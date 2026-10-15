@@ -2047,9 +2047,62 @@ bool IFeature_VkwDx12::Init(VkInstance InInstance, VkPhysicalDevice InPD, VkDevi
 
     SetInitParameters(InParameters);
 
-    // Non-DLSS upscalers don't use the cmdList during Init
-    // We have more than one cmdList so unsure how that would even work
-    SetInit(dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters));
+    // The list has to be recording while Init runs, and what is recorded on it has to be submitted.
+    //
+    // Same defect as the D3D11 bridge: every list here is closed right after creation, but DLSS and
+    // Ray Reconstruction record their weight upload and history initialisation onto the list passed
+    // to NVSDK_NGX_D3D12_CreateFeature and expect the caller to submit it. Recorded onto a closed
+    // list that work is silently discarded and CreateFeature still reports success.
+    HRESULT prep = Dx12CommandAllocator[0]->Reset();
+
+    if (prep != S_OK)
+        LOG_WARN("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
+
+    prep = Dx12CommandList[0]->Reset(Dx12CommandAllocator[0], nullptr);
+
+    if (prep != S_OK)
+        LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
+
+    const bool initialised = dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters);
+
+    SetInit(initialised);
+
+    if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
+    {
+        ID3D12CommandList* lists[] = { Dx12CommandList[0] };
+        Dx12CommandQueue->ExecuteCommandLists(1, lists);
+
+        // A fence of its own, created and destroyed here: Dx12Fence on this bridge is signalled with
+        // _frameCount and the texture-copy fences have their own value scheme, and borrowing either for
+        // a one-time init would perturb them.
+        ID3D12Fence* initFence = nullptr;
+
+        if (_dx11on12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&initFence)) == S_OK &&
+            Dx12CommandQueue->Signal(initFence, 1) == S_OK)
+        {
+            if (initFence->GetCompletedValue() < 1)
+            {
+                HANDLE done = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+                if (done != nullptr)
+                {
+                    if (initFence->SetEventOnCompletion(1, done) == S_OK)
+                        WaitForSingleObject(done, INFINITE);
+
+                    CloseHandle(done);
+                }
+            }
+
+            LOG_INFO("Init: feature creation work submitted and waited on");
+        }
+
+        SAFE_RELEASE(initFence);
+    }
+    else
+    {
+        LOG_WARN("Init: could not submit the feature creation work; a feature that records during "
+                 "creation will be missing it");
+    }
 
     return IsInited();
 }
