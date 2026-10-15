@@ -4,6 +4,7 @@
 
 #include <Util.h>
 #include <Config.h>
+#include "ext/Seams.h"
 
 #include <nvapi/fakenvapi.h>
 #include <misc/IdentifyGpu.h>
@@ -1375,13 +1376,16 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })
     {
+        ext::streamline::MfgUnlockTick(); // ext: D1 before the read, so the cached count is the patched one
+
         // Populate dlssgMfgMax once
-        if (!state.dlssgMfgMax.has_value())
+        if (ext::streamline::MfgCeilingStale(state.dlssgMfgMax)) // ext: D1 (was !has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
-                localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
+                ext::streamline::RaiseMfgCeiling(localState.numFramesToGenerateMax) > 0 && // ext: D1
+                localState.numFramesToGenerateMax < 6)
             {
                 state.dlssgMfgMax = localState.numFramesToGenerateMax;
                 LOG_TRACE("Saving original numFramesToGenerateMax: {}", state.dlssgMfgMax.value());
@@ -1418,6 +1422,8 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     if (o_slDLSSGGetState == nullptr)
         return sl::Result::eErrorFeatureMissing;
 
+    ext::streamline::MfgUnlockTick(); // ext: D1 ahead of every read of numFramesToGenerateMax
+
     sl::Result result {};
 
     const auto originalStructVersion = state.structVersion;
@@ -1439,6 +1445,7 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
             state.numFramesToGenerateMax = newState.numFramesToGenerateMax;
             state.bReserved4 = newState.bReserved4;
             state.bIsVsyncSupportAvailable = newState.bIsVsyncSupportAvailable;
+            ext::streamline::RaiseMfgCeiling(state.numFramesToGenerateMax); // ext: D1 stays inside the v2+ branch
         }
 
         if (originalStructVersion >= 3)
@@ -1456,6 +1463,7 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         if (result != sl::Result::eOk)
             return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
+        ext::streamline::RaiseMfgCeiling(state.numFramesToGenerateMax); // ext: D1
     }
 
     if (!State::Instance().dlssgGameDMFGSupported)
@@ -1467,12 +1475,13 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
     if (optiState.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        if (!optiState.dlssgMfgMax.has_value())
+        if (ext::streamline::MfgCeilingStale(optiState.dlssgMfgMax)) // ext: D1 (was !has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
-                localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
+                ext::streamline::RaiseMfgCeiling(localState.numFramesToGenerateMax) > 0 && // ext: D1
+                localState.numFramesToGenerateMax < 6)
             {
                 optiState.dlssgMfgMax = localState.numFramesToGenerateMax;
                 LOG_TRACE("Saving original numFramesToGenerateMax: {}", optiState.dlssgMfgMax.value());

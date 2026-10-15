@@ -28,6 +28,7 @@
 
 #include <Config.h>
 
+#include "ext/fg/FgConfig.h"
 #include "ext/nr/NrConfig.h"
 
 #include <cstdint>
@@ -157,6 +158,7 @@ namespace ext
 // Aggregates the per-feature config structs. Ports add `<Feature>Config <area>;` members here.
 struct ExtConfig
 {
+    FgConfig fg; // ext/fg
     NrConfig nr; // ext/nr
 
     void Bind(config::Binder& b);

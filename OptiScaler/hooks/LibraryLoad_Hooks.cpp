@@ -2,6 +2,7 @@
 #include "LibraryLoad_Hooks.h"
 
 #include <Config.h>
+#include "ext/Seams.h"
 #include <DllNames.h>
 
 #include <proxies/Ntdll_Proxy.h>
@@ -107,6 +108,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         else
             LOG_ERROR("Trying to load dll: {}", libNameA);
     }
+
+    if (HMODULE dlssg = nullptr; ext::streamline::OnDlssgModuleLoad(normalizedPath, lpLibFullPath, dlssg)) // ext: D1
+        return dlssg;
 
     // NGX OTA
     // Try to catch something like this:

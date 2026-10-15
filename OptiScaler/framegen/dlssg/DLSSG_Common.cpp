@@ -3,6 +3,7 @@
 #include "DLSSG_Common.h"
 
 #include <hooks/Reflex_Hooks.h>
+#include "ext/Seams.h"
 
 #include <magic_enum.hpp>
 
@@ -68,7 +69,7 @@ void DLSSG_Common::QueryState()
     if (StreamlineProxy::DLSSGGetState()(_viewport, dlssgState, &dlssgOptions) == sl::Result::eOk)
     {
         State::Instance().dlssgMfgMax = dlssgState.numFramesToGenerateMax;
-        _maxInterpolationCount = dlssgState.numFramesToGenerateMax;
+        _maxInterpolationCount = ext::fg::AdjustMfgMax(dlssgState.numFramesToGenerateMax); // ext: D1 unlocked ceiling
         LOG_INFO("Max supported interpolations: {}", dlssgState.numFramesToGenerateMax);
 
         _supportsDMFG = dlssgState.bIsDynamicMFGSupported == sl::Boolean::eTrue;

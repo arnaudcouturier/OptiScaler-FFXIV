@@ -151,6 +151,7 @@ namespace ext
 {
 void ExtConfig::Bind(config::Binder& b)
 {
+    fg.Bind(b);
     nr.Bind(b);
 }
 
