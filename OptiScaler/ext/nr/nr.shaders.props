@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NR shaders (docs/SEAMS.md section 3.7/6, U6 section 2). Recipes verified byte-identical to the reference build's
+  checked-in blobs. Headers are generated into $(IntDir)ext_gen\ (never committed). Notes:
+    * dlssnr.hlsl includes dlssnr_spatial_warp.hlsli (same dir) and HdrCompatibility.hlsli (ext\shaders\common).
+    * dlssnr_spatial.hlsl has VK_MODE branches but no SPIR-V is generated for it (no Vulkan consumer).
+    * The cbuffer Params of dlssnr.hlsl must stay identical to DlssNrConstants in pass\DlssNr_Common.h (append-only);
+      the first fields of dlssnr_guide_match.hlsl's Params are a prefix of it.
+    * fxc prints X4000/X3571 warnings for these sources (as in the reference build); do not enable warnings-as-errors.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <!-- DX12 composition pass: fxc cs_5_0 CSMain -O3 -->
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr.hlsl">
+      <Variable>DlssNr_cso</Variable>
+      <Header>DlssNr_Shader.h</Header>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr_guide_match.hlsl">
+      <Variable>DlssNr_GuideMatch_cso</Variable>
+      <Header>DlssNr_GuideMatch_Shader.h</Header>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr_spatial.hlsl">
+      <Variable>DlssNr_Spatial_cso</Variable>
+      <Header>DlssNr_Spatial_Shader.h</Header>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr_spatial.hlsl">
+      <Variable>DlssNr_Spatial_Guides_cso</Variable>
+      <Header>DlssNr_Spatial_Guides_Shader.h</Header>
+      <Defines>SPATIAL_GUIDES=1</Defines>
+    </ExtShader>
+    <!-- Vulkan: dxc -spirv cs_6_0 CSMain -O3 -Qstrip_debug -Cc -Vi -D VK_MODE -->
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr.hlsl">
+      <Variable>dlssnr_spv</Variable>
+      <Header>DlssNr_Shader_Vk.h</Header>
+      <Compiler>dxc</Compiler>
+      <Profile>cs_6_0</Profile>
+      <Spirv>true</Spirv>
+      <Defines>VK_MODE</Defines>
+    </ExtShader>
+  </ItemGroup>
+</Project>
