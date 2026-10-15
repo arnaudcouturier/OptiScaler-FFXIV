@@ -292,6 +292,8 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | `fg::OnUpscaleStart`, `GuideAge`, `MarkersBeforePresent`, `MarkersNextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | `dx11bridge::ShutdownNgx`, `RedirectShutdown1`, `BeforeReleaseFeature` | C6 |
 
+**B6 implementation (`ext/ffxiv/lighting/`):** `Provider()` supplies `ISceneLighting`; `Status()` maps the latest scan reading and capture-install state to the NR menu, and `ConsumeHistoryReset(cursor)` acknowledges each fresh lighting event independently for NR and PreSR. `OnUpscaleBoundary(ctx, color, hdr)` closes the sample only after the DX11 bridge has confirmed that the verified tone-mapped color reaches DLSS. `OnDeviceHooked` / `OnUnhook` install and detach the native shader capture hooks. The capture exposes `SetCompanionCallbacks`; C7 supplies optional function pointers for shader/layout tagging, draw observation, visibility interception, and indexed-draw wrapping, with null callbacks as the inert default.
+
 ## core
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
