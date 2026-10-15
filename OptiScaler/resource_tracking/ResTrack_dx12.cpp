@@ -4,6 +4,7 @@
 #include <Config.h>
 #include <State.h>
 #include <Util.h>
+#include "ext/Seams.h"
 
 #include <menu/menu_overlay_dx.h>
 
@@ -102,7 +103,6 @@ static PFN_CopyDescriptorsSimple o_CopyDescriptorsSimple = nullptr;
 static PFN_Dispatch o_Dispatch = nullptr;
 static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
-static PFN_Reset o_Reset = nullptr;
 static PFN_ClearState o_ClearState = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
@@ -2122,7 +2122,11 @@ HRESULT ResTrack_Dx12::hkReset(ID3D12GraphicsCommandList* This, ID3D12CommandAll
 {
     const auto result = o_Reset(This, pAllocator, pInitialState);
     if (SUCCEEDED(result))
-        ResetBindingState(This);
+    {
+        if (_bindingTrackingEnabled.load(std::memory_order_acquire)) // ext: C6 hook shared with ext observers
+            ResetBindingState(This);
+        ext::restrack::OnCommandListReset(This);
+    }
     return result;
 }
 
@@ -2491,11 +2495,13 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
             // Get the vtable pointer
             PVOID* pVTable = *(PVOID**) realCL;
             const bool persistentBindings = Config::Instance()->FGHudfixPersistentBindings.value_or_default();
+            // ext: C6 ext::restrack may have attached hkReset already; then o_Reset is not ours to set or attach
+            const bool ownReset = o_Reset == nullptr && State::Instance().activeFgInput == FGInput::Upscaler;
 
             // Persistent command-list binding invalidation
             if (persistentBindings)
             {
-                o_Reset = (PFN_Reset) pVTable[10];
+                if (ownReset) o_Reset = (PFN_Reset) pVTable[10]; // ext: C6
                 o_ClearState = (PFN_ClearState) pVTable[11];
             }
 
@@ -2518,7 +2524,7 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 // Only needed for hudfix
                 if (State::Instance().activeFgInput == FGInput::Upscaler)
                 {
-                    if (o_Reset != nullptr)
+                    if (ownReset && o_Reset != nullptr) // ext: C6
                         DetourAttach(&(PVOID&) o_Reset, hkReset);
                     if (o_ClearState != nullptr)
                         DetourAttach(&(PVOID&) o_ClearState, hkClearState);
@@ -2547,7 +2553,7 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 {
                     LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
                     _bindingTrackingEnabled.store(false, std::memory_order_release);
-                    o_Reset = nullptr;
+                    if (ownReset) o_Reset = nullptr; // ext: C6
                     o_ClearState = nullptr;
                     o_OMSetRenderTargets = nullptr;
                     o_SetGraphicsRootDescriptorTable = nullptr;
@@ -2676,11 +2682,13 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
     }
 
     HookCommandList(device);
+    ext::restrack::OnDeviceHooked(device); // ext: C6
 }
 
 void ResTrack_Dx12::ReleaseDeviceHooks()
 {
     LOG_DEBUG("");
+    ext::restrack::ReleaseQueueHook(); // ext: C6 own transaction, before upstream's
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -2760,6 +2768,7 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 void ResTrack_Dx12::ReleaseHooks()
 {
     LOG_DEBUG("");
+    ext::restrack::ReleaseQueueHook(); // ext: C6 own transaction, before upstream's
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());

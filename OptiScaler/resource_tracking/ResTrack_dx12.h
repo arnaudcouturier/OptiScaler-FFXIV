@@ -4,6 +4,7 @@
 
 #include <hudfix/Hudfix_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
+#include "ext/Seams.h"
 
 #include <ankerl/unordered_dense.h>
 
@@ -619,7 +620,12 @@ struct alignas(CACHE_LINE_SIZE) CommandListShard
 
 class ResTrack_Dx12
 {
+    friend struct ext::Access; // ext: C6
+
   private:
+    // ext: C6 member (was file-static) so ext::restrack can attach the same hkReset when it needs resets
+    inline static HRESULT(STDMETHODCALLTYPE* o_Reset)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*,
+                                                      ID3D12PipelineState*) = nullptr;
     inline static bool _presentDone = true;
     inline static bool _useShards = false;
     inline static std::atomic<bool> _bindingTrackingEnabled { false };

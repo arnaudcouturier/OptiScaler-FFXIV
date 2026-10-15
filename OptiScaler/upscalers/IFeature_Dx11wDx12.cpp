@@ -9,6 +9,7 @@
 #include <misc/IdentifyGpu.h>
 
 #include <with_dx12/with_dx12.h>
+#include "ext/Seams.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -217,7 +218,7 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
         return false;
     }
 
-    result = Dx12CommandList[commandFrame]->Reset(Dx12CommandAllocator[commandFrame], nullptr);
+    result = ext::gpu::ResetCommands(Dx12CommandList[commandFrame], Dx12CommandAllocator[commandFrame]); // ext: C6
     if (result != S_OK)
     {
         LOG_ERROR("CommandList Reset error: {:X}", (UINT) result);
@@ -278,7 +279,7 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
     if (prep != S_OK)
         LOG_WARN("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
 
-    prep = Dx12CommandList[0]->Reset(Dx12CommandAllocator[0], nullptr);
+    prep = ext::gpu::ResetCommands(Dx12CommandList[0], Dx12CommandAllocator[0]); // ext: C6
 
     if (prep != S_OK)
         LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
@@ -288,7 +289,7 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
     if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
     {
         ID3D12CommandList* lists[] = { Dx12CommandList[0] };
-        Dx12CommandQueue->ExecuteCommandLists(1, lists);
+        ext::gpu::ExecuteCommands(Dx12CommandQueue, 1, lists); // ext: C6
 
         // Recorded against allocator 0, so it must not be reset until this has retired
         // (Dx12CommandAllocatorFenceValue, which ProcessDx11Textures already honours).
@@ -503,7 +504,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
     if (dx12EvalResult)
     {
         ID3D12CommandList* ppCommandLists[] = { cmdList };
-        Dx12CommandQueue->ExecuteCommandLists(1, ppCommandLists);
+        ext::gpu::ExecuteCommands(Dx12CommandQueue, 1, ppCommandLists); // ext: C6
         commandListExecuted = true;
 
         const auto fenceValue = ++Dx12FenceValue;

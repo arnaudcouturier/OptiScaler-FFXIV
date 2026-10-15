@@ -5,6 +5,8 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/core/MenuRegistry.h"
+#include "ext/gpu/Gpu.h"
+#include "ext/gpu/Restrack.h"
 
 #include <cstddef>
 
@@ -18,6 +20,11 @@ namespace ext
 // them; the definitions live in Seams.cpp. (The menu seam needs none: it is a template, see ext/core/MenuRegistry.h.)
 struct Access
 {
+    // resource_tracking/ResTrack_dx12.h (friend line). C6, ext-internal (ext::restrack::EnsureHooks): attach upstream's
+    // own hkReset to ResTrack_Dx12::o_Reset. AttachResetHook is a no-op returning true when o_Reset is already set;
+    // `target` is slot 10 of a real ID3D12GraphicsCommandList vtable. Failure leaves o_Reset null.
+    static bool ResetHookAttached();
+    static bool AttachResetHook(void* target);
 };
 
 // ini load/save hooks in Config.cpp (state: ext/core/ExtConfig)
@@ -38,15 +45,16 @@ namespace core
 void Banner(); // once, right after upstream logs its version line
 } // namespace core
 
+// ext::gpu (command-list Reset/Execute wrappers, owners, Scope) is declared in ext/gpu/Gpu.h and ext::restrack
+// (OnCommandListReset, WantsCommandListReset, OnDeviceHooked, ReleaseQueueHook) in ext/gpu/Restrack.h; both are
+// included above.
+
 // Groups of later series. Declarations are added here together with the SEAMS-catalog.md row.
 namespace upscaler {}
-namespace dx11bridge {}
 namespace nr {}
 namespace fg {}
 namespace present {}
-namespace restrack {}
 namespace streamline {}
-namespace gpu {}
 namespace hdr {}
 namespace hudless {}
 namespace game {}
