@@ -29,6 +29,7 @@
 #include <Config.h>
 
 #include "ext/fg/FgConfig.h"
+#include "ext/ffxiv/FfxivConfig.h"
 #include "ext/hdr/HdrConfig.h"
 #include "ext/nr/NrConfig.h"
 
@@ -160,6 +161,7 @@ namespace ext
 struct ExtConfig
 {
     FgConfig fg; // ext/fg
+    FfxivConfig ffxiv; // ext/ffxiv
     NrConfig nr; // ext/nr
     HdrConfig hdr; // ext/hdr
 

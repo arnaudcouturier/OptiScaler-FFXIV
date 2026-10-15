@@ -151,9 +151,16 @@ void SaveXeFG(CSimpleIniA& ini)
 
 namespace ext
 {
+void FfxivConfig::Bind(config::Binder& b)
+{
+    b.Add("Companion", "HudReplacement", companionHudReplacement);
+    b.Add("Companion", "HudInterpolation", companionHudInterpolation);
+}
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
+    ffxiv.Bind(b);
     nr.Bind(b);
     hdr.Bind(b);
 }

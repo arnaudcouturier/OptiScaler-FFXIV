@@ -286,7 +286,7 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 |---|---|---|---|
 | `IRenderGeometry` | `ResolveRenderExtent`, `ColorIsDisplayAllocation` | `upscaler::ResolveRenderGeometry`, `dx11bridge::PrepareUpscalerColor` | C2, C3, C4 |
 | `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached; the oracle does two `ReadProcessMemory` per call), `Request(preset)` | `upscaler::ApplyForcedQuality`, `ResolveRenderGeometry`, `EffectivePerfQuality`, menu card `forced_quality` | C1, C5 |
-| `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset(uint64_t& cursor)`, `Status()` (`LightingStatus`, the NR menu's lighting-scan text) | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
+| `ISceneLighting` | `OnUpscaleBoundary(ID3D11DeviceContext*, ID3D11Resource* color, bool hdr)`, `ConsumeHistoryReset(uint64_t& cursor)`, `Status()` (`LightingStatus`, the NR menu's lighting-scan text) | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
 | `INrQuirks` | `BridgedNativeDx11` | NR internals: history reset on disable, split frame work, motion-onset sampling, exposure scan off (was `gameExe == "ffxiv_dx11.exe"`) | A1-A8, B5 |
 | `ISceneHdr` | `Open(ID3D12Device*, UINT, UINT, bool) -> SceneInput`, `PublishReconstructed(SceneInput&&)`, `EndFrame()` | `hdr::DlssEvalScope`, `dx11bridge::ConvertCopySource`, `dx11bridge::PresentScope` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | `fg::OnUpscaleStart`, `GuideAge`, `MarkersBeforePresent`, `MarkersNextFrame` | B5, D2, C5 |

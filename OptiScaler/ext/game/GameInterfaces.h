@@ -57,7 +57,7 @@ struct ISceneLighting
     virtual ~ISceneLighting() = default;
     // A3 menu: status of the scan, polled while the NR card is open
     virtual LightingStatus Status() = 0;
-    virtual void OnUpscaleBoundary() = 0;
+    virtual void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color, bool hdr) = 0;
     // True once per fresh native lighting event. `cursor` is the caller's last seen event count (one per NR consumer);
     // the implementation updates it (A3, was FfxivLightingScan::ConsumeReset).
     virtual bool ConsumeHistoryReset(uint64_t& cursor) = 0;
