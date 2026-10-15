@@ -27,6 +27,7 @@ void DLSSG_Common::Activate()
     {
         UpdateTarget();
         _isActive = true;
+        ext::fg::OnActivated(this); // ext: E3 presentation telemetry restarts
     }
 }
 

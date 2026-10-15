@@ -11,6 +11,8 @@
 #include <menu/menu_overlay_base.h>
 #include <proxies/Streamline_Proxy.h>
 
+#include <magic_enum.hpp>
+
 #include <algorithm>
 #include <cmath>
 
@@ -79,6 +81,15 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
 }
 
 IFGFeature_Dx12* AsDx12(IFGFeature* fg) { return dynamic_cast<IFGFeature_Dx12*>(fg); }
+
+// E3: presentation telemetry since the last activation (diagnostics only; the reference build's file-local static too,
+// SetOptions and Activate run on the same serialized thread in practice).
+struct PresentStats
+{
+    ULONGLONG lastLog = 0;
+    uint64_t frames = 0, presented = 0;
+};
+PresentStats presentStats;
 } // namespace
 
 namespace ext::fg
@@ -118,6 +129,24 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
     else
         dx12Ext.observedMultiplier.store(0, std::memory_order_relaxed);
     dx12Ext.sampleMode = queryResult == sl::Result::eOk ? mode : -1;
+
+    // E3: first dispatch after each activation, then at most every 5 s. The first sample covers the time since the
+    // previous GetState call, so it may be stale; the running average is presented frames per game frame (dispatch).
+    if (queryResult == sl::Result::eOk)
+    {
+        ++presentStats.frames;
+        presentStats.presented += count;
+    }
+    if (presentStats.lastLog == 0 || sampleTime - presentStats.lastLog >= 5000)
+    {
+        presentStats.lastLog = sampleTime;
+        LOG_INFO("DLSSG presentation: query={} status={:#x} numFramesActuallyPresented={} requested mode={} "
+                 "numFramesToGenerate={} (max {}), avg presented/game frame {:.2f} over {} frames since activation",
+                 magic_enum::enum_name(queryResult), static_cast<unsigned>(runtimeState.status), count, mode,
+                 options.numFramesToGenerate, runtimeState.numFramesToGenerateMax,
+                 presentStats.frames ? double(presentStats.presented) / presentStats.frames : 0.0,
+                 presentStats.frames);
+    }
 }
 
 void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& reflexConst)
@@ -130,6 +159,8 @@ void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& ref
             reflexConst.frameLimitUs = static_cast<uint32_t>(std::clamp(1000000.0 / limit, 1.0, 4294967295.0));
     }
 }
+
+void ResetDlssgPresentStats() { presentStats = {}; }
 
 unsigned ObservedMultiplier(IFGFeature* fg)
 {

@@ -99,12 +99,13 @@ void ObservedMultiplier(IFGFeature* dlssg);
 } // namespace ext::menu
 
 // ---------------------------------------------------------------------------------------------------------------
-// XeFG extras (D3). Hosts: framegen/xefg/
+// XeFG extras (D3) and the activation hook (D3, E3). Hosts: framegen/dlssg/DLSSG_Common.cpp (Activate), framegen/xefg/
 // XeFG_Dx12.cpp (Activate, Dispatch), proxies/XeFG_Proxy.h (HookXeFG),
 // menu/menu_common.cpp (XeFG card). Implementation: ext/fg/Activation.cpp, ext/fg/xefg/XefgSeams.cpp.
 namespace ext::fg
 {
-// XeFG_Dx12::Activate, before it marks itself active: the provider pacing restarts clean (XeFGPacing::RequestRecovery).
+// XeFG_Dx12::Activate (before it marks itself active: the provider pacing restarts clean, XeFGPacing::RequestRecovery)
+// and DLSSG_Common::Activate (after: the DLSS-G presentation telemetry window restarts, E3).
 void OnActivated(IFGFeature* fg);
 
 // XeFGProxy::HookXeFG, right after the provider module is bound and before the first call into it: the built-in MFG

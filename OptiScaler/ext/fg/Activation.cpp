@@ -1,12 +1,14 @@
 #include "pch.h"
 
 #include "ext/Seams.h"
+#include "ext/fg/FgInternal.h"
 #include "ext/fg/xefg/XeFGPacing.h"
 
+#include <framegen/dlssg/DLSSG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
 
-// D3: the activation hook (was an inline call in XeFG_Dx12::Activate; the DLSS-G presentation telemetry reset of E3
-// joins it from DLSSG_Common::Activate). Fullscreen-state logging of the reference build is dropped.
+// D3, E3: the activation hook shared by the two providers (was the DLSSG_Common::OnActivated virtual, overridden by
+// DLSSG_Dx12, and an inline call in XeFG_Dx12::Activate). Fullscreen-state logging of the reference build is dropped.
 
 namespace ext::fg
 {
@@ -15,5 +17,9 @@ void OnActivated(IFGFeature* fg)
     // XeFG_Dx12::Activate, before the feature is marked active: the provider's pacing restarts clean.
     if (dynamic_cast<XeFG_Dx12*>(fg) != nullptr)
         XeFGPacing::RequestRecovery();
+    // DLSSG_Common::Activate, after the feature is marked active: DLSS-G presentation telemetry restarts (the Vulkan
+    // output has none).
+    else if (dynamic_cast<DLSSG_Dx12*>(fg) != nullptr)
+        ResetDlssgPresentStats();
 }
 } // namespace ext::fg
