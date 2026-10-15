@@ -164,7 +164,7 @@ The catalog is in [SEAMS-catalog.md](SEAMS-catalog.md), one table per group: `co
 | E5 swapchain sizing | Upstream already fixed the 0x0 overlay misclassification. **Drop the 0x0→window resolve; keep only the `CreateSwapChainForComposition` hook** (`ext::present::HookFactoryComposition`, `ResolveCompositionHandle`) |
 | `hdrPresenter` lost `activeFgInput != NvngxFG` | Restore upstream's term unless the originating fork commit justifies the removal (S6 checks `git log -S`) |
 | Nameplate live-scope guards | `ext::core::HooksBypassed()` (section 3.9) |
-| Forwarder name `nvngx.dll_dlssnr.dll` | Rename it to a non-`nvngx` name if nothing external loads it by that name (S2 checks). That removes the `Kernel_Hooks` workaround. Document it in the release notes |
+| Forwarder name `nvngx.dll_dlssnr.dll` | **Kept (S2 check done).** The name is not our convention: NVIDIA's `nvngx_dlssnr.dll` resolves the module owning its caller's return address and returns `FAIL_PlatformError` unless that path contains `nvngx.dll`. Any other name makes the model refuse every call, so the substring is part of an external contract. Consequently the `Kernel_Hooks` `!path.contains("nvngx.dll_")` carve-out stays (S2b, `// ext: A1`, otherwise the nvngx spoof redirects the forwarder to the driver `nvngx.dll`; this crashed Dragon's Dogma 2) and `tools/package.ps1`'s default stays |
 | Dynamic markers thread-local bridge flag | Replace with a raw-send function on the fork's Reflex path. No per-marker check on the upstream hook |
 | `ext::present::BeforeOverlay` | A general pre-overlay slot, used by HudlessEngine paste and HDR |
 | C3 `RenderSizeFromWidthHeight` | Restore Siren's gate from `adfbea9d` (both halves, default off). Its readers were lost in Siren's merge `c131de52`. Default-off behaviour must equal the oracle |
@@ -200,7 +200,7 @@ The catalog is in [SEAMS-catalog.md](SEAMS-catalog.md), one table per group: `co
 | 3 | Menu tone-map under OptiHDR | `AdjustUiTargetMode` reads nightly's fields. In-game check in Phase 4 |
 | 4 | XeFG camera build | Seam: it keeps `BuildView` validation, so behaviour matches the oracle |
 | 5 | Detours lock | Keep only the `[UP]` file-local Streamline mutex. No shared `DetourLock` |
-| 6 | Forwarder rename | S2 checks and decides |
+| 6 | Forwarder rename | Not renamed: the model's caller check needs `nvngx.dll` in the module path (section 5). The `Kernel_Hooks` carve-out is carried |
 | 7 | `ReleaseBackbufferOnce` | Upstream quirk mechanism (`GameConfigs`), appended enum value |
 | 8 | `FrameLimit` interval / timer | `[UP]` |
 | 9 | `menuOverlayIsVulkan` / Vulkan DLSS-G menu interlock | S1 checks nightly. Dropped if covered, otherwise `[UP]` |

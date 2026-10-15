@@ -40,7 +40,9 @@ struct ISceneLighting
 {
     virtual ~ISceneLighting() = default;
     virtual void OnUpscaleBoundary() = 0;
-    virtual bool ConsumeHistoryReset() = 0;
+    // True once per fresh native lighting event. `cursor` is the caller's last seen event count (one per NR consumer);
+    // the implementation updates it (A3, was FfxivLightingScan::ConsumeReset).
+    virtual bool ConsumeHistoryReset(uint64_t& cursor) = 0;
 };
 
 // C10
@@ -59,6 +61,14 @@ struct IFgMarkers
     virtual void OnUpscale() = 0;
     virtual void BeforePresent() = 0;
     virtual void NextFrame() = 0;
+};
+
+// A1-A8, B5 (NR). NR behaviours that follow the FFXIV DX11 bridge path
+// (was `State::gameExe == "ffxiv_dx11.exe"` inside the NR pass, PreSR and the exposure scan).
+struct INrQuirks
+{
+    virtual ~INrQuirks() = default;
+    virtual bool BridgedNativeDx11() = 0;
 };
 
 // C6

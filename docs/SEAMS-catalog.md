@@ -129,7 +129,16 @@ Native DLSS Neural Rendering (A*, B*, E4 AMD PreSR). All internals live in `ext/
 | `ext::nr::AppendNgxSearchPaths(std::vector<std::wstring>&)` | hook | `Streamline_Proxy.h` `LoadStreamline`, where the SL NGX path list is built | A1, D5 | init, once | Merges U1 hunks 3 and 4. |
 | `ext::nr::AppendVkDeviceExtensions(VkPhysicalDevice, VkDeviceCreateInfo& local) -> ExtScope` | decision | `Vulkan_Hooks.cpp` `hkvkCreateDevice`, plus `ExtScope::LogResult(VkResult)` after the real call | B9 | per-create | `ExtScope` owns the vector so `ppEnabledExtensionNames` outlives the call; early-out when NR is off. The swapchain colour-space log (dead) is dropped. |
 
-Not seams: `Shader_Dx12.cpp` `TranslateTypelessFormats` skip is solved by the NR call site passing `translateTypeless=false` (0 upstream lines). `OS_Dx12`/`OS_Vk` scaler-override constructors are inline-marked `// ext: A8` (section d). The `dlssnr` forwarder DLL is the second project in `OptiScaler.sln`.
+**S2a status (code is in `ext/nr`, nothing in upstream calls it yet; the seams above are S2b's).** Ext-internal hooks of the moved code, none of them an upstream seam:
+
+| Hook | Where | Notes |
+|---|---|---|
+| `DlssNr::EnsureGpuHooks(ID3D12Device*)` | `ext/nr/pass/DlssNr_Dx12.cpp` | Registers NR's one `ext::gpu::Owner` (begin = `BeginGpuSubmission`, quarantine = `QuarantineGpuSubmission`, reset = `NotifyGpuReset`) on first call, then `ext::restrack::EnsureHooks(device)`. Called inside NR before it records; replaces `ResTrack_Dx12::HookLateNrQueue`. |
+| `DlssNr::AmdBridge::EnsureHooks(ID3D12Device*)` | `ext/nr/amd/AmdBridge.cpp` | Registers the AMD pre-SR owner (isolate = `PendingListIndex`, before = `Submitting`, after = `Submitted`), then `ext::restrack::EnsureHooks`. S2b's `PreSrScope` calls it where `IFeature_Dx12::Evaluate` called `CanUse(Device) && HookLateNrQueue(Device)`. |
+| `ext::nr::SetSceneHdrHooks(const SceneHdrHooks&)` | `ext/nr/NrHooks.h` | C10 (S6) fills it. With nothing registered NR runs on the SDR colour (= HDR.NRSceneInput / DLSSSceneInput off). |
+| `ext::game::Current().nrQuirks` (`INrQuirks::BridgedNativeDx11`) and `.lighting` (`ISceneLighting::ConsumeHistoryReset(uint64_t& cursor)`) | `ext/game/GameInterfaces.h` | Replace the `gameExe == "ffxiv_dx11.exe"` tests inside NR; `ext/ffxiv` (S7) provides both. |
+
+Not seams: `Shader_Dx12.cpp` `TranslateTypelessFormats` skip is solved by the NR call site passing `translateTypeless=false` (0 upstream lines; done in `DlssNr_Dx12::DispatchPass`, S2a). `OS_Dx12`/`OS_Vk` are not touched: NR owns `NrResampler_Dx12`/`NrResampler_Vk` (SEAMS 7 A8, S2a). `OS_Dx12`/`OS_Vk` scaler-override constructors are inline-marked `// ext: A8` (section d). The `dlssnr` forwarder DLL is the second project in `OptiScaler.sln`.
 
 ## fg
 
@@ -272,7 +281,8 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 |---|---|---|---|
 | `IRenderGeometry` | `ResolveRenderExtent`, `ColorIsDisplayAllocation` | `upscaler::ResolveRenderGeometry`, `dx11bridge::PrepareUpscalerColor` | C2, C3, C4 |
 | `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached; the oracle does two `ReadProcessMemory` per call), `Request(preset)` | `upscaler::ApplyForcedQuality`, `ResolveRenderGeometry`, `EffectivePerfQuality`, menu card `forced_quality` | C1, C5 |
-| `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset` | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory` | B6, A3 |
+| `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset(uint64_t& cursor)` | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
+| `INrQuirks` | `BridgedNativeDx11` | NR internals: history reset on disable, split frame work, motion-onset sampling, exposure scan off (was `gameExe == "ffxiv_dx11.exe"`) | A1-A8, B5 |
 | `ISceneHdr` | `Open`, `PublishReconstructed` | `hdr::DlssEvalPrepare/Finish`, `dx11bridge::SelectCopySource` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | `fg::OnUpscaleStart`, `GuideAge`, `MarkersBeforePresent`, `MarkersNextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | `dx11bridge::ShutdownNgx`, `RedirectShutdown1`, `BeforeReleaseFeature` | C6 |
@@ -296,7 +306,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | `GameQuirk::ScaleDisplayColorForForcedQuality`, `GameQuirk::ReleaseBackbufferOnce` | enum values, appended at the end of the enum (SEAMS 5; no shift of upstream values) | `misc/Quirks.h` | C4, D3 | compile-time | 2 lines. The second replaces the U4 string compare in `hkFGRelease`: the test becomes a quirk flag (`FG_Hooks.cpp`, ~5 lines inline) instead of a game interface. |
 | `printQuirks` entries for both quirks | inline | `dllmain.cpp` | C4 | init | 4 lines (upstream convention: "add the new entry to printQuirks"). |
 
-Contingent: `Kernel_Hooks.cpp` `!path.contains("nvngx.dll_")` in `hk_K32_GetFileAttributesW`/`hk_K32_CreateFileW` (+7 lines) only if the S2 check finds something external loading the forwarder as `nvngx.dll_dlssnr.dll` (SEAMS 5). Otherwise the forwarder is renamed and the hunk is not carried.
+**Carried (S2 check, SEAMS 5):** `Kernel_Hooks.cpp` `!path.contains("nvngx.dll_")` in `hk_K32_GetFileAttributesW`/`hk_K32_CreateFileW` (+7 lines, `// ext: A1`). The forwarder keeps the name `nvngx.dll_dlssnr.dll` because NVIDIA's model checks that its caller's module path contains `nvngx.dll`; the nvngx spoof must therefore leave `nvngx.dll_` paths alone. Placed by S2b.
 
 ## Summary of seam counts
 

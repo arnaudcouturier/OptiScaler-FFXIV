@@ -14,6 +14,7 @@ struct Game
     ISceneHdr* hdr = nullptr;
     IFgMarkers* fgMarkers = nullptr;
     INgxLifecycle* ngx = nullptr;
+    INrQuirks* nrQuirks = nullptr;
 };
 
 const Game& Current();
