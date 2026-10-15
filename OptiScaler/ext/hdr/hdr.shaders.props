@@ -12,6 +12,7 @@
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Hdr10.hlsl"><Variable>Hdr10_cso</Variable><Header>Hdr10_Shader.h</Header></ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\DlssSceneInput.hlsl"><Variable>DlssSceneInput_cso</Variable><Header>DlssSceneInput_Shader.h</Header></ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\NrSceneInput.hlsl"><Variable>NrSceneInput_cso</Variable><Header>NrSceneInput_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\hdr_menu_layer.hlsl"><Variable>HdrMenuLayer</Variable><Header>HdrMenuLayer_Text.h</Header><Compiler>text</Compiler></ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\Tonemap_0x85E777EF.ps_5_0.hlsl"><Variable>Tonemap_0x85E777EF</Variable><Header>Tonemap_0x85E777EF_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\PostTonemapPreLUT_0xF8F57F0A.ps_5_0.hlsl"><Variable>PostTonemapPreLUT_0xF8F57F0A</Variable><Header>PostTonemapPreLUT_0xF8F57F0A_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\LUT_0x27EBC404.ps_5_0.hlsl"><Variable>LUT_0x27EBC404</Variable><Header>LUT_0x27EBC404_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>

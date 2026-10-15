@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "menu_common.h"
+#include "ext/Seams.h"
 #include <inputs/FG/XeFG_Inputs_Dx12.h>
 
 #include "input/input_system.h"
@@ -1182,7 +1183,7 @@ void MenuCommon::PopulateCombo(const std::string& name, TStorage& currentValue,
     }
 }
 
-static UiTargetMode getUiTargetMode()
+static UiTargetMode getUiTargetModeRaw()
 {
     const auto& state = State::Instance();
 
@@ -1254,6 +1255,11 @@ static UiTargetMode getUiTargetMode()
 
     // Unsupported model / primaries / transfer combination.
     return UiTargetMode::SDR;
+}
+
+static UiTargetMode getUiTargetMode()
+{
+    return ext::menu::AdjustUiTargetMode(getUiTargetModeRaw());
 }
 
 static float srgbToLinear(float x)
@@ -1669,6 +1675,7 @@ void MenuCommon::ApplyThemeStyle()
 
     _hdrTonemapApplied = false;
     MenuHdrCheck(ImGui::GetIO());
+    ext::menu::AdjustTheme(ImGui::GetStyle());
 }
 
 static double lastTime = 0.0;

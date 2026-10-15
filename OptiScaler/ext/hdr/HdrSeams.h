@@ -4,6 +4,11 @@
 
 #include "ext/ExtFeatures.h"
 
+#include <d3d12.h>
+
+struct ImDrawData;
+struct ImGuiStyle;
+
 namespace ext::hdr
 {
 // Out-of-line half of Active(): nightly's `hdrOutputActive` (State), filled for the DX11 bridge by
@@ -13,7 +18,37 @@ bool OutputIsHdr();
 // True while OptiHDR is engaged: the bridge negotiated PQ/BT.2020 on the FG swapchain (feature bit F::Hdr) and
 // nightly's `hdrOutputActive` is true. Was Hdr10::Active().
 inline bool Active() { return ext::Active(ext::F::Hdr) && OutputIsHdr(); }
+
+DXGI_FORMAT OverlayRtvFormat(DXGI_FORMAT format);
+bool OverlayPrepare(ID3D12Device* device, ID3D12Resource* output, ImDrawData* drawData, bool (*wait)(UINT64),
+                    UINT64 retireValue);
+class OverlayScope
+{
+  public:
+    OverlayScope(ID3D12GraphicsCommandList* commands, ID3D12Resource* output, D3D12_CPU_DESCRIPTOR_HANDLE outputRtv);
+    OverlayScope(const OverlayScope&) = delete;
+    OverlayScope& operator=(const OverlayScope&) = delete;
+    ~OverlayScope();
+
+  private:
+    ID3D12GraphicsCommandList* _commands = nullptr;
+    ID3D12Resource* _output = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE _outputRtv {};
+    bool _active = false;
+};
+void OverlayRelease();
 } // namespace ext::hdr
+
+namespace ext::menu
+{
+// MenuCommon's UiTargetMode is TU-local. Its first value is SDR, so keep the host type deduced at the call site.
+template <class UiTargetMode> UiTargetMode AdjustUiTargetMode(UiTargetMode mode)
+{
+    return hdr::Active() ? static_cast<UiTargetMode>(0) : mode;
+}
+
+void AdjustTheme(ImGuiStyle& style);
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Presenter plan (C8; ext/hdr/PresentHdr.cpp). Hosts: hooks/DxgiFactory_Hooks.cpp and hooks/DxgiFactory_WrappedCalls.cpp,

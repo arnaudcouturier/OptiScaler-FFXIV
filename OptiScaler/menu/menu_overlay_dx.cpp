@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "menu_overlay_base.h"
 #include "menu_overlay_dx.h"
+#include "ext/Seams.h"
 
 #include <Util.h>
 #include <Logger.h>
@@ -202,6 +203,8 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         LOG_WARN("DX12 overlay cleanup deferred: GPU submission still pending");
         return;
     }
+
+    ext::hdr::OverlayRelease();
 
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {
@@ -533,7 +536,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         initInfo.Device = device;
         initInfo.CommandQueue = (ID3D12CommandQueue*) currentSCCommandQueue;
         initInfo.NumFramesInFlight = NUM_BACK_BUFFERS;
-        initInfo.RTVFormat = scDesc.BufferDesc.Format;
+        initInfo.RTVFormat = ext::hdr::OverlayRtvFormat(scDesc.BufferDesc.Format);
         initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
         initInfo.SrvDescriptorHeap = g_pd3dSrvDescHeap;
         initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
@@ -606,6 +609,13 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     return;
                 }
 
+                if (!ext::hdr::OverlayPrepare(g_pd3dDeviceParam, g_mainRenderTargetResource[backBufferIdx],
+                                              ImGui::GetDrawData(), WaitForOverlayFence, g_overlayFenceValue))
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+
                 // Allocator and ImGui buffer set follow our own submission ring, not the swapchain index.
                 const UINT overlaySlot = UINT(g_overlaySubmissionCount % NUM_BACK_BUFFERS);
                 ID3D12CommandAllocator* commandAllocator = g_commandAllocators[overlaySlot];
@@ -659,8 +669,12 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, NULL);
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
 
-                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
-                ++g_overlaySubmissionCount; // The backend advanced its FrameIndex in that call.
+                {
+                    ext::hdr::OverlayScope hdrScope(g_pd3dCommandList, g_mainRenderTargetResource[backBufferIdx],
+                                                    g_mainRenderTargetDescriptor[backBufferIdx]);
+                    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
+                    ++g_overlaySubmissionCount; // The backend advanced its FrameIndex in that call.
+                }
 
                 barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
