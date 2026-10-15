@@ -44,6 +44,7 @@ struct NativeQualityBuild
     std::uint32_t settingsDlaaOffset = 0x45;
     std::uint32_t settingsRendererOffset = 0x47;
     std::uint32_t settingsAdditionalOffset = 0x49;
+    std::uint32_t settingsSelectorOffset = 0x55; // logged alongside the DLAA gate, never gated on
     std::uint32_t managerContextOffset = 0x4220;
     std::uint32_t contextFlagsOffset = 0x181;
     std::uint32_t contextCacheOffset = 0x150;

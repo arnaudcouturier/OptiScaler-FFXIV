@@ -34,7 +34,9 @@ struct INativeQuality
     virtual bool EnsureHooks() = 0; // lazy, call_once
     virtual bool Live() = 0;
     virtual bool DlaaRequired() = 0; // cached per frame
-    virtual void Request(uint32_t preset) = 0;
+    // Signed to carry the oracle's -1 "game's choice" sentinel directly (finalised by the owning series, C1/C5:
+    // the placeholder was uint32_t, which made -1 a silent wraparound at every call site).
+    virtual void Request(int preset) = 0;
 };
 
 // A3 menu status of the native lighting scan (was FfxivLightingScan::Latest/Fresh and FfxivLightingCapture::installed,
