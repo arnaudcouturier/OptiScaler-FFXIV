@@ -4,6 +4,10 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/dx11bridge/BridgeAccess.h"
 #include "ext/hdr/Hdr10.h"
+#include "ext/hdr/FfxivHdrPreview.h"
+#include "ext/game/Game.h"
+
+#include <framegen/IFGFeature_Dx12.h>
 
 #include <State.h>
 
@@ -65,11 +69,67 @@ bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, 
     if (!Access::Bridge::HdrOutput(sc))
         return true;
 
-    copySource = hdr::Convert(Access::Bridge::Dx12Device(sc), Access::Bridge::CopyList(sc, slot), copySource, before);
+    auto* device = Access::Bridge::Dx12Device(sc);
+    auto* list = Access::Bridge::CopyList(sc, slot);
+
+    hdr::SceneInput scene;
+    const auto sourceDesc = copySource->GetDesc();
+    if (auto* provider = game::Current().hdr)
+        scene = provider->Open(device, (UINT) sourceDesc.Width, sourceDesc.Height, true);
+
+    copySource = hdr::Convert(device, list, copySource, before, scene);
+
+    auto* fg = Access::Bridge::Fg(sc);
+    if (copySource && ext::Cfg().hdr.mode.value_or_default() == 1 && fg && fg->IsActive())
+    {
+        // The original HUD-less copy was recorded on the upscaler list.
+        // This queue now waits on DX11 (and its upscaler interop completion),
+        // so both colour conversions can use the same immutable scene pair.
+        Microsoft::WRL::ComPtr<ID3D12Resource> nativeHudless;
+        Dx12Resource hudless {};
+        const auto frame = fg->GetIndex();
+        {
+            auto input = fg->GetResource(FG_ResourceType::HudlessColor, frame);
+            if (input && !input->hdrEncoded)
+            {
+                hudless = *input.resource;
+                nativeHudless = input->GetResource();
+            }
+        }
+
+        if (nativeHudless)
+        {
+            auto* hdrHudless = hdr::Convert(device, list, nativeHudless.Get(), hudless.state, scene);
+            if (hdrHudless)
+            {
+                hudless.resource = hdrHudless;
+                hudless.copy = nullptr;
+                hudless.hdrEncoded = true;
+                hudless.cmdList = list;
+                hudless.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                hudless.validity = FG_ResourceValidity::ValidNow;
+                hudless.frameIndex = frame;
+                fg->SetResource(&hudless);
+            }
+        }
+    }
+
     if (!copySource)
         return false;
 
     before = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
+}
+
+PresentScope::~PresentScope()
+{
+    if (auto* scene = game::Current().hdr)
+        scene->EndFrame();
+}
+
+void BeforeSharedCopy(Dx11wDx12SC& sc)
+{
+    if (Access::Bridge::HdrOutput(sc) && game::Current().hdr)
+        hdr::FfxivHdrPreview::SealFrame();
 }
 } // namespace ext::dx11bridge

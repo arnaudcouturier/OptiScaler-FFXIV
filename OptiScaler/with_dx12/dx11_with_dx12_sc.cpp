@@ -369,6 +369,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
 
+    ext::dx11bridge::PresentScope scenePresentScope; // ext: C10 ends the scene capture frame at every exit
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&
                                    State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -1084,6 +1085,7 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
     LOG_DEBUG("Copying DX11 backbuffer {} sourceTexture: {:X} to shadow copy {:X}", index, (size_t) sourceTexture,
               (size_t) _sharedDx11BackBufferCopies[_currentFakeIndex]);
 
+    ext::dx11bridge::BeforeSharedCopy(*this); // ext: C10 freezes the UI preview mask with the SDR backbuffer
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
     sourceTexture->Release();
     return true;

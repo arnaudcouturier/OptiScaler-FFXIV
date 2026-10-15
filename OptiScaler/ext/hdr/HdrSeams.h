@@ -128,3 +128,19 @@ struct BridgeEvalScope
     BridgeEvalScope& operator=(const BridgeEvalScope&) = delete;
 };
 } // namespace ext::hdr
+
+namespace ext::dx11bridge
+{
+// Dx11wDx12SC::Present, after the DXGI_PRESENT_TEST early return (C10): ends the frame of the game's scene capture at
+// every exit of Present (ISceneHdr::EndFrame). No-op without a scene provider.
+struct PresentScope
+{
+    PresentScope() = default;
+    ~PresentScope();
+    PresentScope(const PresentScope&) = delete;
+    PresentScope& operator=(const PresentScope&) = delete;
+};
+// _CopyDx11BackBufferToShared, right before the backbuffer is copied: freezes the native UI preview mask at the same
+// frame boundary as the SDR backbuffer (HDR output only).
+void BeforeSharedCopy(Dx11wDx12SC& sc);
+} // namespace ext::dx11bridge
