@@ -3,6 +3,7 @@
 #include "Config.h"
 
 #include "Util.h"
+#include "ext/Seams.h"
 
 #include "nvapi/fakenvapi.h"
 #include <misc/IdentifyGpu.h>
@@ -805,6 +806,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             _DONTUSE_Fsr4ForceEnableInt8.set_from_config(readBool("FSR", "Fsr4ForceEnableInt8"));
         }
 
+        ext::config::Load(ini);
+
         return true;
     }
 
@@ -1599,6 +1602,8 @@ bool Config::SaveIni()
         ini.Delete("Nukems", "MakeDepthCopy", true);
     }
 
+    ext::config::Save(ini);
+
     auto pathWStr = absoluteFileName.wstring();
 
     LOG_INFO("Trying to save ini to: {0}", wstring_to_string(pathWStr));
@@ -1611,6 +1616,8 @@ bool Config::SaveXeFG()
     ini.SetValue("XeFG", "DepthInverted", GetBoolValue(Instance()->FGXeFGDepthInverted.value_for_config()).c_str());
     ini.SetValue("XeFG", "JitteredMV", GetBoolValue(Instance()->FGXeFGJitteredMV.value_for_config()).c_str());
     ini.SetValue("XeFG", "HighResMV", GetBoolValue(Instance()->FGXeFGHighResMV.value_for_config()).c_str());
+
+    ext::config::SaveXeFG(ini);
 
     auto pathWStr = absoluteFileName.wstring();
     LOG_INFO("Trying to save ini to: {0}", wstring_to_string(pathWStr));

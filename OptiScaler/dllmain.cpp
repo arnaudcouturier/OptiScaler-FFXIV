@@ -4,6 +4,7 @@
 #include "Util.h"
 #include "Config.h"
 #include "Logger.h"
+#include "ext/Seams.h"
 #include "resource.h"
 #include "DllNames.h"
 #include "BuildInfo.h"
@@ -1559,6 +1560,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         PrepareLogger();
 
         spdlog::warn("{0} loaded", BuildInfo::ProductName());
+        ext::core::Banner();
         spdlog::warn("---------------------------------");
         spdlog::warn("OptiScaler is freely downloadable from");
         spdlog::warn("GitHub : https://github.com/optiscaler/OptiScaler/releases");

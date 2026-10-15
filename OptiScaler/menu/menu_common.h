@@ -2,6 +2,7 @@
 
 #include "SysUtils.h"
 #include <Config.h>
+#include "ext/Seams.h"
 
 #include <imgui/imgui.h>
 
@@ -120,6 +121,8 @@ template <typename T> struct MenuOption
 
 class MenuCommon
 {
+    friend struct ext::Access; // ext: fork access to private menu state
+
   private:
     // internal values
     inline static HWND _handle = nullptr;

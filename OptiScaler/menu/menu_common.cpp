@@ -8301,7 +8301,7 @@ const MenuCommon::MenuBox* MenuCommon::GetMenuBoxes(size_t& count)
     // clang-format on
 
     count = std::size(boxes);
-    return boxes;
+    return ext::menu::MergeBoxes(boxes, count); // ext: fork cards
 }
 
 // Draws a single box, even when it's one of many drawn by the same function

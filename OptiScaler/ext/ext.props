@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fork build glue, imported once by OptiScaler.vcxproj (just before Microsoft.Cpp.targets). docs/SEAMS.md section 3.7.
+
+  1. Compiles ext\**\*.cpp (precompiled header "pch.h" like upstream: every ext .cpp starts with #include "pch.h").
+     Objects go to $(IntDir)ext\<dir>\ so equal file names never collide with upstream objects.
+     Files that must not use the PCH: add a line to the "NotUsing" group below.
+  2. ExtShader: HLSL -> header generation before ClCompile, output in $(IntDir)ext_gen\ (on the include path, never committed).
+  3. ExtPackageFile: text files copied to the package folder (x64\Release\a\...) after the build.
+  4. ExtBuildInfo: generates $(IntDir)ext_gen\ext_buildinfo.h (git describe + upstream merge-base) for ext\core\Banner.cpp.
+
+  ExtShader items (declare them in a *.shaders.props next to the shaders; every ext\*\*.shaders.props and
+  ext\*\*\*.shaders.props is imported automatically; Include paths are relative to the PROJECT dir, so write
+  $(MSBuildThisFileDirectory)file.hlsl):
+
+    <ItemGroup>
+      <ExtShader Include="$(MSBuildThisFileDirectory)dlssnr.hlsl">
+        <Variable>DlssNr_cso</Variable>        required, name of the generated array
+        <Header>DlssNr_Shader.h</Header>       required, file name inside $(IntDir)ext_gen\
+        <Compiler>fxc</Compiler>               fxc (default) | dxc
+        <Profile>cs_5_0</Profile>              default cs_5_0 (dxc: use cs_6_0 / ps_6_0 ...)
+        <Entry>CSMain</Entry>                  default CSMain
+        <Defines>SPATIAL_GUIDES=1;FOO</Defines>  optional, ';' separated, each becomes -D
+        <Spirv>false</Spirv>                   true: dxc -spirv ... -Cc -Vi (SPIR-V array)
+        <Args></Args>                          optional extra compiler arguments, appended verbatim
+      </ExtShader>
+    </ItemGroup>
+
+  fxc recipe: -nologo -T <Profile> -E <Entry> -O3 [-D ...]  (byte-identical to the reference blobs, U6 section 2)
+  dxc recipe: -T <Profile> -E <Entry> -O3 -Qstrip_debug [-spirv -Cc -Vi] [-D ...]
+  Compilers come from OptiScaler\shaders\shader_tools (tracked upstream), include path adds ext\shaders\common and
+  the source's own directory. All *.hlsl/*.hlsli/*.h under ext\ are build inputs (any change regenerates everything).
+
+  ExtPackageFile items:
+    <ExtPackageFile Include="$(MSBuildThisFileDirectory)NOTICE.txt"><Dest>Licenses\RenoDX_NOTICE.txt</Dest></ExtPackageFile>
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <ExtDir>$(MSBuildThisFileDirectory)</ExtDir>
+    <ExtRepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..'))</ExtRepoRoot>
+    <ExtGenDir>$([MSBuild]::NormalizeDirectory('$(ProjectDir)', '$(IntDir)', 'ext_gen'))</ExtGenDir>
+    <ExtShaderTools>$(ProjectDir)shaders\shader_tools\</ExtShaderTools>
+    <ExtPackageDir>$([MSBuild]::NormalizeDirectory('$(SolutionDir)', '$(Platform)', '$(Configuration)', 'a'))</ExtPackageDir>
+    <IncludePath>$(ExtGenDir);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ClCompile Include="ext\**\*.cpp">
+      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClInclude Include="ext\**\*.h" />
+    <None Include="ext\**\*.hlsl;ext\**\*.hlsli;ext\**\*.props;ext\ini\*.ini" />
+  </ItemGroup>
+
+  <!-- Per-file PCH opt-out (SEAMS 3.7). Update on a missing file is a no-op. -->
+  <ItemGroup>
+    <ClCompile Update="ext\**\AmdPreSr.cpp;ext\**\DlssNrNative.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+
+  <!-- ExtShader defaults -->
+  <ItemDefinitionGroup>
+    <ExtShader>
+      <Compiler>fxc</Compiler>
+      <Profile>cs_5_0</Profile>
+      <Entry>CSMain</Entry>
+      <Defines></Defines>
+      <Spirv>false</Spirv>
+      <Args></Args>
+    </ExtShader>
+  </ItemDefinitionGroup>
+
+  <!-- Feature-owned shader declarations (no match is fine) -->
+  <Import Project="$(MSBuildThisFileDirectory)*\*.shaders.props" />
+  <Import Project="$(MSBuildThisFileDirectory)*\*\*.shaders.props" />
+
+  <ItemGroup>
+    <ExtShaderInput Include="ext\**\*.hlsl;ext\**\*.hlsli;ext\**\*.h;$(ExtRepoRoot)tools\bin2h.ps1" />
+  </ItemGroup>
+
+  <!-- Shader generation, runs before the compiler so the headers exist when ext .cpp files include them -->
+  <Target Name="ExtGenerateShaders"
+          BeforeTargets="ClCompile"
+          Condition="'@(ExtShader)' != ''"
+          Inputs="@(ExtShader);@(ExtShaderInput)"
+          Outputs="@(ExtShader->'$(ExtGenDir)%(Header)')">
+    <MakeDir Directories="$(ExtGenDir)" />
+
+    <!-- fxc -> .bin -->
+    <Exec Condition="'%(ExtShader.Compiler)' == 'fxc'"
+          Command="&quot;$(ExtShaderTools)fxc.exe&quot; -nologo -T %(ExtShader.Profile) -E %(ExtShader.Entry) -O3 $([System.Text.RegularExpressions.Regex]::Replace('%(ExtShader.Defines)', '([^;]+);?', '-D $1 ')) -I &quot;%(ExtShader.RootDir)%(ExtShader.Directory).&quot; -I &quot;$(ExtDir)shaders\common&quot; %(ExtShader.Args) &quot;%(ExtShader.FullPath)&quot; -Fo &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot;"
+          StandardOutputImportance="low" />
+
+    <!-- dxc DXIL -> .bin -->
+    <Exec Condition="'%(ExtShader.Compiler)' == 'dxc' and '%(ExtShader.Spirv)' != 'true'"
+          Command="&quot;$(ExtShaderTools)dxc.exe&quot; -T %(ExtShader.Profile) -E %(ExtShader.Entry) -O3 -Qstrip_debug $([System.Text.RegularExpressions.Regex]::Replace('%(ExtShader.Defines)', '([^;]+);?', '-D $1 ')) -I &quot;%(ExtShader.RootDir)%(ExtShader.Directory).&quot; -I &quot;$(ExtDir)shaders\common&quot; %(ExtShader.Args) &quot;%(ExtShader.FullPath)&quot; -Fo &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot;"
+          StandardOutputImportance="low" />
+
+    <!-- dxc SPIR-V -> .bin -->
+    <Exec Condition="'%(ExtShader.Compiler)' == 'dxc' and '%(ExtShader.Spirv)' == 'true'"
+          Command="&quot;$(ExtShaderTools)dxc.exe&quot; -spirv -T %(ExtShader.Profile) -E %(ExtShader.Entry) -O3 -Qstrip_debug -Cc -Vi $([System.Text.RegularExpressions.Regex]::Replace('%(ExtShader.Defines)', '([^;]+);?', '-D $1 ')) -I &quot;%(ExtShader.RootDir)%(ExtShader.Directory).&quot; -I &quot;$(ExtDir)shaders\common&quot; %(ExtShader.Args) &quot;%(ExtShader.FullPath)&quot; -Fo &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot;"
+          StandardOutputImportance="low" />
+
+    <!-- .bin -> header -->
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ExtRepoRoot)tools\bin2h.ps1&quot; -In &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot; -Out &quot;$(ExtGenDir)%(ExtShader.Header)&quot; -Name %(ExtShader.Variable)"
+          StandardOutputImportance="low" />
+    <Touch Files="@(ExtShader->'$(ExtGenDir)%(Header)')" />
+  </Target>
+
+  <!-- Build info for ext\core\Banner.cpp: fork describe + merge-base with upstream/master (fallback fd6c2870) -->
+  <Target Name="ExtBuildInfo" BeforeTargets="ClCompile">
+    <MakeDir Directories="$(ExtGenDir)" />
+    <Exec Command="git -C &quot;$(ExtRepoRoot).&quot; describe --tags --always" ConsoleToMSBuild="true" IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="ExtGitDescribe" />
+    </Exec>
+    <Exec Command="git -C &quot;$(ExtRepoRoot).&quot; merge-base HEAD upstream/master" ConsoleToMSBuild="true" IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="ExtGitBase" />
+    </Exec>
+    <PropertyGroup>
+      <ExtGitDescribe Condition="'$(ExtGitDescribe)' == ''">unknown</ExtGitDescribe>
+      <ExtGitBase Condition="'$(ExtGitBase)' == '' or $(ExtGitBase.Length) &lt; 8">fd6c2870</ExtGitBase>
+      <ExtGitBase Condition="$(ExtGitBase.Length) &gt; 8">$(ExtGitBase.Substring(0, 8))</ExtGitBase>
+    </PropertyGroup>
+    <ItemGroup>
+      <ExtBuildInfoLine Include="#pragma once" />
+      <ExtBuildInfoLine Include="#define EXT_BUILD_DESCRIBE &quot;$(ExtGitDescribe)&quot;" />
+      <ExtBuildInfoLine Include="#define EXT_BUILD_UPSTREAM &quot;$(ExtGitBase)&quot;" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(ExtGenDir)ext_buildinfo.h" Lines="@(ExtBuildInfoLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
+  <!-- Text files copied into the package folder (Release builds create it in the upstream post-build step) -->
+  <Target Name="ExtPackageFiles" AfterTargets="Build" Condition="'@(ExtPackageFile)' != '' and Exists('$(ExtPackageDir)')">
+    <Copy SourceFiles="@(ExtPackageFile)" DestinationFiles="@(ExtPackageFile->'$(ExtPackageDir)%(Dest)')" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

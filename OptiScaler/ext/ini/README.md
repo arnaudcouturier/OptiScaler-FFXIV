@@ -1,0 +1,1 @@
+Ini template fragments. `<Section>.ini` holds the key/comment lines that `tools/package.ps1` inserts at the end of `[Section]` of the shipped `OptiScaler.ini` (the section is created if upstream has none). The upstream template is never edited in git.
