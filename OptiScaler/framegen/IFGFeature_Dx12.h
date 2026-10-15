@@ -58,6 +58,7 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool SubmitUICommandList(UINT index);
 
   protected:
+    std::unique_ptr<ext::fg::Dx12Ext> _ext = std::make_unique<ext::fg::Dx12Ext>(); // ext: C6 fork state of FG
     ID3D12Device* _device = nullptr;
     IDXGISwapChain* _swapChain = nullptr;
     ID3D12CommandQueue* _gameCommandQueue = nullptr;

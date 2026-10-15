@@ -5,6 +5,8 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/core/MenuRegistry.h"
+#include "ext/fg/Dx12Ext.h"
+#include "ext/fg/FgSeams.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
 #include "ext/nr/NrSeams.h"
@@ -36,6 +38,10 @@ struct Access
     // `target` is slot 10 of a real ID3D12GraphicsCommandList vtable. Failure leaves o_Reset null.
     static bool ResetHookAttached();
     static bool AttachResetHook(void* target);
+
+    // framegen/IFGFeature_Dx12.h and the derived FG classes (friend lines). The FG fork code names their protected
+    // state through this nested class only; it is defined in ext/fg/Dx12Access.h, which upstream files never include.
+    struct FgDx12;
 };
 
 // ini load/save hooks in Config.cpp (state: ext/core/ExtConfig)
@@ -77,7 +83,6 @@ bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
 // Groups of later series. Declarations are added here together with the SEAMS-catalog.md row.
 namespace upscaler {}
 namespace nr {}
-namespace fg {}
 namespace present {}
 namespace streamline {}
 namespace hdr {}

@@ -632,7 +632,7 @@ void XeFG_Dx12::Deactivate()
             auto closeResult = _uiCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+                ext::gpu::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[fIndex]); // ext: C6
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
@@ -1308,7 +1308,7 @@ bool XeFG_Dx12::Present()
             auto closeResult = _uiCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+                ext::gpu::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[fIndex]); // ext: C6
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
@@ -1317,18 +1317,8 @@ bool XeFG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        if (!ext::fg::SubmitSC(this, (UINT) fIndex)) // ext: C6 ordered SC submit
+            return false;
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)

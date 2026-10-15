@@ -107,7 +107,7 @@ bool IFGFeature_Dx12::SubmitUICommandList(UINT index)
         return false;
     }
 
-    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[index]);
+    ext::gpu::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[index]); // ext: C6 owners
     _uiCommandListResetted[index] = false;
 
     auto signalResult = _gameCommandQueue->Signal(_uiFence, _uiAllocatorFenceValues[index]);
@@ -158,7 +158,7 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
 
         if (result == S_OK)
         {
-            result = _uiCommandList[index]->Reset(_uiCommandAllocator[index], nullptr);
+            result = ext::gpu::ResetCommands(_uiCommandList[index], _uiCommandAllocator[index]); // ext: C6 owners
 
             if (result == S_OK)
             {
@@ -183,7 +183,7 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
 
 ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
 {
-    if (index < 0)
+    if (index < 0 || index >= BUFFER_COUNT) // ext: C6 bounds
         index = GetIndex();
 
     LOG_DEBUG("index: {}", index);
@@ -214,24 +214,8 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
         }
     }
 
-    if (!_scCommandListResetted[index])
-    {
-        auto result = _scCommandAllocator[index]->Reset();
-
-        if (result == S_OK)
-        {
-            result = _scCommandList[index]->Reset(_scCommandAllocator[index], nullptr);
-
-            if (result == S_OK)
-                _scCommandListResetted[index] = true;
-            else
-                LOG_ERROR("_scCommandList[{}]->Reset() error: {:X}", index, (UINT) result);
-        }
-        else
-        {
-            LOG_ERROR("_scCommandAllocator[{}]->Reset() error: {:X}", index, (UINT) result);
-        }
-    }
+    if (!ext::fg::PrepareSC(this, (UINT) index)) // ext: C6 guards, allocator fence wait, Reset
+        return nullptr;
 
     return _scCommandList[index];
 }
