@@ -17,7 +17,7 @@
       <ExtShader Include="$(MSBuildThisFileDirectory)dlssnr.hlsl">
         <Variable>DlssNr_cso</Variable>        required, name of the generated array
         <Header>DlssNr_Shader.h</Header>       required, file name inside $(IntDir)ext_gen\
-        <Compiler>fxc</Compiler>               fxc (default) | dxc
+        <Compiler>fxc</Compiler>               fxc (default) | dxc | text
         <Profile>cs_5_0</Profile>              default cs_5_0 (dxc: use cs_6_0 / ps_6_0 ...)
         <Entry>CSMain</Entry>                  default CSMain
         <Defines>SPATIAL_GUIDES=1;FOO</Defines>  optional, ';' separated, each becomes -D
@@ -25,6 +25,9 @@
         <Args></Args>                          optional extra compiler arguments, appended verbatim
       </ExtShader>
     </ItemGroup>
+
+  Compiler=text embeds the ASCII source file itself as a NUL terminated `char` array and compiles nothing at build time:
+  for shaders that are compiled at run time (system D3DCompiler, run-time defines). Profile/Entry/Defines are ignored.
 
   fxc recipe: -nologo -T <Profile> -E <Entry> -O3 [-D ...]  (byte-identical to the reference blobs, U6 section 2)
   dxc recipe: -T <Profile> -E <Entry> -O3 -Qstrip_debug [-spirv -Cc -Vi] [-D ...]
@@ -104,7 +107,13 @@
           StandardOutputImportance="low" />
 
     <!-- .bin -> header -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ExtRepoRoot)tools\bin2h.ps1&quot; -In &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot; -Out &quot;$(ExtGenDir)%(ExtShader.Header)&quot; -Name %(ExtShader.Variable)"
+    <Exec Condition="'%(ExtShader.Compiler)' != 'text'"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ExtRepoRoot)tools\bin2h.ps1&quot; -In &quot;$(ExtGenDir)%(ExtShader.Header).bin&quot; -Out &quot;$(ExtGenDir)%(ExtShader.Header)&quot; -Name %(ExtShader.Variable)"
+          StandardOutputImportance="low" />
+
+    <!-- text source -> header (Compiler=text: embedded as is, compiled at run time) -->
+    <Exec Condition="'%(ExtShader.Compiler)' == 'text'"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ExtRepoRoot)tools\bin2h.ps1&quot; -In &quot;%(ExtShader.FullPath)&quot; -Out &quot;$(ExtGenDir)%(ExtShader.Header)&quot; -Name %(ExtShader.Variable) -Text"
           StandardOutputImportance="low" />
     <Touch Files="@(ExtShader->'$(ExtGenDir)%(Header)')" />
   </Target>
