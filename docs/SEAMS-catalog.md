@@ -21,7 +21,7 @@ Compiled from the five port ledgers (U1..U5, `phase3-ledger/`) with SEAMS.md sec
 | U1 `ext::quality::EffectivePerfQuality`, `OnOptimalSettings` | `ext::upscaler::EffectivePerfQuality`, `OnOptimalSettings` |
 | U1 `ext::dlssg::OnLoadStreamline` | `ext::streamline::OnLoadStreamline` |
 | U1 `ext::xefg::OnProviderLoaded` | `ext::fg::OnXefgProviderLoaded` |
-| U1 `ext::pacing::FrameInterval` | `ext::present::FrameInterval` |
+| U1 `ext::pacing::FrameInterval` | `ext::present::FrameInterval` **S5 (placed, revised):** `FrameLimit::sleep` calls `FrameInterval(cap, fgActive)` and compares the returned nanoseconds directly (`ext/fg/FrameInterval.cpp`); NaN/infinite/negative caps mean no cap. |
 | U1 `ext::hdr::MenuHdrFlag/MenuPixelShader` | `ext::hdr::MenuHdrFlag/MenuPixelShader` (contingent only) |
 | U1 `ext::diag::LogFullscreenState`, U2 `OnFgActivated` log, U4 fullscreen logs | dropped (log-only) |
 | U2/U3 `ExecuteUi`/`ResetUi`, U3 `ext::gpu::*`, U5 `ResetCopyList`/`ExecuteCopyList`, `Hdr10::ExecuteCommands/ResetCommands` | `ext::gpu::ExecuteCommands`, `ext::gpu::ResetCommands` |
@@ -212,6 +212,7 @@ Single Reset hook design (SEAMS 5): one upstream `hkReset`, installed when `pers
 | `ext::streamline::MfgCeilingStale(const std::optional<int>& cached) -> bool` | decision | same two functions, populate-once condition (duplicated upstream block, 2 sites) | D1, D4 | per-frame | True while an unlock raised the ceiling after the first populate. **S5:** signature refined: it is the whole populate-once condition `(!cached || UnlockedMax() > *cached) && !Pending()` (the provisional-answer term is inside), so the upstream line is `if (ext::streamline::MfgCeilingStale(state.dlssgMfgMax))`. |
 | `ext::streamline::RaiseMfgCeiling(uint32_t& numFramesToGenerateMax) -> uint32_t` | hook | `hkslDLSSGGetState` after each `o_slDLSSGGetState` read; `hkslDLSSGSetOptions` (3 sites) | D1, D4 | per-frame | Must stay inside the struct v2 branch (v1 ends before the field). **S5:** returns the raised value; the two populate sites use it inside the existing `eOk && ... > 0 && ... < 6` condition (no re-indent), the two GetState sites ignore it. |
 | `ext::streamline::OnDlssgModuleLoad(const std::wstring& normalizedPath, LPCWSTR fullPath, HMODULE& module) -> bool handled` | decision | `LibraryLoad_Hooks.cpp` `LoadLibraryCheckW`, `nvngx_dlssg.dll` branch | D1, D4 | per-create (DLL load, any thread) | nullptr = not handled. Loads through `NtdllProxy::LoadLibraryExW_Ldr` and applies `MfgUnlock::TryApply`; early-out is a filename compare plus `Watching()`. **S5:** returns "handled" (as the oracle, which returned the load result even when null); the caller returns `module`. |
+| `ext::streamline::WarnMfgOverrideIgnored(uint32_t major, minor, patch)` | hook | `Streamline_Hooks.cpp` `hkslDLSSGSetOptions`, the `else` of the Streamline >= 2.7.1 branch | D5 | per-frame | Once-only warning that an interpolation-count override cannot apply (Streamline < 2.7.1); moves the 14-line inline block out. **Added by S5** (U4 Streamline #4). |
 | `ext::streamline::ApplyMenuDlssgInterlock(sl::DLSSGOptions&, bool active)` | hook | `Streamline_Hooks.cpp` `hkslDLSSGSetOptions` (the `StreamlineHooks::applyMenuDlssgInterlock` function and its `.h` declaration move to ext) | B9, D5 | per-frame (menu open, Vulkan) | Forces DLSS-G off with `eRetainResourcesWhenOff` while the menu is visible. `delayMenuRenderBy` is dropped. Depends on `menu::OnVulkanOverlay` unless dropped (see menu). |
 
 ## gpu
@@ -320,7 +321,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | fg | 26 | 0 |
 | present | 6 | 0 |
 | restrack | 8 | 3 inline-guarded |
-| streamline | 6 | 0 |
+| streamline | 7 | 0 |
 | gpu | 2 | 0 |
 | hdr | 11 (+2 contingent) | 1 inline-guarded, 3 RAII |
 | hudless | 0 | 0 |

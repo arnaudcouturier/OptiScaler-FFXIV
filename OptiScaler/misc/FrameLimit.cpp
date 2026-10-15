@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "Config.h"
+#include "ext/Seams.h"
 // #include "hooks/D3D11Hooks.h"
 
 static uint64_t get_timestamp()
@@ -75,25 +76,20 @@ void FrameLimit::sleep(bool fgActive)
 {
     static thread_local uint64_t previous_frame_time = 0;
 
-    auto fpsCap = Config::Instance()->FramerateLimit.value_or_default();
-    if (fpsCap == 0.0f)
+    const auto interval = ext::present::FrameInterval(Config::Instance()->FramerateLimit.value_or_default(), fgActive);
+    if (!interval) // ext: D5 validated interval, nullopt = no cap
     {
         previous_frame_time = 0;
         return;
     }
 
-    uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000 / fpsCap), 0ULL, 100'000'000ULL);
-
-    if (fgActive)
-        min_interval_us *= 2;
-
     uint64_t current_time = get_timestamp();
     if (previous_frame_time && current_time >= previous_frame_time)
     {
         uint64_t frame_time = current_time - previous_frame_time;
-        if (frame_time < 1000 * min_interval_us)
+        if (frame_time < *interval)
         {
-            if (auto res = combined_sleep(min_interval_us * 1000 - frame_time); res)
+            if (auto res = combined_sleep(int64_t(*interval - frame_time)); res)
                 LOG_ERROR("Sleep command failed: {}", res);
         }
     }

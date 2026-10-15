@@ -1410,6 +1410,9 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
                 newOptions.mode = sl::DLSSGMode::eOff;
         }
     }
+    else if (dlssgPotentiallyActive)
+        ext::streamline::WarnMfgOverrideIgnored(state.streamlineVersion.major, state.streamlineVersion.minor,
+                                                state.streamlineVersion.patch); // ext: D5 once-only warning
 
     state.dlssgLastSetMode = newOptions.mode;
 

@@ -2,6 +2,8 @@
 
 #include "ext/Seams.h"
 
+#include <Config.h>
+
 #include <proxies/Ntdll_Proxy.h>
 
 #include "ext/fg/dlssg/AmpereMfgLoader.h"
@@ -53,3 +55,24 @@ namespace ext::fg
 {
 int AdjustMfgMax(int driverMax) { return std::max(driverMax, static_cast<int>(MfgUnlock::UnlockedMax())); }
 } // namespace ext::fg
+
+namespace ext::streamline
+{
+void WarnMfgOverrideIgnored(uint32_t major, uint32_t minor, uint32_t patch)
+{
+    if (!Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() ||
+        Config::Instance()->FGDLSSGOverrideInterpolationCount.value() == 0)
+        return;
+
+    // Once. slDLSSGSetOptions runs per frame.
+    static bool warnedNoMfg = false;
+
+    if (!warnedNoMfg)
+    {
+        warnedNoMfg = true;
+        LOG_WARN("Interpolation count override ignored: Streamline {}.{}.{}, multi frame generation "
+                 "needs 2.7.1",
+                 major, minor, patch);
+    }
+}
+} // namespace ext::streamline

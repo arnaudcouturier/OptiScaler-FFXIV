@@ -30,6 +30,9 @@ uint32_t RaiseMfgCeiling(uint32_t& numFramesToGenerateMax);
 // D1: LoadLibraryCheckW, nvngx_dlssg.dll branch. True = handled: `module` is what LoadLibraryCheckW returns (nullptr when
 // the load failed). The provider is loaded through the loader-level entry and patched before NGX caches capabilities.
 bool OnDlssgModuleLoad(const std::wstring& normalizedPath, LPCWSTR fullPath, HMODULE& module);
+// D5: hkslDLSSGSetOptions, Streamline older than 2.7.1 (no multi frame generation). Once-only warning when the user set an
+// interpolation count override that therefore cannot apply.
+void WarnMfgOverrideIgnored(uint32_t major, uint32_t minor, uint32_t patch);
 } // namespace ext::streamline
 
 namespace ext::fg
@@ -45,3 +48,10 @@ bool PrepareSC(IFGFeature_Dx12* fg, UINT index);
 // D1: DLSSG_Common::QueryState, the usable maximum: max(driver ceiling, unlocked ceiling).
 int AdjustMfgMax(int driverMax);
 } // namespace ext::fg
+
+namespace ext::present
+{
+// D5, D1: FrameLimit::sleep. Minimum time (ns) between two frames for the FramerateLimit cap, or nullopt when there is
+// no valid cap. With NVIDIA FG the cap counts generated frames, so the interval doubles. Implementation: FrameInterval.cpp.
+std::optional<uint64_t> FrameInterval(float fpsCap, bool fgActive);
+} // namespace ext::present

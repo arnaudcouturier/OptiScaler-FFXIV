@@ -19,5 +19,11 @@ void FgConfig::Bind(config::Binder& b)
     b.Add("DLSSG", "AmpereMfgPreset", ampereMfgPreset);
     b.Add("DLSSG", "AmpereMfgSpoofArchToGame", ampereMfgSpoofArchToGame);
     b.Add("DLSSG", "AmpereMfgLogLevel", ampereMfgLogLevel);
+
+    // D5: upstream members (Config.h) whose ini persistence under [LowLatency] is the fork's. Read after upstream's own
+    // [fakenvapi] keys (set_from_config only fills an unset value), out-of-range values are ignored.
+    b.AddEnum("LowLatency", "Input", Config::Instance()->LowLatencyInput, ::LowLatencyInput::_);
+    b.AddEnum("LowLatency", "Output", Config::Instance()->LowLatencyOutput,
+              static_cast<LowLatencyMode>(static_cast<uint32_t>(LowLatencyMode::Reflex) + 1));
 }
 } // namespace ext
