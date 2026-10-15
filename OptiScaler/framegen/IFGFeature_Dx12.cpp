@@ -48,14 +48,20 @@ bool IFGFeature_Dx12::HasResource(FG_ResourceType type, int index)
 
 bool IFGFeature_Dx12::WaitForUIAllocator(UINT index)
 {
-    if (_uiFence == nullptr || _uiFenceEvent == nullptr)
-        return true;
+    if (index >= BUFFER_COUNT)
+        return false;
 
     const auto fenceValue = _uiAllocatorFenceValues[index];
     if (fenceValue == 0)
         return true;
 
+    // A missing fence is not "completed": the allocator may still be in flight.
+    if (_uiFence == nullptr || _uiFenceEvent == nullptr)
+        return false;
+
     const auto completedValue = _uiFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+        return false; // Device removal is not completion.
     if (completedValue >= fenceValue)
         return true;
 
@@ -75,7 +81,8 @@ bool IFGFeature_Dx12::WaitForUIAllocator(UINT index)
         return false;
     }
 
-    return true;
+    const auto retiredValue = _uiFence->GetCompletedValue();
+    return retiredValue != UINT64_MAX && retiredValue >= fenceValue;
 }
 
 bool IFGFeature_Dx12::SubmitUICommandList(UINT index)
