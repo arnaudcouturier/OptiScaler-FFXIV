@@ -12,6 +12,7 @@
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
 #include "ext/nr/NrSeams.h"
+#include "ext/upscaler/UpscalerSeams.h"
 
 #include <cstddef>
 
@@ -99,8 +100,10 @@ void OnD3D11DeviceHooked(ID3D11Device* device);
 void OnD3D11Unhook();
 } // namespace game
 
+// ext::upscaler (EffectivePerfQuality, OnOptimalSettings, LastQualityAnswer, ApplyForcedQuality) is declared in
+// ext/upscaler/UpscalerSeams.h, included above.
+
 // Groups of later series. Declarations are added here together with the SEAMS-catalog.md row.
-namespace upscaler {}
 namespace nr {}
 namespace present {}
 namespace streamline {}

@@ -32,6 +32,7 @@
 #include "ext/ffxiv/FfxivConfig.h"
 #include "ext/hdr/HdrConfig.h"
 #include "ext/nr/NrConfig.h"
+#include "ext/upscaler/UpscalerConfig.h"
 
 #include <cstdint>
 #include <string>
@@ -164,6 +165,7 @@ struct ExtConfig
     FfxivConfig ffxiv; // ext/ffxiv
     NrConfig nr; // ext/nr
     HdrConfig hdr; // ext/hdr
+    UpscalerConfig upscaler; // ext/upscaler
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
