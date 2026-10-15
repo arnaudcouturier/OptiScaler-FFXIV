@@ -4,8 +4,11 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/nr/DlssNr.h"
 #include <State.h>
+#include <Util.h>
 #include "ext/nr/amd/AmdBridge.h"
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
+#include "ext/nr/native/DlssNrNative.h"
+#include "ext/nr/presr/PreSrModelHints.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 #include "ext/nr/vk/DlssNr_VkExtensions.h"
 
@@ -222,6 +225,44 @@ void VkDeviceExtScope::LogResult(VkResult result) const
     if (_on)
         LOG_INFO("DLSS-NR Vulkan: vkCreateDevice returned {} with {} extensions requested", (int) result,
                  _info->enabledExtensionCount);
+}
+
+void NormalizeDlssPresets(NVSDK_NGX_Parameter* params)
+{
+    // Normalize the legacy UI "Latest" sentinel at the NGX boundary.
+    for (const char* key : { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance })
+    {
+        uint32_t preset = 0;
+        if (params->Get(key, &preset) == NVSDK_NGX_Result_Success && preset == NV_PRESET_LATEST)
+            params->Set(key, DlssModelHints::NgxPreset(preset));
+    }
+}
+
+// Not gated on the NR switch: the reference build always recorded the CUDA entry points the game queried, so enabling
+// NR (or the hybrid path) later in the session still finds them.
+void* WrapNvapi(unsigned int id, void* fn) { return DlssNrNative::WrapNvapi(id, fn); }
+
+bool NeedsDlssgRuntime(const std::filesystem::path& fileName)
+{
+    // Residual-only FG needs the official FG runtime even with full-game FG off.
+    const NrConfig& nr = Cfg().nr;
+    return fileName == L"nvngx_dlssg.dll" && nr.enabled.value_or_default() && nr.deferredDlss.value_or_default() &&
+           nr.residualFg.value_or_default();
+}
+
+void AppendNgxSearchPaths(const std::filesystem::path& exePath, std::vector<std::wstring>& paths)
+{
+    // Streamline can initialize NGX before the upscaler does. Include the NR runtime now: later NGX initialization
+    // cannot repair the first search list.
+    auto nvngxDlssNrPath = Util::FindFilePath(exePath, "nvngx_dlssnr.dll");
+
+    if (nvngxDlssNrPath.has_value())
+        paths.push_back(nvngxDlssNrPath.value().parent_path().wstring());
 }
 } // namespace ext::nr
 

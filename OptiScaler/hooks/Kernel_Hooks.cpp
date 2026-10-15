@@ -254,7 +254,9 @@ DWORD WINAPI KernelHooks::hk_K32_GetFileAttributesW(LPCWSTR lpFileName)
         auto path = wstring_to_string(std::wstring(lpFileName));
         to_lower_in_place(path);
 
-        if (path.contains("nvngx.dll") && !path.contains("_nvngx.dll") &&
+        // ext: A1 "nvngx.dll_" excludes NR's forwarder nvngx.dll_dlssnr.dll (the spoof would load the signed driver
+        // nvngx.dll in its place; Dragon's Dogma 2 crashed at the first NR init)
+        if (path.contains("nvngx.dll") && !path.contains("_nvngx.dll") && !path.contains("nvngx.dll_") &&
             !IsInsideWindowsDirectory(path)) // apply the override to just one path
         {
             LOG_DEBUG("Overriding GetFileAttributesW for nvngx");
@@ -277,8 +279,9 @@ HANDLE WINAPI KernelHooks::hk_K32_CreateFileW(LPCWSTR lpFileName, DWORD dwDesire
         auto path = wstring_to_string(std::wstring(lpFileName));
         to_lower_in_place(path);
 
-        if (path.contains("nvngx.dll") && !path.contains("_nvngx.dll") && // apply the override to just one path
-            !IsInsideWindowsDirectory(path))
+        // ext: A1 see hk_K32_GetFileAttributesW, the NR forwarder is excluded
+        if (path.contains("nvngx.dll") && !path.contains("_nvngx.dll") && !path.contains("nvngx.dll_") &&
+            !IsInsideWindowsDirectory(path)) // apply the override to just one path
         {
             static auto& signedDll = State::Instance().nvngxReplacement;
 

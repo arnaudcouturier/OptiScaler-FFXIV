@@ -1,6 +1,7 @@
 #include <pch.h>
 #include <Config.h>
 #include <Util.h>
+#include "ext/Seams.h"
 
 #include "DLSSFeature.h"
 
@@ -252,6 +253,8 @@ void DLSSFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
 
         State::Instance().dlssPresetsOverridenByOpti = false;
     }
+
+    ext::nr::NormalizeDlssPresets(InParameters); // ext: B1
 
     UINT perfQ = NVSDK_NGX_PerfQuality_Value_Balanced;
     if (InParameters->Get(NVSDK_NGX_Parameter_PerfQualityValue, &perfQ) == NVSDK_NGX_Result_Success &&

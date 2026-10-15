@@ -9,8 +9,10 @@
 #include <nvsdk_ngx.h>
 #include <vulkan/vulkan.h>
 
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "ext/nr/NgxResourceBinding.h"
@@ -118,6 +120,22 @@ class VkDeviceExtScope
     const VkDeviceCreateInfo* _info = nullptr;
     std::vector<const char*> _names;
 };
+
+// DLSSFeature::ProcessInitParams: the six Hint_Render_Preset_* equal to NV_PRESET_LATEST (the legacy UI "Latest"
+// sentinel, not an NGX preset) are mapped to the runtime default. SR only.
+void NormalizeDlssPresets(NVSDK_NGX_Parameter* params);
+
+// NvApiHooks.cpp hkNvAPI_QueryInterface, final return: records the CUDA-kernel entry points NR's hybrid path
+// intercepts and hands back its wrappers; every other id passes through.
+void* WrapNvapi(unsigned int id, void* fn);
+
+// Util::FindFilePath: residual-only FG (NR + DeferredDLSS + ResidualFG) needs the official FG runtime even with
+// full-game FG off.
+bool NeedsDlssgRuntime(const std::filesystem::path& fileName);
+
+// Streamline_Proxy.h LoadStreamline: Streamline can initialise NGX before the upscaler does, so the NR runtime's folder
+// goes into the first search list (a later NGX initialisation cannot repair it).
+void AppendNgxSearchPaths(const std::filesystem::path& exePath, std::vector<std::wstring>& paths);
 } // namespace ext::nr
 
 namespace ext::dx11bridge

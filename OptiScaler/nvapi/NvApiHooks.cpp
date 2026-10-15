@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "NvApiHooks.h"
+#include "ext/Seams.h"
 #include <NvApiDriverSettings.h>
 
 #include "State.h"
@@ -297,7 +298,7 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
 
     // LOG_DEBUG("counter: {} functionPointer: {:X}", qiCounter, (size_t)functionPointer);
 
-    return functionPointer;
+    return ext::nr::WrapNvapi(InterfaceId, functionPointer); // ext: A10
 }
 
 // Requires HMODULE to make sure nvapi is loaded before calling this function

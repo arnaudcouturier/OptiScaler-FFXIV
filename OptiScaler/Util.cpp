@@ -2,6 +2,7 @@
 
 #include "Util.h"
 #include "Config.h"
+#include "ext/Seams.h"
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -518,7 +519,9 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
     optiPath /= L"streamline";
     auto normalizedStreamlinePath = optiPath.lexically_normal();
 
-    const bool isDlssgOutput = State::Instance().activeFgOutput == FGOutput::DLSSG;
+    // ext: B7 residual-only FG needs the official FG runtime even with full-game FG off
+    const bool isDlssgOutput =
+        State::Instance().activeFgOutput == FGOutput::DLSSG || ext::nr::NeedsDlssgRuntime(fileName);
 
     // 1) Direct check in startDir
     std::filesystem::path candidate = startDir / fileName;

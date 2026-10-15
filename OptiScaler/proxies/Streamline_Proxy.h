@@ -4,6 +4,7 @@
 #include "Util.h"
 #include "Config.h"
 #include "Logger.h"
+#include "ext/Seams.h"
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -400,6 +401,8 @@ class StreamlineProxy
 
         if (Config::Instance()->DLSSFeaturePath.has_value())
             pathStorage.push_back(Config::Instance()->DLSSFeaturePath.value());
+
+        ext::nr::AppendNgxSearchPaths(exePath, pathStorage); // ext: A1
 
         // Streamline makes a copy of those
         std::vector<const wchar_t*> paths;
