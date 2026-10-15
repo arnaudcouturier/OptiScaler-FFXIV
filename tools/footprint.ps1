@@ -3,13 +3,13 @@
   Diff stat of a revision against the upstream base, excluding fork-only paths.
 .DESCRIPTION
   Base = merge-base of <Rev> and upstream/master (fallback fd6c2870).
-  Target (docs/SEAMS.md section 1): <= 40 upstream files and <= 1000 changed lines.
+  Target (docs/SEAMS.md section 1.3): <= 600 lines of persistent surface. [UP] commits
+  (upstream-candidate fixes) are counted separately; the file count is reported only.
 #>
 [CmdletBinding()]
 param(
     [string]$Rev = 'HEAD',
-    [int]$MaxFiles = 40,
-    [int]$MaxLines = 1000
+    [int]$MaxLines = 600
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,9 +44,20 @@ try {
     if (-not $add) { $add = 0 }
     if (-not $del) { $del = 0 }
     $lines = $add + $del
-    $okF = if ($rows.Count -le $MaxFiles) { 'OK' } else { 'OVER' }
-    $okL = if ($lines -le $MaxLines) { 'OK' } else { 'OVER' }
-    Write-Host ("total: {0} files (target <= {1}) {2}; +{3} -{4} = {5} lines (target <= {6}) {7}" -f `
-            $rows.Count, $MaxFiles, $okF, $add, $del, $lines, $MaxLines, $okL)
+    # Lines contributed by [UP] commits (upstream-candidate fixes), upstream paths only.
+    $up = 0
+    foreach ($c in (git log --format=%H --grep='^\[UP\]' "$base..$Rev")) {
+        foreach ($line in (git show --numstat --format= --no-renames $c)) {
+            $p = $line -split "`t", 3
+            if ($p.Count -lt 3) { continue }
+            if ($forkOnly | Where-Object { $p[2] -match $_ }) { continue }
+            if ($p[0] -ne '-') { $up += [int]$p[0] }
+            if ($p[1] -ne '-') { $up += [int]$p[1] }
+        }
+    }
+    $persistent = [Math]::Max(0, $lines - $up)
+    $ok = if ($persistent -le $MaxLines) { 'OK' } else { 'OVER' }
+    Write-Host ("total: {0} upstream files; +{1} -{2} = {3} lines" -f $rows.Count, $add, $del, $lines)
+    Write-Host ("  [UP] commits: {0} lines; persistent surface: {1} lines (target <= {2}) {3}" -f $up, $persistent, $MaxLines, $ok)
 }
 finally { Pop-Location }

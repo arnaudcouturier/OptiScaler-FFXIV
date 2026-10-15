@@ -112,7 +112,7 @@
   <!-- Build info for ext\core\Banner.cpp: fork describe + merge-base with upstream/master (fallback fd6c2870) -->
   <Target Name="ExtBuildInfo" BeforeTargets="ClCompile">
     <MakeDir Directories="$(ExtGenDir)" />
-    <Exec Command="git -C &quot;$(ExtRepoRoot).&quot; describe --tags --always" ConsoleToMSBuild="true" IgnoreExitCode="true"
+    <Exec Command="git -C &quot;$(ExtRepoRoot).&quot; describe --tags --always --match &quot;ffxiv-*&quot;" ConsoleToMSBuild="true" IgnoreExitCode="true"
           IgnoreStandardErrorWarningFormat="true" StandardOutputImportance="low" StandardErrorImportance="low">
       <Output TaskParameter="ConsoleOutput" PropertyName="ExtGitDescribe" />
     </Exec>

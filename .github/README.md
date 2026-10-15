@@ -2,6 +2,8 @@
 
 Unofficial fork of OptiScaler (tracking nightly), not affiliated with the OptiScaler team.
 
+> **Status (October 2026): work in progress.** The feature stack is being ported onto OptiScaler nightly `fd6c2870`, and there is no release yet. The feature list below describes the target.
+
 An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler). It adds DLSS Neural Rendering with pre-SR multipass, DLSS-G multi frame generation unlocks for RTX 30/40, XeFG/XeMFG, OptiHDR, RenoDX scene HDR and a native FFXIV integration. All fork code lives under `OptiScaler/ext/`, so upstream files carry only small, listed seams (see [docs/SEAMS.md](../docs/SEAMS.md)). The upstream README is [README.md](../README.md).
 
 ## Features
