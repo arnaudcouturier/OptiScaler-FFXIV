@@ -279,6 +279,8 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
     // Iterate FORWARDS to execute the shaders in the defined order
     for (auto& pass : pipeline)
     {
+        if (!evalResult)
+            break;
         if (pass.inputBuffer && pass.outputBuffer)
         {
             if (!pass.Dispatch(pass.inputBuffer, pass.outputBuffer))
@@ -290,7 +292,7 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
     }
 
     // imgui
-    if (!pipelineFailed && !Config::Instance()->OverlayMenu.value_or_default() && _frameCount > 30)
+    if (evalResult && !pipelineFailed && !Config::Instance()->OverlayMenu.value_or_default() && _frameCount > 30)
     {
         if (Imgui != nullptr && Imgui.get() != nullptr)
         {
@@ -308,8 +310,8 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
         }
     }
 
-    if (evalResult && !pipelineFailed)
-        InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+    // Always give the caller its original output back, even when the upscale or a pass failed
+    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
 
     // restore compute shader resources
     for (UINT i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
