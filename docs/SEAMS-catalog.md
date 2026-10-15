@@ -318,8 +318,8 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | menu | 13 (1 provisional) | 0 |
 | upscaler | 5 | 0 |
 | dx11bridge | 21 | 2 RAII |
-| nr | 10 | 1 RAII |
-| fg | 26 | 0 |
+| nr | 10 | 2 RAII |
+| fg | 27 | 0 |
 | present | 6 | 0 |
 | restrack | 8 | 3 inline-guarded |
 | streamline | 7 | 0 |
@@ -329,7 +329,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
-| **Total** | **115** | |
+| **Total** | **117** | |
 
 # (a) `[UP]` fix list
 
@@ -372,8 +372,8 @@ One `friend struct ext::Access;` per class. Members listed are what the fork nee
 
 | Upstream class (file) | Private/protected members the fork needs | Used by |
 |---|---|---|
-| `IFGFeature_Dx12` (`framegen/IFGFeature_Dx12.h`); covers derived `DLSSG_Dx12` and `XeFG_Dx12` through base access | `_uiCommandList`, `_scCommandList`, `_resourceMutex`, UI/SC allocators and fences, frame-resource arrays, `_jitterX/_jitterY`, `_cameraNear/_cameraFar`, `_lastDispatchedFrame`, `_waitingNewFrameData`, `Deactivate()`, `ReleaseObjects()` | `fg::*`, `CancelPendingUpscalerWork`, `SubmitSC`, `PrepareSC`, guide matcher |
-| `XeFG_Dx12` (`framegen/xefg/XeFG_Dx12.h`) | `_reset`, XeFG context/session handles, `WAR_xefgRequestFGToggle`, frame-index state | `XefgSelectFactor`, `XefgFrameTime`, `XefgPrepareHudless`, rebuild-on-upscaler-change |
+| `IFGFeature_Dx12` (`framegen/IFGFeature_Dx12.h`); covers derived `DLSSG_Dx12` and `XeFG_Dx12` through base access | `_uiCommandList`, `_scCommandList`, `_resourceMutex`, UI/SC allocators and fences, frame-resource arrays, `_jitterX/_jitterY`, `_cameraNear/_cameraFar`, `_lastDispatchedFrame`, `_waitingNewFrameData`, `Deactivate()`, `ReleaseObjects()` | `fg::*`, `CancelPendingUpscalerWork`, `SubmitSC`, `PrepareSC`, guide matcher. **As built (S5):** the one friend line names `ext::Access`; the fork code that needs these members uses the nested `ext::Access::FgDx12` (declared in `Seams.h`, defined in `ext/fg/Dx12Access.h`, which upstream never includes). A nested class of a friend has the friend's access, so no further friend line and no accessor churn in `Seams.cpp`. No separate friend line is needed for `XeFG_Dx12`: XeFG state that the seams need is passed as arguments (`XefgSelectFactor`, `XefgBuildCamera`) or kept in `Dx12Ext::xefg`. |
+| `XeFG_Dx12` (`framegen/xefg/XeFG_Dx12.h`) | `_reset`, XeFG context/session handles, `WAR_xefgRequestFGToggle`, frame-index state | `XefgPrepareHudless` (S6), rebuild-on-upscaler-change. **As built (S5, D3):** not needed for `XefgSelectFactor`, `XefgFrameTime`, `XefgNoteFrameTime`, `XefgBuildCamera` (they take values or arrays as arguments; the rebuild uses the public `DestroyFGContext()`), so no friend line in `XeFG_Dx12.h` so far. |
 | `Dx11wDx12SC` (`with_dx12/dx11_with_dx12_sc.h`) | `_fgSwapChain`, `_currentFakeIndex`, `_openedDx11BackBuffers`, copy queue/allocators/fences, D3D11 immediate context, `_hdrOutput` (moves to `_ext`), `_RequestSharedBackBuffer` shape | `dx11bridge::*`, `HudlessEngine` |
 | `IFeature_Dx11wDx12` (`upscalers/IFeature_Dx11wDx12.h`) | `dx12Feature`, `_dx11on12Device`, `Dx12CommandQueue`, `Dx12CommandList`, `Dx12Fence`, `ResourceBarrier`, `_frameCount` | `PrepareUpscalerColor`, `BridgeEvalScope`, `BeforeReleaseFeature` |
 | `IFeature` (`upscalers/IFeature.h`) | `_renderWidth/_renderHeight`, `_displayWidth/_displayHeight`, `Handle()`/`Id`, create-flag accessors | `CorrectRenderSubrect`, `ResolveRenderGeometry`, `ApplyForcedQuality` |
@@ -389,7 +389,7 @@ One member each, marked `// ext:`, `std::unique_ptr<ext::.../...Ext>` with a for
 
 | Upstream class (file) | `_ext` type | Holds |
 |---|---|---|
-| `IFGFeature_Dx12` (`framegen/IFGFeature_Dx12.h`) | `ext::fg::Dx12Ext` | guide snapshot ring and metadata, `_guideAge`, `_retiredGuides`, `_sceneHistory`, SC fence value/failed flag, DLSS-G observed multiplier/sample mode/last options, `_historyFrames`, `_forceConstantsReset`, XeFG dynamic state (`_dynamic`, `_dynamicWasEnabled`, `_dynamicLastTarget`). Covers `DLSSG_Dx12`, `XeFG_Dx12`, `FSRFG_Dx12` (derived), so no member is added in those classes or in `DLSSG_Common`. |
+| `IFGFeature_Dx12` (`framegen/IFGFeature_Dx12.h`) | `ext::fg::Dx12Ext` | guide snapshot ring and metadata, `_guideAge`, `_retiredGuides`, `_sceneHistory`, SC fence value/failed flag, DLSS-G observed multiplier/sample mode/last options, `_historyFrames`, `_forceConstantsReset`, XeFG dynamic state (`_dynamic`, `_dynamicWasEnabled`, `_dynamicLastTarget`; as built: `Dx12Ext::xefg`, an `XefgState` created on the first XeFG Dispatch). **As built (S5):** the fields are reached through `ext::Access::FgDx12::Ext(fg)` (see section (b)). Covers `DLSSG_Dx12`, `XeFG_Dx12`, `FSRFG_Dx12` (derived), so no member is added in those classes or in `DLSSG_Common`. |
 | `Dx11wDx12SC` (`with_dx12/dx11_with_dx12_sc.h`) | `ext::dx11bridge::BridgeExt` | HudlessEngine ring and flags (`_hudlessPending`, `_hudlessSlot`, `_uiFreeThisFrame`, UI image ring, `_uiExtract`), `_hdrOutput` |
 | `IFeature_Dx11wDx12` (`upscalers/IFeature_Dx11wDx12.h`) | `ext::dx11bridge::BridgeState` | `ForcedQualityColorScaler` (`OS_Dx12`), `ReportedForcedQualityColorScale`; freed on the GPU-idle path (C6) |
 | `DLSSFeature_Dx12` (`upscalers/dlss/DLSSFeature_Dx12.h`) | `ext::hdr::DlssExt` | `_sceneHdrInput`, `_sceneHdrAvailable`, saved create flags |
