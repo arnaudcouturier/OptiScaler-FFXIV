@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/nr/NrConfig.h"
+#include "ext/ExtFeatures.h"
 #include "ext/core/ExtConfig.h"
 
 #include <algorithm>
@@ -110,6 +111,11 @@ void NrConfig::Bind(config::Binder& b)
 
 void NrConfig::PostLoad()
 {
+    // The hot-path seams of the exposure scan (ext::restrack::NoteUav/NoteResourceCreated) test this feature bit; it
+    // stays set for the session once NR was enabled (EvalBefore latches it for a runtime enable).
+    if (enabled.value_or_default())
+        SetActive(F::Nr, true);
+
     if (precision.value_or_default() != 4)
         precision = 0u;
 

@@ -685,6 +685,8 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
         }
     }
 
+    ext::restrack::NoteUav(pResource, pDesc); // ext: A4 exposure scan
+
     o_CreateUnorderedAccessView(This, pResource, pCounterResource, pDesc, DestDescriptor);
 
     ResourceInfo resInfo {};

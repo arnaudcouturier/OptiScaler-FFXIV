@@ -821,6 +821,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
     if (!InHandle)
         return NVSDK_NGX_Result_Success;
 
+    ext::restrack::OnFeatureRelease(); // ext: A4 drop the exposure scan's pins before any resource is freed
+
     auto handleId = InHandle->Id;
 
     // Clean up framegen

@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/amd/AmdBridge.h"
+#include "ext/nr/exposure/DlssNr_ExposureScan.h"
 
 #include <with_dx12/with_dx12.h>
 
@@ -115,3 +116,28 @@ void OnNgxShutdownBegin()
         DlssNr::SuspendForBridgeShutdown();
 }
 } // namespace ext::dx11bridge
+
+namespace ext::restrack
+{
+void NoteUavSlow(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
+{
+    DlssNr::ExposureScan::NoteUav(resource, desc);
+}
+
+void NoteResourceCreatedSlow(const D3D12_RESOURCE_DESC* desc, REFIID riid, void* resource)
+{
+    // The reference build cast the out pointer blindly; only the resource interfaces are known to be one.
+    if (resource == nullptr || desc == nullptr)
+        return;
+
+    if (riid != __uuidof(ID3D12Resource) && riid != __uuidof(ID3D12Resource1) && riid != __uuidof(ID3D12Resource2))
+        return;
+
+    DlssNr::ExposureScan::NoteResource(desc, static_cast<ID3D12Resource*>(resource));
+}
+
+// The scan needs the game's resources, and a game without the UE atomics spoof had none of these hooks installed.
+bool WantsResourceCreateHooks() { return ext::Cfg().nr.enabled.value_or_default(); }
+
+void OnFeatureRelease() { DlssNr::ExposureScan::ReleaseTrackedResources(); }
+} // namespace ext::restrack

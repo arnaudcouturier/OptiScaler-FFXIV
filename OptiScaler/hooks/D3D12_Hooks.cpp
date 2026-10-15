@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "D3D12_Hooks.h"
+#include "ext/Seams.h"
 
 #include <Util.h>
 #include <Config.h>
@@ -1886,8 +1887,10 @@ static HRESULT hkCreateCommittedResource(ID3D12Device* device, const D3D12_HEAP_
         }
     }
 
-    return o_CreateCommittedResource(device, pHeapProperties, HeapFlags, pDesc, InitialResourceState,
-                                     pOptimizedClearValue, riidResource, ppvResource);
+    const HRESULT hr = o_CreateCommittedResource(device, pHeapProperties, HeapFlags, pDesc, InitialResourceState,
+                                                 pOptimizedClearValue, riidResource, ppvResource);
+    ext::restrack::NoteResourceCreated(hr, pDesc, riidResource, ppvResource); // ext: A4 exposure scan
+    return hr;
 }
 
 static bool skipPlacedResource = false;
@@ -1916,8 +1919,10 @@ static HRESULT hkCreatePlacedResource(ID3D12Device* device, ID3D12Heap* pHeap, U
         }
     }
 
-    return o_CreatePlacedResource(device, pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid,
-                                  ppvResource);
+    const HRESULT hr = o_CreatePlacedResource(device, pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue,
+                                              riid, ppvResource);
+    ext::restrack::NoteResourceCreated(hr, pDesc, riid, ppvResource); // ext: A4 exposure scan
+    return hr;
 }
 
 VALIDATE_HOOK(hkSetResidencyPriority, PFN_SetResidencyPriority)
@@ -2279,6 +2284,16 @@ static void HookToDevice(ID3D12Device* InDevice)
 
             if (o_GetResourceAllocationInfo != nullptr)
                 DetourAttach(&(PVOID&) o_GetResourceAllocationInfo, hkGetResourceAllocationInfo);
+        }
+        else if (ext::restrack::WantsResourceCreateHooks()) // ext: A4 the scan needs the resource creation hooks alone
+        {
+            LOG_DEBUG("DLSS-NR wants the resource creation hooks, applying detours");
+
+            if (o_CreateCommittedResource != nullptr)
+                DetourAttach(&(PVOID&) o_CreateCommittedResource, hkCreateCommittedResource);
+
+            if (o_CreatePlacedResource != nullptr)
+                DetourAttach(&(PVOID&) o_CreatePlacedResource, hkCreatePlacedResource);
         }
 
         auto detourResult = DetourTransactionCommit();

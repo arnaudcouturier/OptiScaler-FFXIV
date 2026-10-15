@@ -85,3 +85,31 @@ void OnNgxInit();
 // bridge is up, NR stops new work and retires its PreSR generations before the driver's NGX shutdown.
 void OnNgxShutdownBegin();
 } // namespace ext::dx11bridge
+
+namespace ext::restrack
+{
+// ResTrack_dx12.cpp hkCreateUnorderedAccessView, before the call (A4 exposure scan). One relaxed load while NR was
+// never enabled this session.
+void NoteUavSlow(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc);
+inline void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
+{
+    if (Active(F::Nr))
+        NoteUavSlow(resource, desc);
+}
+
+// D3D12_Hooks.cpp tail of hkCreateCommittedResource / hkCreatePlacedResource (A4). Every game thread, bursts of
+// thousands: lock-free on the miss path. `resource` is the call's ppvResource; only a resource IID is looked at.
+void NoteResourceCreatedSlow(const D3D12_RESOURCE_DESC* desc, REFIID riid, void* resource);
+inline void NoteResourceCreated(HRESULT hr, const D3D12_RESOURCE_DESC* desc, REFIID riid, void** resource)
+{
+    if (Active(F::Nr) && SUCCEEDED(hr) && resource != nullptr)
+        NoteResourceCreatedSlow(desc, riid, *resource);
+}
+
+// D3D12_Hooks.cpp HookToDevice: NR wants the resource-creation hooks even without the UE atomics spoof.
+bool WantsResourceCreateHooks();
+
+// NVNGX_DLSS_Dx12.cpp NVSDK_NGX_D3D12_ReleaseFeature, before any resource is freed: drops the exposure scan's pins
+// (the Cyberpunk device-removal fix).
+void OnFeatureRelease();
+} // namespace ext::restrack
