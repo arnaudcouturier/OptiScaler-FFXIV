@@ -225,6 +225,8 @@ bool DLSSG_Dx12::Dispatch()
         }
     }
 
+    const auto guide = ext::fg::GuideAge(this, fIndex, willDispatchFrame); // ext: B5
+
     auto mv = GetResource(FG_ResourceType::Velocity, fIndex);
 
     if (!mv)
@@ -233,8 +235,12 @@ bool DLSSG_Dx12::Dispatch()
         return false;
     }
 
+    const bool discontinuity = ext::fg::DispatchResetHistory(this, guide, willDispatchFrame, ext::fg::Provider::DlssG); // ext: B5
+
     if (!SetConstants(fIndex, static_cast<uint32_t>(willDispatchFrame), (uint32_t) mv->width, mv->height))
         return false;
+
+    ext::fg::PostDispatch(this, guide, willDispatchFrame, discontinuity, ext::fg::Provider::DlssG); // ext: B5
 
     LOG_DEBUG("Result: Ok");
 
@@ -319,6 +325,8 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void DLSSG_Dx12::ReleaseObjects()
 {
+    ext::fg::ReleaseGuides(this); // ext: B5
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -590,6 +598,10 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    Dx12Resource matched; // ext: B5
+    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched)) // ext: B5 guide matching
+        return false;
+
     auto& type = inputResource->type;
 
     std::unique_lock<std::shared_mutex> lock(_resourceMutex[fIndex]);
@@ -663,6 +675,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    ext::fg::SetResourcePost(*inputResource, *fResource); // ext: B5
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
     fResource->width = inputResource->width;

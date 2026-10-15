@@ -4,6 +4,7 @@
 // DLSSG_Common. Later series (B5 guide matcher, D2 observed multiplier, D3 XeFG dynamic state) add their state here
 // behind out-of-line types, so this header stays free of upstream types.
 
+#include "ext/fg/TemporalContinuity.h"
 #include "ext/gpu/Gpu.h"
 
 #include <atomic>
@@ -12,6 +13,8 @@
 
 namespace ext::fg
 {
+struct GuideState; // B5, ext/fg/GuideState.h
+
 class Dx12Ext
 {
   public:
@@ -23,6 +26,14 @@ class Dx12Ext
     // C6: the SC list is submitted in order with a monotonic fence value (was IFGFeature_Dx12::_scFenceValue and
     // _scSubmissionFailed). `failed` is permanent for this object: further SC rendering is disabled.
     gpu::OrderedFence sc;
+
+    // B5: presentation-guide matcher (created on the first guide delay a game module supplies)
+    std::unique_ptr<GuideState> guides;
+
+    // C5/B5: DLSS-G consecutive accepted frames (was DLSSG_Dx12::_historyFrames) and the "next constants get reset = true"
+    // request (was DLSSG_Common::_forceConstantsReset)
+    SuccessfulFrames dlssgFrames;
+    bool forceConstantsReset = false;
 
     // D2 (DLSS-G on the Dx12 output): the latest observed output frames per real frame (tick count << 8 | multiplier,
     // 0 = none), the DLSS-G mode of the last sampled query (-1 = none) and the result/mode of the last SetOptions.

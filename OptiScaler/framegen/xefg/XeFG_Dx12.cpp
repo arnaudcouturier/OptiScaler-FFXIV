@@ -621,6 +621,7 @@ void XeFG_Dx12::Activate()
 
 void XeFG_Dx12::Deactivate()
 {
+    ext::fg::OnDeactivating(this); // ext: B5
     LOG_DEBUG("");
 
     if (_isActive)
@@ -882,8 +883,11 @@ bool XeFG_Dx12::Dispatch()
     constData.motionVectorScaleX = _mvScaleX[fIndex];
     constData.motionVectorScaleY = _mvScaleY[fIndex];
 
+    const auto guide = ext::fg::GuideAge(this, fIndex, willDispatchFrame); // ext: B5
+
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.resetHistory = _reset[fIndex];
+        constData.resetHistory = _reset[fIndex] ||
+                                 ext::fg::DispatchResetHistory(this, guide, willDispatchFrame, ext::fg::Provider::XeFg); // ext: B5
     else
         constData.resetHistory = false;
 
@@ -983,6 +987,7 @@ bool XeFG_Dx12::Dispatch()
         }
     }
 
+    ext::fg::PostDispatch(this, guide, willDispatchFrame, false, ext::fg::Provider::XeFg); // ext: B5
     LOG_DEBUG("Result: Ok");
 
     return true;
@@ -1077,6 +1082,8 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void XeFG_Dx12::ReleaseObjects()
 {
+    ext::fg::ReleaseGuides(this); // ext: B5
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -1348,6 +1355,10 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    Dx12Resource matched; // ext: B5
+    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched)) // ext: B5 guide matching
+        return false;
+
     auto& type = inputResource->type;
 
     std::unique_lock<std::shared_mutex> lock(_resourceMutex[fIndex]);
@@ -1429,6 +1440,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    ext::fg::SetResourcePost(*inputResource, *fResource); // ext: B5
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
     fResource->width = inputResource->width;

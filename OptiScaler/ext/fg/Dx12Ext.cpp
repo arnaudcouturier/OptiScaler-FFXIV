@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/fg/Dx12Ext.h"
+#include "ext/fg/GuideState.h"
 
 namespace ext::fg
 {

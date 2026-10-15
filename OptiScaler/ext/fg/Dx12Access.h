@@ -9,10 +9,20 @@
 
 struct ext::Access::FgDx12
 {
+    static ext::fg::Dx12Ext& Ext(IFGFeature_Dx12& fg) { return *fg._ext; }
+
     // --- C6: SC command list ownership (Dx12Sc.cpp)
     static bool WaitForSCAllocator(IFGFeature_Dx12& fg, UINT index);
     static bool PrepareSC(IFGFeature_Dx12& fg, UINT index);
     static bool SubmitSC(IFGFeature_Dx12& fg, UINT index);
 
-    static ext::fg::Dx12Ext& Ext(IFGFeature_Dx12& fg) { return *fg._ext; }
+    // --- B5: guide matcher (GuideMatcher.cpp)
+    static ext::fg::GuideState& Guides(IFGFeature_Dx12& fg);
+    static void SetPresentationGuideDelay(IFGFeature_Dx12& fg, int age);
+    static bool MatchPresentationGuide(IFGFeature_Dx12& fg, Dx12Resource& input, int index);
+    static void RetireGuide(IFGFeature_Dx12& fg, ID3D12Resource*& resource);
+    static void CollectGuides(IFGFeature_Dx12& fg);
+    static void ReleaseGuides(IFGFeature_Dx12& fg);
+    static void InvalidateGuides(IFGFeature_Dx12& fg);
+    static int GuideAge(IFGFeature_Dx12& fg, int index);
 };

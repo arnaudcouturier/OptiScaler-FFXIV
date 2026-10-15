@@ -10,6 +10,7 @@
 #include <string>
 
 class IFGFeature_Dx12;
+struct Dx12Resource;
 
 // ---------------------------------------------------------------------------------------------------------------
 // Streamline (D1, D4). Implementation: ext/fg/streamline/*.cpp. Hosts: proxies/Streamline_Proxy.h (LoadStreamline),
@@ -96,3 +97,45 @@ namespace ext::menu
 // DLSSG card, inside the Force Dynamic MFG block: "Current DMFG: Nx (observed)" or the waiting text, with its tooltip.
 void ObservedMultiplier(IFGFeature* dlssg);
 } // namespace ext::menu
+
+// ---------------------------------------------------------------------------------------------------------------
+// Provider-neutral presentation-guide matching and scene-paired history (B5, C5; ext/fg/GuideMatcher.cpp,
+// GuideSeams.cpp). DLSSG_Dx12 and XeFG_Dx12 hosts. All of it is inert unless ext::game::Current().fgMarkers is set.
+namespace ext::fg
+{
+enum class Provider
+{
+    DlssG,
+    XeFg
+};
+
+// Age of the NR guides paired with the frame being dispatched, and the scene frame it maps to (willDispatchFrame - age).
+struct GuideInfo
+{
+    int age = -1;
+    uint64_t sceneFrame = 0;
+};
+
+// SetResource, after the frame index is known. Depth/Velocity inputs are replaced by the scene-matched snapshot taken
+// `age` frames ago (`matched` is the storage, `input` is repointed at it). False = skip the input (warm-up, gap, resize).
+bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12Resource& matched);
+// SetResource, after the per-frame resource record took the input's fields: Depth/Velocity never keep a copy.
+void SetResourcePost(const Dx12Resource& input, Dx12Resource& frameResource);
+
+// Dispatch, before the motion vectors are fetched: the guide age and scene frame of `willDispatchFrame`.
+GuideInfo GuideAge(IFGFeature_Dx12* fg, int fIndex, uint64_t willDispatchFrame);
+// Dispatch, before the constants: true when the history is discontinuous (DLSS-G: also makes the next constants reset;
+// XeFG: OR it into resetHistory). Replaces DlssgPreConstants/XefgResetHistory.
+bool DispatchResetHistory(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t frame, Provider provider);
+// Dispatch, after the constants were accepted: commit (or invalidate) the history. Replaces DlssgPostConstants/XefgPostDispatch.
+void PostDispatch(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t frame, bool discontinuity, Provider provider);
+
+// ReleaseObjects (DLSSG_Dx12, XeFG_Dx12): collect and retire the guide snapshots (fence refs). Unfinished copies are
+// kept through shutdown on purpose.
+void ReleaseGuides(IFGFeature_Dx12* fg);
+// DLSSG_Common::Deactivate / XeFG_Dx12::Deactivate, first statement: invalidate history, guide snapshots and the observed
+// multiplier.
+void OnDeactivating(IFGFeature* fg);
+// DLSSG_Common::SetConstants: true while the next constants must carry reset = true (history discontinuity).
+bool ForceConstantsReset(IFGFeature* fg);
+} // namespace ext::fg

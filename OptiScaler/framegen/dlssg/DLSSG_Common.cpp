@@ -32,6 +32,7 @@ void DLSSG_Common::Activate()
 
 void DLSSG_Common::Deactivate()
 {
+    ext::fg::OnDeactivating(this); // ext: B5 history / guide snapshots / observed multiplier
     LOG_DEBUG("");
 
     if (_isActive)
@@ -221,7 +222,9 @@ bool DLSSG_Common::SetConstants(int fIndex, uint32_t frameId, uint32_t mvWidth, 
     constData.mvecScale.y = _mvScaleY[fIndex] / (float) mvHeight;
 
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.reset = _reset[fIndex] != 0 ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        constData.reset = (_reset[fIndex] != 0 || ext::fg::ForceConstantsReset(this)) // ext: B5 history restart
+                              ? sl::Boolean::eTrue
+                              : sl::Boolean::eFalse;
     else
         constData.reset = sl::Boolean::eFalse;
 
