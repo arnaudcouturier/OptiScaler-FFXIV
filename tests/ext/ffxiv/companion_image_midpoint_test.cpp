@@ -5,7 +5,7 @@
 #include <cstdio>
 #include "../../../OptiScaler/ext/ffxiv/companion/CompanionImageMidpoint.h"
 #pragma comment(lib,"d3d11.lib")
-using namespace FfxivCompanion;
+using namespace ext::ffxiv::companion;
 using Microsoft::WRL::ComPtr;
 int main()
 {

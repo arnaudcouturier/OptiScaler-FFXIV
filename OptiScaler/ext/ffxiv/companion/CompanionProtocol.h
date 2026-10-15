@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace FfxivCompanion
+namespace ext::ffxiv::companion
 {
 inline constexpr uint32_t Version = 1, MaxPlates = 50;
 inline constexpr uint32_t Preview = 1, CameraValid = 2, GameplayReady = 4;

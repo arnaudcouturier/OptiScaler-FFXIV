@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace FfxivCompanion::ImageMidpoint
+namespace ext::ffxiv::companion::ImageMidpoint
 {
 struct Move { D3D11_RECT source; int x,y; };
 inline bool Overlap(const D3D11_RECT& a,const D3D11_RECT& b)

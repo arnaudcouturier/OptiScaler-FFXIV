@@ -1,0 +1,1 @@
+@{ Class = 'warp'; Sources = @('companion_geometry_test.cpp'); Std = 'c++20' }

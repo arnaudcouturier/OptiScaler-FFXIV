@@ -5,7 +5,7 @@
 #include <cstring>
 #include <mutex>
 
-namespace FfxivCompanion
+namespace ext::ffxiv::companion
 {
 struct Snapshot
 {

@@ -1,0 +1,1 @@
+@{ Class = 'cpu'; Sources = @('companion_abi_fixture.cpp'); Runner = 'run_companion_abi_fixture.ps1'; Std = 'c++20' }

@@ -1,0 +1,1 @@
+@{ Class = 'cpu'; Sources = @('companion_packets_test.cpp'); Std = 'c++20' }

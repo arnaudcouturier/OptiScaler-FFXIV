@@ -4,7 +4,7 @@
 #include <limits>
 #include <thread>
 
-using namespace FfxivCompanion;
+using namespace ext::ffxiv::companion;
 int main()
 {
     Mailbox m;

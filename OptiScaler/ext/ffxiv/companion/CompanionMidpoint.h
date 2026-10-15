@@ -5,7 +5,7 @@
 #include <span>
 #include <vector>
 
-namespace FfxivCompanion::Midpoint
+namespace ext::ffxiv::companion::Midpoint
 {
 // Never waits for a future sample. One midpoint may replace the first presentation
 // of an already-arrived sample; its endpoint must be shown before another midpoint.

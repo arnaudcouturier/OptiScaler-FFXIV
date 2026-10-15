@@ -3,7 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <limits>
-using namespace FfxivCompanion::Midpoint;
+using namespace ext::ffxiv::companion::Midpoint;
 struct Vertex { float x,y,z; uint32_t colour; float u,v; };
 int main()
 {
