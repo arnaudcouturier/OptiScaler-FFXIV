@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HDR shaders (docs/SEAMS.md section 3.7/6, U6 section 2). Recipes verified byte-identical to the reference build's
+  checked-in blobs. Headers are generated into $(IntDir)ext_gen\ (never committed). fxc cs_5_0 CSMain -O3 unless noted.
+    * Hdr10.hlsl includes renodx\reinhard.hlsl (relative to its directory).
+    * The RenoDX pixel shaders are ps_5_0 / main and include shared.h (same directory).
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Hdr10.hlsl">
+      <Variable>Hdr10_cso</Variable>
+      <Header>Hdr10_Shader.h</Header>
+    </ExtShader>
+  </ItemGroup>
+</Project>

@@ -5,6 +5,8 @@
 // PROVISIONAL: method names come from SEAMS.md, parameter lists are placeholders that the owning series (C1-C5, B5,
 // B6, C10, C6, D2) finalise when they port the first implementation. Keep interfaces small and separate.
 
+#include "ext/hdr/SceneInput.h"
+
 #include <cstdint>
 
 namespace ext::game
@@ -61,12 +63,22 @@ struct ISceneLighting
     virtual bool ConsumeHistoryReset(uint64_t& cursor) = 0;
 };
 
-// C10
+// C10. Implemented only for a game whose renderer exposes the pre-clipping scene (FFXIV: the RenoDX tonemap stages
+// replayed into FP16; ext/hdr/scene/FfxivSceneProvider.cpp supplies the implementation object, the game module only
+// points `Game::hdr` at it). A non-null `ext::game::Current().hdr` is also the test OptiHDR uses for "this game
+// supports OptiHDR" (was `gameExe == "ffxiv_dx11.exe"`), so a game module that sets it opts in to HDR10 output and
+// scene HDR.
 struct ISceneHdr
 {
     virtual ~ISceneHdr() = default;
-    virtual bool Open() = 0;
-    virtual void PublishReconstructed() = 0;
+    // Same-frame HDR scene and SDR reference matching (width, height). `presentation` = the image the presentation
+    // path converts (a reconstructed display image published this frame wins). Empty when scene HDR is not requested
+    // or no scene matches (was FfxivSceneHdr::Open).
+    virtual hdr::SceneInput Open(ID3D12Device* device, UINT width, UINT height, bool presentation) = 0;
+    // The reconstructed display image of this frame (was FfxivSceneHdr::PublishReconstructed).
+    virtual void PublishReconstructed(hdr::SceneInput&& image) = 0;
+    // End of the bridge's Present: forgets the frame's captures (was FfxivSceneHdr::EndFrame).
+    virtual void EndFrame() = 0;
 };
 
 // B5, D2, C5. Implemented only for a game whose frame-generation bridge needs scene pairing and native dynamic-MFG

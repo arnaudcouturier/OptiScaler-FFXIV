@@ -135,6 +135,8 @@ void Save(CSimpleIniA& ini)
 {
     for (const auto& b : Table())
         b.save(b, ini);
+
+    Cfg().hdr.Retire(ini);
 }
 
 void SaveXeFG(CSimpleIniA& ini)
@@ -153,6 +155,7 @@ void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
     nr.Bind(b);
+    hdr.Bind(b);
 }
 
 void ExtConfig::PostLoad()

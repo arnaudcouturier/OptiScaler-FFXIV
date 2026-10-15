@@ -29,6 +29,7 @@
 #include <Config.h>
 
 #include "ext/fg/FgConfig.h"
+#include "ext/hdr/HdrConfig.h"
 #include "ext/nr/NrConfig.h"
 
 #include <cstdint>
@@ -160,6 +161,7 @@ struct ExtConfig
 {
     FgConfig fg; // ext/fg
     NrConfig nr; // ext/nr
+    HdrConfig hdr; // ext/hdr
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
