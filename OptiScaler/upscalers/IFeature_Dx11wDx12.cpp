@@ -469,7 +469,11 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
                               (void*) dx11Reactive.Dx12Resource);
 
         LOG_DEBUG("Dispatch!!");
-        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
+        auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::Dx11Bridge, cmdList, InParameters,
+                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: A9
+        ext::nr::EvalBefore(nrEval);
+        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
+        ext::nr::EvalAfter(nrEval, dx12EvalResult);
 
     } while (false);
 

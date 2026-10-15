@@ -5,6 +5,8 @@
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/amd/AmdBridge.h"
 
+#include <with_dx12/with_dx12.h>
+
 // Bodies of the NR seams (docs/SEAMS-catalog.md groups nr, restrack, dx11bridge). Everything here is the glue the
 // upstream host files used to carry inline; the logic it calls lives in the rest of ext/nr.
 
@@ -101,3 +103,15 @@ PreSrScope::~PreSrScope()
     _output->Restore();
 }
 } // namespace ext::nr
+
+namespace ext::dx11bridge
+{
+void OnNgxInit() { DlssNr::ResumeAfterBridgeInit(); }
+
+void OnNgxShutdownBegin()
+{
+    // The oracle tested the FFXIV exe name here; the bridge-active test is what the call is about.
+    if (WithDx12::IsInited())
+        DlssNr::SuspendForBridgeShutdown();
+}
+} // namespace ext::dx11bridge

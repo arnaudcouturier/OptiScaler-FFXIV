@@ -244,6 +244,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_Ext(unsigned long long InApp
     State::Instance().currentD3D11Device = InDevice;
     State::Instance().nvngxDx11Inited = true;
 
+    ext::dx11bridge::OnNgxInit(); // ext: A9 NR resumes after a bridge re-init
+
     return NVSDK_NGX_Result_Success;
 }
 
@@ -366,6 +368,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_with_ProjectID(
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 {
     shutdown = true;
+
+    ext::dx11bridge::OnNgxShutdownBegin(); // ext: A9 NR suspends before the driver's NGX shutdown
 
     // for (auto const& [key, val] : Dx11Contexts)
     //{

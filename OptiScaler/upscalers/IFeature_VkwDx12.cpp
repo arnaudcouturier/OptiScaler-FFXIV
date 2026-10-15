@@ -10,6 +10,7 @@
 
 #include <hooks/VulkanwDx12_Hooks.h>
 #include <with_dx12/with_dx12.h>
+#include "ext/Seams.h"
 
 #include <misc/IdentifyGpu.h>
 
@@ -2171,7 +2172,11 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
             InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) vkReactive.Dx12Resource);
 
         LOG_DEBUG("Dispatch!!");
-        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
+        auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::VkBridge, cmdList, InParameters,
+                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: B9
+        ext::nr::EvalBefore(nrEval);
+        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
+        ext::nr::EvalAfter(nrEval, dx12EvalResult);
 
     } while (false);
 

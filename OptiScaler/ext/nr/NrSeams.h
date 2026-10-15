@@ -75,3 +75,13 @@ class PreSrScope
     bool _colorChanged = false;
 };
 } // namespace ext::nr
+
+namespace ext::dx11bridge
+{
+// NVNGX_DLSS_Dx11.cpp NVSDK_NGX_D3D11_Init_Ext, before `return Success`: NR resumes after a bridge re-initialisation
+// (a no-op unless OnNgxShutdownBegin suspended it).
+void OnNgxInit();
+// NVNGX_DLSS_Dx11.cpp NVSDK_NGX_D3D11_Shutdown, first statement after `shutdown = true;`: while the D3D11-on-D3D12
+// bridge is up, NR stops new work and retires its PreSR generations before the driver's NGX shutdown.
+void OnNgxShutdownBegin();
+} // namespace ext::dx11bridge
