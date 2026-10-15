@@ -979,6 +979,7 @@ bool XeFG_Dx12::Dispatch()
             state.fgChanged = true;
             UpdateTarget();
             Deactivate();
+            return false;
         }
     }
 
