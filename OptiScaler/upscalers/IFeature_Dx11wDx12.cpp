@@ -459,7 +459,17 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         commandListRecording = true;
 
-        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) dx11Color.Dx12Resource);
+        unsigned int nrGuideSourceWidth = 0, nrGuideSourceHeight = 0;
+        auto upscalerColor = ext::dx11bridge::PrepareUpscalerColor(*this, cmdList, InParameters,
+                                                                    dx11Color.Dx12Resource, nrGuideSourceWidth,
+                                                                    nrGuideSourceHeight); // ext: C4
+        if (upscalerColor == nullptr)
+        {
+            LOG_ERROR("Can't prepare the forced-quality color input");
+            break;
+        }
+
+        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor);
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) dx11Depth.Dx12Resource);
@@ -475,9 +485,13 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         if (dx12Feature->GetUpscalerType() == Upscaler::DLSS || dx12Feature->GetUpscalerType() == Upscaler::DLSSD) // ext: C2/C3
             ext::upscaler::CorrectRenderSubrect(dx12Feature.get(), InParameters); // ext: C2/C3
         auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::Dx11Bridge, cmdList, InParameters,
-                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: A9
+                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType(),
+                                                 nrGuideSourceWidth, nrGuideSourceHeight); // ext: A9, C4
         ext::nr::EvalBefore(nrEval);
-        ext::hdr::BridgeEvalScope hdrBridge(dx11Color.Dx12Resource, dx11Out.Dx12Resource, D3D12_RESOURCE_STATE_COMMON); // ext: C10
+        const auto upscalerColorState = upscalerColor == dx11Color.Dx12Resource
+                                            ? D3D12_RESOURCE_STATE_COMMON
+                                            : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; // ext: C4
+        ext::hdr::BridgeEvalScope hdrBridge(upscalerColor, dx11Out.Dx12Resource, upscalerColorState); // ext: C10, C4
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
         ext::nr::EvalAfter(nrEval, dx12EvalResult);
 
