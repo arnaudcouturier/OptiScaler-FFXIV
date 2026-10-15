@@ -37,7 +37,15 @@ inline bool ResolveRenderExtentValue(bool enabled, unsigned int paramWidth, unsi
 // `enabled` is the same RenderSizeFromWidthHeight config flag ResolveRenderExtentValue reads: the oracle gates both
 // the geometry correction and this colour scale off a single !FfxivNativeQuality::Available() check, so this fork
 // couples the two to the same flag instead (docs/SEAMS.md 5 already restored the explicit flag for the geometry
-// side; this mirrors it rather than inventing a second, independent gate for the colour side).
+// side; this mirrors it rather than inventing a second, independent gate for the colour side). In steady state
+// (the flag held at one value across frames) this check is provably redundant with the renderWidth/allocWidth
+// comparison below: with the flag off, nothing ever shrinks RenderWidth() below the allocation for FFXIV, so that
+// comparison alone already answers false. The check earns its keep at the one moment steady state excludes -- the
+// frame the flag is flipped on -> off. ext::dx11bridge::PrepareUpscalerColor reads RenderWidth() before
+// CorrectRenderSubrect refreshes it for the current frame, so on that transition frame RenderWidth() is still last
+// frame's corrected (smaller) value while CorrectRenderSubrect has already gone quiet. Without this flag read, the
+// colour would scale to that stale smaller size for one frame while the subrect DLSS sees stays at the full
+// allocation -- a real size mismatch, not a merely-redundant extra caution.
 //
 // `renderWidth`/`renderHeight` are the live feature's current render size (0 = not yet known -- a no-op).
 // `allocWidth`/`allocHeight` are the colour resource's own allocation (GetDesc()); `allocWidth` is uint64_t to
