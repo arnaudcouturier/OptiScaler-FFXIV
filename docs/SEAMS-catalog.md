@@ -68,7 +68,7 @@ Not seams: `[LowLatency] Input/Output` and `[Vulkan] UseCopyForInputs/Output` pe
 | `ext::menu::DrawOverlays(RenderMenuContext&)` | hook | `menu_common.cpp` `RenderMenu`, right after `RenderPerformanceOverlay` | A6, A4 | per-frame | NR compare tags plus exposure-scan lamp. One call replaces U5 rows 15 and 40. **S2c (placed):** runs every registered `ext::menu::Overlay`. The oracle drew the compare labels at the top of `RenderPerformanceOverlay`; they go to the foreground draw list, which ImGui renders after every window, so moving them after the performance overlay changes nothing visible. The lamp window is created at the same point as before (after the performance overlay). |
 | `ext::menu::WantsFrame() -> bool` | decision | `menu_common.cpp` `BeginMenuFrameIfNeeded` (last OR term) | A4, A6 | per-frame | Menu frame is built when the scan lamp or compare tags are on. Overlay Present must still draw when the menu is closed (it does: `RenderMenu` returns `ctx.newFrame`). **S2c (placed):** asks every registered `Overlay::wantsFrame`; no overlay registered = false. |
 | `ext::menu::ShaderTimeRows() -> ExtraTimes` (+ `DrawShaderTimeRows(const ExtraTimes&)`) | hook | `menu_common.cpp` `RenderShaderTimes` (before the loop; the `hasExtra` condition; after the extra-shaders loop) | A1 | per-frame (menu open) | The "Neural Rendering N ms" row of the extra-shaders block and `hasExtra` feeding. **S2c (placed, signature refined):** returns a fixed-size list of the registered `TimeRow`s that have a value (no heap); 3 call lines plus the 1-line condition. The row only shows when upstream's own table is shown (`detailedGpuTimes` not empty), as in the oracle. |
-| `ext::menu::AdjustUiTargetMode(UiTargetMode) -> UiTargetMode` | decision | `menu_common.cpp` `getUiTargetMode` | C8 | per-frame | Returns SDR while OptiHDR composites the menu. Replaces `LegacyMenuToneMapRequired`, the `MenuHdrCheck` re-indent and the notification term. See conflict 3 in section (e). |
+| `ext::menu::UseSdrUiTarget() -> bool` | inline decision | `menu_common.cpp` `getUiTargetMode`, first statement | C8 | per-frame | Early return SDR while OptiHDR composites the menu; preserves the normal upstream selection otherwise. |
 | `ext::menu::AdjustTheme(ImGuiStyle&)` | hook | `menu_common.cpp` `ApplyThemeStyle`, end | C8 | per-create (theme apply) | Forces window/child/popup background alpha to 1 under OptiHDR. |
 | `ext::menu::OnVulkanOverlay(bool created)` | hook (provisional) | `menu_overlay_vk.cpp` `CreateVulkanObjects`/`DestroyVulkanObjects` | D5, B9 | init, teardown | Sets the flag read by `ext::streamline::ApplyMenuDlssgInterlock`. Dropped (with `State::menuOverlayIsVulkan`) if S6 finds nightly's Vulkan DLSS-G menu path already covers it. `delayMenuRenderBy` is dropped regardless (write-only). |
 
@@ -90,18 +90,18 @@ Group for the D3D11-to-D3D12 bridge (`Dx11wDx12SC`, `IFeature_Dx11wDx12`, `NVNGX
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
 |---|---|---|---|---|---|
-| `ext::dx11bridge::ConfigureOutput(Dx11wDx12SC&, IDXGISwapChain4* fg, DXGI_FORMAT orig) -> bool` | decision | `dx11_with_dx12_sc.cpp` ctor, after `_RefreshCachedSwapchainDesc` | C8 | init | Calls `Hdr10::Configure` when FFXIV HDR is on and the FG chain is R10G10B10A2; restores the format on failure. Result kept in `_ext`. |
-| `ext::dx11bridge::OnDestroy(Dx11wDx12SC&)` | hook | `dx11_with_dx12_sc.cpp` dtor | C8, B6 | teardown | `Hdr10::Deactivate`, drain lighting-scan readbacks. Contract: never block, never release from DLL detach under loader lock. |
-| `ext::dx11bridge::PresentScope` (RAII) | RAII | `dx11_with_dx12_sc.cpp` `Present`, after bypass early-return | C10 | per-frame | `EndFrame` of the scene-HDR frame guard at every exit. May also own state of PreInteropCopy/PostInteropCopy. |
+| `ext::dx11bridge::ConfigureOutput(Dx11wDx12SC&)` | hook | `dx11_with_dx12_sc.cpp` ctor, after `_RefreshCachedSwapchainDesc` | C8 | init | Negotiates PQ/BT.2020 when FFXIV HDR is enabled and the FG chain is R10G10B10A2; restores the original format on failure. |
+| `ext::dx11bridge::OnDestroy(Dx11wDx12SC&)` | hook | `dx11_with_dx12_sc.cpp` dtor | C8 | teardown | Deactivates OptiHDR. Never blocks or releases GPU objects from DLL detach under loader lock. |
+| `ext::dx11bridge::OutputFormat(Dx11wDx12SC&, DXGI_FORMAT) -> DXGI_FORMAT` | decision | `dx11_with_dx12_sc.cpp` `ResizeBuffers` and `ResizeBuffers1` | C8 | rare | Requests R10G10B10A2 while OptiHDR owns the bridge output. |
+| `ext::dx11bridge::OnResizeDone(Dx11wDx12SC&) -> HRESULT` | decision | same functions, after successful resize | C8 | rare | Renegotiates HDR output; returns `DXGI_ERROR_UNSUPPORTED` on failure. |
+| `ext::dx11bridge::PresentScope` (RAII) | RAII | `dx11_with_dx12_sc.cpp` `Present`, after bypass early-return | C10 | per-frame | Calls `ISceneHdr::EndFrame` at every exit. |
 | `ext::dx11bridge::PreInteropCopy(Dx11wDx12SC&, uint32_t slot)` | hook | `dx11_with_dx12_sc.cpp` `Present`, before `_WaitDx11ThenDx12` | C11 | per-frame | HudlessEngine P1: `HudlessSource::Take`, validate, normalise, `CopyResource` on the D3D11 immediate context before the interop signal. |
 | `ext::dx11bridge::UiFreeFrame(Dx11wDx12SC&) -> bool` | decision | `dx11_with_dx12_sc.cpp` `Present`, after `_WaitDx11ThenDx12` | C11 | per-frame | P2: hud-less pending and paste ready. |
 | `ext::dx11bridge::PostInteropCopy(Dx11wDx12SC&) -> bool needRecopy` | decision | `dx11_with_dx12_sc.cpp` `Present`, after `_WaitForInteropCopyOnPresentQueue` | C11 | per-frame | P4+P5: tag hud-less on the FG UI list, produce the paste. Upstream keeps `if (needRecopy) { copy; wait }` (3 inline lines). |
-| `ext::dx11bridge::CopyScope` (RAII) | RAII | `dx11_with_dx12_sc.cpp` `_CopyDx11SharedToDx12FGBackBuffer` | C8, C9, C11 | per-frame | Created at the allocator reset; finishes screenshot submit after the execute. |
-| `ext::dx11bridge::SelectCopySource(CopyScope&) -> CopySource` | decision | same function, source selection | C11, C8, C9 | per-frame | P3 FG-input swap, HDR convert of copy source, mode-1 FG input re-tag. Must stay inside this one function (cross-queue ordering relies on the DX11 wait). |
-| `ext::dx11bridge::BeforeSharedCopy(ID3D11DeviceContext*)` | hook | `dx11_with_dx12_sc.cpp` `_CopyDx11BackBufferToShared`, before | C9 | per-frame | `HdrPreview::SealFrame`. |
+| `ext::dx11bridge::ConvertCopySource(Dx11wDx12SC&, UINT, ID3D12Resource*&, D3D12_RESOURCE_STATES&) -> bool` | decision | `dx11_with_dx12_sc.cpp` `_CopyDx11SharedToDx12FGBackBuffer`, after source selection | C8, C10 | per-frame | Converts the SDR source to PQ; mode-1 scene HDR also opens the scene and re-tags the HUD-less FG input. False closes the copy list and returns failure. |
+| `ext::dx11bridge::PrepareScreenshot(Dx11wDx12SC&, UINT, ID3D12Resource*)` | hook | same function, after `CopyResource` | C9 | per-frame | Records a requested SDR or HDR readback. Submission occurs in the registered GPU owner's after-execute callback; a Reset callback drops captures whose recording was discarded. |
+| `ext::dx11bridge::BeforeSharedCopy(Dx11wDx12SC&)` | hook | `dx11_with_dx12_sc.cpp` `_CopyDx11BackBufferToShared`, before | C10 | per-frame | Seals the scene HDR preview mask at the SDR backbuffer frame boundary. |
 | `ext::dx11bridge::AfterSharedCopy(ID3D11DeviceContext*, ID3D11Texture2D* dst)` | hook | same, after | C7 | per-frame | Companion source markers; the FFXIV test is behind `game::Current()`. |
-| `ext::dx11bridge::OutputFormat(Dx11wDx12SC&, DXGI_FORMAT requested) -> DXGI_FORMAT` | decision | `ResizeBuffers`, `ResizeBuffers1` (FG resize format) | C8 | rare | R10G10B10A2 when HDR output. |
-| `ext::dx11bridge::OnResizeDone(Dx11wDx12SC&) -> HRESULT` | decision | `ResizeBuffers`, `ResizeBuffers1`, after success | C8 | rare | Re-runs `Hdr10::Configure`; fails with `DXGI_ERROR_UNSUPPORTED`. |
 | `ext::dx11bridge::SetColorSpace(Dx11wDx12SC&, DXGI_COLOR_SPACE_TYPE, HRESULT& out) -> bool handled` | decision | `dx11_with_dx12_sc.cpp` `SetColorSpace1` | C8 | rare | Swallows the game's call when OptiHDR owns the output. Otherwise fills nightly's `outputColorSpace`/`hdrOutputActive` (SEAMS 5; the bridge never filled them in the oracle). |
 | `ext::dx11bridge::OnReleaseInterop(Dx11wDx12SC&)` | hook | `dx11_with_dx12_sc.cpp` `_ReleaseInteropBackBuffers` | C11 | rare (resize), teardown | P8: drain FG queue (2 s), release the hud-less ring; leaks on failure by design. |
 | `ext::dx11bridge::PrepareUpscalerColor(IFeature_Dx11wDx12&, cmd, params, color, uint2& guideSrc) -> ID3D12Resource*` | decision | `IFeature_Dx11wDx12.cpp` `Evaluate`, before binding Color | C4 | per-frame | Lanczos3 scale of the display-sized colour to render size when `GameQuirk::ScaleDisplayColorForForcedQuality` and `IRenderGeometry::ColorIsDisplayAllocation`. nullptr = failure, upstream `break`s inline. |
@@ -138,7 +138,7 @@ Native DLSS Neural Rendering (A*, B*, E4 AMD PreSR). All internals live in `ext/
 | `ext::nr::SetSceneHdrHooks(const SceneHdrHooks&)` | `ext/nr/NrHooks.h` | C10 (S6) fills it. With nothing registered NR runs on the SDR colour (= HDR.NRSceneInput / DLSSSceneInput off). |
 | `ext::game::Current().nrQuirks` (`INrQuirks::BridgedNativeDx11`) and `.lighting` (`ISceneLighting::ConsumeHistoryReset(uint64_t& cursor)`, `ISceneLighting::Status()` for the NR menu, S2c) | `ext/game/GameInterfaces.h` | Replace the `gameExe == "ffxiv_dx11.exe"` tests inside NR; `ext/ffxiv` (S7) provides both. |
 
-Not seams: `Shader_Dx12.cpp` `TranslateTypelessFormats` skip is solved by the NR call site passing `translateTypeless=false` (0 upstream lines; done in `DlssNr_Dx12::DispatchPass`, S2a). `OS_Dx12`/`OS_Vk` are not touched: NR owns `NrResampler_Dx12`/`NrResampler_Vk` (SEAMS 7 A8, S2a). `OS_Dx12`/`OS_Vk` scaler-override constructors are inline-marked `// ext: A8` (section d). The `dlssnr` forwarder DLL is the second project in `OptiScaler.sln`.
+Not seams: `Shader_Dx12.cpp` `TranslateTypelessFormats` skip is solved by the NR call site passing `translateTypeless=false` (0 upstream lines; done in `DlssNr_Dx12::DispatchPass`, S2a). `OS_Dx12`/`OS_Vk` are not touched: NR owns `NrResampler_Dx12`/`NrResampler_Vk` (SEAMS 7 A8, S2a). The `dlssnr` forwarder DLL is the second project in `OptiScaler.sln`.
 
 ## fg
 
@@ -156,11 +156,13 @@ Provider-neutral frame-generation seams (DLSS-G, XeFG, FSR-FG) on `IFGFeature_Dx
 | `ext::fg::GuideAge(IFGFeature_Dx12*, int fIndex, uint64_t willDispatchFrame) -> GuideInfo` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `Dispatch` | B5 | per-frame | `age` and `sceneFrame`. FFXIV test is `game::Current().fgMarkers != nullptr`. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
 | `ext::fg::DispatchResetHistory(IFGFeature_Dx12*, const GuideInfo&, uint64_t frame, Provider) -> bool` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `Dispatch`, before constants | B5, C5 | per-frame | Replaces `DlssgPreConstants` and `XefgResetHistory`. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
 | `ext::fg::PostDispatch(IFGFeature_Dx12*, const GuideInfo&, uint64_t frame, bool discontinuity, Provider)` | hook | same, after constants/dispatch | B5, C5 | per-frame | Commit or invalidate history; replaces `DlssgPostConstants` and `XefgPostDispatch`. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
-| `ext::fg::SetResourcePre(IFGFeature_Dx12*, int fIndex, Dx12Resource*& in, Dx12Resource& matched) -> bool` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `SetResource`, entry | B5, C8, C10 | per-resource | Guide matching for Depth/Velocity, HDR `sceneRaw` capture, UI tag drop under OptiHDR. false = skip as upstream would on its own `return false`. Merges `MatchGuide`. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
+| `ext::fg::SetResourcePre(IFGFeature_Dx12*, int fIndex, Dx12Resource*&, Dx12Resource&, Provider) -> bool` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `SetResource`, entry | B5, C8, C10 | per-resource | Matches Depth/Velocity guides and dispatches HDR handling for HudlessColor/UIColor through the `Provider` (DLSS-G or XeFG). False skips the input. **S5:** `ext/fg/GuideSeams.cpp`, matcher in `GuideMatcher.cpp`; HDR body in `ext/hdr/FgHdr.cpp`. |
 | `ext::fg::SetResourcePost(const Dx12Resource& in, Dx12Resource& frameResource)` | hook | same, after the copy | B5, C8 | per-resource | `hdrEncoded` flag copy; null the copy for encoded and Depth/Velocity. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
 | `ext::fg::NormalizeFormat(DXGI_FORMAT) -> DXGI_FORMAT` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `SetResource` (3 sites) | C8 | per-resource | R10G10B10A2 under OptiHDR. |
 | `ext::fg::DlssgTagHudless(DLSSG_Dx12*, Dx12Resource&, sl::ResourceTag&)` | hook | `DLSSG_Dx12.cpp` `SetResource` tag | C8 | per-frame (HDR only) | Converts hud-less to PQ and tags `eOnlyValidNow`; deactivates FG on failure. |
-| `ext::fg::XefgPrepareHudless(XeFG_Dx12*, ...) -> bool` | decision | `XeFG_Dx12.cpp` `SetResource` | C8 | per-frame (HDR only) | Immediate SDK copy path; failure deactivates FG. |
+| `ext::fg::XefgPrepareHudless(IFGFeature_Dx12*, Dx12Resource&, int, _xefg_swapchain_d3d12_resource_data_t&) -> bool` | decision | `XeFG_Dx12.cpp` `SetResource` | C8 | per-frame (HDR only) | Immediate SDK copy path; failure deactivates FG. |
+| `ext::fg::SceneRawHudless(const Dx12Resource&) -> bool` | decision | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `SetResource` | C10 | per-frame (scene HDR) | Holds the raw SDR HUD-less input for later scene-HDR conversion after the interop fence. |
+| `ext::fg::AdjustConstants(FG_Constants&)` | hook | `Upscaler_Inputs_Dx11wDx12.cpp` `UpscaleStart` | C8 | per-frame | Adds the HDR flag to the FG constants while OptiHDR output is active. |
 | `ext::fg::SubmitSC(IFGFeature_Dx12*, UINT idx) -> bool` | decision | `DLSSG_Dx12.cpp`, `XeFG_Dx12.cpp`, `FSRFG_Dx12.cpp` `Present` (3 sites) | C6, D5 | per-frame | Ordered SC list submit with monotonic `_scFenceValue`; false = `return false`. Net -10 lines per site upstream. Fence state in `Dx12Ext`. **S4:** the execute/signal half exists as `ext::gpu::ExecuteOrdered` (its `ext::gpu::OrderedFence {value, failed}` replaces `_scFenceValue`/`_scSubmissionFailed` inside `Dx12Ext`); the wrapper itself, `Dx12Ext` and the SC wait are S5. **S5 (placed):** `ext/fg/Dx12Sc.cpp`, state in `Dx12Ext::sc` (an `ext::gpu::OrderedFence`). |
 | `ext::fg::PrepareSC(IFGFeature_Dx12*, UINT idx) -> bool` | decision | `IFGFeature_Dx12.cpp` `GetSCCommandList` | C6, D5 | per-frame | Replaces the 7 inline early-outs/waits/null-checks; tied to `SubmitSC` (stale lists are discarded, not executed). **S5 (placed):** the call sits after the stale-list discard loop and also does the allocator Reset (the 16-line reset block is gone from upstream); `ext/fg/Dx12Sc.cpp`. Only the index bounds check stays inline (`// ext: C6`). |
 | `ext::fg::ReleaseGuides(IFGFeature_Dx12*)` | hook | `DLSSG_Dx12.cpp` and `XeFG_Dx12.cpp` `ReleaseObjects` | B5 | teardown | Collect and retire guide snapshots (fence refs); intentional leak of unfinished copies at shutdown. **S5 (placed):** `ext/fg/GuideSeams.cpp`, matcher in `ext/fg/GuideMatcher.cpp` (state `GuideState` behind `Dx12Ext::guides`, `Dx12Ext::dlssgFrames/forceConstantsReset`). Inert unless `game::Current().fgMarkers`. |
@@ -169,7 +171,6 @@ Provider-neutral frame-generation seams (DLSS-G, XeFG, FSR-FG) on `IFGFeature_Dx
 | `ext::fg::XefgNoteFrameTime(float& ft, bool& resetHistory)` | hook | `XeFG_Dx12.cpp` `Dispatch` | D3 | per-frame | Discards samples outside [0, 250] ms (ft = 0, reset unless `FGSkipReset`) and feeds `XeFGPacing`. **S5 (placed):** takes the sample by reference. |
 | `ext::fg::XefgBuildCamera(float* view, const float* pos, right, up, forward, uint64_t frameCount, int guideAge) -> bool havePose` | decision | `XeFG_Dx12.cpp` `Dispatch` camera build | D3, B5 | per-frame | Validated view matrix with stationary fallback (`XeFGCamera::BuildView`) plus the periodic fallback log. **S5 (placed):** the non-mutating near/far conversion stays inline as locals (`// ext: D3`; the matched B5 snapshot metadata must not be written). |
 | `ext::fg::OnXefgProviderLoaded(HMODULE)` | hook | `XeFG_Proxy.h` after the provider module is bound | D3 | init, once | `XeFGUnlock::Apply`; runs before the first call into the provider. Failure leaves the provider untouched. |
-| `ext::fg::AdjustConstants(FG_Constants&)` | hook | `Upscaler_Inputs_Dx11wDx12.cpp` `UpscaleStart` (constants) | C8 | per-frame | ORs `FG_Flags::Hdr` when OptiHDR is active. |
 | `ext::fg::OnUpscaleStart(IFGFeature*)` | hook | `Upscaler_Inputs_Dx11wDx12.cpp` `UpscaleStart` | B5, D2, C5 | per-frame | `IFgMarkers::PresentationGuideDelay` into the guide ring, `IFgMarkers::OnUpscale`. Replaces `IFGFeature::SetPresentationGuideDelay` virtual. Cast to `IFGFeature_Dx12` is done once and cached. **S5 (placed):** both parts placed (`ext/fg/GuideSeams.cpp`): the guide delay goes to the matcher, then `IFgMarkers::OnUpscale`. `IFgMarkers` signatures are final in `ext/game/GameInterfaces.h`. |
 | `ext::fg::MarkersBeforePresent(uint32_t frameId)` | hook | `FG_Hooks.cpp` `FGPresent`, before `GetNewFrameToken` | D2, C5 | per-frame | `IFgMarkers::BeforePresent`; pointer test only when no game module. Raw-send function on the fork's Reflex path replaces the `bridgeMarkerCall` thread-local (SEAMS 5): no check in `hkNvAPI_D3D_SetLatencyMarker`. **S5 (placed):** `ext/fg/MarkerSeams.cpp`. No `bridgeMarkerCall` is carried: the markers go to Streamline PCL under `ScopedOptiScalerReflex`, which upstream's Reflex input (`FromOptiScaler`) already recognises (S7 verifies with the log). |
 | `ext::fg::MarkersNextFrame(uint64_t frame)` | hook | `FG_Hooks.cpp` `FGPresent`, after `ReflexSleep` | D2, C5 | per-frame | `IFgMarkers::NextFrame`. |
@@ -182,6 +183,7 @@ Drop list for this group (SEAMS 5): E6 KCD2 waitable-object hunks, `External` ea
 |---|---|---|---|---|---|
 | `ext::present::PlanDx12Presenter(HWND, bool skipFgSwapchainCreation) -> PresenterPlan{hdr, createFg}` | decision | `DxgiFactory_Hooks.cpp` `CreateSwapChain`, `CreateSwapChainForHwnd`; `DxgiFactory_WrappedCalls.cpp` same two (4 sites) | C8 | per-create | `Hdr10::Request(hwnd)` must stay side-effect free. Upstream ORs `plan.hdr` into its condition. S6 restores upstream's `activeFgInput != NvngxFG` term unless `git log -S` justifies its removal (SEAMS 5). |
 | `ext::present::PatchPresenterDesc(DXGI_SWAP_CHAIN_DESC1&/DXGI_SWAP_CHAIN_DESC&, const PresenterPlan&)` | hook | same 4 sites | C8 | per-create | Sets R10G10B10A2. Overloads for both desc types. |
+| `ext::present::LogPlainPresenter(const PresenterPlan&, unsigned int fgResult)` | hook | `DxgiFactory_Hooks.cpp` / `DxgiFactory_WrappedCalls.cpp`, plain presenter fallback | C8 | per-create | Logs when no FG provider was selected or when FG swapchain creation fails. |
 | `ext::present::HookFactoryComposition(IDXGIFactory2*)` | hook | `DxgiFactory_Hooks.cpp` `HookToFactory`, after `DetourTransactionCommit` | E5 | init, per factory | Vtable slot 24; ext opens its own transaction and owns `o_CreateSwapChainForComposition`; the hook function (62 lines) lives in `ext/present/CompositionSwapchain.cpp`. Only this hook is kept from E5. |
 | `ext::present::ResolveCompositionHandle(HWND&) -> bool proceed` | decision | `wrapped_swapchain.cpp` `Present`, `Present1`; guarded by `if (_composition)` | E5 | per-frame (composition chains only) | One bool test elsewhere. |
 | `ext::present::BeforeOverlay(IDXGISwapChain*, ID3D12CommandQueue*, bool isD3D11)` | hook | `wrapped_swapchain.cpp` `LocalPresent`, before `MenuOverlayDx::Present` | C11, C8 | per-frame (each real and generated frame) | General pre-overlay slot (SEAMS 5). HudlessEngine paste is the first user; one flag test when idle. |
@@ -235,17 +237,18 @@ OptiHDR (C8), HDR PNG + ICC (C9), RenoDX scene HDR (C10, NOTICE shipped), F3, F4
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
 |---|---|---|---|---|---|
-| `ext::hdr::Active() -> bool` | inline-guarded | `XeFG_Dx12.cpp` `Present` (2 guards); also used inside ext | C8 | per-frame | Reads nightly's `hdrOutputActive`/`outputColorSpace` plus the OptiHDR-enabled bit. Replaces `Hdr10::Active()` and `isHdrActive`. |
-| `ext::hdr::BridgeInitScope` (RAII) | RAII | `IFeature_Dx11wDx12.cpp` `Init` around `dx12Feature->Init` (inside the `[UP]` recorded-Init block) | C10 | per-create | Sets `DlssSceneInput::bridgeInitialising` so `InitDLSS` sets IsHDR/AutoExposure. Render thread only. |
-| `ext::hdr::BridgeEvalScope` (RAII) | RAII | `IFeature_Dx11wDx12.cpp` `Evaluate` around `dx12Feature->Evaluate` | C10 | per-frame | Publishes and clears `bridgeColour/bridgeOutput/bridgeColourState`; strictly scoped. |
-| `ext::hdr::AdjustDlssCreateFlags(params, bool& sceneHdr) -> void` | decision | `DLSSFeature_Dx12.cpp` `InitDLSS` | C10 | per-create | Forces `IsHDR | AutoExposure` when bridge-initialising with FfxivHDR mode 1 and `DLSSSceneInput`; keeps the original flags in `_ext`. |
-| `ext::hdr::RestoreDlssCreateFlags(params)` | hook | `DLSSFeature_Dx12.cpp` `InitDLSS`, after `CreateFeature` | C10 | per-create | |
-| `ext::hdr::DlssEvalPrepare(DLSSFeature_Dx12*, device, cmd, params, w, h) -> bool` | decision | `DLSSFeature_Dx12.cpp` `EvaluateInternal`, before the native evaluate | C10 | per-frame | `ISceneHdr::Open` + `DlssSceneInput::Prepare`; substitutes colour/output/exposure; on failure disables the option and returns false (upstream returns false). |
-| `ext::hdr::DlssEvalFinish(DLSSFeature_Dx12*, cmd, bool ok)` | hook | same, after | C10 | per-frame | Restores bindings and `Reset`, `DlssSceneInput::Finish`, `ISceneHdr::PublishReconstructed`. |
-| `ext::hdr::OverlayRtvFormat(DXGI_FORMAT) -> DXGI_FORMAT` | decision | `menu_overlay_dx.cpp` overlay init, RTV format | C8 | init | R8G8B8A8 under OptiHDR so the menu is composited into an SDR target, then converted to PQ. |
-| `ext::hdr::OverlayPrepare(...) -> bool draw` | decision | `menu_overlay_dx.cpp` per-frame prepare | C8 | per-frame | Computes bounds, ensures the layer, waits for retire on resize, false = skip (never draw SDR into HDR). |
-| `ext::hdr::OverlayScope` (RAII) | RAII | `menu_overlay_dx.cpp` around `ImGui_ImplDX12_RenderDrawData` | C8 | per-frame | Begin/End of the HDR layer; the fence-ring `++g_overlaySubmissionCount` stays in the `[UP]` ring code at the same point. |
-| `ext::hdr::OverlayRelease()` | hook | `menu_overlay_dx.cpp` `CleanupRenderTargetDx12` | C8 | teardown | |
+| `ext::hdr::Active() -> bool` | inline decision | used inside HDR seams and FG path | C8, C10 | per-frame | Requires OptiHDR's feature bit and nightly's `hdrOutputActive`; the selected output colour space is recorded in `State`. |
+| `ext::hdr::DlssExt { bool sceneHdr; int available; unsigned originalFlags; }` | per-feature state | `DLSSFeature_Dx12::_ext` | C10 | per-feature | Replaces the three scene-HDR fields formerly on the DLSS feature. |
+| `ext::hdr::AdjustDlssCreateFlags(DlssExt&, NVSDK_NGX_Parameter*)` | hook | `DLSSFeature_Dx12.cpp` `InitDLSS`, before `CreateFeature` | C10 | per-create | Adds `IsHDR | AutoExposure` only while bridge-initialising with scene HDR; saves the original flags in `DlssExt`. |
+| `ext::hdr::RestoreDlssCreateFlags(DlssExt&, NVSDK_NGX_Parameter*)` | hook | same function, after `CreateFeature` | C10 | per-create | Restores flags after feature creation. |
+| `ext::hdr::DlssEvalScope(DlssExt&, device, commands, params, width, height, handleId)` (RAII; `ok()`, `Finish(bool)`) | RAII | `DLSSFeature_Dx12.cpp` `EvaluateInternal`, around native evaluate | C10 | per-frame | Opens same-frame scene data, prepares/substitutes input/output/exposure, restores bindings and publishes the reconstructed image in `Finish`. On preparation failure, `ok()` is false and the session disables the option/recreates the backend. |
+| `ext::hdr::BridgeInitScope` (RAII) | RAII | `IFeature_Dx11wDx12.cpp` `Init` around `dx12Feature->Init` | C10 | per-create | Sets `DlssSceneInput::bridgeInitialising` so DLSS creation flags are adjusted. |
+| `ext::hdr::BridgeEvalScope(ID3D12Resource*, ID3D12Resource*, D3D12_RESOURCE_STATES)` (RAII) | RAII | `IFeature_Dx11wDx12.cpp` `Evaluate` around `dx12Feature->Evaluate` | C10 | per-frame | Publishes bridge colour/output/state for scene HDR input and clears them on scope exit. |
+| `ext::hdr::OverlayRtvFormat(DXGI_FORMAT) -> DXGI_FORMAT` | decision | `menu_overlay_dx.cpp` overlay init, RTV format | C8 | init | Selects R8G8B8A8 for the menu layer while OptiHDR is active. |
+| `ext::hdr::OverlayPrepare(ID3D12Device*, ID3D12Resource*, ImDrawData*, bool (*)(UINT64), UINT64) -> bool` | decision | `menu_overlay_dx.cpp` per-frame prepare | C8 | per-frame | Computes bounds, ensures the layer and waits for the retired resource on resize; false skips the SDR draw into HDR. |
+| `ext::hdr::OverlayScope(ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_CPU_DESCRIPTOR_HANDLE)` (RAII) | RAII | `menu_overlay_dx.cpp` around `ImGui_ImplDX12_RenderDrawData` | C8 | per-frame | Composites the SDR ImGui layer into the PQ output; the overlay fence ring remains in its `[UP]` host code. |
+| `ext::hdr::OverlayRelease()` | hook | `menu_overlay_dx.cpp` `CleanupRenderTargetDx12` | C8 | teardown | Releases the HDR menu layer. |
+| `ext::hdr::SetResourceHdr(IFGFeature_Dx12*, int, Dx12Resource*&, Dx12Resource&, fg::Provider) -> bool` | ext-internal hook | `fg::SetResourcePre` | C8, C10 | per-resource | Handles raw scene HUD-less capture, UI tag drop and PQ HUD-less conversion before the guide matcher. |
 
 Contingent (not counted; only if in-game Phase 4 shows the SDR-target composite is not visually equivalent, SEAMS 5): `ext::hdr::MenuHdrFlag(DXGI_FORMAT rtv) -> float` and `ext::hdr::MenuPixelShader() -> const char*` in `include/imgui/imgui_impl_dx12.cpp` (+ ~12 lines in the vendored file: root param, constant, shader replacement).
 
@@ -285,7 +288,7 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 | `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached; the oracle does two `ReadProcessMemory` per call), `Request(preset)` | `upscaler::ApplyForcedQuality`, `ResolveRenderGeometry`, `EffectivePerfQuality`, menu card `forced_quality` | C1, C5 |
 | `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset(uint64_t& cursor)`, `Status()` (`LightingStatus`, the NR menu's lighting-scan text) | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
 | `INrQuirks` | `BridgedNativeDx11` | NR internals: history reset on disable, split frame work, motion-onset sampling, exposure scan off (was `gameExe == "ffxiv_dx11.exe"`) | A1-A8, B5 |
-| `ISceneHdr` | `Open`, `PublishReconstructed` | `hdr::DlssEvalPrepare/Finish`, `dx11bridge::SelectCopySource` | C10 |
+| `ISceneHdr` | `Open(ID3D12Device*, UINT, UINT, bool) -> SceneInput`, `PublishReconstructed(SceneInput&&)`, `EndFrame()` | `hdr::DlssEvalScope`, `dx11bridge::ConvertCopySource`, `dx11bridge::PresentScope` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | `fg::OnUpscaleStart`, `GuideAge`, `MarkersBeforePresent`, `MarkersNextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | `dx11bridge::ShutdownNgx`, `RedirectShutdown1`, `BeforeReleaseFeature` | C6 |
 
@@ -364,7 +367,7 @@ Generic upstream bug fixes, each carried as a separate self-contained commit at 
 | 25 | D5 Streamline: `eOk` guards on `slDLSSGGetState` results, clamp via `set_volatile_value` instead of overwriting the ini value | `hooks/Streamline_Hooks.cpp` | U4 Streamline #3(c), #6, #8 | 8 |
 | 26 | Vulkan DLSS-G menu interlock: while the menu is visible on a Vulkan swapchain/overlay, force DLSS-G `eOff` + `eRetainResourcesWhenOff` and frame count 0 (`State::menuOverlayIsVulkan` set in `menu_overlay_vk.cpp`). Not covered by nightly; dead `delayMenuRenderBy` not carried | `hooks/Streamline_Hooks.cpp`, `State.h`, `menu/menu_overlay_vk.cpp` | U4 Streamline; SEAMS 7 item 9; S1a | 24 |
 
-Count: 26 rows (row 26 added by S1a; #16 skipped in S1b because nightly's DLSS-SR flag is per instance) (items 1-17 and 21-25 are enumerated or implied by SEAMS 5 line 160; 18-19 are additions). Approx. lines: 718 in total; the footprint table in (d) uses these numbers (rounded to ~715).
+Count: 26 rows (row 26 added by S1a; #16 skipped in S1b because nightly's DLSS-SR flag is per instance) (items 1-17 and 21-25 are enumerated or implied by SEAMS 5 line 160; 18-19 are additions). The old 718-line estimate is a historical inventory only; section (d)'s current `[UP]` measurement comes from `tools\\footprint.ps1`.
 
 # (b) `ext::Access` needs
 
@@ -390,111 +393,20 @@ One member each, marked `// ext:`, `std::unique_ptr<ext::.../...Ext>` with a for
 | Upstream class (file) | `_ext` type | Holds |
 |---|---|---|
 | `IFGFeature_Dx12` (`framegen/IFGFeature_Dx12.h`) | `ext::fg::Dx12Ext` | guide snapshot ring and metadata, `_guideAge`, `_retiredGuides`, `_sceneHistory`, SC fence value/failed flag, DLSS-G observed multiplier/sample mode/last options, `_historyFrames`, `_forceConstantsReset`, XeFG dynamic state (`_dynamic`, `_dynamicWasEnabled`, `_dynamicLastTarget`; as built: `Dx12Ext::xefg`, an `XefgState` created on the first XeFG Dispatch). **As built (S5):** the fields are reached through `ext::Access::FgDx12::Ext(fg)` (see section (b)). Covers `DLSSG_Dx12`, `XeFG_Dx12`, `FSRFG_Dx12` (derived), so no member is added in those classes or in `DLSSG_Common`. |
-| `Dx11wDx12SC` (`with_dx12/dx11_with_dx12_sc.h`) | `ext::dx11bridge::BridgeExt` | HudlessEngine ring and flags (`_hudlessPending`, `_hudlessSlot`, `_uiFreeThisFrame`, UI image ring, `_uiExtract`), `_hdrOutput` |
+| `Dx11wDx12SC` (`with_dx12/dx11_with_dx12_sc.h`) | `ext::dx11bridge::BridgeExt` | `hdrOutput` and the C9 screenshot's borrowed SDR source/state (`screenshotSdrSource`, `screenshotSdrState`); the HudlessEngine ring is planned for S10 and is not present yet |
 | `IFeature_Dx11wDx12` (`upscalers/IFeature_Dx11wDx12.h`) | `ext::dx11bridge::BridgeState` | `ForcedQualityColorScaler` (`OS_Dx12`), `ReportedForcedQualityColorScale`; freed on the GPU-idle path (C6) |
-| `DLSSFeature_Dx12` (`upscalers/dlss/DLSSFeature_Dx12.h`) | `ext::hdr::DlssExt` | `_sceneHdrInput`, `_sceneHdrAvailable`, saved create flags |
+| `DLSSFeature_Dx12` (`upscalers/dlss/DLSSFeature_Dx12.h`) | `ext::hdr::DlssExt` | `sceneHdr`, cached `available` state, and saved `originalFlags` for feature creation |
 
 Single-field exceptions kept inline (hot path, per resource or per present, marked `// ext:`): `Dx12Resource::hdrEncoded` (`IFGFeature_Dx12.h`), `Dx11wDx12SC::_copySubmissionFailed` (in the `[UP]` fence commit), `WrappedIDXGISwapChain4::_composition`.
 
-# (d) Projected footprint
+# (d) Measured footprint
 
-Basis: added plus removed lines, after the port, per upstream file. "Seam" = seam calls and includes (one `#include "ext/Seams.h"` per file); "Fr/ext" = friend/`_ext`/forward-decl lines; "Inline" = `// ext:`-marked inline changes; "[UP]" = lines in the section (a) commits. Estimates; each seam-replaced block counts its removed lines (U2/U4/U5 ledger residuals understate this).
-
-| Upstream file | Seam | Fr/ext | Inline | [UP] | Total |
-|---|---|---|---|---|---|
-| `OptiScaler.vcxproj` (one `Import`) | - | - | 2 | - | 2 |
-| `OptiScaler.sln` (forwarder project and mappings) | - | - | 8 | - | 8 |
-| `.gitignore` | - | - | 6 | - | 6 |
-| `Config.cpp` | 4 | - | - | 6 | 10 |
-| `Util.cpp` | 2 | - | - | - | 2 |
-| `dllmain.cpp` | 2 | - | 4 | - | 6 |
-| `NVNGX_Parameter.cpp` | 7 | - | - | - | 7 |
-| `misc/FrameLimit.cpp` | 8 | - | - | 20 | 28 |
-| `misc/GameConfigs.cpp` | - | - | 1 | - | 1 |
-| `misc/Quirks.h` | - | - | 2 | - | 2 |
-| `nvapi/NvApiHooks.cpp` | 2 | - | - | - | 2 |
-| `proxies/NVNGX_Proxy.h` | - | - | - | 3 | 3 |
-| `proxies/Streamline_Proxy.h` | 3 | - | - | - | 3 |
-| `proxies/XeFG_Proxy.h` | 2 | - | - | - | 2 |
-| `spoofing/Vulkan_Spoofing.cpp` | - | - | - | 53 | 53 |
-| `framegen/IFGFeature_Dx12.cpp` | 9 | - | - | 9 | 18 |
-| `framegen/IFGFeature_Dx12.h` | - | 3 | 1 | - | 4 |
-| `framegen/dlssg/DLSSG_Common.cpp` | 9 | - | - | - | 9 |
-| `framegen/dlssg/DLSSG_Dx12.cpp` | 29 | - | - | 9 | 38 |
-| `framegen/ffx/FSRFG_Dx12.cpp` | 15 | - | - | - | 15 |
-| `framegen/xefg/XeFG_Dx12.cpp` | 103 | - | - | 11 | 114 |
-| `low_latency/input/input_common.h` | - | - | - | 30 | 30 |
-| `low_latency/input/input_common.cpp` | - | - | - | 5 | 5 |
-| `low_latency/input/ConcurrentInputSelection.h` (new) | - | - | - | 71 | 71 |
-| `inputs/FG/Upscaler_Inputs_Dx11wDx12.cpp` | 4 | - | - | - | 4 |
-| `inputs/NVNGX_DLSS_Dx11.cpp` | 16 | - | - | 3 | 19 |
-| `inputs/NVNGX_DLSS_Dx12.cpp` | 6 | - | 2 | - | 8 |
-| `inputs/NVNGX_DLSS_Vk.cpp` | 5 | - | - | - | 5 |
-| `upscalers/IFeature.cpp` | 5 | - | - | - | 5 |
-| `upscalers/IFeature.h` | - | 1 | - | - | 1 |
-| `upscalers/IFeature_Dx11.cpp` | - | - | - | 15 | 15 |
-| `upscalers/IFeature_Dx11wDx12.cpp` | 13 | - | 1 | 78 | 92 |
-| `upscalers/IFeature_Dx11wDx12.h` | - | 3 | - | - | 3 |
-| `upscalers/IFeature_Dx12.cpp` | 4 | - | 6 | - | 10 |
-| `upscalers/IFeature_Dx12.h` | - | - | 2 | - | 2 |
-| `upscalers/IFeature_Vk.cpp` | - | - | - | 11 | 11 |
-| `upscalers/IFeature_VkwDx12.cpp` | 4 | - | - | 67 | 71 |
-| `upscalers/dlss/DLSSFeature.cpp` | 4 | - | - | - | 4 |
-| `upscalers/dlss/DLSSFeature.h` | - | - | - | 5 | 5 |
-| `upscalers/dlss/DLSSFeature_Dx11.cpp` | - | - | - | 6 | 6 |
-| `upscalers/dlss/DLSSFeature_Dx12.cpp` | 6 | - | - | 6 | 12 |
-| `upscalers/dlss/DLSSFeature_Dx12.h` | - | 2 | - | - | 2 |
-| `upscalers/dlss/DLSSFeature_Vk.cpp` | - | - | - | 6 | 6 |
-| `upscalers/dlssd/DLSSDFeature.cpp` | 2 | - | - | - | 2 |
-| `upscalers/dlssd/DLSSDFeature.h` | - | - | - | 5 | 5 |
-| `upscalers/dlssd/DLSSDFeature_Dx11.cpp`, `_Dx12.cpp`, `_Vk.cpp` | - | - | - | 18 | 18 |
-| `hooks/D3D11_Hooks.cpp` | 6 | - | - | - | 6 |
-| `hooks/D3D12_Hooks.cpp` | 9 | - | 8 | - | 17 |
-| `hooks/DxgiFactory_Hooks.cpp` | 20 | - | - | - | 20 |
-| `hooks/DxgiFactory_WrappedCalls.cpp` | 14 | - | - | - | 14 |
-| `hooks/Dxgi_Hooks.cpp` | 7 | - | - | - | 7 |
-| `hooks/FG_Hooks.cpp` | 5 | - | 5 | - | 10 |
-| `hooks/LibraryLoad_Hooks.cpp` | 2 | - | - | - | 2 |
-| `hooks/Reflex_Hooks.cpp` | - | - | - | 25 | 25 |
-| `hooks/Streamline_Hooks.cpp` | 13 | - | - | 17 | 30 |
-| `hooks/Vulkan_Hooks.cpp` | 4 | - | - | - | 4 |
-| `resource_tracking/ResTrack_dx12.cpp` | 8 | - | 12 | - | 20 |
-| `resource_tracking/ResTrack_dx12.h` | - | - | 2 | - | 2 |
-| `wrapped/wrapped_swapchain.cpp` | 6 | - | 6 | - | 12 |
-| `wrapped/wrapped_swapchain.h` | - | - | 3 | - | 3 |
-| `with_dx12/dx11_with_dx12_sc.cpp` | 33 | - | 2 | 40 | 75 |
-| `with_dx12/dx11_with_dx12_sc.h` | - | 3 | - | 1 | 4 |
-| `menu/menu_common.cpp` | 16 | - | - | - | 16 |
-| `menu/menu_common.h` | - | 1 | - | - | 1 |
-| `menu/menu_overlay_dx.cpp` | 7 | - | - | 178 | 185 |
-| `menu/menu_overlay_dx.h` | - | - | - | 9 | 9 |
-| `menu/menu_overlay_vk.cpp` | 2 | - | - | - | 2 |
-| `shaders/hudless_compare/HC_Dx12.cpp`, `shaders/render_ui/RUI_Dx12.cpp` | - | - | - | 4 | 4 |
-| `shaders/output_scaling/OS_Dx12.cpp`, `.h`, `OS_Vk.cpp`, `.h` (A8 scaler override and resource-size dispatch, gated on the override per SEAMS 5) | - | - | 122 | - | 122 |
-| **Total** | **~412** | **13** | **~195** | **~715** | **~1,335** |
-
-**Files touched:** 75 upstream files (including the new `ConcurrentInputSelection.h`, `.sln`, `.vcxproj` and `.gitignore`). Of these, 18 contain only `[UP]` lines (`Vulkan_Spoofing.cpp`, `NVNGX_Proxy.h`, `input_common.h/.cpp`, `ConcurrentInputSelection.h`, `IFeature_Dx11.cpp`, `IFeature_Vk.cpp`, `HC_Dx12.cpp`, `RUI_Dx12.cpp`, `menu_overlay_dx.h`, `Reflex_Hooks.cpp`, `DLSSFeature_Dx11.cpp`, `DLSSFeature_Vk.cpp`, `DLSSFeature.h`, `DLSSDFeature.h`, `DLSSDFeature_Dx11/_Dx12/_Vk.cpp`).
-
-**Against the target (≤ 40 files, ≤ 1,000 lines): not met as written.** About 1,335 lines in 75 files with every `[UP]` commit counted (the footprint tool counts them). The persistent conflict surface that survives a rebase once the `[UP]` commits are merged upstream or dropped as empty is about 620 lines in about 57 files (the seam, friend, `_ext` and `// ext:` lines). Levers to reach the target, largest first:
-
-| Lever | Lines | Files |
-|---|---|---|
-| Overlay fence ring accepted upstream (#20) | -191 | -1 |
-| `OS_*` scaler override and sizing (A8): upstream or replace by ext-owned resampler | -122 | -4 |
-| Recorded Init (#14, #15) accepted upstream | -132 | -1 (Vk only) |
-| `ConcurrentInputSelection` (#5) accepted | -106 | -3 |
-| Vulkan spoofing (#3) accepted | -53 | -1 |
-| Bridge fence hardening (#18, #19) accepted | -57 | 0 |
-| Per-API NGX init flags (#16, #17) accepted | -46 | -9 |
-| `XefgBuildCamera` kept as `// ext:` fix instead of a seam (or dropped) | up to -30 | 0 |
-
-Even with a normal acceptance rate the first pass lands above 1,000 lines; the file count stays above 40 unless the A8 and DLSS init-flag items go upstream. This needs a designer decision (section (e), item 11).
-
+Basis: added plus removed lines against upstream base `fd6c2870`, reported by `tools\footprint.ps1`. For the committed S6 stack at `373dab43`: **58 upstream files; +1115/-266 = 1381 total lines; `[UP]` 787 lines; persistent seam surface 594 lines.** The current policy in [SEAMS.md](SEAMS.md) section 1.3 is persistent surface <= 600 lines. `[UP]` is reported separately; touched-file count is informational. The S6 stack has six lines of persistent-surface headroom after C9. S7 and S10 are not included in this measurement; measure and explain their actual changes at those wave boundaries. The former <=40-file/<=1000-total projection and the 122-line `OS_*` resampler estimate are obsolete.
 # (e) Unresolved conflicts between ledgers that SEAMS.md does not settle
 
 1. **Recorded Init dependency on C6/C10.** SEAMS 5 makes it `[UP]`; U3 proposed an out-of-line `ext::dx11bridge::InitFeature` using `Hdr10::ResetCommands/ExecuteCommands`. A self-contained `[UP]` commit can only use raw `Reset`/`ExecuteCommandLists`; the C6 and C10 series then add inline `ext::gpu::*` and `ext::hdr::BridgeInitScope` lines inside the block (+4-6 lines). Decide whether Init needs GpuLifetime registration at all (U3 notes the Vulkan variant uses raw calls). The catalog assumes raw in `[UP]`, one RAII line from C10, no `ext::gpu` in Init.
 2. **Bridge fence/allocator hardening scope.** U3 (`ProcessDx11Textures`, 13 lines) and U5 (`dx11_with_dx12_sc.cpp`, ~44 lines) call it generic and upstream-worthy; SEAMS 5 does not list it. Catalog: `[UP]` rows 18-19. Alternative: inline `// ext: C6`.
-3. **Menu tonemap under OptiHDR.** U5 proposes `AdjustUiTargetMode` (return SDR while OptiHDR composites the menu); SEAMS 5 makes nightly's `outputColorSpace`/`hdrOutputActive` the single truth and the bridge fills them. If the bridge fills them with the HDR10 space, nightly's legacy tone-map path would also engage unless `AdjustUiTargetMode` overrides it. Needs an in-game check that the SDR-target composite (SEAMS 5, `imgui_impl_dx12` row) and `AdjustUiTargetMode` together produce the oracle's menu.
+3. **Menu tone-map under OptiHDR (resolved in C8).** `UseSdrUiTarget()` returns SDR from `getUiTargetMode()` while the menu layer composites into the HDR output. Phase 4 should verify visual parity with the oracle.
 4. **XeFG camera build.** U2 offers a seam (`XefgBuildCamera`, chosen: ~37 lines of footprint) or an inline `[UP]` fix with only non-mutating near/far (~8 lines, loses `BuildView` validation). SEAMS 5 lists the XeFG barrier but not the camera fix.
 5. **Detours transaction lock.** U4 proposes one process-wide `ext::core::DetourLock` shared with ResTrack/DXGI hooks; SEAMS 5 puts the Streamline mutex under `[UP]` (self-contained, file-local) and lists `DetourLock` under `ext/core`. The file-local `[UP]` mutex and the ext lock do not exclude each other. Decide whether the `[UP]` commit uses a header-declared shared mutex or the race between Streamline hooks and ext hooks is accepted.
 6. **Forwarder rename and `Kernel_Hooks`.** Rename is pending the S2 check (SEAMS 5). Contingent +7 lines in `Kernel_Hooks.cpp` and a `.sln`/package-path rename. Also affects U1 `Streamline_Proxy.h` `FindFilePath(exePath, "nvngx_dlssnr.dll")` naming.
@@ -502,8 +414,8 @@ Even with a normal acceptance rate the first pass lands above 1,000 lines; the f
 8. **`FrameLimit` interval.** U1: `ext::present::FrameInterval` seam vs. sending the whole file upstream. The FG-doubling semantics ("cap counts generated frames") is fork policy, not a bug fix; catalog keeps the seam and sends only the timer fixes.
 9. **`menuOverlayIsVulkan` / Vulkan DLSS-G interlock.** U4 keeps `ApplyMenuDlssgInterlock` (minus `delayMenuRenderBy`); U5 asks whether nightly already covers the menu delay. Without the delay the interlock may be a no-op. S6 decides; if dropped: -`menu::OnVulkanOverlay`, -`streamline::ApplyMenuDlssgInterlock`, -2 files' lines.
 10. **Generic menu behaviour not covered by "cosmetic" in SEAMS 3.6.** A11 preset live-apply (U5 rows 16-19), OptiFG state text (row 26), `SaveIni` bool result and "Settings saved" text (rows 37-38 and `Config.cpp` hunks 18, 19). Catalog: not carried. Confirm.
-11. **Footprint target.** About 1,335 lines in 75 files with the current `[UP]` set against ≤ 1,000 and ≤ 40. The levers are in section (d); either the target is restated as "excluding `[UP]` commits" (≈ 620 lines / 57 files) or the A8 `OS_*` edits, the per-API init flags and the recorded-Init need a different shape.
-12. **`OS_Dx12` sizing policy.** SEAMS 5 says both `OS_Dx12` and `OS_Vk` gate on the NR override, leaving Output Scaling and Magnifier unchanged; the oracle's `OS_Dx12` changed all callers (U5 OD1). Gating adds lines to the 122-line estimate. Verify the resource-size claim for Output Scaling and Magnifier first.
+11. **Footprint target (resolved).** Section (d) records actual S6 counts and the current policy: persistent surface <=600 lines, `[UP]` reported separately, file count informational. Future waves measure their actual contribution at completion.
+12. **`OS_Dx12` sizing policy (resolved in SEAMS 7 A8).** NR uses its own `NrResampler_Dx12`/`NrResampler_Vk` and leaves the upstream `OS_*` callers unchanged; the previous inline-size estimate does not apply.
 13. **`IFeature_Dx12::Evaluate` `timingQueue` parameter.** U3 keeps a 2-line signature extension; alternative is a thread-local `ext::nr::CurrentQueue` set by the bridges. Catalog keeps the signature (smaller, visible).
 14. **XeFG interpolation-count behaviour.** The fork rewrite stops writing `FGXeFGInterpolationCount` back to max; SEAMS settles the 1..7 range but not this behaviour change. `XefgSelectFactor` documents it; Phase 4 should confirm with the oracle log.
 15. **`ext::fg::OnUpscaleStart` per-frame cast.** Removing both `IFGFeature` virtuals means ext casts `IFGFeature*` to `IFGFeature_Dx12` each frame unless cached in `Dx12Ext` at activation. Catalog assumes the cache; verify there is no path where the FG object changes without `OnActivated`.

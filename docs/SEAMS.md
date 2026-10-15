@@ -121,7 +121,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 | `IRenderGeometry` | `ResolveRenderExtent`, `ColorIsDisplayAllocation` | C2, C3, C4 |
 | `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached), `Request(preset)` | C1, C5 |
 | `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset` | B6, A3 |
-| `ISceneHdr` | `Open`, `PublishReconstructed` | C10 |
+| `ISceneHdr` | `Open`, `PublishReconstructed`, `EndFrame` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | C6 |
 
@@ -194,10 +194,10 @@ The catalog is in [SEAMS-catalog.md](SEAMS-catalog.md), one table per group: `co
 
 | # | Topic | Decision |
 |---|---|---|
-| A8 | `OS_Dx12`/`OS_Vk` scaler override + resource-sized dispatch (122 inline lines) | **NR owns its resampler.** `ext/nr/NrResampler{Dx12,Vk}` is derived from upstream's OS classes, with NR's override and resource sizing. Upstream `OS_*` stay untouched (0 lines), and the A11 output-scaling `[UP]` is not carried: upstream callers keep nightly's behaviour |
+| A8 | NR-owned resampler with resource-sized dispatch; upstream `OS_*` untouched | **NR owns its resampler.** `ext/nr/NrResampler{Dx12,Vk}` is derived from upstream's OS classes, with NR's override and resource sizing. Upstream `OS_*` stay untouched (0 lines), and the A11 output-scaling `[UP]` is not carried: upstream callers keep nightly's behaviour |
 | 1 | Recorded-Init `[UP]` vs C6/C10 needs | The `[UP]` commit uses raw calls. C6 and C10 later add one RAII line each (`ext::gpu::Scope`, `ext::hdr::BridgeInitScope`) |
 | 2 | Bridge fence/allocator hardening | `[UP]` |
-| 3 | Menu tone-map under OptiHDR | `AdjustUiTargetMode` reads nightly's fields. In-game check in Phase 4 |
+| 3 | Menu tone-map under OptiHDR | Resolved in C8: `UseSdrUiTarget()` makes `getUiTargetMode()` return SDR while the separate menu layer composites into the HDR output. Phase 4 verifies visual parity. |
 | 4 | XeFG camera build | Seam: it keeps `BuildView` validation, so behaviour matches the oracle |
 | 5 | Detours lock | Keep only the `[UP]` file-local Streamline mutex. No shared `DetourLock` |
 | 6 | Forwarder rename | Not renamed: the model's caller check needs `nvngx.dll` in the module path (section 5). The `Kernel_Hooks` carve-out is carried |
