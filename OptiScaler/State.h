@@ -269,6 +269,8 @@ class State
 
     API api = API::NotSelected;
     API swapchainApi = API::NotSelected;
+    // True while the Vulkan menu overlay exists, also under a D3D12 swapchain (vkd3d-proton)
+    bool menuOverlayIsVulkan = false;
     SwapchainInteropApi swapchainInteropApi = SwapchainInteropApi::None;
 
     // Framerate

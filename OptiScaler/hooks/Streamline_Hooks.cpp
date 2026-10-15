@@ -7,6 +7,8 @@
 
 #include <nvapi/fakenvapi.h>
 #include <misc/IdentifyGpu.h>
+#include <menu/menu_overlay_base.h>
+#include <hooks/Reflex_Hooks.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/xefg/XeFG_Dx12.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -1298,6 +1300,22 @@ bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, co
     return result;
 }
 
+// DLSS-G cannot present next to the Vulkan menu overlay (a Vulkan swapchain, or the Vulkan overlay on a D3D12 game
+// under vkd3d-proton): turn it off while the menu is open, keeping its resources so it resumes without a restart.
+static void ApplyMenuDlssgInterlock(sl::DLSSGOptions& options)
+{
+    auto& state = State::Instance();
+    if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
+        return;
+
+    if (MenuOverlayBase::IsVisible())
+    {
+        options.mode = sl::DLSSGMode::eOff;
+        options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
+        ReflexHooks::setDlssgFrameCount(0);
+    }
+}
+
 sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
 {
     if (o_slDLSSGSetOptions == nullptr)
@@ -1350,6 +1368,8 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     {
         newOptions.dynamicTargetFrameRate = Config::Instance()->FGDLSSGFramerateTargetDMFG.value();
     }
+
+    ApplyMenuDlssgInterlock(newOptions);
 
     LOG_TRACE("DLSSG Modified Mode: {}", magic_enum::enum_name(newOptions.mode));
 
