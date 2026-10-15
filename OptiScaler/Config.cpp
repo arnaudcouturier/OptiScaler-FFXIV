@@ -605,8 +605,12 @@ bool Config::Reload(std::filesystem::path iniPath)
                 AnisotropyOverride.reset();
 
             AnisotropySkipPointFilter.set_from_config(readBool("Anisotropy", "SkipPointFilter"));
-            AnisotropyModifyComp.set_from_config(readBool("Anisotropy", "AFModifyComparison"));
-            AnisotropyModifyMinMax.set_from_config(readBool("Anisotropy", "AFModifyMinMax"));
+            // Save() writes ModifyComparison/ModifyMinMax; the old AFModify* names are only a fallback
+            AnisotropyModifyComp.set_from_config(readBool(
+                "Anisotropy", ini.GetValue("Anisotropy", "ModifyComparison", nullptr) ? "ModifyComparison"
+                                                                                      : "AFModifyComparison"));
+            AnisotropyModifyMinMax.set_from_config(readBool(
+                "Anisotropy", ini.GetValue("Anisotropy", "ModifyMinMax", nullptr) ? "ModifyMinMax" : "AFModifyMinMax"));
         }
 
         // Mipmap
