@@ -21,8 +21,13 @@ struct Extent
 struct IRenderGeometry
 {
     virtual ~IRenderGeometry() = default;
-    // Fills the game's real render extent inside the allocated texture; false = use upstream's size
-    virtual bool ResolveRenderExtent(Extent& out) = 0;
+    // S7 C2/C3: refined from the placeholder Extent-out signature (owner-finalised, same latitude C1/C5 used for
+    // INativeQuality::Request). The oracle's adfbea9d correction (docs/SEAMS.md 5 "RenderSizeFromWidthHeight") has
+    // to compare the game's own NVSDK_NGX_Parameter_Width/Height (`paramW`/`paramH`, 0 = absent/unreadable) against
+    // the subrect-derived render size (`w`/`h`, in/out), which a single output Extent cannot express. Gated entirely
+    // inside the implementation (config flag, default off); returns whether `w`/`h` were corrected -- false is a
+    // no-op, upstream's own size stands.
+    virtual bool ResolveRenderExtent(unsigned int paramW, unsigned int paramH, unsigned int& w, unsigned int& h) = 0;
     // True when the colour input is allocated at display size even though the render size is smaller
     virtual bool ColorIsDisplayAllocation() = 0;
 };

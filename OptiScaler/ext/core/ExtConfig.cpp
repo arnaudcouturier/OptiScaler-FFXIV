@@ -157,7 +157,11 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("Companion", "HudInterpolation", companionHudInterpolation);
 }
 
-void UpscalerConfig::Bind(config::Binder& b) { b.Add("QualityOverrides", "ForcePerfQuality", forcePerfQuality); }
+void UpscalerConfig::Bind(config::Binder& b)
+{
+    b.Add("QualityOverrides", "ForcePerfQuality", forcePerfQuality);
+    b.Add("Hotfix", "RenderSizeFromWidthHeight", renderSizeFromWidthHeight);
+}
 
 void ExtConfig::Bind(config::Binder& b)
 {
