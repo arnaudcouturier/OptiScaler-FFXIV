@@ -3,6 +3,8 @@
 // restoring the oracle's adfbea9d gate -- docs/SEAMS.md 5 "RenderSizeFromWidthHeight"). No upstream types here, so
 // this header is cheaply unit-testable on its own (tests/ext/upscaler), same split as ext/upscaler/ForcedQuality.h.
 
+#include <cstdint>
+
 namespace ext::upscaler
 {
 // NGX means DLSS_Render_Subrect_Dimensions to be the part of the colour buffer that holds this frame -- the render
@@ -26,5 +28,34 @@ inline bool ResolveRenderExtentValue(bool enabled, unsigned int paramWidth, unsi
     w = paramWidth < w ? paramWidth : w;
     h = paramHeight < h ? paramHeight : h;
     return true;
+}
+
+// Pure decision logic behind IRenderGeometry::ColorIsDisplayAllocation (C4, docs/SEAMS-catalog.md "dx11bridge"
+// PrepareUpscalerColor; the oracle's IFeature_Dx11wDx12::PrepareForcedQualityColor). No upstream types, same
+// unit-testable split as ResolveRenderExtentValue above.
+//
+// `enabled` is the same RenderSizeFromWidthHeight config flag ResolveRenderExtentValue reads: the oracle gates both
+// the geometry correction and this colour scale off a single !FfxivNativeQuality::Available() check, so this fork
+// couples the two to the same flag instead (docs/SEAMS.md 5 already restored the explicit flag for the geometry
+// side; this mirrors it rather than inventing a second, independent gate for the colour side).
+//
+// `renderWidth`/`renderHeight` are the live feature's current render size (0 = not yet known -- a no-op).
+// `allocWidth`/`allocHeight` are the colour resource's own allocation (GetDesc()); `allocWidth` is uint64_t to
+// match D3D12_RESOURCE_DESC::Width exactly, avoiding a narrowing comparison. Scaling only makes sense when the
+// render size is a real, in-bounds shrink of the allocation: not larger than it (nothing to scale up to) and not
+// already equal to it (nothing to do).
+//
+// `subrectWidth`/`subrectHeight` are the game's own NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_* for this
+// evaluate (0 = absent/unreadable). They must describe the whole allocation, not some other crop -- otherwise the
+// game's subrect is doing something this feature should not second-guess.
+inline bool ColorIsDisplayAllocationValue(bool enabled, unsigned int renderWidth, unsigned int renderHeight,
+                                           uint64_t allocWidth, unsigned int allocHeight, unsigned int subrectWidth,
+                                           unsigned int subrectHeight)
+{
+    if (!enabled || renderWidth == 0 || renderHeight == 0 || renderWidth > allocWidth || renderHeight > allocHeight ||
+        (renderWidth == allocWidth && renderHeight == allocHeight))
+        return false;
+
+    return subrectWidth == allocWidth && subrectHeight == allocHeight;
 }
 } // namespace ext::upscaler

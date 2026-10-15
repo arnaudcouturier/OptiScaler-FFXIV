@@ -28,8 +28,20 @@ struct IRenderGeometry
     // inside the implementation (config flag, default off); returns whether `w`/`h` were corrected -- false is a
     // no-op, upstream's own size stands.
     virtual bool ResolveRenderExtent(unsigned int paramW, unsigned int paramH, unsigned int& w, unsigned int& h) = 0;
-    // True when the colour input is allocated at display size even though the render size is smaller
-    virtual bool ColorIsDisplayAllocation() = 0;
+    // S7 C4: refined from the placeholder zero-arg signature, same owner-finalised latitude as ResolveRenderExtent.
+    // True when the colour input is genuinely allocated at display size even though the live render size is
+    // smaller: `renderWidth`/`renderHeight` (0 = not yet known) against `allocWidth`/`allocHeight` (the colour
+    // resource's own GetDesc(); `allocWidth` is uint64_t to match D3D12_RESOURCE_DESC::Width exactly) must show a
+    // real, in-bounds shrink, and the game's own `subrectWidth`/`subrectHeight`
+    // (NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_*, read by the caller so this interface never sees an NGX
+    // type) must describe the whole allocation, not some other crop. Delegates to
+    // ext::upscaler::ColorIsDisplayAllocationValue for FFXIV (ext/ffxiv/geometry/GeometryProvider.cpp), the same
+    // pure-math split as ResolveRenderExtent/ResolveRenderExtentValue; also carries the RenderSizeFromWidthHeight
+    // config read, coupling this scale to the same flag as ResolveRenderExtent's correction (the oracle's single
+    // !Available() gate covers both).
+    virtual bool ColorIsDisplayAllocation(unsigned int renderWidth, unsigned int renderHeight, uint64_t allocWidth,
+                                          unsigned int allocHeight, unsigned int subrectWidth,
+                                          unsigned int subrectHeight) = 0;
 };
 
 // C1, C5

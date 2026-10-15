@@ -18,9 +18,17 @@ class RenderGeometryProvider final : public game::IRenderGeometry
         return upscaler::ResolveRenderExtentValue(enabled, paramW, paramH, w, h);
     }
 
-    // C4 (next wave) implements the real "colour allocated at display size, render size smaller" logic -- do not
-    // guess at it here.
-    bool ColorIsDisplayAllocation() override { return false; }
+    // S7 C4: reads the same RenderSizeFromWidthHeight flag as ResolveRenderExtent above (coupling this scale to the
+    // same gate as the geometry correction, see ext/upscaler/RenderGeometry.h's ColorIsDisplayAllocationValue
+    // doc comment) and delegates the actual decision math to it.
+    bool ColorIsDisplayAllocation(unsigned int renderWidth, unsigned int renderHeight, uint64_t allocWidth,
+                                  unsigned int allocHeight, unsigned int subrectWidth,
+                                  unsigned int subrectHeight) override
+    {
+        const bool enabled = Cfg().upscaler.renderSizeFromWidthHeight.value_or_default();
+        return upscaler::ColorIsDisplayAllocationValue(enabled, renderWidth, renderHeight, allocWidth, allocHeight,
+                                                        subrectWidth, subrectHeight);
+    }
 };
 
 RenderGeometryProvider provider;
