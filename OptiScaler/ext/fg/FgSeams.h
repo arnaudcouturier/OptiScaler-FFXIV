@@ -3,31 +3,22 @@
 // Per-object state: ext::fg::Dx12Ext (IFGFeature_Dx12::_ext), ext/fg/Dx12Ext.h. Implementations: ext/fg/*.cpp.
 
 #include <d3d12.h>
+#include <windows.h>
+
+#include <cstdint>
+#include <optional>
+#include <string>
 
 class IFGFeature_Dx12;
 
-namespace ext::fg
-{
-// --- C6 (Dx12Sc.cpp)
-// DLSSG_Dx12, XeFG_Dx12, FSRFG_Dx12 `Present`: close and submit the SC list in order (monotonic completion fence).
-// False = the submission failed (further SC rendering is off): `return false` from Present.
-bool SubmitSC(IFGFeature_Dx12* fg, UINT index);
-// IFGFeature_Dx12::GetSCCommandList, after the stale lists were discarded: leaves the list at `index` open and ready
-// (failed-submission and null guards, allocator fence wait, resets). False -> return nullptr.
-bool PrepareSC(IFGFeature_Dx12* fg, UINT index);
-} // namespace ext::fg
-
 // ---------------------------------------------------------------------------------------------------------------
-// Streamline (D1, D4). Implementation: ext/fg/streamline/*.cpp. Hosts: hooks/Streamline_Hooks.cpp (hkslDLSSGSetOptions,
-// hkslDLSSGGetState), hooks/LibraryLoad_Hooks.cpp (LoadLibraryCheckW).
-#include <cstdint>
-#include <filesystem>
-#include <optional>
-#include <string>
-#include <windows.h>
-
+// Streamline (D1, D4). Implementation: ext/fg/streamline/*.cpp. Hosts: proxies/Streamline_Proxy.h (LoadStreamline),
+// hooks/Streamline_Hooks.cpp (hkslDLSSGSetOptions, hkslDLSSGGetState), hooks/LibraryLoad_Hooks.cpp (LoadLibraryCheckW).
 namespace ext::streamline
 {
+// D4: first statement of StreamlineProxy::LoadStreamline: Ampere MFG companion setup (guarded inside, runs on every call;
+// must precede the Streamline module load and the `_dll != nullptr` early-out).
+void OnLoadStreamline();
 // D1: apply the nvngx_dlssg.dll patches when the provider is loaded (cheap flag check when the unlock is off).
 void MfgUnlockTick();
 // D1: the populate-once condition of the cached Streamline frame-count ceiling (State::dlssgMfgMax): true while it is
@@ -43,6 +34,14 @@ bool OnDlssgModuleLoad(const std::wstring& normalizedPath, LPCWSTR fullPath, HMO
 
 namespace ext::fg
 {
+// --- C6 (Dx12Sc.cpp)
+// DLSSG_Dx12, XeFG_Dx12, FSRFG_Dx12 `Present`: close and submit the SC list in order (monotonic completion fence).
+// False = the submission failed (further SC rendering is off): `return false` from Present.
+bool SubmitSC(IFGFeature_Dx12* fg, UINT index);
+// IFGFeature_Dx12::GetSCCommandList, after the stale lists were discarded: leaves the list at `index` open and ready
+// (failed-submission and null guards, allocator fence wait, resets). False -> return nullptr.
+bool PrepareSC(IFGFeature_Dx12* fg, UINT index);
+
 // D1: DLSSG_Common::QueryState, the usable maximum: max(driver ceiling, unlocked ceiling).
 int AdjustMfgMax(int driverMax);
 } // namespace ext::fg

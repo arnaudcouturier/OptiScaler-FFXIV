@@ -71,6 +71,8 @@ class StreamlineProxy
 
     static bool LoadStreamline()
     {
+        ext::streamline::OnLoadStreamline(); // ext: D4 Ampere companion setup, before the early-out
+
         if (_dll != nullptr)
             return true;
 

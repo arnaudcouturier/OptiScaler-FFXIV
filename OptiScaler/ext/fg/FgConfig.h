@@ -22,6 +22,17 @@ struct FgConfig
     // D1: built-in RTX 40 (Ada) MFG unlock plus targeted temporal correction. Memory-only, restart after changing.
     CustomOptional<bool> adaMfgUnlock { false };
 
+    // D4: RTX 20/30 (Ampere/Turing) companion DLSS-G runtime, loaded before Streamline. Restart after changing.
+    CustomOptional<bool> ampereMfgUnlock { false };
+    CustomOptional<int> ampereMfgMaxFrames { 3 };
+    CustomOptional<std::string> ampereMfgKernelImage { "Auto" };
+    CustomOptional<std::string> ampereMfgRouter { "Auto" };
+    CustomOptional<bool> ampereMfgHardwareBilinear { false };
+    CustomOptional<int> ampereMfgOptimized { 1 };
+    CustomOptional<std::string> ampereMfgPreset { "Auto" };
+    CustomOptional<std::string> ampereMfgSpoofArchToGame { "Auto" };
+    CustomOptional<int> ampereMfgLogLevel { 1 };
+
     void Bind(config::Binder& b);
 };
 } // namespace ext

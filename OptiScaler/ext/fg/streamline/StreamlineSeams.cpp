@@ -4,12 +4,15 @@
 
 #include <proxies/Ntdll_Proxy.h>
 
+#include "ext/fg/dlssg/AmpereMfgLoader.h"
 #include "ext/fg/dlssg/MfgUnlock.h"
 
 // D1 seams on the Streamline hooks and the library loader; the patching itself is ext/fg/dlssg/MfgUnlock.cpp.
 
 namespace ext::streamline
 {
+void OnLoadStreamline() { AmpereMfgLoader::TrySetup(); }
+
 void MfgUnlockTick() { MfgUnlock::TryApply(); }
 
 bool MfgCeilingStale(const std::optional<int>& cached)
