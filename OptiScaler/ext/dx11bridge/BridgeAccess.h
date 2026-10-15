@@ -5,6 +5,7 @@
 
 #include "ext/Seams.h"
 
+#include <upscalers/IFeature_Dx11wDx12.h>
 #include <with_dx12/dx11_with_dx12_sc.h>
 
 struct ext::Access::Bridge
@@ -16,6 +17,14 @@ struct ext::Access::Bridge
         return *sc._ext;
     }
     static bool HdrOutput(const Dx11wDx12SC& sc) { return sc._ext && sc._ext->hdrOutput; }
+
+    // C4: lazily creates the per-feature forced-quality colour scaler state (upscalers/IFeature_Dx11wDx12.h `_ext`).
+    static ext::dx11bridge::BridgeState& Ext(IFeature_Dx11wDx12& feature)
+    {
+        if (!feature._ext)
+            feature._ext = std::make_unique<ext::dx11bridge::BridgeState>();
+        return *feature._ext;
+    }
 
     static IDXGISwapChain4* FgSwapChain(Dx11wDx12SC& sc) { return sc._fgSwapChain; }
     static DXGI_FORMAT BufferFormat(const Dx11wDx12SC& sc) { return sc._bufferFormat; }

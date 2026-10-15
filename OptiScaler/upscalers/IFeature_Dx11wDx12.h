@@ -14,6 +14,9 @@
 class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
 {
   private:
+    friend struct ext::Access; // ext: C4
+    std::unique_ptr<ext::dx11bridge::BridgeState> _ext; // ext: C4 fork state (forced-quality colour scaler)
+
     std::vector<DetailedGpuTime> detailedGpuTimes;
 
     template <typename F, typename Default> auto CallFeature(F&& f, Default&& def)

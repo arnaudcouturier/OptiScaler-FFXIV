@@ -53,6 +53,11 @@ void Access::GetRenderResolution(IFeature& feature, const NVSDK_NGX_Parameter* p
     feature.GetRenderResolution(params, &w, &h);
 }
 
+ID3D12Device* Access::Dx11On12Device()
+{
+    return IFeature::_dx11on12Device;
+}
+
 void Access::CancelPendingUpscalerWork(IFGFeature_Dx12& fg)
 {
     // The input feature can disappear before its final Present (FFXIV exit/scene changes).

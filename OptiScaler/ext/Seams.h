@@ -6,6 +6,7 @@
 #include "ext/ExtFeatures.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"
+#include "ext/dx11bridge/BridgeState.h"
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/FgSeams.h"
 #include "ext/hdr/HdrSeams.h"
@@ -22,12 +23,15 @@
 // Upstream classes named by the seams below (the full types come with the host file's own includes)
 class IFeature;
 class IFeature_Dx11;
+class IFeature_Dx11wDx12;
 class IFGFeature_Dx12;
 class Dx11wDx12SC;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Resource;
 struct NVSDK_NGX_Parameter;
+// ID3D12Device/ID3D12GraphicsCommandList/ID3D12Resource are already complete by this point (NrSeams.h above pulls
+// in d3d12.h), so PrepareUpscalerColor's signature below can simply name them.
 
 namespace ext
 {
@@ -53,6 +57,11 @@ struct Access
     // added to IFeature.h beyond the friend line.
     static void GetRenderResolution(IFeature& feature, const NVSDK_NGX_Parameter* params, unsigned int& w,
                                      unsigned int& h);
+
+    // upscalers/IFeature.h (friend line, already granted). C4: ext::dx11bridge::PrepareUpscalerColor needs the
+    // D3D11-on-D3D12 device (static across every feature, upstream's own _dx11on12Device) to create/update its
+    // lazily-created forced-quality colour scaler. Not a seam: ext-internal.
+    static ID3D12Device* Dx11On12Device();
 
     // framegen/IFGFeature_Dx12.h and the derived FG classes (friend lines). The FG fork code names their protected
     // state through this nested class only; it is defined in ext/fg/Dx12Access.h, which upstream files never include.
@@ -100,6 +109,22 @@ bool ShutdownNgx(ID3D11Device* device, NVSDK_NGX_Result& out);
 bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice);
 // NVSDK_NGX_D3D11_ReleaseFeature, before the feature is reset. False -> return FAIL_PlatformError.
 bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
+
+// IFeature_Dx11wDx12.cpp Evaluate, before binding NVSDK_NGX_Parameter_Color (replaces the unconditional
+// dx11Color.Dx12Resource bind). C4's forced-quality colour scale: Lanczos3-downscales the display-sized colour
+// input to the live render size when game::Current().quality->Live() is false, game::Current().geometry says the
+// colour is really allocated at display size (IRenderGeometry::ColorIsDisplayAllocation, which also carries the
+// RenderSizeFromWidthHeight gate -- the oracle's single !Available() gate covers both the geometry correction and
+// this scale, so this call and C2/C3's CorrectRenderSubrect stay coupled to the same config flag), and
+// GameQuirk::ScaleDisplayColorForForcedQuality is set. Every other combination (no FFXIV match, native quality
+// live, quirk off, flag off, render already equals the allocation, or the game's subrect doesn't describe the full
+// allocation) is a no-op returning `color` unchanged. `guideSrcWidth`/`guideSrcHeight` are zeroed by this call and
+// set to the ORIGINAL (unscaled) extent only on the scaled path, for the caller's NrEvalCtx guide-extent fields.
+// nullptr = the scale itself failed; the caller must bail the evaluate (same severity as "Can't process Dx11
+// textures!").
+ID3D12Resource* PrepareUpscalerColor(IFeature_Dx11wDx12& feature, ID3D12GraphicsCommandList* cmd,
+                                     NVSDK_NGX_Parameter* params, ID3D12Resource* color, unsigned int& guideSrcWidth,
+                                     unsigned int& guideSrcHeight);
 } // namespace dx11bridge
 
 namespace game
