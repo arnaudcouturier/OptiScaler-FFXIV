@@ -33,3 +33,11 @@ gpu::GpuSubmission BeginSubmission(UINT, ID3D12CommandList* const*);
 void QuarantineSubmission(UINT, ID3D12CommandList* const*);
 void Reset(ID3D12CommandList*);
 } // namespace ext::hdr
+
+namespace ext::hdr
+{
+// ext::dx11bridge::SetColorSpace, OptiHDR not engaged: records the colour space the game selected on the bridge in
+// nightly's State::outputColorSpace / hdrOutputActive, as a wrapped swapchain's UpdateOutputColorSpace would (the
+// reference build wrote its own write-only isHdrActive here).
+void NoteGameColorSpace(DXGI_COLOR_SPACE_TYPE colorSpace);
+} // namespace ext::hdr

@@ -5,6 +5,7 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/core/MenuRegistry.h"
+#include "ext/dx11bridge/BridgeExt.h"
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/FgSeams.h"
 #include "ext/hdr/HdrSeams.h"
@@ -20,6 +21,7 @@
 // Upstream classes named by the seams below (the full types come with the host file's own includes)
 class IFeature_Dx11;
 class IFGFeature_Dx12;
+class Dx11wDx12SC;
 struct ID3D11Device;
 
 namespace ext
@@ -43,6 +45,10 @@ struct Access
     // framegen/IFGFeature_Dx12.h and the derived FG classes (friend lines). The FG fork code names their protected
     // state through this nested class only; it is defined in ext/fg/Dx12Access.h, which upstream files never include.
     struct FgDx12;
+
+    // with_dx12/dx11_with_dx12_sc.h (friend line). The fork's D3D11-bridge code names its private state through this
+    // nested class only; defined in ext/dx11bridge/BridgeAccess.h, which upstream files never include.
+    struct Bridge;
 };
 
 // ini load/save hooks in Config.cpp (state: ext/core/ExtConfig)

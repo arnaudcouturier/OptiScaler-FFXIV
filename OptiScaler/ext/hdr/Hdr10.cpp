@@ -171,6 +171,19 @@ ID3D12Resource* Convert(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resourc
  if(k.scene && k.pad[1])Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
  return p.image.Get();
 }
+void NoteGameColorSpace(DXGI_COLOR_SPACE_TYPE cs){
+ OutputColorSpace space{};space.dxgiColorSpace=cs;space.range=ColorRange::Full;space.model=ColorModel::RGB;
+ switch(cs){
+ case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709:space.transfer=ColorTransfer::SRGB;space.primaries=ColorPrimaries::Rec709;space.valid=true;break;
+ case DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709:space.transfer=ColorTransfer::Linear;space.primaries=ColorPrimaries::Rec709;space.valid=true;break;
+ case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:space.transfer=ColorTransfer::PQ;space.primaries=ColorPrimaries::Rec2020;space.valid=true;break;
+ case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020:space.transfer=ColorTransfer::SRGB;space.primaries=ColorPrimaries::Rec2020;space.valid=true;break;
+ case DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020:space.transfer=ColorTransfer::HLG;space.primaries=ColorPrimaries::Rec2020;space.model=ColorModel::YCbCr;space.valid=true;break;
+ default:break;
+ }
+ auto& state=State::Instance();state.outputColorSpace=space;
+ state.hdrOutputActive=cs==DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+}
 std::function<bool()> TrackCommands(ID3D12GraphicsCommandList*c){auto& p=P();std::lock_guard lock(p.mutex);p.lifetime.Record(c);return p.lifetime.ReuseProbe(c);}
 gpu::GpuSubmission BeginSubmission(UINT n,ID3D12CommandList*const*l){return P().lifetime.BeginSubmission(n,l);}
 void QuarantineSubmission(UINT n,ID3D12CommandList*const*l){P().lifetime.QuarantineSubmission(n,l);}

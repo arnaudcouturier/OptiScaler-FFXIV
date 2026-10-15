@@ -2,6 +2,7 @@
 #include "DxgiFactory_WrappedCalls.h"
 
 #include "FG_Hooks.h"
+#include "ext/Seams.h"
 #include "D3D11_Hooks.h"
 #include "D3D12_Hooks.h"
 
@@ -239,7 +240,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && ShouldCreateDx11wDx12Swapchain())
+            const auto plan = ext::present::PlanDx12Presenter(localDesc.OutputWindow, _skipFGSwapChainCreation); // ext: C8
+            if (!_skipFGSwapChainCreation && (ShouldCreateDx11wDx12Swapchain() || plan.hdr)) // ext: C8
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -266,6 +268,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                     }
 
                     DXGI_SWAP_CHAIN_DESC fgDesc = localDesc;
+                    ext::present::PatchPresenterDesc(fgDesc, plan); // ext: C8
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain* fgSwapChain = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
@@ -273,6 +276,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
 
                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc))
                     {
+                        if (plan.createFg) // ext: C8 no FG provider: plain DX12 presenter only
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChain(wrappedFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -283,8 +287,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChain(IDXGIFactory* realFactory, Wrap
                         {
                             fgSwapChainIsRealFG = false;
 
-                            LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
-                                     (UINT) fgScResult);
+                            ext::present::LogPlainPresenter(plan, (UINT) fgScResult); // ext: C8
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = realFactory->CreateSwapChain(dx12Queue, &fgDesc, &fgSwapChain);
@@ -628,7 +631,8 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && ShouldCreateDx11wDx12Swapchain())
+            const auto plan = ext::present::PlanDx12Presenter(hWnd, _skipFGSwapChainCreation); // ext: C8
+            if (!_skipFGSwapChainCreation && (ShouldCreateDx11wDx12Swapchain() || plan.hdr)) // ext: C8
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -653,6 +657,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                     }
 
                     DXGI_SWAP_CHAIN_DESC1 fgDesc = localDesc;
+                    ext::present::PatchPresenterDesc(fgDesc, plan); // ext: C8
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain1* fgSwapChain1 = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
@@ -660,6 +665,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
 
                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc1(fgDesc))
                     {
+                        if (plan.createFg) // ext: C8 no FG provider: plain DX12 presenter only
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChainForHwnd(
@@ -673,8 +679,7 @@ HRESULT DxgiFactoryWrappedCalls::CreateSwapChainForHwnd(IDXGIFactory2* realFacto
                         {
                             fgSwapChainIsRealFG = false;
 
-                            LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
-                                     (UINT) fgScResult);
+                            ext::present::LogPlainPresenter(plan, (UINT) fgScResult); // ext: C8
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = realFactory->CreateSwapChainForHwnd(

@@ -193,6 +193,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
 
     _RefreshCachedSwapchainDesc();
+    ext::dx11bridge::ConfigureOutput(*this); // ext: C8
 
     LOG_INFO("Dx11wDx12SC {} created, real: {:X}, fg: {:X}, dx11: {:X}, dx12: {:X}, queue: {:X}", _id, (UINT64) _real,
              (UINT64) _fgSwapChain, (UINT64) _dx11Device, (UINT64) _dx12Device, (UINT64) _dx12CommandQueue);
@@ -200,6 +201,7 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
+    ext::dx11bridge::OnDestroy(*this); // ext: C8
     MenuOverlayDx::CleanupRenderTarget(true, _handle);
     _ReleaseInteropObjects();
 
@@ -526,7 +528,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, ext::dx11bridge::OutputFormat(*this, NewFormat), SwapChainFlags); // ext: C8
         }
     }
 
@@ -535,6 +537,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
         _RefreshCachedSwapchainDesc();
+        if (FAILED(ext::dx11bridge::OnResizeDone(*this))) // ext: C8
+            return DXGI_ERROR_UNSUPPORTED;
 
         if (Config::Instance()->IsFGEnabled())
         {
@@ -713,6 +717,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::CheckColorSpaceSupport(DXGI_COLOR_SPACE_T
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
+    if (HRESULT hdrResult; ext::dx11bridge::SetColorSpace(*this, ColorSpace, hdrResult)) // ext: C8
+        return hdrResult;
+
     if (_fgSwapChain != nullptr)
         return _fgSwapChain->SetColorSpace1(ColorSpace);
 
@@ -775,7 +782,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, ext::dx11bridge::OutputFormat(*this, Format), SwapChainFlags); // ext: C8
         }
     }
 
@@ -784,6 +791,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
         _RefreshCachedSwapchainDesc();
+        if (FAILED(ext::dx11bridge::OnResizeDone(*this))) // ext: C8
+            return DXGI_ERROR_UNSUPPORTED;
 
         if (Config::Instance()->IsFGEnabled())
         {
@@ -1007,6 +1016,7 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         sourceTexture->GetDesc(&desc);
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.CPUAccessFlags = 0;
+        desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE; // ext: C8 readable as a texture: the HDR10 conversion samples it
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
         result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedDx11BackBufferCopies[_currentFakeIndex]);
@@ -1184,7 +1194,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         return false;
     }
 
-    result = _copyCommandLists[copySlot]->Reset(allocator, nullptr);
+    result = ext::gpu::ResetCommands(_copyCommandLists[copySlot], allocator); // ext: C6
     if (FAILED(result))
     {
         LOG_ERROR("copy command list reset failed: {:X}", (UINT) result);
@@ -1204,18 +1214,24 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     }
 
     auto sourceBefore = _openedDx11BackBufferStates[copySlot];
+    ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot]; // ext: C8
 
-    TransitionResource(_copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot], sourceBefore,
-                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (!ext::dx11bridge::ConvertCopySource(*this, copySlot, copySource, sourceBefore)) // ext: C8 OptiHDR PQ conversion
+    {
+        fgBackBuffer->Release();
+        _copyCommandLists[copySlot]->Close();
+        return false;
+    }
+
+    TransitionResource(_copyCommandLists[copySlot], copySource, sourceBefore, D3D12_RESOURCE_STATE_COPY_SOURCE);
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_PRESENT,
                        D3D12_RESOURCE_STATE_COPY_DEST);
 
-    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, _openedDx11BackBuffers[copySlot]);
+    _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, copySource);
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);
-    TransitionResource(_copyCommandLists[copySlot], _openedDx11BackBuffers[copySlot], D3D12_RESOURCE_STATE_COPY_SOURCE,
-                       sourceBefore);
+    TransitionResource(_copyCommandLists[copySlot], copySource, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceBefore);
 
     _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
 
@@ -1229,7 +1245,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     }
 
     ID3D12CommandList* lists[] = { _copyCommandLists[copySlot] };
-    _dx12CommandQueue->ExecuteCommandLists(1, lists);
+    ext::gpu::ExecuteCommands(_dx12CommandQueue, 1, lists); // ext: C6
 
     const auto signalValue = ++_copyFenceValue;
 
@@ -1253,6 +1269,10 @@ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
     if (_copySubmissionFailed || _copyFence == nullptr)
         return false;
+
+    // ext: C8 a plain HDR presenter uses the same queue as the interop copy: queue order already covers it
+    if (ext::hdr::Active() && FGHooks::IsDx12InteropPresentSC(_fgSwapChain))
+        return true;
 
     if (_lastInteropCopyFenceValue == 0)
         return true;

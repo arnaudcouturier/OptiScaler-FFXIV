@@ -7,7 +7,9 @@
 #include "d3d11_4.h"
 #include "d3d12.h"
 
+#include <memory>
 #include <vector>
+#include "ext/Seams.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -72,6 +74,9 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
   private:
+    friend struct ext::Access; // ext:
+    std::unique_ptr<ext::dx11bridge::BridgeExt> _ext; // ext: C8 fork state (OptiHDR output flag)
+
     bool _InitInteropObjects();
     bool _RequestSharedBackBuffer(UINT index);
     bool _CopyDx11BackBufferToShared(UINT index);
