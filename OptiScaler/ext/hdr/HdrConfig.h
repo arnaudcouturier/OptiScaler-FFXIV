@@ -37,6 +37,7 @@ struct HdrConfig
     CustomOptional<int> screenshotFormat { 0 };            // ScreenshotFormat: 0 SDR PNG, 1 HDR PNG
 
     void Bind(config::Binder& b);
+    void PostLoad();               // end of config::Load: installs the NR scene hooks (once)
     void Retire(CSimpleIniA& ini); // config::Save: drops the retired keys
 };
 } // namespace ext

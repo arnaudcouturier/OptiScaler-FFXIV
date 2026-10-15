@@ -3,13 +3,23 @@
   HDR shaders (docs/SEAMS.md section 3.7/6, U6 section 2). Recipes verified byte-identical to the reference build's
   checked-in blobs. Headers are generated into $(IntDir)ext_gen\ (never committed). fxc cs_5_0 CSMain -O3 unless noted.
     * Hdr10.hlsl includes renodx\reinhard.hlsl (relative to its directory).
-    * The RenoDX pixel shaders are ps_5_0 / main and include shared.h (same directory).
+    * DlssSceneInput.hlsl includes HdrCompatibility.hlsli (ext\shaders\common).
+    * The RenoDX pixel shaders are ps_5_0 / main and include shared.h (same directory). The five arrays are named after
+      the file (Tonemap_0x85E777EF, ...), one generated header each.
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Hdr10.hlsl">
-      <Variable>Hdr10_cso</Variable>
-      <Header>Hdr10_Shader.h</Header>
-    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Hdr10.hlsl"><Variable>Hdr10_cso</Variable><Header>Hdr10_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\DlssSceneInput.hlsl"><Variable>DlssSceneInput_cso</Variable><Header>DlssSceneInput_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\NrSceneInput.hlsl"><Variable>NrSceneInput_cso</Variable><Header>NrSceneInput_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\Tonemap_0x85E777EF.ps_5_0.hlsl"><Variable>Tonemap_0x85E777EF</Variable><Header>Tonemap_0x85E777EF_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\PostTonemapPreLUT_0xF8F57F0A.ps_5_0.hlsl"><Variable>PostTonemapPreLUT_0xF8F57F0A</Variable><Header>PostTonemapPreLUT_0xF8F57F0A_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\LUT_0x27EBC404.ps_5_0.hlsl"><Variable>LUT_0x27EBC404</Variable><Header>LUT_0x27EBC404_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\LUT_0x1F264D17.ps_5_0.hlsl"><Variable>LUT_0x1F264D17</Variable><Header>LUT_0x1F264D17_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\renodx\FullscreenGammaCorrection_0xF6E81A1B.ps_5_0.hlsl"><Variable>FullscreenGammaCorrection_0xF6E81A1B</Variable><Header>FullscreenGammaCorrection_0xF6E81A1B_Shader.h</Header><Profile>ps_5_0</Profile><Entry>main</Entry></ExtShader>
+    <!-- Licence and attribution of the RenoDX-derived shaders ship with every build that contains them -->
+    <ExtPackageFile Include="$(MSBuildThisFileDirectory)RenoDX_ATTRIBUTION.txt"><Dest>Licenses\RenoDX_ATTRIBUTION.txt</Dest></ExtPackageFile>
+    <ExtPackageFile Include="$(MSBuildThisFileDirectory)shaders\renodx\LICENSE"><Dest>Licenses\RenoDX_LICENSE.txt</Dest></ExtPackageFile>
+    <ExtPackageFile Include="$(MSBuildThisFileDirectory)shaders\renodx\NOTICE.md"><Dest>Licenses\RenoDX_FFXIV_NOTICE.md</Dest></ExtPackageFile>
   </ItemGroup>
 </Project>

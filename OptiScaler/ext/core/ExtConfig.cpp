@@ -162,6 +162,7 @@ void ExtConfig::PostLoad()
 {
     fg.PostLoad();
     nr.PostLoad();
+    hdr.PostLoad();
 }
 
 ExtConfig& Cfg()

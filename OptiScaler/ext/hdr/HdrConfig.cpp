@@ -2,6 +2,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/hdr/HdrConfig.h"
+#include "ext/hdr/HdrScene.h"
 
 namespace ext
 {
@@ -21,6 +22,12 @@ void HdrConfig::Bind(config::Binder& b)
     b.Add("HDR", "ScreenshotKey", screenshotKey, true); // hex when positive (a key code), like the reference build
     b.Add("HDR", "ScreenshotFormat", screenshotFormat);
     b.Add("HDR", "ScreenshotIccOnly", screenshotIccOnly);
+}
+
+void HdrConfig::PostLoad()
+{
+    static const bool installed = (hdr::InstallSceneHooks(), true);
+    (void) installed;
 }
 
 void HdrConfig::Retire(CSimpleIniA& ini)
