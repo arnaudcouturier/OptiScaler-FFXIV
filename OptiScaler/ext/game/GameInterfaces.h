@@ -53,14 +53,20 @@ struct ISceneHdr
     virtual void PublishReconstructed() = 0;
 };
 
-// B5, D2, C5
+// B5, D2, C5. Implemented only for a game whose frame-generation bridge needs scene pairing and native dynamic-MFG
+// markers (FFXIV). A non-null `ext::game::Current().fgMarkers` is also the test the FG code uses for "scene-paired
+// history applies" (was `gameExe == "ffxiv_dx11.exe"`), so a game module that sets it opts in to all of the below.
 struct IFgMarkers
 {
     virtual ~IFgMarkers() = default;
-    virtual uint32_t PresentationGuideDelay() = 0;
-    virtual void OnUpscale() = 0;
-    virtual void BeforePresent() = 0;
-    virtual void NextFrame() = 0;
+    // B5: age in real frames (0..2) of the NR guides to pair with this upscale, -1 = none. Called once per upscale and
+    // consumed by the caller; the NR side is DlssNr::ConsumePresentationGuideDelay (was SetPresentationGuideDelay).
+    virtual int PresentationGuideDelay() = 0;
+    // D2: the bridge's native dynamic-MFG interval markers (simulation / render submit), see FfxivDynamicMarkers. They
+    // reach Streamline PCL under ScopedOptiScalerReflex, which upstream's Reflex input already treats as OptiScaler's own.
+    virtual void OnUpscale(uint64_t frame) = 0;     // FG upscale boundary of frame `frame`
+    virtual void BeforePresent(uint32_t frameId) = 0; // FGPresent, before the Streamline frame token is fetched
+    virtual void NextFrame(uint64_t frame) = 0;     // FGPresent, after ReflexSleep, `frame` = next frame count
 };
 
 // A1-A8, B5 (NR). NR behaviours that follow the FFXIV DX11 bridge path

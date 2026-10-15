@@ -109,7 +109,9 @@ void DLSSG_Common::SetOptions(bool gameMarkersReachStreamline)
         options.dynamicTargetFrameRate = config->FGDLSSGFramerateTargetDMFG.value_or_default();
     }
 
+    ext::fg::AdjustDlssgOptions(this, options); // ext: D2 UI recomposition, menu interlock
     auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(_viewport, options);
+    ext::fg::AfterDlssgSetOptions(this, _viewport, options, dlssgSetOptionsResult); // ext: D2 observed multiplier
 
     if (dlssgSetOptionsResult != sl::Result::eOk)
         LOG_ERROR("Couldn't set DLSSG options, error: {}", magic_enum::enum_name(dlssgSetOptionsResult));
@@ -117,6 +119,7 @@ void DLSSG_Common::SetOptions(bool gameMarkersReachStreamline)
     sl::ReflexOptions reflexConst = {};
     reflexConst.mode = sl::ReflexMode::eLowLatency;
     reflexConst.useMarkersToOptimize = gameMarkersReachStreamline && ReflexHooks::gameIsSendingMarkers();
+    ext::fg::AdjustReflexOptions(options, reflexConst); // ext: D2 dynamic MFG frame limit
 
     ScopedOptiScalerReflex optiScalerCall {};
     auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);

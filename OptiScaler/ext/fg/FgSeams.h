@@ -55,3 +55,44 @@ namespace ext::present
 // no valid cap. With NVIDIA FG the cap counts generated frames, so the interval doubles. Implementation: FrameInterval.cpp.
 std::optional<uint64_t> FrameInterval(float fpsCap, bool fgActive);
 } // namespace ext::present
+
+// ---------------------------------------------------------------------------------------------------------------
+// DLSS-G options / markers (D2). Hosts: framegen/dlssg/DLSSG_Common.cpp (SetOptions), hooks/FG_Hooks.cpp (FGPresent),
+// inputs/FG/Upscaler_Inputs_Dx11wDx12.cpp (UpscaleStart), menu/menu_common.cpp (DLSSG card).
+class IFGFeature;
+
+namespace sl
+{
+struct DLSSGOptions;
+struct ReflexOptions;
+struct ViewportHandle;
+enum class Result;
+} // namespace sl
+
+namespace ext::fg
+{
+// DLSSG_Common::SetOptions, after the base options are built and before slDLSSGSetOptions: UI recomposition and the
+// hud-less/ui buffer formats (Dx12 output only, nvngx_dlssg reads them at feature creation; needs the hudless source,
+// off until C11) and the Vulkan menu interlock (all outputs).
+void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options);
+// Right after slDLSSGSetOptions: remembers its result/mode and samples the observed multiplier on the existing
+// Streamline thread (GetState is not thread safe and consumes presentation telemetry, so never from ImGui).
+void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options,
+                          sl::Result setOptionsResult);
+// Reflex options built next to the DLSS-G ones: in dynamic mode Streamline sees the same output cap as the user, so
+// dynamic MFG can account for it.
+void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& reflex);
+
+// UpscalerInputsDx11wDx12::UpscaleStart, right after StartNewFrame: the game module's per-upscale hook
+// (ext::game::IFgMarkers, null for every game but FFXIV).
+void OnUpscaleStart(IFGFeature* fg);
+// FGHooks::FGPresent. Before the Streamline frame token is fetched / after ReflexSleep (frame = next frame count).
+void MarkersBeforePresent(uint32_t frameId);
+void MarkersNextFrame(uint64_t frame);
+} // namespace ext::fg
+
+namespace ext::menu
+{
+// DLSSG card, inside the Force Dynamic MFG block: "Current DMFG: Nx (observed)" or the waiting text, with its tooltip.
+void ObservedMultiplier(IFGFeature* dlssg);
+} // namespace ext::menu

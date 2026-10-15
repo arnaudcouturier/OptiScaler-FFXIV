@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "FG_Hooks.h"
 #include <Config.h>
+#include "ext/Seams.h"
 
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
@@ -1258,6 +1259,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             {
                 ((IDXGISwapChain4*) This)->GetCurrentBackBufferIndex();
                 const uint32_t frameId = (uint32_t) fg->FrameCount();
+                ext::fg::MarkersBeforePresent(frameId); // ext: D2 before the token is fetched
                 tokenResult = StreamlineProxy::GetNewFrameToken()(localToken, &frameId);
 
                 if (tokenResult == sl::Result::eOk)
@@ -1391,6 +1393,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         LOG_DEBUG("Calling ReflexSleep");
         ScopedOptiScalerReflex optiScalerCall {};
         StreamlineProxy::ReflexSleep()(*localToken);
+        ext::fg::MarkersNextFrame(fg->FrameCount() + 1); // ext: D2
     }
 
     if (state.swapchainInteropApi == SwapchainInteropApi::None)

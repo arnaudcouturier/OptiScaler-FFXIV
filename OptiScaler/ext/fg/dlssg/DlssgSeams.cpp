@@ -1,0 +1,143 @@
+#include "pch.h"
+
+#include "ext/Seams.h"
+#include "ext/core/ExtConfig.h"
+#include "ext/fg/Dx12Access.h"
+#include "ext/fg/FgInternal.h"
+#include "ext/fg/HudlessLink.h"
+
+#include <framegen/IFGFeature_Dx12.h>
+#include <hooks/Reflex_Hooks.h>
+#include <menu/menu_overlay_base.h>
+#include <proxies/Streamline_Proxy.h>
+
+#include <algorithm>
+#include <cmath>
+
+// D2: the DLSS-G option seams of DLSSG_Common::SetOptions and the observed dynamic-MFG multiplier. These were the
+// DLSSG_Common virtuals AdjustDlssgOptions / AfterDlssgSetOptions and DLSSG_Dx12's overrides (SEAMS 5: free functions
+// instead of virtuals). The Dx12 state lives in Dx12Ext; DLSSG_Vk has none, so the Dx12-only parts are no-ops there.
+
+namespace
+{
+// DLSS-G cannot present next to the Vulkan menu overlay (a Vulkan swapchain, or the Vulkan overlay on a D3D12 game under
+// vkd3d-proton): turn it off while the menu is open, keeping its resources so it resumes without a restart. Same rule
+// as the [UP] one in Streamline_Hooks.cpp, which only sees the game's own slDLSSGSetOptions calls (this is OptiFG's).
+void ApplyMenuDlssgInterlock(sl::DLSSGOptions& options)
+{
+    auto& state = State::Instance();
+    if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
+        return;
+
+    if (MenuOverlayBase::IsVisible())
+    {
+        options.mode = sl::DLSSGMode::eOff;
+        options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
+        ReflexHooks::setDlssgFrameCount(0);
+    }
+}
+
+// Separate UI path: without it DLSS-G treats tagged HUD-less / UI images as hints only and still interpolates the UI.
+// nvngx_dlssg reads it at feature *creation*, so it must already be on for the very first SetOptions. Needs a hud-less
+// source (C11); auto = on whenever the source is in use and UI-free frame generation is off.
+void AdjustUiRecomposition(sl::DLSSGOptions& options)
+{
+    const auto& recompositionConfig = ext::Cfg().fg.uiRecomposition;
+    const auto source = ext::fg::hudless::Query();
+    const bool recomposition = source.sourceActive && !source.freeFrameGen &&
+                               (recompositionConfig.has_value() ? recompositionConfig.value() : true);
+
+    if (recomposition)
+    {
+        options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
+
+        if (source.lastFormat != 0)
+        {
+            auto hudlessFormat = static_cast<DXGI_FORMAT>(source.lastFormat);
+            if (hudlessFormat == DXGI_FORMAT_R8G8B8A8_TYPELESS)
+                hudlessFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            else if (hudlessFormat == DXGI_FORMAT_B8G8R8A8_TYPELESS)
+                hudlessFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            else if (hudlessFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS)
+                hudlessFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+
+            options.hudLessBufferFormat = static_cast<uint32_t>(hudlessFormat);
+        }
+
+        if (source.uiFromHudless)
+            options.uiBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    static int lastLogged = -1;
+    if (lastLogged != (int) recomposition)
+    {
+        LOG_INFO("DLSSG UI recomposition: {} (hud-less source active {}, hudless format {}, ui format {}){}",
+                 recomposition, source.sourceActive, options.hudLessBufferFormat, options.uiBufferFormat,
+                 lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
+        lastLogged = (int) recomposition;
+    }
+}
+
+IFGFeature_Dx12* AsDx12(IFGFeature* fg) { return dynamic_cast<IFGFeature_Dx12*>(fg); }
+} // namespace
+
+namespace ext::fg
+{
+void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options)
+{
+    if (AsDx12(fg) != nullptr)
+        AdjustUiRecomposition(options);
+
+    ApplyMenuDlssgInterlock(options);
+}
+
+void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options,
+                          sl::Result dlssgSetOptionsResult)
+{
+    auto* dx12 = AsDx12(fg);
+    if (dx12 == nullptr)
+        return;
+
+    auto& dx12Ext = Access::FgDx12::Ext(*dx12);
+    dx12Ext.setOptionsOk = dlssgSetOptionsResult == sl::Result::eOk;
+    dx12Ext.optionsMode = static_cast<uint32_t>(options.mode);
+
+    // Query once per real dispatch, on the existing serialized SL thread. Do not query
+    // from ImGui: GetState is not thread safe and consumes presentation telemetry.
+    // This is an observed output multiplier, not a prediction of the driver's next factor.
+    sl::DLSSGState runtimeState {};
+    const auto queryResult = StreamlineProxy::DLSSGGetState()(viewport, runtimeState, nullptr);
+    const auto sampleTime = GetTickCount64();
+    const auto mode = static_cast<int>(options.mode);
+    const auto count = runtimeState.numFramesActuallyPresented;
+    if (dx12Ext.sampleMode == mode && options.mode == sl::DLSSGMode::eDynamic &&
+        dlssgSetOptionsResult == sl::Result::eOk && queryResult == sl::Result::eOk &&
+        static_cast<unsigned>(runtimeState.status) == 0 && count >= 1 &&
+        count <= static_cast<unsigned>(fg->GetMaxInterpolationCount() + 1))
+        dx12Ext.observedMultiplier.store((sampleTime << 8) | count, std::memory_order_relaxed);
+    else
+        dx12Ext.observedMultiplier.store(0, std::memory_order_relaxed);
+    dx12Ext.sampleMode = queryResult == sl::Result::eOk ? mode : -1;
+}
+
+void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& reflexConst)
+{
+    // Let Streamline see the same output cap as the user, so dynamic MFG can account for it.
+    if (options.mode == sl::DLSSGMode::eDynamic)
+    {
+        const float limit = Config::Instance()->FramerateLimit.value_or_default();
+        if (limit > 0.0f && std::isfinite(limit))
+            reflexConst.frameLimitUs = static_cast<uint32_t>(std::clamp(1000000.0 / limit, 1.0, 4294967295.0));
+    }
+}
+
+unsigned ObservedMultiplier(IFGFeature* fg)
+{
+    auto* dx12 = AsDx12(fg);
+    if (dx12 == nullptr)
+        return 0;
+
+    const auto sample = Access::FgDx12::Ext(*dx12).observedMultiplier.load(std::memory_order_relaxed);
+    return sample && GetTickCount64() - (sample >> 8) < 3000 ? unsigned(sample & 0xff) : 0;
+}
+} // namespace ext::fg

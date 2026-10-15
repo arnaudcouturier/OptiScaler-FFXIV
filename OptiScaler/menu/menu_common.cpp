@@ -4576,6 +4576,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 }
 
                 ImGui::BeginDisabled(!config->FGDLSSGForceDMFG.value_or_default());
+                ext::menu::ObservedMultiplier(dlssg); // ext: D2
                 static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
                 float fpsSliderMax = (float) std::max(200, refreshRate);
                 ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, fpsSliderMax, "%.0f");

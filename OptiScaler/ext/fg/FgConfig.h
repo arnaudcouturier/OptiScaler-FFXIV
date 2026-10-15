@@ -33,6 +33,10 @@ struct FgConfig
     CustomOptional<std::string> ampereMfgSpoofArchToGame { "Auto" };
     CustomOptional<int> ampereMfgLogLevel { 1 };
 
+    // D2/C11: DLSS-G UI recomposition (DLSSGOptions::enableUserInterfaceRecomposition). Unset = on while a hud-less source
+    // is in use (see ext/fg/HudlessLink.h).
+    CustomOptional<bool> uiRecomposition { false };
+
     void Bind(config::Binder& b);
 };
 } // namespace ext

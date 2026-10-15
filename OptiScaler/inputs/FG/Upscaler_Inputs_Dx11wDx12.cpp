@@ -3,6 +3,7 @@
 #include "Upscaler_Inputs.h"
 
 #include "MathUtils.h"
+#include "ext/Seams.h"
 
 #include <with_dx12/with_dx12.h>
 #include <upscalers/IFeature_Dx11wDx12.h>
@@ -137,6 +138,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jitterY);
 
     fg->StartNewFrame();
+    ext::fg::OnUpscaleStart(fg); // ext: D2 game markers, B5 guide delay
 
     auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
     fg->SetCameraValues(camera.cameraNear, camera.cameraFar, camera.cameraVFov, aspectRatio, camera.meterFactor);

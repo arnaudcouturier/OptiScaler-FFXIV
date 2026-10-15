@@ -10,6 +10,8 @@ void FgConfig::Bind(config::Binder& b)
 {
     b.Add("DLSSG", "AdaMfgUnlock", adaMfgUnlock);
 
+    b.Add("DLSSG", "UIRecomposition", uiRecomposition);
+
     b.Add("DLSSG", "AmpereMfgUnlock", ampereMfgUnlock);
     b.Add("DLSSG", "AmpereMfgMaxFrames", ampereMfgMaxFrames);
     b.Add("DLSSG", "AmpereMfgKernelImage", ampereMfgKernelImage);
