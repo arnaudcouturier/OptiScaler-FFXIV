@@ -1537,6 +1537,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         }
 
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
+        bool changedCopySourceState = false;
 
         // SDK version 2.1.1 fixes those issues
         if (version < feature_version { 1, 2, 2 })
@@ -1550,11 +1551,12 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             // HACK: XeFG seems to crash if the resource is in COPY_SOURCE state
             // even though the docs say it's the preferred state
             // https://github.com/intel/xess/issues/47
-            if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+            if (resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_SOURCE)
             {
-                ResourceBarrier(inputResource->cmdList, inputResource->resource, inputResource->state,
+                ResourceBarrier(fResource->cmdList, resourceParam.pResource, resourceParam.incomingState,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
 
+                changedCopySourceState = true;
                 resourceParam.incomingState = D3D12_RESOURCE_STATE_COPY_DEST;
             }
         }
@@ -1584,10 +1586,10 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         }
 
         // Potentially we don't need to restore but do it just to be safe
-        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+        if (changedCopySourceState)
         {
-            ResourceBarrier(inputResource->cmdList, inputResource->resource, D3D12_RESOURCE_STATE_COPY_DEST,
-                            inputResource->state);
+            ResourceBarrier(fResource->cmdList, resourceParam.pResource, D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
         }
 
         SetResourceReady(type, fIndex);
