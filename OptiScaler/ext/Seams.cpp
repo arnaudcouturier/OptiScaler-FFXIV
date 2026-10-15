@@ -67,6 +67,12 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
                                     !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
     }
 }
+
+void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
+{
+    if (game::Current().hdr != nullptr)
+        ext::ffxiv::companion::AfterSharedCopy(context, target);
+}
 } // namespace ext::dx11bridge
 
 #include <framegen/IFGFeature_Dx12.h>

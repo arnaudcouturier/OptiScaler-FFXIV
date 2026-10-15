@@ -1087,6 +1087,7 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
 
     ext::dx11bridge::BeforeSharedCopy(*this); // ext: C10 freezes the UI preview mask with the SDR backbuffer
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
+    ext::dx11bridge::AfterSharedCopy(_dx11Context, _sharedDx11BackBufferCopies[_currentFakeIndex]); // ext: C7 Companion source markers
     sourceTexture->Release();
     return true;
 }
