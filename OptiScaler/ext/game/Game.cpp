@@ -2,6 +2,7 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/ffxiv/GameBuild.h"
+#include "ext/ffxiv/lighting/FfxivLighting.h"
 #include "ext/game/Game.h"
 #include "ext/hdr/HdrScene.h"
 
@@ -37,6 +38,7 @@ const Game& SelectGame()
     static const bool initialized = []
     {
         ffxiv.hdr = &ext::hdr::SceneProvider();
+        ffxiv.lighting = &ext::ffxiv::lighting::Provider();
         ffxiv.ngx = &quirks;
         ffxiv.nrQuirks = &quirks;
         ext::SetActive(ext::F::Game, true);
@@ -52,5 +54,17 @@ const Game& Current()
 {
     static const Game& selected = SelectGame();
     return selected;
+}
+
+void OnD3D11DeviceHooked(ID3D11Device* device)
+{
+    if (device != nullptr && Current().lighting != nullptr)
+        ext::ffxiv::lighting::OnDeviceHooked(device);
+}
+
+void OnD3D11Unhook()
+{
+    if (Current().lighting != nullptr)
+        ext::ffxiv::lighting::OnUnhook();
 }
 } // namespace ext::game

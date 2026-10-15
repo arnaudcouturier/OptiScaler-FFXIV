@@ -9,6 +9,7 @@
 #include <wrapped/wrapped_swapchain.h>
 
 #include <resource_tracking/ResTrack_dx11.h>
+#include <ext/game/Game.h>
 
 #include <detours/detours.h>
 
@@ -92,6 +93,8 @@ static void HookToDeviceLocal(ID3D11Device* InDevice)
 {
     if (InDevice == nullptr)
         return;
+
+    ext::game::OnD3D11DeviceHooked(InDevice); // ext: B6, C7
 
     if (o_CreateSamplerState != nullptr)
         return;
@@ -570,6 +573,7 @@ void D3D11Hooks::Hook(HMODULE dx11Module)
 
 void D3D11Hooks::Unhook()
 {
+    ext::game::OnD3D11Unhook(); // ext: B6, C7
     ResTrack_Dx11::ReleaseHooks();
 
     DetourTransactionBegin();

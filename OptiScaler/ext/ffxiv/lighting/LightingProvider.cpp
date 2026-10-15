@@ -29,11 +29,7 @@ class SceneLightingProvider final : public game::ISceneLighting
         return status;
     }
 
-    // The core branch updates the scaffold to carry the capture inputs. Keep
-    // this no-argument overload until that interface commit is stacked.
-    void OnUpscaleBoundary() {}
-
-    void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color, bool hdr)
+    void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color, bool hdr) override
     {
         FfxivLightingScan::Boundary(context, color, hdr);
     }

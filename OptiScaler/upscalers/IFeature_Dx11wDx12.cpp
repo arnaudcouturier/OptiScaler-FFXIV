@@ -10,6 +10,7 @@
 
 #include <with_dx12/with_dx12.h>
 #include "ext/Seams.h"
+#include "ext/game/Game.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -398,6 +399,15 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         getOriginalNgxResource(InParameters, NVSDK_NGX_Parameter_ExposureTexture, &restoreParamExposure);
     const bool hasRestoreParamReactive = getOriginalNgxResource(
         InParameters, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &restoreParamReactive);
+
+    if (auto* lighting = ext::game::Current().lighting)
+    {
+        unsigned int flags = 0;
+        const bool haveFlags = InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags) ==
+                               NVSDK_NGX_Result_Success;
+        lighting->OnUpscaleBoundary(InDeviceContext, restoreParamColor,
+                                    !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
+    }
 
     ComPtr<ID3D11ShaderResourceView> restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
     ComPtr<ID3D11SamplerState> restoreSamplerStates[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
