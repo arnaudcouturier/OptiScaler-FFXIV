@@ -29,6 +29,7 @@ struct Dx12Resource
     ID3D12Resource* copy = nullptr;
     int frameIndex = -1;
     bool waitingExecution = false;
+    bool hdrEncoded = false; // ext: C8 late HDR tag: do not convert already-PQ colour again
 
     ID3D12Resource* GetResource() { return (copy == nullptr) ? resource : copy; }
 };

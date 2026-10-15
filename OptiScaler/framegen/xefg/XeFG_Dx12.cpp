@@ -1226,7 +1226,7 @@ bool XeFG_Dx12::Present()
     auto fIndex = GetIndexWillBeDispatched();
     LOG_DEBUG("fIndex: {}", fIndex);
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
+    if (!ext::hdr::Active() && Config::Instance()->FGDrawUIOverFG.value_or_default()) // ext: C8
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui && (ui->validity == FG_ResourceValidity::UntilPresent ||
@@ -1261,7 +1261,7 @@ bool XeFG_Dx12::Present()
 
     if (IsActive() && !IsPaused())
     {
-        if (State::Instance().fgHudlessCompare)
+        if (!ext::hdr::Active() && State::Instance().fgHudlessCompare) // ext: C8
         {
             auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
             if (hudless && (hudless->validity == FG_ResourceValidity::UntilPresent ||
@@ -1341,7 +1341,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         fIndex = GetIndex();
 
     Dx12Resource matched; // ext: B5
-    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched)) // ext: B5 guide matching
+    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched, ext::fg::Provider::XeFg)) // ext: B5, C8
         return false;
 
     auto& type = inputResource->type;
@@ -1503,6 +1503,12 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     else if (type == FG_ResourceType::HudlessColor)
         _noHudless[fIndex] = false;
 
+    if (ext::fg::SceneRawHudless(*inputResource)) // ext: C8 defer HDR colour/tag until the DX11 fence is satisfied
+    {
+        _noHudless[fIndex] = true;
+        return true;
+    }
+
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         fResource->validity != FG_ResourceValidity::UntilPresent)
     {
@@ -1515,17 +1521,20 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             static DXGI_FORMAT lastFormat[BUFFER_COUNT] = {};
             auto desc = fResource->GetResource()->GetDesc();
 
-            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
+            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != ext::fg::NormalizeFormat(desc.Format)) // ext: C8
             {
                 State::Instance().fgChanged = true;
                 return false;
             }
 
-            lastFormat[fIndex] = desc.Format;
+            lastFormat[fIndex] = ext::fg::NormalizeFormat(desc.Format); // ext: C8
         }
 
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
         bool changedCopySourceState = false;
+
+        if (!ext::fg::XefgPrepareHudless(this, *fResource, fIndex, resourceParam)) // ext: C8 PQ HUD-less
+            return false;
 
         // SDK version 2.1.1 fixes those issues
         if (version < feature_version { 1, 2, 2 })

@@ -127,6 +127,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
 
     auto fgConstants = UpscalerInputs::GetFGConstants(feature);
 
+    ext::fg::AdjustConstants(fgConstants); // ext: C8 OptiHDR output also needs the FG HDR flag
     fg->EvaluateState(_dx12Device, fgConstants);
 
     int reset = 0;

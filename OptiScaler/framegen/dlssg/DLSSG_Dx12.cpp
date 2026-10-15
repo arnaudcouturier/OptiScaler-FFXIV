@@ -599,7 +599,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
         fIndex = GetIndex();
 
     Dx12Resource matched; // ext: B5
-    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched)) // ext: B5 guide matching
+    if (!ext::fg::SetResourcePre(this, fIndex, inputResource, matched, ext::fg::Provider::DlssG)) // ext: B5, C8
         return false;
 
     auto& type = inputResource->type;
@@ -721,6 +721,12 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     else if (type == FG_ResourceType::HudlessColor)
         _noHudless[fIndex] = false;
 
+    if (ext::fg::SceneRawHudless(*inputResource)) // ext: C8 SDR copy is converted/tagged after the interop fence
+    {
+        _noHudless[fIndex] = true;
+        return true;
+    }
+
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         fResource->validity != FG_ResourceValidity::UntilPresent)
     {
@@ -733,18 +739,18 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
             static DXGI_FORMAT lastFormat[BUFFER_COUNT] = {};
             auto desc = fResource->GetResource()->GetDesc();
 
-            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
+            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != ext::fg::NormalizeFormat(desc.Format)) // ext: C8
             {
                 LOG_INFO("HUD-less format changed {} -> {}, resetting FG once", (UINT) lastFormat[fIndex],
                          (UINT) desc.Format);
                 // Remember the new format: otherwise every following frame sees the same "change"
                 // and FG is reset over and over (WAITING/PAUSED loop).
-                lastFormat[fIndex] = desc.Format;
+                lastFormat[fIndex] = ext::fg::NormalizeFormat(desc.Format); // ext: C8
                 State::Instance().fgChanged = true;
                 return false;
             }
 
-            lastFormat[fIndex] = desc.Format;
+            lastFormat[fIndex] = ext::fg::NormalizeFormat(desc.Format); // ext: C8
         }
 
         sl::Resource resource {};
@@ -782,6 +788,9 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
         resourceTag.lifecycle = fResource->validity == FG_ResourceValidity::UntilPresent
                                     ? ::sl::ResourceLifecycle::eValidUntilPresent
                                     : sl::ResourceLifecycle::eOnlyValidNow;
+
+        if (!ext::fg::DlssgTagHudless(this, *fResource, resource, resourceTag)) // ext: C8 PQ HUD-less
+            return false;
 
         resourceTag.extent.left = fResource->left;
         resourceTag.extent.top = fResource->top;

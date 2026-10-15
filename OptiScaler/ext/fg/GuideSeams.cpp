@@ -4,6 +4,7 @@
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/GuideState.h"
 #include "ext/game/Game.h"
+#include "ext/hdr/HdrFg.h"
 
 #include <proxies/Streamline_Proxy.h>
 
@@ -34,8 +35,13 @@ void OnUpscaleStart(IFGFeature* fg)
     markers->OnUpscale(fg->FrameCount());
 }
 
-bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12Resource& matched)
+bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12Resource& matched, Provider provider)
 {
+    // C8: OptiHDR's raw scene capture / UI tag drop / PQ HUD-less capture (HudlessColor and UIColor inputs only, so
+    // it never competes with the guide matcher for `matched`)
+    if (!hdr::SetResourceHdr(fg, fIndex, input, matched, provider))
+        return false;
+
     if (Access::FgDx12::GuideAge(*fg, fIndex) < 0 ||
         (input->type != FG_ResourceType::Depth && input->type != FG_ResourceType::Velocity))
         return true;
@@ -50,6 +56,11 @@ bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12R
 
 void SetResourcePost(const Dx12Resource& input, Dx12Resource& frameResource)
 {
+    // C8: a PQ-encoded HUD-less input is the converted image itself; there is nothing to copy at Present
+    frameResource.hdrEncoded = input.hdrEncoded;
+    if (input.hdrEncoded)
+        frameResource.copy = nullptr;
+
     // The matched snapshot owns its data: never keep a per-frame copy of the guides.
     if (input.type == FG_ResourceType::Depth || input.type == FG_ResourceType::Velocity)
         frameResource.copy = nullptr;

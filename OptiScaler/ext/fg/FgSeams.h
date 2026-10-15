@@ -160,7 +160,9 @@ struct GuideInfo
 
 // SetResource, after the frame index is known. Depth/Velocity inputs are replaced by the scene-matched snapshot taken
 // `age` frames ago (`matched` is the storage, `input` is repointed at it). False = skip the input (warm-up, gap, resize).
-bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12Resource& matched);
+// OptiHDR (C8) adds its own handling of HudlessColor and UIColor inputs here (ext/hdr/FgHdr.cpp: raw scene capture, UI tag
+// drop, PQ HUD-less capture); `matched` is the storage for whichever of the two replaces `input`.
+bool SetResourcePre(IFGFeature_Dx12* fg, int fIndex, Dx12Resource*& input, Dx12Resource& matched, Provider provider);
 // SetResource, after the per-frame resource record took the input's fields: Depth/Velocity never keep a copy.
 void SetResourcePost(const Dx12Resource& input, Dx12Resource& frameResource);
 
@@ -180,4 +182,37 @@ void ReleaseGuides(IFGFeature_Dx12* fg);
 void OnDeactivating(IFGFeature* fg);
 // DLSSG_Common::SetConstants: true while the next constants must carry reset = true (history discontinuity).
 bool ForceConstantsReset(IFGFeature* fg);
+} // namespace ext::fg
+
+// ---------------------------------------------------------------------------------------------------------------
+// OptiHDR in the FG path (C8, C10; implementation ext/hdr/FgHdr.cpp). Hosts: framegen/dlssg/DLSSG_Dx12.cpp and
+// framegen/xefg/XeFG_Dx12.cpp (SetResource), inputs/FG/Upscaler_Inputs_Dx11wDx12.cpp (UpscaleStart). All of it is
+// inert while ext::hdr::Active() is false (and the game has no ISceneHdr).
+struct FG_Constants;
+struct _xefg_swapchain_d3d12_resource_data_t;
+
+namespace sl
+{
+struct Resource;
+struct ResourceTag;
+} // namespace sl
+
+namespace ext::fg
+{
+// SetResource, after the lastFormat bookkeeping: the HUD-less format the loop guard compares. R10G10B10A2 while
+// OptiHDR converts the HUD-less input (the tag is PQ), `format` otherwise.
+DXGI_FORMAT NormalizeFormat(DXGI_FORMAT format);
+// SetResource, right after the Streamline resource lifecycle is chosen (DLSS-G): converts a not yet PQ-encoded HUD-less
+// colour to the PQ presentation image on the capture list and tags it eOnlyValidNow. False = the conversion failed, FG
+// was deactivated (refusing a mismatched input): the caller returns false.
+bool DlssgTagHudless(IFGFeature_Dx12* fg, Dx12Resource& fResource, sl::Resource& resource, sl::ResourceTag& tag);
+// SetResource, XeFG, after GetResourceData: the same conversion through the SDK's immediate copy path. False = FG was
+// deactivated, the caller returns false.
+bool XefgPrepareHudless(IFGFeature_Dx12* fg, Dx12Resource& fResource, int fIndex,
+                        _xefg_swapchain_d3d12_resource_data_t& resourceParam);
+// SetResource, after the resource state was recorded: true while the raw (SDR) HUD-less capture of scene HDR mode is
+// only held; the PQ colour and the tag are produced after the interop fence (`_noHudless = true; return true`).
+bool SceneRawHudless(const Dx12Resource& input);
+// UpscalerInputsDx11wDx12::UpscaleStart: OptiHDR output also needs the FG HDR flag.
+void AdjustConstants(FG_Constants& constants);
 } // namespace ext::fg

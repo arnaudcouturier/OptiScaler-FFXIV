@@ -25,4 +25,8 @@ struct ext::Access::FgDx12
     static void ReleaseGuides(IFGFeature_Dx12& fg);
     static void InvalidateGuides(IFGFeature_Dx12& fg);
     static int GuideAge(IFGFeature_Dx12& fg, int index);
+
+    // --- C8: OptiHDR (hdr/FgHdr.cpp)
+    static ID3D12Device* Device(IFGFeature_Dx12& fg) { return fg._device; }
+    static bool& NoUi(IFGFeature_Dx12& fg, int index) { return fg._noUi[index]; }
 };
