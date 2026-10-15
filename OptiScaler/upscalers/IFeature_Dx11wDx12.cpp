@@ -472,12 +472,10 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
                               (void*) dx11Reactive.Dx12Resource);
 
         LOG_DEBUG("Dispatch!!");
-        const auto upscalerType = dx12Feature->GetUpscalerType();
-        if (upscalerType == Upscaler::DLSS || upscalerType == Upscaler::DLSSD)
+        if (dx12Feature->GetUpscalerType() == Upscaler::DLSS || dx12Feature->GetUpscalerType() == Upscaler::DLSSD) // ext: C2/C3
             ext::upscaler::CorrectRenderSubrect(dx12Feature.get(), InParameters); // ext: C2/C3
-
         auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::Dx11Bridge, cmdList, InParameters,
-                                                 Dx12CommandQueue, _frameCount, upscalerType); // ext: A9
+                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: A9
         ext::nr::EvalBefore(nrEval);
         ext::hdr::BridgeEvalScope hdrBridge(dx11Color.Dx12Resource, dx11Out.Dx12Resource, D3D12_RESOURCE_STATE_COMMON); // ext: C10
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
