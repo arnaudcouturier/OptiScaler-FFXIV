@@ -1109,8 +1109,9 @@ bool Dx11wDx12SC::_WaitDx11ThenDx12()
 
 bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
+    // A submission whose completion cannot be proved: its allocator must never be reused
+    if (_copySubmissionFailed)
+        return false;
 
     if (slot >= _copyAllocatorFenceValues.size())
     {
@@ -1123,7 +1124,13 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     if (fenceValue == 0)
         return true;
 
+    // A missing fence is not "completed", and UINT64_MAX means the device was removed
+    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
+        return false;
+
     const auto completedValue = _copyFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+        return false;
     if (completedValue >= fenceValue)
         return true;
 
@@ -1142,6 +1149,10 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
                   fenceValue, _copyFence->GetCompletedValue(), waitResult);
         return false;
     }
+
+    const auto retiredValue = _copyFence->GetCompletedValue();
+    if (retiredValue == UINT64_MAX || retiredValue < fenceValue)
+        return false;
 
     return true;
 }
@@ -1223,6 +1234,9 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     result = _dx12CommandQueue->Signal(_copyFence, signalValue);
     if (FAILED(result))
     {
+        // Work was submitted, but its completion cannot be proved. Never reset its allocator or
+        // destroy its resources using an older fence value.
+        _copySubmissionFailed = true;
         LOG_ERROR("interop copy fence signal failed: {:X}", (UINT) result);
         return false;
     }
@@ -1235,7 +1249,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
-    if (_copyFence == nullptr)
+    if (_copySubmissionFailed || _copyFence == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
@@ -1258,8 +1272,8 @@ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 
 bool Dx11wDx12SC::_WaitForCopyQueueIdle()
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
+    if (_copySubmissionFailed)
+        return false;
 
     UINT64 waitValue = _lastInteropCopyFenceValue;
 
@@ -1269,7 +1283,13 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
     if (waitValue == 0)
         return true;
 
+    // A missing fence is not "idle", and UINT64_MAX means the device was removed
+    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
+        return false;
+
     const auto completedValue = _copyFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+        return false;
     if (completedValue >= waitValue)
         return true;
 
@@ -1288,6 +1308,10 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
                   _copyFence->GetCompletedValue(), waitResult);
         return false;
     }
+
+    const auto retiredValue = _copyFence->GetCompletedValue();
+    if (retiredValue == UINT64_MAX || retiredValue < waitValue)
+        return false;
 
     for (auto& fenceValue : _copyAllocatorFenceValues)
         fenceValue = 0;
@@ -1318,7 +1342,14 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 
 void Dx11wDx12SC::_ReleaseInteropObjects()
 {
-    _WaitForCopyQueueIdle();
+    if (!_WaitForCopyQueueIdle())
+    {
+        // Raw COM ownership is intentionally retained on this failure path: a timeout or a failed
+        // signal cannot justify freeing memory the GPU may still be using.
+        _interopInitialized = false;
+        LOG_ERROR("Interop cleanup deferred: copy completion could not be established");
+        return;
+    }
     _ReleaseInteropBackBuffers();
 
     _lastInteropCopyFenceValue = 0;
