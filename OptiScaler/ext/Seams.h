@@ -7,6 +7,7 @@
 #include "ext/core/MenuRegistry.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
+#include "ext/nr/NrSeams.h"
 
 #include <cstddef>
 

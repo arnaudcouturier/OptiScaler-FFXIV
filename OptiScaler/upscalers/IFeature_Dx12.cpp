@@ -5,6 +5,7 @@
 
 #include "IFeature_Dx12.h"
 #include "State.h"
+#include "ext/Seams.h"
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
@@ -44,7 +45,8 @@ bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCo
     return result;
 }
 
-bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
+bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters,
+                             ID3D12CommandQueue* timingQueue) // ext: A1 timingQueue (AMD pre-SR timing)
 {
     if (!IsInited())
     {
@@ -237,7 +239,8 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     }
 
     // Upscaler will write to the first active shader, or just output
-    InParameters->Set(NVSDK_NGX_Parameter_Output, currentTarget);
+    ext::nr::PreSrScope preSr(Device, GetUpscalerType(), GetFeatureFlags(), InCommandList, InParameters, currentTarget,
+                              timingQueue); // ext: A1 Output/Color swap for the upscaler, restored on every exit
 
     UpscalerTime->Start(InCommandList);
 

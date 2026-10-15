@@ -5,6 +5,7 @@
 #include "NVNGX_DLSS.h"
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
+#include "ext/Seams.h"
 
 #include <upscalers/FeatureProvider_Dx12.h>
 #include "upscalers/dlss/DLSSFeature_Dx12.h"
@@ -1146,15 +1147,19 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         }
     }
 
+    ext::nr::NrEvalCtx nrEval { ext::nr::NrEvalCtx::Site::Native, InCmdList, InParameters, nullptr, 0, feature }; // ext: A1
+
     // Native DLSS passthrough
     if (handleId < DLSS_MOD_ID_OFFSET)
     {
         if (cfg.DLSSEnabled.value_or_default() && NVNGXProxy::D3D12_EvaluateFeature() != nullptr)
         {
             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
+            ext::nr::EvalBefore(nrEval);
             NVSDK_NGX_Result result =
                 NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
+            ext::nr::EvalAfter(nrEval, result == NVSDK_NGX_Result_Success);
             return result;
         }
 
@@ -1176,7 +1181,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         InParameters->Set("DLSSG.CameraFar", lastDlssgCameraFar.value());
 
     // OptiScaler internal handling
-    return TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
+    ext::nr::EvalBefore(nrEval); // ext: A1
+    const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
+    ext::nr::EvalAfter(nrEval, optiResult == NVSDK_NGX_Result_Success); // ext: A1
+    return optiResult;
 }
 
 #pragma endregion
