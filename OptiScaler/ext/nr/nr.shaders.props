@@ -37,5 +37,13 @@
       <Spirv>true</Spirv>
       <Defines>VK_MODE</Defines>
     </ExtShader>
+    <!-- AMD pre-SR: compiled at run time with the System32 D3DCompiler (the game's own one rejects the FP16 typed UAV
+         load shader), so the .hlsl sources are embedded as text (Compiler=text): sizeof() includes the NUL -->
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_copy.hlsl"><Compiler>text</Compiler><Variable>CopyShader</Variable><Header>amd_copy_Text.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_resolve.hlsl"><Compiler>text</Compiler><Variable>ResolveShader</Variable><Header>amd_resolve_Text.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_depth.hlsl"><Compiler>text</Compiler><Variable>DepthShader</Variable><Header>amd_depth_Text.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_motion.hlsl"><Compiler>text</Compiler><Variable>MotionShader</Variable><Header>amd_motion_Text.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_exposure.hlsl"><Compiler>text</Compiler><Variable>ExposureShader</Variable><Header>amd_exposure_Text.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)amd\shaders\amd_encoding.hlsl"><Compiler>text</Compiler><Variable>EncodingShader</Variable><Header>amd_encoding_Text.h</Header></ExtShader>
   </ItemGroup>
 </Project>
