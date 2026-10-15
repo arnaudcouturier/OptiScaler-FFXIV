@@ -263,9 +263,55 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
 
     SetInitParameters(InParameters);
 
-    // Non-DLSS upscalers don't use the cmdList during Init
-    // We have more than one cmdList so unsure how that would even work
+    // The list has to be recording while Init runs, and what is recorded on it has to be submitted.
+    //
+    // Every command list here is closed right after creation. DLSS and Ray Reconstruction record the
+    // model's weight upload and history initialisation onto the list passed to
+    // NVSDK_NGX_D3D12_CreateFeature and expect the caller to submit it. Recorded onto a closed list
+    // that work is silently discarded (the D3D12 methods return void), CreateFeature still reports
+    // success, and the model runs on never-uploaded state: a posterised, flat-blocked picture.
+    //
+    // So open the list, let Init record into it, submit it and wait. The wait is required: the first
+    // Evaluate resets this same allocator, which is a device removal if the work is still in flight.
+    HRESULT prep = Dx12CommandAllocator[0]->Reset();
+
+    if (prep != S_OK)
+        LOG_WARN("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
+
+    prep = Dx12CommandList[0]->Reset(Dx12CommandAllocator[0], nullptr);
+
+    if (prep != S_OK)
+        LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
+
     SetInit(dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters));
+
+    if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
+    {
+        ID3D12CommandList* lists[] = { Dx12CommandList[0] };
+        Dx12CommandQueue->ExecuteCommandLists(1, lists);
+
+        // Recorded against allocator 0, so it must not be reset until this has retired
+        // (Dx12CommandAllocatorFenceValue, which ProcessDx11Textures already honours).
+        const UINT64 signalled = ++Dx12FenceValue;
+
+        if (Dx12CommandQueue->Signal(Dx12Fence, signalled) == S_OK)
+        {
+            Dx12CommandAllocatorFenceValue[0] = signalled;
+
+            if (Dx12Fence->GetCompletedValue() < signalled &&
+                Dx12Fence->SetEventOnCompletion(signalled, Dx12FenceEvent) == S_OK)
+            {
+                WaitForSingleObject(Dx12FenceEvent, INFINITE);
+            }
+        }
+
+        LOG_INFO("Init: feature creation work submitted and waited on (fence {})", signalled);
+    }
+    else
+    {
+        LOG_WARN("Init: could not submit the feature creation work; a feature that records during "
+                 "creation will be missing it");
+    }
 
     return IsInited();
 }
