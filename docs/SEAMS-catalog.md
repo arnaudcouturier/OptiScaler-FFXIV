@@ -325,7 +325,7 @@ Generic upstream bug fixes, each carried as a separate self-contained commit at 
 | 2 | `FrameLimit` timer: `steady_clock` timestamp, `thread_local` waitable timer (RAII), `previous_frame_time` thread_local, early reset when cap is 0 | `misc/FrameLimit.cpp` | U1 FrameLimit hunks 1, 2 (non-interval part) | 20 |
 | 3 | Vulkan spoofing DXVK/Proton re-entry: vendor and `dlssCapable` from `vkGetPhysicalDeviceProperties` of the device being created, no DXGI enumeration in `vkCreateInstance` | `spoofing/Vulkan_Spoofing.cpp` | U1 Vulkan_Spoofing hunks 1-4 | 53 |
 | 4 | `PFN_D3D11_Shutdown1` typedef gains `unsigned int* OutRemainingInstances` and the non-FFXIV call passes it | `proxies/NVNGX_Proxy.h`, `inputs/NVNGX_DLSS_Dx11.cpp` | U1 NVNGX_Proxy; U3 NVNGX_DLSS_Dx11 H5b | 6 |
-| 5 | D5 `ConcurrentInputSelection`: `activeInput`/`activeOutput`/`avaliableInputs` become a synchronized proxy type at their declaration (the ~44 call sites in `input_common.cpp` stay unchanged); tech mutex taken at the top of `update_low_latency_tech` with a lock-free read first; `alignas(16)` on the two `atomic<shared_ptr>` | `low_latency/input/input_common.h`, `input_common.cpp`, new `ConcurrentInputSelection.h` | U2 input_common.h/.cpp; SEAMS 5 | 106 (header 71, declarations 30, `.cpp` 5) |
+| 5 | D5 `ConcurrentInputSelection`: `activeInput`/`activeOutput`/`avaliableInputs` become a synchronized proxy type at their declaration (the ~44 call sites in `input_common.cpp` stay unchanged); tech mutex taken at the top of `update_low_latency_tech` with a lock-free read first; `alignas(16)` on the two `atomic<shared_ptr>` | `low_latency/input/input_common.h`, `input_common.cpp`, new `ConcurrentInputSelection.h` | U2 input_common.h/.cpp; SEAMS 5 | ~140 (new header 131; declarations and 3 `enum_name` call sites in `.cpp`) |
 | 6 | `WaitForUIAllocator`: bounds check, missing fence is not "completed", `UINT64_MAX` (device removed) is failure | `framegen/IFGFeature_Dx12.cpp` | U2 IFGFeature_Dx12 #3 | 9 |
 | 7 | HUD-less format-change loop: remember the new format and log once instead of resetting FG forever | `framegen/dlssg/DLSSG_Dx12.cpp` | U2 DLSSG_Dx12 #13 | 9 |
 | 8 | XeFG copy-source barrier: use `incomingState`/`pResource` and `fResource->cmdList`, symmetrical restore | `framegen/xefg/XeFG_Dx12.cpp` | U2 XeFG_Dx12 #23 | 10 |
@@ -346,8 +346,9 @@ Generic upstream bug fixes, each carried as a separate self-contained commit at 
 | 23 | D5 Reflex limiter: fall through the transition reset when markers stop; reset when the sleep device changes | `hooks/Reflex_Hooks.cpp` | U4 Reflex #5, #6 | 13 |
 | 24 | D5 Streamline: one Detours transaction mutex around `Begin..Commit` in the hooking functions | `hooks/Streamline_Hooks.cpp` | U4 Streamline #2, #10, #12, #14-18 | 9 |
 | 25 | D5 Streamline: `eOk` guards on `slDLSSGGetState` results, clamp via `set_volatile_value` instead of overwriting the ini value | `hooks/Streamline_Hooks.cpp` | U4 Streamline #3(c), #6, #8 | 8 |
+| 26 | Vulkan DLSS-G menu interlock: while the menu is visible on a Vulkan swapchain/overlay, force DLSS-G `eOff` + `eRetainResourcesWhenOff` and frame count 0 (`State::menuOverlayIsVulkan` set in `menu_overlay_vk.cpp`). Not covered by nightly; dead `delayMenuRenderBy` not carried | `hooks/Streamline_Hooks.cpp`, `State.h`, `menu/menu_overlay_vk.cpp` | U4 Streamline; SEAMS 7 item 9; S1a | 24 |
 
-Count: 25 rows (items 1-17 and 21-25 are enumerated or implied by SEAMS 5 line 160; 18-19 are additions). Approx. lines: 718 in total; the footprint table in (d) uses these numbers (rounded to ~715).
+Count: 26 rows (row 26 added by S1a; #16 skipped in S1b because nightly's DLSS-SR flag is per instance) (items 1-17 and 21-25 are enumerated or implied by SEAMS 5 line 160; 18-19 are additions). Approx. lines: 718 in total; the footprint table in (d) uses these numbers (rounded to ~715).
 
 # (b) `ext::Access` needs
 
