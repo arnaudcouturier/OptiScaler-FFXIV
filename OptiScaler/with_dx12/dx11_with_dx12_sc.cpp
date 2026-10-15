@@ -1230,6 +1230,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
                        D3D12_RESOURCE_STATE_COPY_DEST);
 
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, copySource);
+    ext::dx11bridge::PrepareScreenshot(*this, copySlot, copySource); // ext: C9 HDR PNG readback
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);

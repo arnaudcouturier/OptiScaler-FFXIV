@@ -5,6 +5,7 @@
 #include "ext/dx11bridge/BridgeAccess.h"
 #include "ext/hdr/Hdr10.h"
 #include "ext/hdr/FfxivHdrPreview.h"
+#include "ext/hdr/screenshot/HdrScreenshot.h"
 #include "ext/game/Game.h"
 
 #include <framegen/IFGFeature_Dx12.h>
@@ -66,11 +67,15 @@ bool SetColorSpace(Dx11wDx12SC& sc, DXGI_COLOR_SPACE_TYPE colorSpace, HRESULT& o
 
 bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, D3D12_RESOURCE_STATES& before)
 {
+    auto& bridge = Access::Bridge::Ext(sc);
+    bridge.screenshotSdrSource = nullptr;
     if (!Access::Bridge::HdrOutput(sc))
         return true;
 
     auto* device = Access::Bridge::Dx12Device(sc);
     auto* list = Access::Bridge::CopyList(sc, slot);
+    bridge.screenshotSdrSource = copySource;
+    bridge.screenshotSdrState = before;
 
     hdr::SceneInput scene;
     const auto sourceDesc = copySource->GetDesc();
@@ -119,6 +124,20 @@ bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, 
 
     before = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
+}
+
+void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
+{
+    auto& bridge = Access::Bridge::Ext(sc);
+    auto* sdrSource = bridge.screenshotSdrSource;
+    bridge.screenshotSdrSource = nullptr;
+    if (!sdrSource || !ext::hdr::screenshot::Pending())
+        return;
+
+    auto* device = Access::Bridge::Dx12Device(sc);
+    auto* list = Access::Bridge::CopyList(sc, slot);
+    ext::hdr::screenshot::Prepare(Access::Bridge::Window(sc), device, list, hdrSource, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                  sdrSource, bridge.screenshotSdrState);
 }
 
 PresentScope::~PresentScope()

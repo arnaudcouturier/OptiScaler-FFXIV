@@ -5,6 +5,7 @@
 #include "ext/game/Game.h"
 #include "ext/gpu/GpuLifetime.h"
 #include "ext/hdr/Hdr10.h"
+#include "ext/hdr/screenshot/HdrScreenshot.h"
 
 #include <Config.h>
 #include <State.h>
@@ -94,6 +95,7 @@ void EnsureOwner(ID3D12Device* device){
   owner.begin=[](void*,UINT n,ID3D12CommandList*const* l){return BeginSubmission(n,l);};
   owner.quarantine=[](void*,UINT n,ID3D12CommandList*const* l){QuarantineSubmission(n,l);};
   owner.reset=[](void*,ID3D12CommandList* c){Reset(c);};
+  owner.after=screenshot::AfterExecute;
   handle=gpu::RegisterOwner(owner);
  });
  if(handle>=0 && device)restrack::EnsureHooks(device);
@@ -187,5 +189,5 @@ void NoteGameColorSpace(DXGI_COLOR_SPACE_TYPE cs){
 std::function<bool()> TrackCommands(ID3D12GraphicsCommandList*c){auto& p=P();std::lock_guard lock(p.mutex);p.lifetime.Record(c);return p.lifetime.ReuseProbe(c);}
 gpu::GpuSubmission BeginSubmission(UINT n,ID3D12CommandList*const*l){return P().lifetime.BeginSubmission(n,l);}
 void QuarantineSubmission(UINT n,ID3D12CommandList*const*l){P().lifetime.QuarantineSubmission(n,l);}
-void Reset(ID3D12CommandList*c){auto& pool=P();std::lock_guard lock(pool.mutex);pool.lifetime.ResetRecording(c);CollectLocked(pool,ext::Active(ext::F::Hdr));}
+void Reset(ID3D12CommandList*c){screenshot::Reset(c);auto& pool=P();std::lock_guard lock(pool.mutex);pool.lifetime.ResetRecording(c);CollectLocked(pool,ext::Active(ext::F::Hdr));}
 }

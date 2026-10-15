@@ -41,12 +41,7 @@ void OverlayRelease();
 
 namespace ext::menu
 {
-// MenuCommon's UiTargetMode is TU-local. Its first value is SDR, so keep the host type deduced at the call site.
-template <class UiTargetMode> UiTargetMode AdjustUiTargetMode(UiTargetMode mode)
-{
-    return hdr::Active() ? static_cast<UiTargetMode>(0) : mode;
-}
-
+inline bool UseSdrUiTarget() { return hdr::Active(); }
 void AdjustTheme(ImGuiStyle& style);
 }
 
@@ -102,6 +97,8 @@ bool SetColorSpace(Dx11wDx12SC& sc, DXGI_COLOR_SPACE_TYPE colorSpace, HRESULT& o
 // copy list while the bridge outputs HDR. `copySource`/`before` are updated; false = the conversion failed (the caller
 // closes the list and returns false).
 bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, D3D12_RESOURCE_STATES& before);
+// _CopyDx11SharedToDx12FGBackBuffer, after the shared source was copied: records a requested SDR/HDR screenshot.
+void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource);
 } // namespace ext::dx11bridge
 
 // ---------------------------------------------------------------------------------------------------------------

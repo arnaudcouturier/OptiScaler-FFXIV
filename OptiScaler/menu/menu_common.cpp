@@ -1183,8 +1183,11 @@ void MenuCommon::PopulateCombo(const std::string& name, TStorage& currentValue,
     }
 }
 
-static UiTargetMode getUiTargetModeRaw()
+static UiTargetMode getUiTargetMode()
 {
+    if (ext::menu::UseSdrUiTarget())
+        return UiTargetMode::SDR;
+
     const auto& state = State::Instance();
 
     const bool fallback = !Config::Instance()->OverlayMenu.value_or_default();
@@ -1255,11 +1258,6 @@ static UiTargetMode getUiTargetModeRaw()
 
     // Unsupported model / primaries / transfer combination.
     return UiTargetMode::SDR;
-}
-
-static UiTargetMode getUiTargetMode()
-{
-    return ext::menu::AdjustUiTargetMode(getUiTargetModeRaw());
 }
 
 static float srgbToLinear(float x)

@@ -6,6 +6,7 @@
 #include "ext/core/MenuWidgets.h"
 #include "ext/game/Game.h"
 #include "ext/hdr/Hdr10.h"
+#include "ext/hdr/screenshot/HdrScreenshot.h"
 #include "ext/hdr/scene/NrSceneInput.h"
 
 #include <imgui/imgui.h>
@@ -22,6 +23,9 @@ template <class Setting> void ResetHdr(const char* id, Setting& setting)
         ImGui::SetTooltip("Restore this setting to its default. Save Settings to keep the reset.");
     ImGui::PopID();
 }
+
+void* ScreenshotKeyOption() { return &ext::Cfg().hdr.screenshotKey; }
+void ScreenshotPressed(ext::menu::Ctx&) { ext::hdr::screenshot::Request(); }
 
 void DrawHdrCard(ext::menu::Ctx& ctx)
 {
@@ -110,6 +114,7 @@ void DrawHdrCard(ext::menu::Ctx& ctx)
                        "SDR screenshots and the live game are unaffected.");
     ImGui::EndDisabled();
     ImGui::TextWrapped("Optional screenshot key: one key; Escape cancels, Backspace unbinds. Save Settings to keep your choice.");
+    ImGui::TextWrapped("%s", ext::hdr::screenshot::Status().c_str());
 
     float expansion = hdr.expansion.value_or_default();
     if (ImGui::SliderFloat("Highlight expansion", &expansion, 0, 1, "%.2f"))
@@ -157,6 +162,8 @@ struct HdrMenuRegistration
     {
         ext::menu::Register({ "ffxiv_hdr", "Frame Gen", "FFXIV HDR10 output", DrawHdrCard, "fg_selection",
                               HdrCardVisible });
+        ext::menu::RegisterShortcut({ "OptiHDR screenshot", 15, ScreenshotKeyOption, "OptiHDR screenshot",
+                                      ScreenshotPressed });
     }
 } registration;
 } // namespace

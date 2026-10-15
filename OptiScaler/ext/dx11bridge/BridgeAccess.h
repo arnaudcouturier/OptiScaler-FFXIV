@@ -21,5 +21,6 @@ struct ext::Access::Bridge
     static DXGI_FORMAT BufferFormat(const Dx11wDx12SC& sc) { return sc._bufferFormat; }
     static ID3D12Device* Dx12Device(Dx11wDx12SC& sc) { return sc._dx12Device; }
     static ID3D12GraphicsCommandList* CopyList(Dx11wDx12SC& sc, UINT slot) { return sc._copyCommandLists[slot]; }
+    static HWND Window(Dx11wDx12SC& sc) { return sc._handle; }
     static IFGFeature_Dx12* Fg(Dx11wDx12SC& sc) { return sc._fg; }
 };
