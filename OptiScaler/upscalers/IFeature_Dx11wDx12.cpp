@@ -284,6 +284,7 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
     if (prep != S_OK)
         LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
 
+    ext::hdr::BridgeInitScope hdrBridgeScope; // ext: C10 DLSS scene HDR: IsHDR/AutoExposure create flags
     SetInit(dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters));
 
     if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
@@ -472,6 +473,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::Dx11Bridge, cmdList, InParameters,
                                                  Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: A9
         ext::nr::EvalBefore(nrEval);
+        ext::hdr::BridgeEvalScope hdrBridge(dx11Color.Dx12Resource, dx11Out.Dx12Resource, D3D12_RESOURCE_STATE_COMMON); // ext: C10
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
         ext::nr::EvalAfter(nrEval, dx12EvalResult);
 

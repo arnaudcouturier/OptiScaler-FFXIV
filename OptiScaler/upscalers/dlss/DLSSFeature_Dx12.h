@@ -3,10 +3,13 @@
 #include <upscalers/IFeature_Dx12.h>
 #include <shaders/rcas/RCAS_Dx12.h>
 #include <string>
+#include "ext/Seams.h"
 
 class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
 {
   private:
+    ext::hdr::DlssExt _ext; // ext: C10 scene HDR input state
+
   protected:
     bool InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 

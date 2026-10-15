@@ -2,6 +2,7 @@
 #include "DLSSFeature_Dx12.h"
 #include <dxgi1_4.h>
 #include <Config.h>
+#include "ext/Seams.h"
 
 bool DLSSFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
@@ -45,6 +46,8 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
 
         _p_dlssHandle = &_dlssHandle;
 
+        ext::hdr::AdjustDlssCreateFlags(_ext, InParameters); // ext: C10
+
         NVSDK_NGX_Result nvResult;
         {
             ScopedSkipHeapCapture skipHeapCapture {};
@@ -52,6 +55,8 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
             nvResult = NVNGXProxy::D3D12_CreateFeature()(InCommandList, NVSDK_NGX_Feature_SuperSampling, InParameters,
                                                          &_p_dlssHandle);
         }
+
+        ext::hdr::RestoreDlssCreateFlags(_ext, InParameters); // ext: C10
 
         if (nvResult != NVSDK_NGX_Result_Success)
         {
@@ -89,7 +94,12 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         ProcessEvaluateParams(InParameters);
 
+        ext::hdr::DlssEvalScope hdrEval(_ext, Device, InCommandList, InParameters, RenderWidth(), RenderHeight(), Handle()->Id); // ext: C10
+        if (!hdrEval.ok())
+            return false;
+
         nvResult = NVNGXProxy::D3D12_EvaluateFeature()(InCommandList, _p_dlssHandle, InParameters, NULL);
+        hdrEval.Finish(nvResult == NVSDK_NGX_Result_Success); // ext: C10
 
         if (nvResult != NVSDK_NGX_Result_Success)
         {

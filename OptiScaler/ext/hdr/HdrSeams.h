@@ -19,6 +19,7 @@ inline bool Active() { return ext::Active(ext::F::Hdr) && OutputIsHdr(); }
 // Presenter plan (C8; ext/hdr/PresentHdr.cpp). Hosts: hooks/DxgiFactory_Hooks.cpp and hooks/DxgiFactory_WrappedCalls.cpp,
 // CreateSwapChain and CreateSwapChainForHwnd of each (4 sites): when OptiHDR is requested the DX11 game gets a DX12
 // presenter swapchain (R10G10B10A2) even with frame generation off.
+#include <memory>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <dxgi1_2.h>
@@ -67,3 +68,63 @@ bool SetColorSpace(Dx11wDx12SC& sc, DXGI_COLOR_SPACE_TYPE colorSpace, HRESULT& o
 // closes the list and returns false).
 bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, D3D12_RESOURCE_STATES& before);
 } // namespace ext::dx11bridge
+
+// ---------------------------------------------------------------------------------------------------------------
+// DLSS scene HDR input on the D3D12 side of the bridge (C10; ext/hdr/DlssHdr.cpp). Host:
+// upscalers/dlss/DLSSFeature_Dx12.cpp (InitDLSS, EvaluateInternal). State: DlssExt (`DLSSFeatureDx12::_ext`).
+struct NVSDK_NGX_Parameter;
+
+namespace ext::hdr
+{
+struct DlssExt
+{
+    bool sceneHdr = false;      // this feature runs on the HDR scene (was _sceneHdrInput)
+    int available = -1;         // was _sceneHdrAvailable
+    unsigned originalFlags = 0; // create flags before AdjustDlssCreateFlags
+};
+
+// InitDLSS, right before CreateFeature: when the bridge is initialising the feature with HDR.Mode 1 and DLSSSceneInput,
+// adds IsHDR | AutoExposure to the create flags (the originals are kept in `ext`).
+void AdjustDlssCreateFlags(DlssExt& ext, NVSDK_NGX_Parameter* params);
+// InitDLSS, right after CreateFeature.
+void RestoreDlssCreateFlags(DlssExt& ext, NVSDK_NGX_Parameter* params);
+
+// EvaluateInternal, before the native evaluate: opens the scene, prepares the DLSS input/output pair and substitutes
+// colour/output/exposure. `ok()` false = the preparation failed: the option was turned off for the session and the
+// backend flagged for recreation, the caller returns false. Finish() right after the native evaluate: restores the
+// bindings and Reset, finishes the packet and publishes the reconstructed display image. No-op while the feature is not
+// in scene mode.
+class DlssEvalScope
+{
+  public:
+    DlssEvalScope(DlssExt& ext, ID3D12Device* device, ID3D12GraphicsCommandList* commands, NVSDK_NGX_Parameter* params,
+                  unsigned renderWidth, unsigned renderHeight, unsigned handleId);
+    bool ok() const { return _ok; }
+    void Finish(bool success);
+
+  private:
+    std::shared_ptr<void> _state;
+    ID3D12GraphicsCommandList* _commands = nullptr;
+    bool _ok = true;
+};
+
+// IFeature_Dx11wDx12: the bridge publishes its colour/output and their state around Evaluate, and marks the Init
+// that creates the DLSS feature (DlssSceneInput::bridge* thread-locals of the reference build)
+struct BridgeInitScope
+{
+    BridgeInitScope();
+    ~BridgeInitScope();
+    BridgeInitScope(const BridgeInitScope&) = delete;
+    BridgeInitScope& operator=(const BridgeInitScope&) = delete;
+
+  private:
+    bool _previous;
+};
+struct BridgeEvalScope
+{
+    BridgeEvalScope(ID3D12Resource* colour, ID3D12Resource* output, D3D12_RESOURCE_STATES colourState);
+    ~BridgeEvalScope();
+    BridgeEvalScope(const BridgeEvalScope&) = delete;
+    BridgeEvalScope& operator=(const BridgeEvalScope&) = delete;
+};
+} // namespace ext::hdr
