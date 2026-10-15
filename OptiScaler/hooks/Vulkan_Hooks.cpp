@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "Vulkan_Hooks.h"
+#include "ext/Seams.h"
 
 #include <Util.h>
 #include <Config.h>
@@ -463,7 +464,10 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
     VulkanSpoofing::hkvkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
 
+    ext::nr::VkDeviceExtScope nrExt(o_vkGetInstanceProcAddr, physicalDevice, localCreteInfo); // ext: B9
+
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+    nrExt.LogResult(result); // ext: B9
 
     if (result == VK_SUCCESS && fg != nullptr)
     {

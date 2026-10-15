@@ -8,6 +8,7 @@
 #include <inputs/FG/Upscaler_Inputs_Vk.h>
 #include "NVNGX_Parameter.h"
 #include "proxies/NVNGX_Proxy.h"
+#include "ext/Seams.h"
 
 #include "upscalers/FeatureProvider_Vk.h"
 
@@ -1063,6 +1064,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
     UpscalerInputsVk::UpscaleStart(InCmdList, InParameters, deviceContext);
 
+    auto nrToken = ext::nr::VkEvalBefore(InCmdList, InParameters, vkInstance, vkPD, vkDevice,
+                                         deviceContext->GetUpscalerType()); // ext: B9 (restores Color on scope exit)
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
 
     if (!upscaleResult)
@@ -1075,6 +1078,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
         state.changeBackend[handleId] = true;
         return NVSDK_NGX_Result_Success;
     }
+
+    ext::nr::VkEvalAfter(nrToken, upscaleResult, InCmdList, InParameters, vkInstance, vkPD, vkDevice); // ext: B9
 
     return upscaleResult ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }

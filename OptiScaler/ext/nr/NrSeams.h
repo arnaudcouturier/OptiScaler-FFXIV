@@ -7,11 +7,15 @@
 #include <OptiTypes.h>
 #include <d3d12.h>
 #include <nvsdk_ngx.h>
+#include <vulkan/vulkan.h>
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "ext/nr/NgxResourceBinding.h"
+
+struct NVSDK_NGX_Resource_VK;
 
 namespace ext::nr
 {
@@ -73,6 +77,46 @@ class PreSrScope
     std::optional<NgxResourceBinding::Binding<NVSDK_NGX_Parameter>> _output;
     std::optional<NgxResourceBinding::Binding<NVSDK_NGX_Parameter>> _color;
     bool _colorChanged = false;
+};
+
+// Native Vulkan evaluate (B9). The token carries what the after-call and the Color restore need; `bridged` backends
+// (`*_on12`) are evaluated by IFeature_VkwDx12 on D3D12, so NR does not run on the Vulkan side for them.
+struct VkNrToken
+{
+    bool handled = false;
+    bool rayReconstruction = false;
+    bool bridged = false;
+    NVSDK_NGX_Resource_VK* nrColor = nullptr; // the NR-edited colour that replaced Parameter_Color, if any
+    void* originalColor = nullptr;
+    NVSDK_NGX_Parameter* params = nullptr;
+
+    VkNrToken() = default;
+    VkNrToken(const VkNrToken&) = delete;
+    VkNrToken& operator=(const VkNrToken&) = delete;
+    VkNrToken(VkNrToken&& other) noexcept;
+    ~VkNrToken(); // puts Parameter_Color back when NR replaced it
+};
+
+// Before `deviceContext->Evaluate`. Asked of the live feature's backend rather than of the config: the config is what
+// was requested, the feature is what is actually running.
+VkNrToken VkEvalBefore(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkInstance inst, VkPhysicalDevice pd,
+                       VkDevice dev, Upscaler backend);
+// After the evaluate. Nothing for a failed upscale, a bridged backend or when the model already ran before the upscale.
+void VkEvalAfter(VkNrToken& token, bool upscaleOk, VkCommandBuffer cmd, NVSDK_NGX_Parameter* params, VkInstance inst,
+                 VkPhysicalDevice pd, VkDevice dev);
+
+// vkCreateDevice: appends the NVX extensions the model needs when NR is on (B9) and keeps the merged name list alive
+// for the create call; LogResult reports the outcome. A no-op scope while NR is off.
+class VkDeviceExtScope
+{
+  public:
+    VkDeviceExtScope(PFN_vkGetInstanceProcAddr gipa, VkPhysicalDevice pd, VkDeviceCreateInfo& info);
+    void LogResult(VkResult result) const;
+
+  private:
+    bool _on = false;
+    const VkDeviceCreateInfo* _info = nullptr;
+    std::vector<const char*> _names;
 };
 } // namespace ext::nr
 
