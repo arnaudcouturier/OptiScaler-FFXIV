@@ -1369,7 +1369,9 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
                 if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
                     Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > state.dlssgMfgMax.value())
                 {
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount = state.dlssgMfgMax.value();
+                    // Volatile: the clamp holds for this run and leaves the ini setting alone.
+                    Config::Instance()->FGDLSSGOverrideInterpolationCount.set_volatile_value(
+                        state.dlssgMfgMax.value());
                 }
             }
         }
@@ -1405,6 +1407,8 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
         // We might be feeding a newer struct to an older SL but that seems to work just fine for this Get function
         result = o_slDLSSGGetState(viewport, dynamic_cast<sl::DLSSGState&>(newState), options);
+        if (result != sl::Result::eOk)
+            return result;
 
         // Copy back data to game's struct
         memcpy(&state, &newState, 56); // struct ver 1 size
@@ -1429,6 +1433,8 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     else
     {
         result = o_slDLSSGGetState(viewport, state, options);
+        if (result != sl::Result::eOk)
+            return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
     }
 
@@ -1454,7 +1460,9 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
                 if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
                     Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > optiState.dlssgMfgMax.value())
                 {
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount = optiState.dlssgMfgMax.value();
+                    // Volatile: the clamp holds for this run and leaves the ini setting alone.
+                    Config::Instance()->FGDLSSGOverrideInterpolationCount.set_volatile_value(
+                        optiState.dlssgMfgMax.value());
                 }
             }
         }
