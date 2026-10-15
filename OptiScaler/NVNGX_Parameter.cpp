@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/Seams.h"
 #include "NVNGX_Parameter.h"
 
 #include "SysUtils.h"
@@ -402,7 +403,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = ext::upscaler::EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue; // ext: C1/C5 EffectivePerfQuality write-back
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -540,6 +542,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     LOG_DEBUG("NVSDK_NGX_DLSS_GetOptimalSettingsCallback: Display Resolution: {0}x{1} Render Resolution: {2}x{3}",
               Width, Height, OutWidth, OutHeight);
+    ext::upscaler::OnOptimalSettings(enumPQValue, OutWidth, OutHeight, Width, Height); // ext: C1/C5 records LastQualityAnswer
     return NVSDK_NGX_Result_Success;
 }
 
@@ -558,7 +561,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = ext::upscaler::EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue; // ext: C1/C5 EffectivePerfQuality write-back
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -682,6 +686,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     InParams->Set(NVSDK_NGX_EParameter_DLSSMode, NVSDK_NGX_DLSS_Mode_DLSS_DLISP);
 
     LOG_DEBUG("Display Resolution: {0}x{1} Render Resolution: {2}x{3}", Width, Height, OutWidth, OutHeight);
+    ext::upscaler::OnOptimalSettings(enumPQValue, OutWidth, OutHeight, Width, Height); // ext: C1/C5 records LastQualityAnswer
     return NVSDK_NGX_Result_Success;
 }
 

@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <Config.h>
+#include "ext/Seams.h"
 #include "IFeature.h"
 
 void IFeature::SetHandle(unsigned int InHandleId)
@@ -109,6 +110,8 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         InParameters->Get(NVSDK_NGX_Parameter_Width, &width);
         InParameters->Get(NVSDK_NGX_Parameter_Height, &height);
         InParameters->Get(NVSDK_NGX_Parameter_PerfQualityValue, &pqValue);
+
+        ext::upscaler::ApplyForcedQuality(InParameters, width, height, outWidth, outHeight, pqValue); // ext: C1/C5 forced-quality relabel (32px slack) + native-quality EnsureHooks; docs/SEAMS-catalog.md "upscaler"
 
         GetDynamicOutputResolution(InParameters, &outWidth, &outHeight);
 
