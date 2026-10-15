@@ -417,6 +417,7 @@ const std::vector<GameConfig> gameConfigs = {
     {
         .exes = { "ffxiv_dx11.exe" },
         .defaults = { OverrideVsync = false },
+        .quirks = { ScaleDisplayColorForForcedQuality, ReleaseBackbufferOnce },
     },
     {
         .exes = { "graphadapterdesc.exe" },

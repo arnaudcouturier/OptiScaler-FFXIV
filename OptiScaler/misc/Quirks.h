@@ -30,6 +30,8 @@ enum class GameQuirk : uint64_t
     ForceFGRenderSizeMVs,
     CreateSLOnThe2ndDevice,
     XeFGCameraMotionFill, // XeFG inputs: velocity has alpha 0 where only the camera moved (The Witcher 3)
+    ScaleDisplayColorForForcedQuality, // FFXIV: scale display-sized color to the forced upscaler input size
+    ReleaseBackbufferOnce, // FFXIV: release the FG backbuffer once instead of draining its reference count
     // Don't forget to add the new entry to printQuirks
     _
 };

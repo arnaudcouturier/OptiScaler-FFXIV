@@ -1253,6 +1253,12 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::XeFGCameraMotionFill)
         stringQuirks.push_back("Fill XeFG input motion vectors with camera motion");
 
+    if (quirks & GameQuirk::ScaleDisplayColorForForcedQuality)
+        stringQuirks.push_back("Scale FFXIV display-sized color for forced upscaler quality");
+
+    if (quirks & GameQuirk::ReleaseBackbufferOnce)
+        stringQuirks.push_back("Release FFXIV FG backbuffer once");
+
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
         spdlog::info("Quirk: {}", stringQuirk);

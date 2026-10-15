@@ -1487,7 +1487,9 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
                     {
                         LOG_DEBUG("Backbuffer {}: {:X}", i, (size_t) backBuffer);
                         auto refCount = backBuffer->Release();
-                        while (refCount > XEFG_RESOURCE_REF_LIMIT)
+                        const bool releaseBackbufferOnce =
+                            static_cast<bool>(State::Instance().gameQuirks & GameQuirk::ReleaseBackbufferOnce);
+                        while (!releaseBackbufferOnce && refCount > XEFG_RESOURCE_REF_LIMIT)
                         {
                             LOG_DEBUG("Releasing backbuffer {}: RefCount {}", i, refCount);
                             refCount = backBuffer->Release();
