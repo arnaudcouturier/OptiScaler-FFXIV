@@ -459,17 +459,17 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         commandListRecording = true;
 
-        unsigned int nrGuideSourceWidth = 0, nrGuideSourceHeight = 0;
+        unsigned int nrGuideSourceWidth = 0, nrGuideSourceHeight = 0; // ext: C4
         auto upscalerColor = ext::dx11bridge::PrepareUpscalerColor(*this, cmdList, InParameters,
                                                                     dx11Color.Dx12Resource, nrGuideSourceWidth,
                                                                     nrGuideSourceHeight); // ext: C4
-        if (upscalerColor == nullptr)
+        if (upscalerColor == nullptr) // ext: C4
         {
-            LOG_ERROR("Can't prepare the forced-quality color input");
-            break;
+            LOG_ERROR("Can't prepare the forced-quality color input"); // ext: C4
+            break; // ext: C4
         }
 
-        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor);
+        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor); // ext: C4
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) dx11Depth.Dx12Resource);
