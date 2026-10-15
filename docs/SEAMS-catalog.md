@@ -42,7 +42,7 @@ Compiled from the five port ledgers (U1..U5, `phase3-ledger/`) with SEAMS.md sec
 
 ## config
 
-Fork keys live in per-feature structs bound by a declarative table; `ext::Cfg()` aggregates them. Section and key names are identical to today. `Config.h` loses every fork member (the ~460 `Config::Instance()->X` fork call sites exist only in fork code that moves to ext). Dropped keys (E1 `ProxyProbe`/`UseProxy`/`ScanAnchor*`, E2 `ProbeD3D11`, E6 `External`, dead `AdaBlackwellKernels`, migration-only `WhitePointFromExposure`) are not carried. `AutoCapture` becomes a real key.
+Fork keys live in per-feature structs bound by a declarative table; `ext::Cfg()` aggregates them. Section and key names are identical to today. `Config.h` loses every fork member (the ~460 `Config::Instance()->X` fork call sites exist only in fork code that moves to ext). Dropped keys (E1 `ProxyProbe`/`UseProxy`/`ScanAnchor*`, E2 `ProbeD3D11`, E6 `External`, dead `AdaBlackwellKernels`, migration-only `WhitePointFromExposure`) are not carried. `AutoCapture` becomes a real key (default false).
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
 |---|---|---|---|---|---|

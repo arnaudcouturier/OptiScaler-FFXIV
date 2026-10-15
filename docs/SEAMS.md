@@ -81,7 +81,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 - **Ini template:** `ext/ini/*.ini` fragments are inserted into the matching sections of the upstream `OptiScaler.ini` by `tools/package.ps1`. The shipped file has one header per section, and the upstream template is never edited in git.
 - **Dropped keys:** drop-listed keys (E1 `ProxyProbe`/`UseProxy`/`ScanAnchor*`, E2 `ProbeD3D11`, E6 `ExternalFrameGeneration`, dead `FGDLSSGAdaBlackwellKernels`) are removed together with their code branches.
   - Migration-only keys (`WhitePointFromExposure`, legacy anchors) are dropped.
-  - `AutoCapture` becomes a real key (default = the current 180-frame behaviour).
+  - `AutoCapture` becomes a real key (default false = the current behaviour: the oracle never ran the capture; when true, one capture after 180 frames).
 
 ### 3.5 Commit classes
 

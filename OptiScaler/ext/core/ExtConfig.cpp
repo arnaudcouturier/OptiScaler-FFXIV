@@ -88,7 +88,8 @@ std::string FormatInt(std::optional<int64_t> v, bool hex)
     if (!v)
         return "auto";
 
-    if (hex)
+    // hex only for positive values: key codes are saved as 0x.., "unbound" (-1) stays decimal
+    if (hex && *v > 0)
         return std::format("{:#x}", *v);
 
     return std::to_string(*v);
@@ -126,6 +127,8 @@ void Load(CSimpleIniA& ini)
 {
     for (const auto& b : Table())
         b.load(b, ini);
+
+    Cfg().PostLoad();
 }
 
 void Save(CSimpleIniA& ini)
@@ -148,7 +151,12 @@ namespace ext
 {
 void ExtConfig::Bind(config::Binder& b)
 {
-    (void) b; // feature structs call `<area>.Bind(b)` here as they are ported
+    nr.Bind(b);
+}
+
+void ExtConfig::PostLoad()
+{
+    nr.PostLoad();
 }
 
 ExtConfig& Cfg()
