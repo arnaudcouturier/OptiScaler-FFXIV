@@ -673,11 +673,11 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
 
     if (_updatesWithoutMarker > 20 || !_inited)
     {
+        // Continue through the transition reset so the old driver cap is cleared
+        // before the software limiter takes over.
         State::Instance().reflexLimitsFps = false;
-        return;
     }
-
-    if (isVulkan && _lastVkSleepDev)
+    else if (isVulkan && _lastVkSleepDev)
     {
         // fgActive doesn't matter for vulkan
         // isUsingAsMainNvapi() because fakenvapi might override the reflex' setting and we don't know it
@@ -718,11 +718,16 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     static float lastFps = 0;
     static bool lastReflexLimitsFps = State::Instance().reflexLimitsFps;
     static LowLatencyMode lastLowLatencyMode = fakenvapi::getCurrentMode();
+    static IUnknown* lastLimitDevice = nullptr;
+    static HANDLE lastLimitVkDevice = nullptr;
 
     // Reset required when toggling Reflex
-    if (State::Instance().reflexLimitsFps != lastReflexLimitsFps)
+    if (State::Instance().reflexLimitsFps != lastReflexLimitsFps || _lastSleepDev != lastLimitDevice ||
+        _lastVkSleepDev != lastLimitVkDevice)
     {
         lastReflexLimitsFps = State::Instance().reflexLimitsFps;
+        lastLimitDevice = _lastSleepDev;
+        lastLimitVkDevice = _lastVkSleepDev;
         lastFps = 0;
         setFPSLimit(0);
     }
