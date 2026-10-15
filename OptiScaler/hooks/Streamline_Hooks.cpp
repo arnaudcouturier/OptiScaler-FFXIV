@@ -16,9 +16,13 @@
 #include <sl1_reflex.h>
 #include <magic_enum.hpp>
 #include "detours/detours.h"
+#include <mutex>
 
 #include <intrin.h>
 #pragma intrinsic(_ReturnAddress)
+
+// Detours transactions are process-global; serialize the Begin..Commit sequences of the hooking functions below.
+static std::mutex g_detoursTransactionMutex;
 
 static std::wstring GetModulePath(HMODULE module)
 {
@@ -1873,6 +1877,7 @@ void StreamlineHooks::hkcommon_slSetParameters_sl1(void* params)
         // It's flipped, 0 -> set void*, 7 -> get void*
         o_setVoid = (PFN_setVoid) vtable[0];
 
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
@@ -1952,6 +1957,7 @@ void StreamlineHooks::unhookInterposer()
 {
     LOG_FUNC();
 
+    std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
@@ -2089,6 +2095,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit != nullptr)
             {
                 LOG_TRACE("Hooking v2");
+                std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
@@ -2181,6 +2188,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit_sl1 || o_slSetTag_sl1 || o_slSetConstants_interposer_sl1 || o_slEvaluateFeature_sl1)
             {
                 LOG_TRACE("Hooking v1");
+                std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
@@ -2411,6 +2419,7 @@ void StreamlineHooks::releaseSlot(SlPlugin plugin, size_t index, bool detach)
 
     if (detach && alive)
     {
+        std::lock_guard<std::mutex> detoursLock(g_detoursTransactionMutex);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
         DetourDetach(&(PVOID&) slot.original, (PVOID) slotDetour(plugin, index));
@@ -2526,6 +2535,7 @@ void StreamlineHooks::hookPlugin(SlPlugin plugin, HMODULE module)
 
     LOG_TRACE("Hooking slGetPluginFunction in {} (slot {})", name, index);
 
+    std::unique_lock<std::mutex> detoursLock(g_detoursTransactionMutex);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&(PVOID&) slot.original, (PVOID) slotDetour(plugin, index));
@@ -2536,6 +2546,7 @@ void StreamlineHooks::hookPlugin(SlPlugin plugin, HMODULE module)
         slot.original = nullptr;
         return;
     }
+    detoursLock.unlock();
 
     size_t imageSize = 0;
     {
