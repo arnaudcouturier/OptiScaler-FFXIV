@@ -4,6 +4,7 @@
 
 #include <low_latency/low_latency_tech/low_latency_tech.h>
 #include <Config.h>
+#include "ConcurrentInputSelection.h"
 
 enum class InputMarkerMode
 {
@@ -50,13 +51,13 @@ struct TimingData
 
 class InputCommon
 {
-    static std::atomic<std::shared_ptr<LowLatencyTech>> currently_active_tech;
+    alignas(16) static std::atomic<std::shared_ptr<LowLatencyTech>> currently_active_tech;
     inline static std::mutex create_tech_mutex {};
 
     // OptiScaler's XeFG paces with an XeLL context. With the XeLL output it's that output's own (which then stays the
     // output until XeFG lets go of it), with a Reflex or AntiLag 2 output XeFG gets one of its own that follows the
     // game's markers while the output does the sleeping.
-    static std::atomic<std::shared_ptr<LowLatencyTech>> xefg_xell;
+    alignas(16) static std::atomic<std::shared_ptr<LowLatencyTech>> xefg_xell;
     inline static std::atomic_bool xefg_uses_output_xell = false;
     // The output XeFG started with, None while it doesn't run
     inline static std::atomic<LowLatencyMode> xefg_started_output = LowLatencyMode::None;
@@ -96,9 +97,12 @@ class InputCommon
 
     static bool xefg_paced();
 
-    inline static flag_set<LowLatencyInput> avaliableInputs {};
-    inline static LowLatencyInput activeInput = LowLatencyInput::None;
-    inline static LowLatencyMode activeOutput = LowLatencyMode::None;
+    // Written by whichever hook thread notices a change, read by all of them
+    inline static ConcurrentInputSelection<LowLatencyInput, LowLatencyMode, static_cast<size_t>(LowLatencyInput::_)>
+        selection {};
+    inline static decltype(selection)::AvailableInputs avaliableInputs { selection };
+    inline static decltype(selection)::ActiveInput activeInput { selection };
+    inline static decltype(selection)::ActiveOutput activeOutput { selection };
     inline static bool enabled = false;
 
     // The API of each input's device, the output runs on the active input's
@@ -141,7 +145,10 @@ class InputCommon
     static InputResult get_frame_reports(const InputContext& inputContext, IUnknown* pDev, FrameReport* reports);
     static bool get_timing_data(TimingData& timingDataOut);
     static uint64_t get_last_present_start_frame_id() { return last_present_start_frame_id; };
-    static flag_set<LowLatencyInput> get_avaliable_inputs() { return avaliableInputs; };
+    static flag_set<LowLatencyInput> get_avaliable_inputs()
+    {
+        return avaliableInputs.to_flags<flag_set<LowLatencyInput>>();
+    };
     static LowLatencyMode active_output() { return activeOutput; }
 
     // The active input's API, the swapchain's without one

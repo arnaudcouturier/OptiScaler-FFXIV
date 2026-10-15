@@ -358,10 +358,18 @@ std::optional<LowLatencyInput> InputCommon::forced_input()
 
 bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optional<LowLatencyMode> mode)
 {
+    // Concurrent hook calls make one decision about the selection and the output. Most calls change nothing and
+    // are answered from lock-free reads; the mutex is taken before the first change.
+    std::unique_lock lock(create_tech_mutex, std::defer_lock);
+
     // The game's XeFG runs on its own XeLL, nothing else may drive an output next to it (update() removes it)
     if (InputXeLL::IsNative())
     {
-        activeInput = LowLatencyInput::XeLL;
+        if (activeInput != LowLatencyInput::XeLL)
+        {
+            lock.lock();
+            activeInput = LowLatencyInput::XeLL;
+        }
         return true;
     }
 
@@ -423,8 +431,9 @@ bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optio
     // We can just change the activeInput because it only controls what calls get through
     if (activeInput != desiredInput)
     {
+        lock.lock();
         activeInput = desiredInput;
-        LOG_INFO("Low latency input: {}", magic_enum::enum_name(activeInput));
+        LOG_INFO("Low latency input: {}", magic_enum::enum_name(desiredInput));
 
         // The previous input's frame reports would stay in the overlay, its frame ids don't continue
         std::memset(frame_reports, 0, sizeof(frame_reports));
@@ -499,7 +508,17 @@ bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optio
 
     // Beyond this point activeOutput needs changing
 
-    std::scoped_lock lock(create_tech_mutex);
+    if (!lock.owns_lock())
+    {
+        lock.lock();
+
+        // Another thread may have made the change while this one waited
+        if (activeOutput == desiredMode && api == output_api)
+        {
+            delay_deinit = 0;
+            return true;
+        }
+    }
 
     if (init_tech(pDevice, api, desiredMode))
         return true;
@@ -1344,7 +1363,7 @@ void InputCommon::update()
             activeOutput != LowLatencyMode::FpsLimiter && !xefgPaced &&
             Config::Instance()->FN_ForceReflex.value_or_default() != ForceReflex::ForceEnable)
         {
-            LOG_INFO("Multi frame generation, disabling {}", magic_enum::enum_name(activeOutput));
+            LOG_INFO("Multi frame generation, disabling {}", magic_enum::enum_name(LowLatencyMode(activeOutput)));
             Config::Instance()->FN_ForceReflex.set_volatile_value(ForceReflex::ForceDisable);
         }
 
@@ -1421,7 +1440,7 @@ void InputCommon::update()
 
     if (fps_limit_interval_us.exchange(interval) != interval)
     {
-        LOG_INFO("FPS limit through {}: {} us", magic_enum::enum_name(activeOutput), interval);
+        LOG_INFO("FPS limit through {}: {} us", magic_enum::enum_name(LowLatencyMode(activeOutput)), interval);
 
         if (current_tech != nullptr)
             apply_sleep_mode(current_tech.get());
