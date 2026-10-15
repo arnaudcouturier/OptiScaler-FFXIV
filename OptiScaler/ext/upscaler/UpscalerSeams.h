@@ -13,6 +13,13 @@ namespace ext::upscaler
 {
 // NVNGX_Parameter.cpp DLSS and DLSSD GetOptimalSettingsCallback: forces DLAA when the game module requires native
 // DLAA (ext::game::Current().quality), else applies ForcePerfQuality. `asked` is the game's own PerfQualityValue.
+//
+// Deliberately does not touch the callback's DRS-maximum block (untouched upstream, no seam there): that window
+// has to stay wide enough for whatever the game actually submits, not just the forced preset's own optimal size.
+// FFXIV builds a Balanced feature and then submits a full 3840x2160 subrect every frame regardless of the forced
+// preset; pinning the maximum to the forced optimal would put the game's real render size outside the legal
+// window, and the runtime answers BAD00005 on every frame from then on. The default window (max at display
+// resolution) already covers both cases.
 NVSDK_NGX_PerfQuality_Value EffectivePerfQuality(NVSDK_NGX_PerfQuality_Value asked);
 
 // Same two call sites, end of the callback: records the answer LastQualityAnswer() reports (menu card,
