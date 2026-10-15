@@ -1,1 +1,1 @@
-@{ Class = 'warp'; Sources = @('companion_layer_test.cpp'); Libs = @('user32.lib'); Std = 'c++20' }
+@{ Class = 'warp'; Sources = @('companion_layer_test.cpp'); Libs = @('user32.lib'); Std = 'c++20'; IncludeDirs = @('{repo}/OptiScaler') }
