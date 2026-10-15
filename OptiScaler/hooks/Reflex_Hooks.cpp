@@ -46,15 +46,16 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
     if (State::Instance().gameQuirks & GameQuirk::HitmanReflexHacks)
         _lastSetSleepThread = std::this_thread::get_id();
 
+    auto effectiveParams = *pSetSleepModeParams;
     if (_minimumIntervalUs != 0)
-        pSetSleepModeParams->minimumIntervalUs = _minimumIntervalUs;
+        effectiveParams.minimumIntervalUs = _minimumIntervalUs;
 
     if (XeFGUsesFakenvapi())
     {
-        return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+        return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, &effectiveParams);
     }
 
-    return o_NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+    return o_NvAPI_D3D_SetSleepMode(pDev, &effectiveParams);
 }
 
 NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
@@ -477,10 +478,11 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
     memcpy(&_lastVkSleepParams, pSetSleepModeParams, sizeof(NV_VULKAN_SET_SLEEP_MODE_PARAMS));
     _lastVkSleepDev = vkDevice;
 
+    auto effectiveParams = *pSetSleepModeParams;
     if (_minimumIntervalUs != 0)
-        pSetSleepModeParams->minimumIntervalUs = _minimumIntervalUs;
+        effectiveParams.minimumIntervalUs = _minimumIntervalUs;
 
-    return o_NvAPI_Vulkan_SetSleepMode(vkDevice, pSetSleepModeParams);
+    return o_NvAPI_Vulkan_SetSleepMode(vkDevice, &effectiveParams);
 }
 
 NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_GetLatency(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pGetLatencyParams)
