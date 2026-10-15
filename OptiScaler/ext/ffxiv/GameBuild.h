@@ -101,6 +101,14 @@ struct CompanionBuild
     std::uint32_t batchCountOffset = 0x20;
     std::uint32_t batchVerticesOffset = 0x28;
     std::uint32_t batchFormatOffset = 0x30;
+    std::uint32_t batchExtensionOffset = 0x04;
+    std::uint32_t entryPointerOffset = 0x08;
+    std::uint32_t baseVertexOffset = 0x08;
+    std::uint32_t startIndexOffset = 0x14;
+    std::uint32_t indexCountOffset = 0x18;
+    std::uint32_t drawCommandType = 6;
+    std::uint32_t nativeBatchEntrySize = 16;
+    std::uint32_t nativeBatchHeaderSize = 64;
 };
 
 struct GameBuild
