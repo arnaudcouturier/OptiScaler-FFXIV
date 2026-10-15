@@ -435,6 +435,7 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
         CheckShortcut(config->FGShortcutKey.value_or_default(), inputFG, "Menu key pressed, will be switching FG mode");
         CheckShortcut(config->FpsCycleShortcutKey.value_or_default(), inputFpsCycle,
                       "Menu key pressed, will be switching FPS mode");
+        ext::menu::PollShortcuts(CheckShortcut); // ext: A5 fork shortcuts (NR toggle)
     }
     else if (capturingKey)
     {
@@ -1829,6 +1830,8 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
             config->ShowFps = !config->ShowFps.value_or_default();
         }
 
+        ext::menu::HandleShortcuts(ctx); // ext: A5 fork shortcuts (NR toggle)
+
         if (inputFpsCycle && config->ShowFps.value_or_default())
             config->FpsOverlayType = (FpsOverlay) ((config->FpsOverlayType.value_or_default() + 1) % FpsOverlay_COUNT);
 
@@ -1972,7 +1975,8 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
 
     // New frame check
     if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
-        config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0)
+        config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 ||
+        ext::menu::WantsFrame()) // ext: A4/A6 NR scan lamp and compare labels draw with the menu closed
     {
         if (!_isUWP)
         {
@@ -7863,6 +7867,7 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
         fpsOverlay.Render(config->FpsShortcutKey);
         fpsOverlayCycle.Render(config->FpsCycleShortcutKey);
         fgEnable.Render(config->FGShortcutKey);
+        ext::menu::KeybindRows<Keybind>(); // ext: A5 fork shortcut rows (NR toggle = slot 14)
     }
 }
 
@@ -8835,6 +8840,7 @@ void MenuCommon::RenderShaderTimes(RenderMenuContext& ctx)
     if (ImGui::BeginTable("ShaderTimes", 2, ImGuiTableFlags_SizingFixedSame))
     {
         bool hasExtra = false;
+        const auto extraTimes = ext::menu::ShaderTimeRows(); // ext: A1 "Neural Rendering" row
 
         for (auto& [name, time, includedInUpscalerTime] : state.detailedGpuTimes)
         {
@@ -8853,7 +8859,7 @@ void MenuCommon::RenderShaderTimes(RenderMenuContext& ctx)
             ImGui::Text("%s", formattedTime.c_str());
         }
 
-        if (hasExtra)
+        if (hasExtra || !extraTimes.empty()) // ext: A1
         {
             ImGui::TableNextRow();
             ImGui::TableNextRow();
@@ -8874,6 +8880,8 @@ void MenuCommon::RenderShaderTimes(RenderMenuContext& ctx)
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", formattedTime.c_str());
             }
+
+            ext::menu::DrawShaderTimeRows(extraTimes); // ext: A1
         }
 
         ImGui::EndTable();
@@ -9352,6 +9360,7 @@ bool MenuCommon::RenderMenu()
     RenderNotifications(ctx);
     UpdateFrameTimeAverages(ctx);
     RenderPerformanceOverlay(ctx);
+    ext::menu::DrawOverlays(ctx); // ext: A4/A6 NR compare labels and scan lamp
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);

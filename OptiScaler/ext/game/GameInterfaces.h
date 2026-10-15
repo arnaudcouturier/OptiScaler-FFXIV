@@ -35,10 +35,26 @@ struct INativeQuality
     virtual void Request(uint32_t preset) = 0;
 };
 
+// A3 menu status of the native lighting scan (was FfxivLightingScan::Latest/Fresh and FfxivLightingCapture::installed,
+// read by the NR menu).
+struct LightingStatus
+{
+    bool hooksInstalled = false; // the native shader hooks are in place
+    bool failed = false;         // the scan stopped after a capture or readback error (until restart)
+    bool valid = false;          // a reading exists
+    bool fresh = false;          // the lighting scan is enabled and the last reading is recent (Fresh())
+    float gain = 0.0f;           // adapted gain of the last reading
+    uint64_t samples = 0, events = 0;
+    uint64_t ageMs = 0;      // age of the last reading
+    const char* reason = ""; // why there is no usable reading, shown when !fresh and !valid
+};
+
 // B6, A3
 struct ISceneLighting
 {
     virtual ~ISceneLighting() = default;
+    // A3 menu: status of the scan, polled while the NR card is open
+    virtual LightingStatus Status() = 0;
     virtual void OnUpscaleBoundary() = 0;
     // True once per fresh native lighting event. `cursor` is the caller's last seen event count (one per NR consumer);
     // the implementation updates it (A3, was FfxivLightingScan::ConsumeReset).

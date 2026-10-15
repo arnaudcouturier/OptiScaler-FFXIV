@@ -74,9 +74,9 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 
 
 
-// The settings panel, drawn inside OptiScaler's menu. TODO(S2c): ext/nr/menu/DlssNr_Menu.cpp, registered as a card
-// through ext::menu::Register; the definition is not part of S2a.
-void RenderMenu(::Config* config, float menuResScale);
+// The settings panel: the body of the ext::menu card `dlss_nr` (ext/nr/menu/DlssNr_Menu.cpp, registered by NrMenu.cpp).
+// It reads and writes ext::Cfg().nr and runs inside upstream's ScopedCard.
+void RenderMenu(float menuResScale);
 
 // Clears the session failure latch, so a failure caused by transient thrash does not cost a restart.
 void RetryAfterFailure();
