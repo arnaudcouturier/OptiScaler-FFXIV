@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/Seams.h"
+#include "ext/core/ExtConfig.h"
 #include "ext/game/Game.h"
 
 #include <Config.h>
@@ -59,7 +60,7 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice)
     return true;
 }
 
-bool BeforeReleaseFeature(IFeature_Dx11& feature, [[maybe_unused]] bool shuttingDown)
+bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
 {
     if (!IsolatesNgx() || !feature.IsWithDx12())
         return true;
@@ -79,9 +80,25 @@ bool BeforeReleaseFeature(IFeature_Dx11& feature, [[maybe_unused]] bool shutting
     if (upscaleQueue != fgQueue && !gpu::DrainQueue(upscaleQueue))
         return false;
 
-    // ext: D3 (series S5) adds the XeFG context rebuild here: with `!shuttingDown`, activeFgOutput == XeFG and
-    // FGXeFGResetOnUpscalerChange, under fg->Mutex: log "FFXIV upscaler release: rebuilding FG context so pacing
-    // restarts clean", State::fgChanged = true, fg->DestroyFGContext(). It needs the D3 config key, so it is not here.
+    // D3: the upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps running straight across that
+    // hole: CancelPendingUpscalerWork only switches it off and back on, so the provider's presentation timing history
+    // survives a large discontinuity. It can then settle onto the display's fixed refresh grid and stay there, which
+    // defeats VRR until some later disruption happens to shake it loose - the reason a quality or NR change flips
+    // variable refresh on and off at random.
+    //
+    // Upstream OptiScaler destroys the FG context on this event instead, so frame generation restarts with a clean
+    // history. Do the same, after the queues above have drained: XeFG_Dx12 recreates the context on the next frame when
+    // _fgContext is null.
+    if (!shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG &&
+        ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() && &feature == State::Instance().currentFeature &&
+        fg != nullptr && State::Instance().activeFgInput == FGInput::Upscaler)
+    {
+        OwnedLockGuard guard(fg->Mutex, 5);
+        LOG_INFO("FFXIV upscaler release: rebuilding FG context so pacing restarts clean");
+        State::Instance().fgChanged = true;
+        fg->DestroyFGContext();
+    }
+
     return true;
 }
 } // namespace ext::dx11bridge

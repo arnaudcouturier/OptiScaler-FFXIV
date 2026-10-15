@@ -99,6 +99,47 @@ void ObservedMultiplier(IFGFeature* dlssg);
 } // namespace ext::menu
 
 // ---------------------------------------------------------------------------------------------------------------
+// XeFG extras (D3). Hosts: framegen/xefg/
+// XeFG_Dx12.cpp (Activate, Dispatch), proxies/XeFG_Proxy.h (HookXeFG),
+// menu/menu_common.cpp (XeFG card). Implementation: ext/fg/Activation.cpp, ext/fg/xefg/XefgSeams.cpp.
+namespace ext::fg
+{
+// XeFG_Dx12::Activate, before it marks itself active: the provider pacing restarts clean (XeFGPacing::RequestRecovery).
+void OnActivated(IFGFeature* fg);
+
+// XeFGProxy::HookXeFG, right after the provider module is bound and before the first call into it: the built-in MFG
+// unlock and pacing patches (XeFGUnlock::Apply). A failure leaves the provider as Intel shipped it.
+void OnXefgProviderLoaded(HMODULE provider);
+
+// What XefgSelectFactor decided, for the "XeFG factor" log of the caller.
+struct XefgFactorInfo
+{
+    bool dynamic = false;
+    float target = 0.0f;
+};
+// XeFG_Dx12::Dispatch, interpolation-count block: the factor (generated frames per real frame) to request. `current` is
+// the factor in use, `maxInterpolation` what the provider supports. Applies the configured count, dynamic MFG (target
+// capped by FramerateLimit) and the range clamp. Does not write FGXeFGInterpolationCount back (SEAMS 7 item 14).
+int XefgSelectFactor(IFGFeature_Dx12* fg, int current, int maxInterpolation, XefgFactorInfo& info);
+// XeFG_Dx12::Dispatch, frame time: `inputFrameTime` is the frame time the host supplied (ms). A game module with its own
+// markers prefers fresh pacing telemetry; others only use it when the input is missing. Falls back to the Opti time.
+double XefgFrameTime(double inputFrameTime);
+// XeFG_Dx12::Dispatch, after the FTInput selection: discards samples outside [0, 250] ms (sets them to 0 and, unless
+// FGSkipReset, `resetHistory`), then feeds the pacing hook with what the provider gets.
+void XefgNoteFrameTime(float& frameRenderTime, bool& resetHistory);
+// XeFG_Dx12::Dispatch, view matrix: validated world-to-view (nonsingular stationary view when the pose is unknown),
+// writes 16 floats. Returns whether the pose was usable. `guideAge` is only for the periodic fallback log.
+bool XefgBuildCamera(float* viewMatrix, const float* position, const float* right, const float* up,
+                     const float* forward, uint64_t frameCount, int guideAge);
+} // namespace ext::fg
+
+namespace ext::menu
+{
+// XeFG card, right after the Frame Gen slider: Dynamic XeMFG, target FPS, current XeMFG label and Extra Pacing.
+void XeFgExtras(IFGFeature* fgOutput);
+} // namespace ext::menu
+
+// ---------------------------------------------------------------------------------------------------------------
 // Provider-neutral presentation-guide matching and scene-paired history (B5, C5; ext/fg/GuideMatcher.cpp,
 // GuideSeams.cpp). DLSSG_Dx12 and XeFG_Dx12 hosts. All of it is inert unless ext::game::Current().fgMarkers is set.
 namespace ext::fg

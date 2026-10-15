@@ -14,6 +14,7 @@
 namespace ext::fg
 {
 struct GuideState; // B5, ext/fg/GuideState.h
+struct XefgState;  // D3, ext/fg/xefg/XefgState.h
 
 class Dx12Ext
 {
@@ -29,6 +30,9 @@ class Dx12Ext
 
     // B5: presentation-guide matcher (created on the first guide delay a game module supplies)
     std::unique_ptr<GuideState> guides;
+
+    // D3: XeFG dynamic MFG state (created on the first XeFG Dispatch)
+    std::unique_ptr<XefgState> xefg;
 
     // C5/B5: DLSS-G consecutive accepted frames (was DLSSG_Dx12::_historyFrames) and the "next constants get reset = true"
     // request (was DLSSG_Common::_forceConstantsReset)

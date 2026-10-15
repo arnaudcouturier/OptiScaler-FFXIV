@@ -611,6 +611,7 @@ void XeFG_Dx12::Activate()
 
         if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
         {
+            ext::fg::OnActivated(this); // ext: D3 pacing restarts clean
             _isActive = true;
             _lastDispatchedFrame = 0;
         }
@@ -736,36 +737,27 @@ bool XeFG_Dx12::Dispatch()
 
     if (XeFGProxy::SetNumInterpolatedFrames() != nullptr)
     {
-        if (Config::Instance()->FGXeFGInterpolationCount.value_or_default() > _maxInterpolationCount)
+        ext::fg::XefgFactorInfo factorInfo; // ext: D3 configured count / dynamic MFG selection
+        const int requested = ext::fg::XefgSelectFactor(this, _framesToInterpolate, _maxInterpolationCount, factorInfo);
+
+        if (_framesToInterpolate != requested)
         {
-            Config::Instance()->FGXeFGInterpolationCount = _maxInterpolationCount;
-            LOG_WARN("Requested interpolation count is higher than max supported, setting to max: {}",
-                     _maxInterpolationCount);
-        }
-
-        const int targetCount = std::clamp(
-            Config::Instance()->FGInterpolationCount(Config::Instance()->FGXeFGInterpolationCount.value_or_default()),
-            1, std::max(_maxInterpolationCount, 1));
-
-        if (_framesToInterpolate != targetCount)
-        {
-            LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate, targetCount);
-
-            state.WAR_xefgRequestFGToggle = true;
-
 #ifndef DONT_USE_XMX
             ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 #endif // !DONT_USE_XMX
 
-            auto intResult = XeFGProxy::SetNumInterpolatedFrames()(_swapChainContext, targetCount);
-
-            _framesToInterpolate = targetCount;
-
-            if (intResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+            const auto intResult = XeFGProxy::SetNumInterpolatedFrames()(_swapChainContext, requested); // ext: D3
+            if (intResult == XEFG_SWAPCHAIN_RESULT_SUCCESS)
             {
+                LOG_INFO("XeFG factor: {}X -> {}X, dynamic={}, target={} FPS, real interval={} ms",
+                         _framesToInterpolate + 1, requested + 1, factorInfo.dynamic, factorInfo.target,
+                         state.lastFGFrameTime);
+                _framesToInterpolate = requested;
+                state.WAR_xefgRequestFGToggle = true;
+            }
+            else
                 LOG_ERROR("SetNumInterpolatedFrames error: {} ({})", magic_enum::enum_name(intResult),
                           (UINT) intResult);
-            }
         }
     }
 
@@ -833,44 +825,31 @@ bool XeFG_Dx12::Dispatch()
 
     xefg_swapchain_frame_constant_data_t constData = {};
 
-    if (_cameraPosition[fIndex][0] != 0.0f || _cameraPosition[fIndex][1] != 0.0f || _cameraPosition[fIndex][2] != 0.0f)
-    {
-        XMVECTOR right = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraRight[fIndex]));
-        XMVECTOR up = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraUp[fIndex]));
-        XMVECTOR forward = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraForward[fIndex]));
-        XMVECTOR pos = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraPosition[fIndex]));
-
-        float x = -XMVectorGetX(XMVector3Dot(pos, right));
-        float y = -XMVectorGetX(XMVector3Dot(pos, up));
-        float z = -XMVectorGetX(XMVector3Dot(pos, forward));
-
-        XMMATRIX view = { XMVectorSet(XMVectorGetX(right), XMVectorGetX(up), XMVectorGetX(forward), 0.0f),
-                          XMVectorSet(XMVectorGetY(right), XMVectorGetY(up), XMVectorGetY(forward), 0.0f),
-                          XMVectorSet(XMVectorGetZ(right), XMVectorGetZ(up), XMVectorGetZ(forward), 0.0f),
-                          XMVectorSet(x, y, z, 1.0f) };
-
-        memcpy(constData.viewMatrix, view.r, sizeof(view));
-    }
+    const auto guide = ext::fg::GuideAge(this, fIndex, willDispatchFrame); // ext: B5
+    ext::fg::XefgBuildCamera(constData.viewMatrix, _cameraPosition[fIndex], _cameraRight[fIndex], _cameraUp[fIndex],
+                             _cameraForward[fIndex], _frameCount, guide.age); // ext: D3 validated view matrix
+    // Projection conversion must not mutate the matched source metadata.
+    auto cameraNear = _cameraNear[fIndex]; // ext: D3
+    auto cameraFar = _cameraFar[fIndex];   // ext: D3
 
     if (Config::Instance()->FGXeFGDepthInverted.value_or_default())
-        std::swap(_cameraNear[fIndex], _cameraFar[fIndex]);
+        std::swap(cameraNear, cameraFar);
 
-    if (_infiniteDepth && _cameraFar[fIndex] > _cameraNear[fIndex])
-        _cameraFar[fIndex] = std::numeric_limits<float>::infinity();
-    else if (_infiniteDepth && _cameraNear[fIndex] > _cameraFar[fIndex])
-        _cameraNear[fIndex] = std::numeric_limits<float>::infinity();
+    if (_infiniteDepth && cameraFar > cameraNear)
+        cameraFar = std::numeric_limits<float>::infinity();
+    else if (_infiniteDepth && cameraNear > cameraFar)
+        cameraNear = std::numeric_limits<float>::infinity();
 
     // Cyberpunk seems to be sending LH so do the same
     // it also sends some extra data in usually empty spots but no idea what that is
-    if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f &&
-        !XMScalarNearEqual(_cameraVFov[fIndex], 0.0f, 0.00001f) &&
+    if (cameraNear > 0.f && cameraFar > 0.f && !XMScalarNearEqual(_cameraVFov[fIndex], 0.0f, 0.00001f) &&
         !XMScalarNearEqual(_cameraAspectRatio[fIndex], 0.0f, 0.00001f))
     {
-        if (XMScalarNearEqual(_cameraNear[fIndex], _cameraFar[fIndex], 0.00001f))
-            _cameraFar[fIndex]++;
+        if (XMScalarNearEqual(cameraNear, cameraFar, 0.00001f))
+            cameraFar++;
 
-        auto projectionMatrix = XMMatrixPerspectiveFovLH(_cameraVFov[fIndex], _cameraAspectRatio[fIndex],
-                                                         _cameraNear[fIndex], _cameraFar[fIndex]);
+        auto projectionMatrix =
+            XMMatrixPerspectiveFovLH(_cameraVFov[fIndex], _cameraAspectRatio[fIndex], cameraNear, cameraFar);
         memcpy(constData.projectionMatrix, projectionMatrix.r, sizeof(projectionMatrix));
     }
     else
@@ -883,18 +862,18 @@ bool XeFG_Dx12::Dispatch()
     constData.motionVectorScaleX = _mvScaleX[fIndex];
     constData.motionVectorScaleY = _mvScaleY[fIndex];
 
-    const auto guide = ext::fg::GuideAge(this, fIndex, willDispatchFrame); // ext: B5
-
     if (!Config::Instance()->FGSkipReset.value_or_default())
         constData.resetHistory = _reset[fIndex] ||
                                  ext::fg::DispatchResetHistory(this, guide, willDispatchFrame, ext::fg::Provider::XeFg); // ext: B5
     else
         constData.resetHistory = false;
 
+    const auto frameRenderTime = ext::fg::XefgFrameTime(_ftDelta[fIndex]); // ext: D3 paced time preference
+
     switch (Config::Instance()->FTInput.value_or_default())
     {
     case FrameTimeSource::Input:
-        constData.frameRenderTime = (float) _ftDelta[fIndex];
+        constData.frameRenderTime = static_cast<float>(frameRenderTime);
         break;
 
     case FrameTimeSource::Opti:
@@ -906,8 +885,14 @@ bool XeFG_Dx12::Dispatch()
         break;
     }
 
-    LOG_DEBUG("Reset: {}, Opti FT: {}, Source FT: {}, Set FT: {}, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
-              constData.frameRenderTime, _ftDelta[fIndex], constData.frameRenderTime, _frameCount,
+    // ext: D3 discontinuity guard, the pacing hook gets what the provider gets
+    bool discontinuity = false;
+    ext::fg::XefgNoteFrameTime(constData.frameRenderTime, discontinuity);
+    if (discontinuity)
+        constData.resetHistory = true;
+
+    LOG_DEBUG("Reset: {}, Input FT: {}, Opti FT: {}, Set FT: {} ms, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
+              _ftDelta[fIndex], state.lastFGFrameTime, constData.frameRenderTime, _frameCount,
               State::Instance().reflexFrameId);
 
     auto frameId = static_cast<uint32_t>(willDispatchFrame);

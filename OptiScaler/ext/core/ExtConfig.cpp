@@ -157,6 +157,7 @@ void ExtConfig::Bind(config::Binder& b)
 
 void ExtConfig::PostLoad()
 {
+    fg.PostLoad();
     nr.PostLoad();
 }
 

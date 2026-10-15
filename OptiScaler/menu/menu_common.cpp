@@ -4440,7 +4440,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         RenderFGModeSlider(ctx, "Frame Gen##xefg", fgOutput->GetMaxInterpolationCount(),
                            &config->FGXeFGInterpolationCount);
 
-        bool fgDV = config->FGXeFGDebugView.value_or_default();
+        ext::menu::XeFgExtras(fgOutput); // ext: D3 dynamic MFG, target FPS, extra pacing
+
+        bool fgDV =config->FGXeFGDebugView.value_or_default();
         if (ImGui::Checkbox("Debug View##2", &fgDV))
         {
             config->FGXeFGDebugView = fgDV;

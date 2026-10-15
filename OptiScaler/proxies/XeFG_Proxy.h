@@ -4,6 +4,7 @@
 #include "Util.h"
 #include "Config.h"
 #include "Logger.h"
+#include "ext/Seams.h"
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -172,6 +173,8 @@ class XeFGProxy
             return false;
 
         _dll = libxefgModule;
+
+        ext::fg::OnXefgProviderLoaded(_dll); // ext: D3 patch the provider before anything calls into it
 
         {
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};

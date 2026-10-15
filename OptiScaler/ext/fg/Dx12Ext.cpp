@@ -2,6 +2,7 @@
 
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/GuideState.h"
+#include "ext/fg/xefg/XefgState.h"
 
 namespace ext::fg
 {
