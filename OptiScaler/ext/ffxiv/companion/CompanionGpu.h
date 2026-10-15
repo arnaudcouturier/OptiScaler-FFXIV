@@ -69,7 +69,8 @@ inline void Publish(const std::vector<Packets::Packet>& packets)
     for (const auto& p : packets)
     {
         uintptr_t wrapper = 0, texture = 0; UINT flags = 0;
-        memcpy(&wrapper, p.header.data() + 0x10, 8); memcpy(&flags, p.header.data() + 0x30, 4);
+        memcpy(&wrapper, p.header.data() + ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset, 8);
+        memcpy(&flags, p.header.data() + ext::ffxiv::kCurrentBuild.companion.batchFormatOffset, 4);
         // Identity hint only. Never call COM through this pointer; match a live API reference below.
         if (!wrapper || !Packets::Read(wrapper + ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset, texture) || !texture) { ++readFailures; continue; }
         bool duplicate = false;

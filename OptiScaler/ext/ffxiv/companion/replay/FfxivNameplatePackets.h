@@ -16,7 +16,7 @@ namespace ext::ffxiv::companion::replay::FfxivNameplatePackets
 inline std::atomic<bool> requested {false};
 inline std::mutex mutex;
 struct Queue { uintptr_t address=0, head=0; UINT blocks=0, remaining=0, count=0; std::array<UINT,3> strides{}; };
-struct Packet { uintptr_t source=0; UINT key=0, kind=0, layout=0, count=0, stride=0, error=0; std::array<unsigned char,64> header{}; std::vector<unsigned char> vertices; };
+struct Packet { uintptr_t source=0; UINT key=0, kind=0, layout=0, count=0, stride=0, error=0; std::array<unsigned char,ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> header{}; std::vector<unsigned char> vertices; };
 struct Capture { Queue before,after; std::vector<Packet> packets; UINT rejected=0; bool ready=false; };
 inline Capture pending;
 inline void (*onCapture)(const Capture&)=nullptr;

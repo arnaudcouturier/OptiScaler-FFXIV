@@ -23,7 +23,7 @@ struct Packet
 {
     uintptr_t original = 0;
     uintptr_t alignmentPadding = 0;
-    alignas(16) std::array<unsigned char, 64> header {};
+    alignas(16) std::array<unsigned char, ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> header {};
 };
 using Entry = std::array<uintptr_t, 2>;
 template<class T> bool Read(uintptr_t address, T& value)
@@ -77,9 +77,11 @@ inline bool Capture(const Queue& before, const Queue& after, std::vector<Packet>
         if (index < before.count) continue;
         Entry entry;
         Packet p;
-        if (!Read(block + (index % 64) * ext::ffxiv::kCurrentBuild.companion.nativeBatchEntrySize, entry) || !Read(entry[1], p.header))
+        const auto entryPointerIndex = ext::ffxiv::kCurrentBuild.companion.entryPointerOffset / sizeof(uintptr_t);
+        if (!Read(block + (index % 64) * ext::ffxiv::kCurrentBuild.companion.nativeBatchEntrySize, entry) ||
+            !Read(entry[entryPointerIndex], p.header))
         { output.clear(); return false; }
-        p.original = entry[1];
+        p.original = entry[entryPointerIndex];
         if (!Supported(p)) { output.clear(); return false; }
         for (const auto& previous : output)
             if (previous.original == p.original) { output.clear(); return false; }
@@ -100,7 +102,7 @@ inline Match Substitute(std::vector<Entry>& entries, const std::vector<Packet>& 
         for (size_t i = 0; i < packets.size(); ++i)
         {
             if (entry[1] != packets[i].original) continue;
-            std::array<unsigned char, 64> live;
+            std::array<unsigned char, ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> live;
             if (++seen[i] != 1 || !Read(packets[i].original, live) || live != packets[i].header) return Match::Invalid;
             entry[1] = reinterpret_cast<uintptr_t>(packets[i].header.data());
             ++found;

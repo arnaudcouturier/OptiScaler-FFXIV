@@ -103,9 +103,9 @@ inline void Stage(const ext::ffxiv::companion::replay::FfxivNameplatePackets::Ca
     size_t bytes=0;
     for(const auto& p:capture.packets)
     {
-        uintptr_t wrapper=0,identity=0;memcpy(&wrapper,p.header.data()+16,8);
+        uintptr_t wrapper=0,identity=0;memcpy(&wrapper,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset,8);
         const UINT stride=p.layout==0?40:p.layout==4?24:32;bytes+=p.vertices.size();
-        uint16_t extension=0;memcpy(&extension,p.header.data()+4,2);
+        uint16_t extension=0;memcpy(&extension,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchExtensionOffset,2);
         if(!p.source || p.error || p.kind!=0x22 || extension || !p.count || p.count%4 || p.count>65536 || p.stride!=stride || p.vertices.size()!=size_t(p.count)*stride || bytes>8*1024*1024 ||
            !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset,identity) || std::find(supported.begin(),supported.end(),std::make_pair(identity,p.layout))==supported.end())
         {++fallbacks;latest.reset();pendingSources.clear();return;}
@@ -136,7 +136,7 @@ struct BatchFilter
             const auto sourceIndex=static_cast<size_t>(source-pendingSources.begin());
             if(seen[sourceIndex]){Cancel();return;}seen[sourceIndex]=true;
             const auto packet=std::find_if(frame->draws.begin(),frame->draws.end(),[&](const Draw& d){return d.packet.source==entry[1];});
-            std::array<unsigned char,64> live{};
+            std::array<unsigned char,ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> live{};
             if(packet==frame->draws.end() || !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(entry[1],live) || live!=packet->packet.header)
             {Cancel();return;}
             entry[1]=0;++found;
@@ -176,7 +176,10 @@ inline bool BuildMidpoint(const Frame& old,const Frame& current,const std::map<s
     {
         const auto& a=old.draws[i];const auto& b=current.draws[i];const auto& p=a.packet;const auto& q=b.packet;
         if(a.identity!=b.identity || p.key!=q.key || p.layout!=q.layout || p.count!=q.count || p.stride!=q.stride ||
-           memcmp(p.header.data(),q.header.data(),0x28) || memcmp(p.header.data()+0x30,q.header.data()+0x30,0x10))return false;
+           memcmp(p.header.data(),q.header.data(),ext::ffxiv::kCurrentBuild.companion.batchVerticesOffset) ||
+           memcmp(p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchFormatOffset,
+                  q.header.data()+ext::ffxiv::kCurrentBuild.companion.batchFormatOffset,
+                  ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize-ext::ffxiv::kCurrentBuild.companion.batchFormatOffset))return false;
         const auto material=materials.find({b.identity,q.layout});if(material==materials.end())return false;
         const auto& layout=material->second.layout;
         const Element* position=nullptr;
@@ -235,7 +238,9 @@ inline void Run(Package& package)
     // DXGI_USAGE_RENDER_TARGET_OUTPUT. On this transparent layer that ran the whole game preset at
     // hundreds of presents per second and exhausted VRAM. Without that usage they skip the chain;
     // all drawing goes to `canvas`, which is copied into the back buffer right before Present1.
-    const bool isolateReShade=Config::Instance()->FGExternalHudless.value_or_default() && GetModuleHandleW(L"OptiScalerHudless.addon64")!=nullptr;
+    // The old FGExternalHudless config key belongs to the pending C11 hud-less add-on port.
+    // Until that config returns, keep the optional ReShade isolation disabled by default.
+    const bool isolateReShade=false;
     if(isolateReShade)sd.BufferUsage=DXGI_USAGE_SHADER_INPUT;
     ComPtr<IDXGISwapChain1> swap;
     if(FAILED(factory->CreateSwapChainForComposition(device.Get(),&sd,nullptr,&swap)))

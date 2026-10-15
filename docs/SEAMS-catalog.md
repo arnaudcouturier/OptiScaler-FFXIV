@@ -289,6 +289,7 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 | `ISceneLighting` | `OnUpscaleBoundary(ID3D11DeviceContext*, ID3D11Resource* color, bool hdr)`, `ConsumeHistoryReset(uint64_t& cursor)`, `Status()` (`LightingStatus`, the NR menu's lighting-scan text) | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
 | `INrQuirks` | `BridgedNativeDx11` | NR internals: history reset on disable, split frame work, motion-onset sampling, exposure scan off (was `gameExe == "ffxiv_dx11.exe"`) | A1-A8, B5 |
 | `ISceneHdr` | `Open(ID3D12Device*, UINT, UINT, bool) -> SceneInput`, `PublishReconstructed(SceneInput&&)`, `EndFrame()` | `hdr::DlssEvalScope`, `dx11bridge::ConvertCopySource`, `dx11bridge::PresentScope` | C10 |
+| FFXIV Companion module | `Install(ID3D11Device*)`, `Unhook()`, `AfterSharedCopy(ctx,dst)`, `DrawSettings()`, `GetCaptureCallbacks()` | FFXIV lifecycle, `dx11bridge::AfterSharedCopy`, `FfxivLightingCapture::SetCompanionCallbacks` (wiring pending) | C7 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | `fg::OnUpscaleStart`, `GuideAge`, `MarkersBeforePresent`, `MarkersNextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | `dx11bridge::ShutdownNgx`, `RedirectShutdown1`, `BeforeReleaseFeature` | C6 |
 
