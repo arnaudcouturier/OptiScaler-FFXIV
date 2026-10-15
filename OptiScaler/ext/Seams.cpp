@@ -4,19 +4,51 @@
 
 #include "ext/game/Game.h"
 #include "ext/ffxiv/lighting/FfxivLighting.h"
+#include "ext/ffxiv/lighting/FfxivLightingCapture.h"
+#include "ext/ffxiv/companion/Companion.h"
+#include "ext/ffxiv/companion/CompanionCallbackMap.h"
+
+#include <atomic>
 
 namespace ext::game
 {
 void OnD3D11DeviceHooked(ID3D11Device* device)
 {
-    if (device != nullptr && Current().lighting != nullptr)
+    if (device == nullptr)
+        return;
+
+    if (Current().hdr != nullptr)
+    {
+        // Companion has no dedicated Game interface slot (unlike lighting); gate on the same hdr != nullptr
+        // idiom Companion.cpp's own menu-card visibility uses. Set once: the six mapped pointers never change
+        // across devices, and re-assigning the destination struct on every call is needless, non-atomic churn
+        // while the lighting draw hooks may already be reading it.
+        static std::atomic<bool> companionCallbacksSet {false};
+        if (!companionCallbacksSet.exchange(true))
+        {
+            // Callbacks must be set before the lighting and companion hooks fire (docs/SEAMS-catalog.md):
+            // this runs before both the lighting dispatch below (which installs FfxivLightingCapture's hooks)
+            // and ext::ffxiv::companion::Install further below.
+            ext::ffxiv::lighting::FfxivLightingCapture::SetCompanionCallbacks(
+                ext::ffxiv::companion::MapCaptureCallbacks<ext::ffxiv::lighting::FfxivLightingCapture::CompanionCallbacks>(
+                    ext::ffxiv::companion::GetCaptureCallbacks()));
+        }
+    }
+
+    if (Current().lighting != nullptr)
         ext::ffxiv::lighting::OnDeviceHooked(device);
+
+    if (Current().hdr != nullptr)
+        ext::ffxiv::companion::Install(device);
 }
 
 void OnD3D11Unhook()
 {
     if (Current().lighting != nullptr)
         ext::ffxiv::lighting::OnUnhook();
+
+    if (Current().hdr != nullptr)
+        ext::ffxiv::companion::Unhook();
 }
 } // namespace ext::game
 
