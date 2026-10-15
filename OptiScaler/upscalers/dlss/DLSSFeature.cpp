@@ -26,6 +26,7 @@ void DLSSFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
     unsigned int width;
     unsigned int height;
     GetRenderResolution(InParameters, &width, &height);
+    ext::upscaler::CorrectRenderSubrect(this, InParameters); // ext: C2/C3
 
     LOG_DEBUG("Render Size: {}x{}, Target Size: {}x{}, Display Size: {}x{}", RenderWidth(), RenderHeight(),
               TargetWidth(), TargetHeight(), DisplayWidth(), DisplayHeight());

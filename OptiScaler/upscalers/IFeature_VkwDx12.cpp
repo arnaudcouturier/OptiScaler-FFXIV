@@ -2172,8 +2172,12 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
             InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) vkReactive.Dx12Resource);
 
         LOG_DEBUG("Dispatch!!");
+        const auto upscalerType = dx12Feature->GetUpscalerType();
+        if (upscalerType == Upscaler::DLSS || upscalerType == Upscaler::DLSSD)
+            ext::upscaler::CorrectRenderSubrect(dx12Feature.get(), InParameters); // ext: C2/C3
+
         auto nrEval = ext::nr::NrEvalCtx::Bridge(ext::nr::NrEvalCtx::Site::VkBridge, cmdList, InParameters,
-                                                 Dx12CommandQueue, _frameCount, dx12Feature->GetUpscalerType()); // ext: B9
+                                                 Dx12CommandQueue, _frameCount, upscalerType); // ext: B9
         ext::nr::EvalBefore(nrEval);
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue); // ext: A1 timingQueue
         ext::nr::EvalAfter(nrEval, dx12EvalResult);

@@ -39,6 +39,7 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 
 #include <framegen/IFGFeature_Dx12.h>
 #include <resource_tracking/ResTrack_dx12.h>
+#include <upscalers/IFeature.h>
 
 #include <detours/detours.h>
 
@@ -46,6 +47,12 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 // When upstream renames a member, this file is where the build breaks.
 namespace ext
 {
+void Access::GetRenderResolution(IFeature& feature, const NVSDK_NGX_Parameter* params, unsigned int& w,
+                                  unsigned int& h)
+{
+    feature.GetRenderResolution(params, &w, &h);
+}
+
 void Access::CancelPendingUpscalerWork(IFGFeature_Dx12& fg)
 {
     // The input feature can disappear before its final Present (FFXIV exit/scene changes).

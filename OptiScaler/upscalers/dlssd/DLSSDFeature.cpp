@@ -2,6 +2,7 @@
 #include "DLSSDFeature.h"
 #include <Config.h>
 #include <Util.h>
+#include "ext/Seams.h"
 
 #include <detours/detours.h>
 
@@ -28,6 +29,7 @@ void DLSSDFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
     unsigned int width;
     unsigned int height;
     GetRenderResolution(InParameters, &width, &height);
+    ext::upscaler::CorrectRenderSubrect(this, InParameters); // ext: C2/C3
 }
 
 void DLSSDFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)

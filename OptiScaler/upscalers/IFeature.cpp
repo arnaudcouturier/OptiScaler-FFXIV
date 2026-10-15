@@ -227,6 +227,8 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
+    ext::upscaler::ResolveRenderGeometry(this, InParameters, OutWidth, OutHeight); // ext: C2/C3
+
     _renderWidth = *OutWidth;
     _renderHeight = *OutHeight;
 

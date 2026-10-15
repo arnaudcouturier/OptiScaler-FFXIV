@@ -1,5 +1,6 @@
 #pragma once
 #include "SysUtils.h"
+#include "ext/Seams.h"
 
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
@@ -40,6 +41,8 @@ struct DetailedGpuTime
 
 class IFeature
 {
+    friend struct ext::Access; // ext: C2/C3
+
   private:
     bool _isInited = false;
     int _featureFlags = 0;

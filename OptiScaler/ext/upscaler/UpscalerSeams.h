@@ -1,12 +1,14 @@
 #pragma once
-// Seams of the upscaler-layer group (C1, C5; docs/SEAMS-catalog.md "upscaler"), included by ext/Seams.h. Bodies:
-// ext/upscaler/UpscalerSeams.cpp. The pure decision logic (slack math, EffectivePerfQuality's branches) lives in
-// ext/upscaler/ForcedQuality.h so it is unit-testable without NVNGX or Config.
+// Seams of the upscaler-layer group (C1, C2, C3, C5; docs/SEAMS-catalog.md "upscaler"), included by ext/Seams.h.
+// Bodies: ext/upscaler/UpscalerSeams.cpp. The pure decision logic (slack math, EffectivePerfQuality's branches,
+// the C2/C3 per-axis-min correction) lives in ext/upscaler/ForcedQuality.h and ext/upscaler/RenderGeometry.h so it
+// is unit-testable without NVNGX or Config.
 
 #include "ext/upscaler/ForcedQuality.h"
 
 #include <nvsdk_ngx.h>
 
+class IFeature;
 struct NVSDK_NGX_Parameter;
 
 namespace ext::upscaler
@@ -37,4 +39,25 @@ ForcedQualityStatus LastQualityAnswer();
 // above checks. Returns whether it relabelled `pq`.
 bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigned int height, unsigned int outWidth,
                          unsigned int outHeight, int& pq);
+
+// IFeature::GetRenderResolution, after the existing subrect-read/fallback block: possibly corrects the render size
+// NGX reports for this evaluate (C2/C3, docs/SEAMS.md 5 "RenderSizeFromWidthHeight"). Gated structurally on
+// game::Current().geometry != nullptr -- null (every game but a matched FFXIV build) returns false immediately,
+// upstream's own subrect-report-only behaviour completely untouched; non-null delegates the config-gated per-axis
+// min math to IRenderGeometry::ResolveRenderExtent. `feature` supplies the pre-update render/display size for the
+// "Evaluate geometry" diagnostic (logged whenever FFXIV is matched, independent of the gate, matching the oracle's
+// unconditional H5c hunk); EnsureHooks() on the native-quality module also runs first and unconditionally here
+// (U3 H5a, deferred to this series by C1/C5), through the same cached-pointer path as ApplyForcedQuality. `OutWidth`
+// /`OutHeight` are the subrect-derived render size already written by the existing fallback block (in/out).
+bool ResolveRenderGeometry(IFeature* feature, const NVSDK_NGX_Parameter* InParameters, unsigned int* OutWidth,
+                            unsigned int* OutHeight);
+
+// DLSSFeature.cpp / DLSSDFeature.cpp ProcessEvaluateParams (right after their own GetRenderResolution call),
+// IFeature_Dx11wDx12.cpp / IFeature_VkwDx12.cpp Evaluate (DLSS/DLSSD only, right before dx12Feature->Evaluate):
+// writes the corrected render size back into DLSS_Render_Subrect_Dimensions_* (the runtime reads the subrect
+// itself, not IFeature's own bookkeeping). Free function -- needs ext::Access on IFeature to call the protected
+// GetRenderResolution again on an arbitrary feature, so no declaration is added to IFeature.h beyond the friend
+// line. Same gate as ResolveRenderGeometry, checked here too before touching anything: a complete no-op (not even
+// the extra GetRenderResolution call) when geometry is null or the config flag is off.
+void CorrectRenderSubrect(IFeature* feature, NVSDK_NGX_Parameter* InParameters);
 } // namespace ext::upscaler

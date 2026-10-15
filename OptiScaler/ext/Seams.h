@@ -20,6 +20,7 @@
 #include <SimpleIni.h>
 
 // Upstream classes named by the seams below (the full types come with the host file's own includes)
+class IFeature;
 class IFeature_Dx11;
 class IFGFeature_Dx12;
 class Dx11wDx12SC;
@@ -45,6 +46,13 @@ struct Access
     // `target` is slot 10 of a real ID3D12GraphicsCommandList vtable. Failure leaves o_Reset null.
     static bool ResetHookAttached();
     static bool AttachResetHook(void* target);
+
+    // upscalers/IFeature.h (friend line). C2/C3: the free functions ext::upscaler::CorrectRenderSubrect /
+    // ResolveRenderGeometry need to call the protected GetRenderResolution again, on an arbitrary feature (the
+    // D3D11/Vulkan bridges' inner dx12Feature, not necessarily `this`). Not a seam: ext-internal, no declaration is
+    // added to IFeature.h beyond the friend line.
+    static void GetRenderResolution(IFeature& feature, const NVSDK_NGX_Parameter* params, unsigned int& w,
+                                     unsigned int& h);
 
     // framegen/IFGFeature_Dx12.h and the derived FG classes (friend lines). The FG fork code names their protected
     // state through this nested class only; it is defined in ext/fg/Dx12Access.h, which upstream files never include.

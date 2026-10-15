@@ -2,8 +2,12 @@
 
 #include "ext/upscaler/UpscalerSeams.h"
 
+#include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/game/Game.h"
+#include "ext/game/GameInterfaces.h"
+
+#include <upscalers/IFeature.h>
 
 #include <mutex>
 
@@ -104,5 +108,120 @@ bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigne
     if (params != nullptr)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, pq);
     return true;
+}
+
+namespace
+{
+// C2/C3's gate is structural (game::Current().geometry != nullptr, never true for any game but a matched FFXIV
+// build) plus the RenderSizeFromWidthHeight config flag. CorrectRenderSubrect checks both itself, before touching
+// anything, so a closed gate is a complete no-op (not even the extra GetRenderResolution call) -- it does not rely
+// on ResolveRenderGeometry's own (necessarily per-call) gating the way the oracle's unconditional CorrectRenderSubrect
+// could.
+bool RenderGeometryGateOpen()
+{
+    return game::Current().geometry != nullptr && Cfg().upscaler.renderSizeFromWidthHeight.value_or_default();
+}
+
+// Ext-side "has this answer already been logged" state for the two diagnostics below (docs/SEAMS-catalog.md
+// "upscaler": no IFeature.h field for the oracle's _reportedEvaluateGeometry). A single last-feature/last-answer
+// slot, not a container (SEAMS 3.1 forbids containers on this per-frame path): correct for the common case of one
+// feature evaluating render geometry per frame. If two features interleave frame-by-frame (e.g. a dual SR/FG split)
+// each can re-log its first answer on every swap instead of logging once per feature -- a cosmetic difference from
+// the oracle's per-instance bool, not a behavioural one (the corrected width/height themselves are unaffected).
+struct GeometryLogState
+{
+    const IFeature* feature = nullptr;
+    unsigned int width = 0;
+    unsigned int height = 0;
+};
+
+GeometryLogState& CorrectionLogState()
+{
+    static GeometryLogState s;
+    return s;
+}
+
+GeometryLogState& ReportedLogState()
+{
+    static GeometryLogState s;
+    return s;
+}
+} // namespace
+
+bool ResolveRenderGeometry(IFeature* feature, const NVSDK_NGX_Parameter* InParameters, unsigned int* OutWidth,
+                            unsigned int* OutHeight)
+{
+    auto* geo = game::Current().geometry;
+    if (geo == nullptr || feature == nullptr || InParameters == nullptr || OutWidth == nullptr || OutHeight == nullptr)
+        return false; // not a matched FFXIV build: upstream's subrect-report-only behaviour, completely untouched
+
+    // U3 H5a (deferred to C2/C3 by C1/C5): unconditional, independent of the config flag below -- mirrors the
+    // oracle's EnsureFfxivNativeQuality() call here, through the cached-pointer path ApplyForcedQuality also uses.
+    if (auto* quality = game::Current().quality)
+        quality->EnsureHooks();
+
+    unsigned int paramWidth = 0, paramHeight = 0;
+    const bool haveParams = InParameters->Get(NVSDK_NGX_Parameter_Width, &paramWidth) == NVSDK_NGX_Result_Success &&
+                             InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success;
+
+    const unsigned int subrectWidth = *OutWidth;
+    const unsigned int subrectHeight = *OutHeight;
+    const bool corrected = haveParams && geo->ResolveRenderExtent(paramWidth, paramHeight, *OutWidth, *OutHeight);
+
+    if (corrected)
+    {
+        auto& state = CorrectionLogState();
+        if (state.feature != feature || state.width != *OutWidth || state.height != *OutHeight)
+        {
+            state.feature = feature;
+            state.width = *OutWidth;
+            state.height = *OutHeight;
+            LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect but Width/Height of {}x{}. Taking {}x{} "
+                     "as the render size -- the subrect is this game's buffer, not its frame.",
+                     subrectWidth, subrectHeight, paramWidth, paramHeight, *OutWidth, *OutHeight);
+        }
+    }
+
+    // Unconditional (U3 H5c), independent of whether a correction fired this call: once per distinct answer, not
+    // per frame. `feature`'s render/display size are read before GetRenderResolution's own `_renderWidth =
+    // *OutWidth;` assignment runs (this seam is called before that line), so RenderWidth()/RenderHeight() here are
+    // still the previous answer.
+    {
+        auto& state = ReportedLogState();
+        if (state.feature != feature || state.width != *OutWidth || state.height != *OutHeight)
+        {
+            state.feature = feature;
+            state.width = *OutWidth;
+            state.height = *OutHeight;
+            LOG_INFO("Evaluate geometry from the game: render {}x{}. This feature was created for render {}x{} "
+                     "display {}x{}.",
+                     *OutWidth, *OutHeight, feature->RenderWidth(), feature->RenderHeight(), feature->DisplayWidth(),
+                     feature->DisplayHeight());
+        }
+    }
+
+    return corrected;
+}
+
+void CorrectRenderSubrect(IFeature* feature, NVSDK_NGX_Parameter* InParameters)
+{
+    if (feature == nullptr || InParameters == nullptr || !RenderGeometryGateOpen())
+        return; // closed gate: complete no-op, not even the extra GetRenderResolution call below
+
+    unsigned int width = 0, height = 0;
+    Access::GetRenderResolution(*feature, InParameters, width, height);
+
+    unsigned int subrectWidth = 0, subrectHeight = 0;
+    if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+            NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+            NVSDK_NGX_Result_Success &&
+        (subrectWidth != width || subrectHeight != height))
+    {
+        LOG_DEBUG("Correcting the render subrect the game set: {}x{} -> {}x{}", subrectWidth, subrectHeight, width,
+                  height);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
+    }
 }
 } // namespace ext::upscaler
