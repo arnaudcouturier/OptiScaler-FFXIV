@@ -313,6 +313,11 @@ bool IFeature_Dx11::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NGX_Par
     // Always give the caller its original output back, even when the upscale or a pass failed
     InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
 
+    // Unbind our UAVs first so restoring SRVs cannot collide with stale write bindings
+    // (a resource bound as UAV and SRV at once makes D3D11 null out the SRV)
+    ID3D11UnorderedAccessView* nullUAVs[D3D11_1_UAV_SLOT_COUNT] {};
+    InDeviceContext->CSSetUnorderedAccessViews(0, uavCount, nullUAVs, nullptr);
+
     // restore compute shader resources
     for (UINT i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
     {
