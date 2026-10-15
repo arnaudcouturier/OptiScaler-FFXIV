@@ -157,6 +157,11 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
 
     const auto allocatorFenceValue = Dx12CommandAllocatorFenceValue[commandFrame];
     const auto completedBefore = Dx12Fence->GetCompletedValue();
+    if (completedBefore == UINT64_MAX)
+    {
+        LOG_ERROR("Dx11wDx12 allocator fence reports device removal");
+        return false;
+    }
     if (allocatorFenceValue != 0 && completedBefore < allocatorFenceValue)
     {
         result = Dx12Fence->SetEventOnCompletion(allocatorFenceValue, Dx12FenceEvent);
@@ -194,6 +199,14 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
             }
             return false;
         }
+    }
+
+    const auto completedFinal = Dx12Fence->GetCompletedValue();
+    if (completedFinal == UINT64_MAX || completedFinal < allocatorFenceValue)
+    {
+        LOG_ERROR("Dx11wDx12 allocator remains in flight or device removed; required {}, completed {}",
+                  allocatorFenceValue, completedFinal);
+        return false;
     }
 
     result = Dx12CommandAllocator[commandFrame]->Reset();
