@@ -11,13 +11,21 @@
         IncludeDirs = @('stubs', '{repo}/OptiScaler')   # optional, same path rules (stubs\pch.h replaces the product pch)
         Libs        = @('d3d12.lib', 'dxgi.lib', 'ole32.lib')   # optional
         Defines     = @('NOMINMAX')                # optional, "NAME" or "NAME=VALUE"
-        Args        = @()                          # optional, command-line arguments of the test exe
+        Args        = @()                          # optional, command-line arguments of the test exe ('{repo}', '{out}' expand)
+        Runner      = 'run_x.ps1'                  # optional, replaces the build and run steps for tests that need several builds
+                                                   # (negative controls, sliced production source): run under the vcvars environment as
+                                                   #   pwsh -File <script> -Repo <repo root> -Out <build folder>
+                                                   # exit code 0 = pass. Sources then only lists the .cpp files the script builds.
+        Prepare     = 'prepare_x.ps1'              # optional, PowerShell script run before the build as
+                                                   #   pwsh -File <script> -Repo <repo root> -Out <build folder>
+                                                   # (stages generated files such as sliced production source; a non-zero exit fails the test)
         Std         = 'c++20'                      # optional
         Note        = 'one line for -List'         # optional (required for Class manual: what and why)
     }
 
   The test name is the recipe file name minus .test.psd1. Every test is a standalone cl.exe build into a temp folder
   (vcvars64 from the VS install is located with vswhere) followed by one run; exit code 0 = pass.
+  '{out}' in IncludeDirs/Sources/Args is the test's own build folder (where Prepare writes).
   Tests that link production source stub pch.h/Util.h (see tests\ext\gpu\stubs) instead of building the product.
 
   Usage:  pwsh -File tools\test.ps1 [-Filter <wildcard on name or area>] [-List]
@@ -34,8 +42,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $dir = Join-Path $root 'tests\ext'
 if (-not (Test-Path $dir)) { Write-Host '[test] tests\ext: no tests yet (nothing to run)'; exit 0 }
 
-function Expand-Path([string]$p, [string]$base) {
-    $p = $p.Replace('{repo}', $root)
+function Expand-Path([string]$p, [string]$base, [string]$out = '') {
+    $p = $p.Replace('{repo}', $root).Replace('{out}', $out)
     if ([IO.Path]::IsPathRooted($p)) { return [IO.Path]::GetFullPath($p) }
     return [IO.Path]::GetFullPath((Join-Path $base $p))
 }
@@ -73,11 +81,29 @@ foreach ($r in $recipes) {
 
     $out = Join-Path ([IO.Path]::GetTempPath()) ("optiscaler-test-$name-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $out | Out-Null
+    if ($t.Runner) {
+        Write-Host "[test] $area/$name  ($($t.Class)) running..."
+        $rcmd = 'call "{0}" >nul && pwsh -NoProfile -File "{1}" -Repo "{2}" -Out "{3}"' -f $vcvars, (Join-Path $base $t.Runner), $root, $out
+        $runnerOut = & cmd.exe /c $rcmd 2>&1
+        $rcode = $LASTEXITCODE
+        $runnerOut | ForEach-Object { Write-Host "    $_" }
+        if ($rcode -eq 0) { Write-Host "[test] $area/$name  PASS"; $passed++; Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue }
+        else { Write-Host "[test] $area/$name  FAIL (exit $rcode, kept $out)"; $failed += "$area/$name (exit $rcode)" }
+        continue
+    }
+    if ($t.Prepare) {
+        Write-Host "[test] $area/$name  preparing..."
+        $prepOut = & pwsh -NoProfile -File (Join-Path $base $t.Prepare) -Repo $root -Out $out 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $prepOut | Select-Object -Last 20 | ForEach-Object { Write-Host "    $_" }
+            Write-Host "[test] $area/$name  FAIL (prepare)"; $failed += "$area/$name (prepare)"; continue
+        }
+    }
     $std = if ($t.Std) { $t.Std } else { 'c++20' }
     $cl = @('/nologo', "/std:$std", '/EHsc', '/W4', "/Fo$out\", "/Fe$out\$name.exe")
     foreach ($d in @($t.Defines)) { if ($d) { $cl += "/D$d" } }
-    foreach ($i in @($t.IncludeDirs)) { if ($i) { $cl += ('/I"{0}"' -f (Expand-Path $i $base)) } }
-    foreach ($s in @($t.Sources)) { $cl += ('"{0}"' -f (Expand-Path $s $base)) }
+    foreach ($i in @($t.IncludeDirs)) { if ($i) { $cl += ('/I"{0}"' -f (Expand-Path $i $base $out)) } }
+    foreach ($s in @($t.Sources)) { $cl += ('"{0}"' -f (Expand-Path $s $base $out)) }
     foreach ($l in @($t.Libs)) { if ($l) { $cl += $l } }
     $cmd = 'call "{0}" >nul && cl.exe {1}' -f $vcvars, ($cl -join ' ')
 
@@ -87,7 +113,8 @@ foreach ($r in $recipes) {
         $buildOut | Select-Object -Last 40 | ForEach-Object { Write-Host "    $_" }
         Write-Host "[test] $area/$name  FAIL (build)"; $failed += "$area/$name (build)"; continue
     }
-    $runOut = & "$out\$name.exe" @($t.Args) 2>&1
+    $testArgs = @(@($t.Args) | Where-Object { $_ } | ForEach-Object { $_.Replace('{repo}', $root).Replace('{out}', $out) })
+    $runOut = & "$out\$name.exe" @testArgs 2>&1
     $code = $LASTEXITCODE
     $runOut | ForEach-Object { Write-Host "    $_" }
     if ($code -eq 0) { Write-Host "[test] $area/$name  PASS"; $passed++; Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue }
