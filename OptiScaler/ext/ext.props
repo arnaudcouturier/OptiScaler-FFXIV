@@ -46,7 +46,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ClCompile Include="ext\**\*.cpp">
+    <ClCompile Include="ext\**\*.cpp" Exclude="ext\nr\forwarder\**">
       <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
     </ClCompile>
     <ClInclude Include="ext\**\*.h" />
