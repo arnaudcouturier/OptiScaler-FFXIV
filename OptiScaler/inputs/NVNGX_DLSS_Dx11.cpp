@@ -17,6 +17,7 @@
 #include <ankerl/unordered_dense.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <misc/IdentifyGpu.h>
+#include "ext/Seams.h"
 
 static ID3D11Device* D3D11Device = nullptr;
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Dx11>> Dx11Contexts;
@@ -374,15 +375,20 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 
     // Dx11Contexts.clear();
 
-    D3D11Device = nullptr;
     State::Instance().currentFeature = nullptr;
 
-    if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited() &&
-        NVNGXProxy::D3D11_Shutdown() != nullptr)
+    if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited())
     {
-        auto result = NVNGXProxy::D3D11_Shutdown()();
-        NVNGXProxy::SetDx11Inited(false);
+        NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_PlatformError;
+        // ext: C6 a game that shares NGX with a live DX12 Streamline instance must not run the legacy global Shutdown
+        if (!ext::dx11bridge::ShutdownNgx(D3D11Device, result) && NVNGXProxy::D3D11_Shutdown() != nullptr)
+            result = NVNGXProxy::D3D11_Shutdown()();
+
+        if (result == NVSDK_NGX_Result_Success)
+            NVNGXProxy::SetDx11Inited(false);
     }
+
+    D3D11Device = nullptr; // ext: C6 after the proxy call: ShutdownNgx needs the device
 
     // Unhooking and cleaning stuff causing issues during shutdown.
     // Disabled for now to check if it cause any issues
@@ -398,6 +404,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown1(ID3D11Device* InDevice)
 {
+    if (ext::dx11bridge::RedirectShutdown1(InDevice, D3D11Device)) // ext: C6 null-device Shutdown1 == global Shutdown
+        return NVSDK_NGX_D3D11_Shutdown();
+
     shutdown = true;
 
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited() &&
@@ -693,6 +702,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (auto deviceContext = Dx11Contexts[handleId].feature.get(); deviceContext != nullptr)
     {
+        if (!ext::dx11bridge::BeforeReleaseFeature(*deviceContext, shutdown)) // ext: C6 drain the queues first
+            return NVSDK_NGX_Result_FAIL_PlatformError;
+
         if (!shutdown)
         {
             LOG_TRACE("sleeping for 500ms before reset()!");

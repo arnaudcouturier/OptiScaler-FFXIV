@@ -3,6 +3,7 @@
 #include "IFGFeature.h"
 
 #include <upscalers/IFeature.h>
+#include "ext/Seams.h"
 
 #include <shaders/resource_flip/RF_Dx12.h>
 #include <shaders/hudless_compare/HC_Dx12.h>
@@ -45,6 +46,8 @@ struct LockedDx12Resource
 
 class IFGFeature_Dx12 : public virtual IFGFeature
 {
+    friend struct ext::Access;
+
   private:
     ID3D12GraphicsCommandList* _copyCommandList[BUFFER_COUNT] {};
     ID3D12CommandAllocator* _copyCommandAllocator[BUFFER_COUNT] {};
