@@ -13,6 +13,23 @@
 #include "menu_common.h"
 #include <shaders/menu_blur/MenuBlur_Dx11.h>
 #include <shaders/menu_blur/MenuBlur_Dx12.h>
+#include <mutex>
+
+// Serializes overlay rendering/cleanup against swapchain resizes. Present only try-locks it.
+static std::recursive_mutex overlayRenderMutex;
+static unsigned int overlayResizeDepth = 0;
+
+MenuOverlayDx::ScopedResize::ScopedResize()
+{
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
+    ++overlayResizeDepth;
+}
+
+MenuOverlayDx::ScopedResize::~ScopedResize()
+{
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
+    --overlayResizeDepth;
+}
 
 // menu
 static int const NUM_BACK_BUFFERS = 8;
@@ -34,6 +51,28 @@ static DescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
 static ID3D12CommandQueue* g_pd3dCommandQueue = nullptr;
 static ID3D12GraphicsCommandList* g_pd3dCommandList = nullptr;
 static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
+static ID3D12Fence* g_overlayFence = nullptr;
+static HANDLE g_overlayFenceEvent = nullptr;
+// Highest value signaled so far (UINT64_MAX once a signal failed). The queue is in-order, so when the
+// fence reaches this value every earlier overlay submission is retired as well.
+static UINT64 g_overlayFenceValue = 0;
+// Ring of in-flight overlay submissions. Slot = g_overlaySubmissionCount % NUM_BACK_BUFFERS selects the
+// command allocator and, by construction, the ImGui DX12 backend vertex/index buffer set.
+// g_overlaySlotFenceValues[slot] is the fence value signaled by the submission that last used that slot.
+static UINT64 g_overlaySlotFenceValues[NUM_BACK_BUFFERS] = {};
+// Number of ImGui_ImplDX12_RenderDrawData calls that advanced the backend since ImGui_ImplDX12_Init.
+//
+// This mirrors the vendored backend (include/imgui/imgui_impl_dx12.cpp): its per-viewport FrameIndex
+// starts at UINT_MAX, is incremented by every RenderDrawData call that does not bail out on an empty
+// display, and selects FrameRenderBuffers[FrameIndex % NumFramesInFlight] (we pass NUM_BACK_BUFFERS as
+// NumFramesInFlight). If the backend changes how it picks its buffers, the ring below no longer protects
+// them, so the assert pins the version it was written against - re-check the backend before bumping it.
+static UINT64 g_overlaySubmissionCount = 0;
+static_assert(IMGUI_VERSION_NUM == 19196,
+              "The overlay fence ring mirrors the frame index of the vendored ImGui DX12 backend. Re-verify "
+              "ImGui_ImplDX12_RenderDrawData's FrameIndex handling, then update this version.");
+// FrameIndex is a UINT that wraps at 2^32; the slot order only survives the wrap if the ring size divides it.
+static_assert((NUM_BACK_BUFFERS & (NUM_BACK_BUFFERS - 1)) == 0, "NUM_BACK_BUFFERS must be a power of two");
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
 static std::unique_ptr<MenuBlur_Dx12> g_menuBlur;
@@ -120,10 +159,49 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     LOG_INFO("done!");
 }
 
+static void ResetOverlayFenceRing()
+{
+    g_overlayFenceValue = 0;
+    g_overlaySubmissionCount = 0;
+    for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
+        g_overlaySlotFenceValues[i] = 0;
+}
+
+// Blocks until g_overlayFence reaches value. Returns false on failure, timeout or device removal.
+static bool WaitForOverlayFence(UINT64 value)
+{
+    if (g_overlayFence->GetCompletedValue() >= value)
+        return g_overlayFence->GetCompletedValue() != UINT64_MAX;
+    if (value == UINT64_MAX)
+        return false;
+
+    if (!g_overlayFenceEvent)
+        g_overlayFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+    const auto waitResult =
+        g_overlayFenceEvent ? g_overlayFence->SetEventOnCompletion(value, g_overlayFenceEvent) : E_OUTOFMEMORY;
+    if (FAILED(waitResult) || WaitForSingleObject(g_overlayFenceEvent, 2000) != WAIT_OBJECT_0 ||
+        g_overlayFence->GetCompletedValue() < value)
+    {
+        LOG_ERROR("DX12 overlay completion wait failed or timed out: {:X}", (UINT) waitResult);
+        return false;
+    }
+
+    return g_overlayFence->GetCompletedValue() != UINT64_MAX;
+}
+
 static void CleanupRenderTargetDx12(bool clearQueue)
 {
     if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
         return;
+
+    // Keep the allocators and ImGui upload buffers alive until every in-flight submission retires.
+    // g_overlayFenceValue is the highest signaled value, so this covers all ring slots.
+    if (g_overlayFence && g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+    {
+        LOG_WARN("DX12 overlay cleanup deferred: GPU submission still pending");
+        return;
+    }
 
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
     {
@@ -154,6 +232,11 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         }
 
         SAFE_RELEASE(g_pd3dCommandList);
+        SAFE_RELEASE(g_overlayFence);
+        if (g_overlayFenceEvent)
+            CloseHandle(g_overlayFenceEvent);
+        g_overlayFenceEvent = nullptr;
+        ResetOverlayFenceRing();
 
         if (g_pd3dCommandQueue != nullptr)
             g_pd3dCommandQueue = nullptr;
@@ -409,6 +492,19 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             }
         }
 
+        result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_overlayFence));
+        if (FAILED(result))
+        {
+            LOG_ERROR("DX12 overlay fence creation failed: {:X}", (UINT) result);
+            MenuOverlayBase::HideMenu();
+            CleanupRenderTargetDx12(true);
+            pSwapChain->Release();
+            return;
+        }
+        // Fresh fence, and ImGui_ImplDX12_Init below creates a fresh backend FrameIndex (UINT_MAX):
+        // the submission counter must restart together with it.
+        ResetOverlayFenceRing();
+
         result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0], NULL,
                                            IID_PPV_ARGS(&g_pd3dCommandList));
         if (result != S_OK)
@@ -468,6 +564,16 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         {
             _showRenderImGuiDebugOnce = true;
 
+            // Never reuse an allocator or ImGui upload buffer before the submission that last used it retires
+            // (waited per ring slot below). Skipping busy frames instead makes the overlay disappear on
+            // generated presents.
+            if (!g_overlayFence || g_overlayFence->GetCompletedValue() == UINT64_MAX ||
+                g_overlayFenceValue == UINT64_MAX)
+            {
+                pSwapChain->Release();
+                return;
+            }
+
             ImGui_ImplDX12_NewFrame();
 
             UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
@@ -491,8 +597,27 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             {
                 ImGui::Render();
 
+                // ImGui_ImplDX12_RenderDrawData returns before advancing its FrameIndex for an empty display.
+                // Bail out here too so g_overlaySubmissionCount stays in lockstep with it.
+                if (ImGui::GetDrawData()->TotalVtxCount == 0 || ImGui::GetDrawData()->DisplaySize.x <= 0.0f ||
+                    ImGui::GetDrawData()->DisplaySize.y <= 0.0f)
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+
+                // Allocator and ImGui buffer set follow our own submission ring, not the swapchain index.
+                const UINT overlaySlot = UINT(g_overlaySubmissionCount % NUM_BACK_BUFFERS);
+                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[overlaySlot];
+
+                // Only the submission that last used this slot's allocator and ImGui buffers must be complete.
+                if (!WaitForOverlayFence(g_overlaySlotFenceValues[overlaySlot]))
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+
                 const bool blurMenu = blurReady && MenuCommon::BackgroundBlurUsed();
-                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
 
                 auto result = commandAllocator->Reset();
                 if (result != S_OK)
@@ -535,6 +660,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
 
                 ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
+                ++g_overlaySubmissionCount; // The backend advanced its FrameIndex in that call.
 
                 barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -551,6 +677,19 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
                 ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+
+                result = ((ID3D12CommandQueue*) currentSCCommandQueue)->Signal(g_overlayFence, g_overlayFenceValue + 1);
+                if (FAILED(result))
+                {
+                    // No completion token: prevent unsafe reuse after the submission.
+                    g_overlaySlotFenceValues[overlaySlot] = UINT64_MAX;
+                    g_overlayFenceValue = UINT64_MAX;
+                    LOG_ERROR("DX12 overlay completion signal failed: {:X}", (UINT) result);
+                }
+                else
+                {
+                    g_overlaySlotFenceValues[overlaySlot] = ++g_overlayFenceValue;
+                }
             }
         }
         else
@@ -570,6 +709,7 @@ ID3D12GraphicsCommandList* MenuOverlayDx::MenuCommandList() { return g_pd3dComma
 
 void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 {
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
     LOG_FUNC();
 
     auto fg = State::Instance().currentFG;
@@ -589,6 +729,12 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    // XeFG may present internally while ResizeBuffers is still on the stack.
+    // Do not block its worker or rebuild resources released for that resize.
+    const std::unique_lock<std::recursive_mutex> lock(overlayRenderMutex, std::try_to_lock);
+    if (!lock.owns_lock() || overlayResizeDepth != 0)
+        return;
+
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
         MenuOverlayBase::Present();
