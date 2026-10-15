@@ -2,6 +2,41 @@
 
 #include "ext/Seams.h"
 
+#include "ext/game/Game.h"
+#include "ext/ffxiv/lighting/FfxivLighting.h"
+
+namespace ext::game
+{
+void OnD3D11DeviceHooked(ID3D11Device* device)
+{
+    if (device != nullptr && Current().lighting != nullptr)
+        ext::ffxiv::lighting::OnDeviceHooked(device);
+}
+
+void OnD3D11Unhook()
+{
+    if (Current().lighting != nullptr)
+        ext::ffxiv::lighting::OnUnhook();
+}
+} // namespace ext::game
+
+namespace ext::dx11bridge
+{
+void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
+                       const NVSDK_NGX_Parameter* parameters)
+{
+    if (auto* lighting = game::Current().lighting)
+    {
+        unsigned int flags = 0;
+        const bool haveFlags = parameters != nullptr &&
+                               parameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags) ==
+                                   NVSDK_NGX_Result_Success;
+        lighting->OnUpscaleBoundary(context, color,
+                                    !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
+    }
+}
+} // namespace ext::dx11bridge
+
 #include <framegen/IFGFeature_Dx12.h>
 #include <resource_tracking/ResTrack_dx12.h>
 

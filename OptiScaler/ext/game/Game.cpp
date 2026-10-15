@@ -56,15 +56,4 @@ const Game& Current()
     return selected;
 }
 
-void OnD3D11DeviceHooked(ID3D11Device* device)
-{
-    if (device != nullptr && Current().lighting != nullptr)
-        ext::ffxiv::lighting::OnDeviceHooked(device);
-}
-
-void OnD3D11Unhook()
-{
-    if (Current().lighting != nullptr)
-        ext::ffxiv::lighting::OnUnhook();
-}
 } // namespace ext::game

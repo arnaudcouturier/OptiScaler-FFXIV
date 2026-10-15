@@ -23,6 +23,9 @@ class IFeature_Dx11;
 class IFGFeature_Dx12;
 class Dx11wDx12SC;
 struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11Resource;
+struct NVSDK_NGX_Parameter;
 
 namespace ext
 {
@@ -76,6 +79,9 @@ void Banner(); // once, right after upstream logs its version line
 // NGX shutdown / feature release on the D3D11 entry points (C6). State: ext/dx11bridge/NgxLifecycle.cpp
 namespace dx11bridge
 {
+// C5/B6: the bridge passes its original input color and feature flags; dispatch stays inside the fork seam.
+void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
+                       const NVSDK_NGX_Parameter* parameters);
 // NVSDK_NGX_D3D11_Shutdown, replaces the legacy proxy Shutdown call. True = handled (`out` holds the result): the
 // game isolates NGX shutdown (ext::game INgxLifecycle) and the bridge is up, so only the device-specific Shutdown1 runs
 // and Streamline's live DX12 NGX instance survives. False = upstream calls the legacy Shutdown.
@@ -86,6 +92,12 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice);
 // NVSDK_NGX_D3D11_ReleaseFeature, before the feature is reset. False -> return FAIL_PlatformError.
 bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
 } // namespace dx11bridge
+
+namespace game
+{
+void OnD3D11DeviceHooked(ID3D11Device* device);
+void OnD3D11Unhook();
+} // namespace game
 
 // Groups of later series. Declarations are added here together with the SEAMS-catalog.md row.
 namespace upscaler {}

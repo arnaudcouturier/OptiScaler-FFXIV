@@ -9,7 +9,7 @@
 #include <wrapped/wrapped_swapchain.h>
 
 #include <resource_tracking/ResTrack_dx11.h>
-#include <ext/game/Game.h>
+#include <ext/Seams.h>
 
 #include <detours/detours.h>
 

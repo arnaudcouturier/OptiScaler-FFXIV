@@ -107,8 +107,12 @@ struct CompanionBuild
     std::uint32_t startIndexOffset = 0x14;
     std::uint32_t indexCountOffset = 0x18;
     std::uint32_t drawCommandType = 6;
+    std::uint32_t drawCommandTypeOffset = 0x00;
+    std::uint32_t drawCommandSize = 0xb0;
     std::uint32_t nativeBatchEntrySize = 16;
     std::uint32_t nativeBatchHeaderSize = 64;
+    std::uint32_t rendererVertexSlotStride = 0x10;
+    std::uint32_t layoutSlotEntrySize = 8;
 };
 
 struct GameBuild
