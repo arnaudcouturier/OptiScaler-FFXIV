@@ -4,6 +4,7 @@
 // Hot-path seams are inline wrappers testing a feature bit, see ExtFeatures.h.
 
 #include "ext/ExtFeatures.h"
+#include "ext/core/HooksBypass.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"
 #include "ext/dx11bridge/BridgeState.h"

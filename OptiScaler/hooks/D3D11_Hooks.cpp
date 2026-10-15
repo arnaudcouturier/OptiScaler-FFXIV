@@ -191,7 +191,7 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
                                    ID3D11Device** ppDevice, D3D_FEATURE_LEVEL* pFeatureLevel,
                                    ID3D11DeviceContext** ppImmediateContext)
 {
-    if (_skipDx11Create)
+    if (_skipDx11Create || ext::core::HooksBypassed()) // ext: C7
     {
         LOG_DEBUG("Skip");
         return o_D3D11CreateDevice(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion,
@@ -466,6 +466,9 @@ VALIDATE_HOOK(hkCreateSamplerState, PFN_CreateSamplerState)
 static HRESULT hkCreateSamplerState(ID3D11Device* This, const D3D11_SAMPLER_DESC* pSamplerDesc,
                                     ID3D11SamplerState** ppSamplerState)
 {
+    if (ext::core::HooksBypassed()) // ext: C7
+        return o_CreateSamplerState(This, pSamplerDesc, ppSamplerState);
+
     if (pSamplerDesc == nullptr || This == nullptr)
         return E_INVALIDARG;
 
