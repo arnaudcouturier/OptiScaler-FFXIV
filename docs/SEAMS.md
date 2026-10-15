@@ -119,7 +119,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 | Interface | Methods (initial) | Used by |
 |---|---|---|
 | `IRenderGeometry` | `ResolveRenderExtent`, `ColorIsDisplayAllocation` | C2, C3, C4 |
-| `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached), `Request(preset)` | C1, C5 |
+| `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached), `Request(int preset)` | C1, C5 |
 | `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset` | B6, A3 |
 | `ISceneHdr` | `Open`, `PublishReconstructed`, `EndFrame` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | B5, D2, C5 |
