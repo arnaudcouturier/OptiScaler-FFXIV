@@ -405,6 +405,9 @@ void Session::ProbeAtBoundary(void* context)
         const int64_t t0 = _backend.Qpc();
 
         _report.Line(std::format("[F2] ===== probe run {} at the boundary call, method: {} =====", run, SkipMethodName(method)));
+        _report.Line("[F3] skip methods NOT tried on purpose: set_technique_state per technique (it can mark the preset modified, and "
+                     "ReShade.ini may have AutoSavePreset=1, so a crash in between could rewrite the user's preset) and event "
+                     "vetoes (reshade_begin_effects / reshade_finish_effects return void: no event can veto a pass).");
         const EventCounts counts = Counts();
         _report.Line("[F1] events delivered so far: " + FormatEventCounts(counts));
         if (counts.Total() == 0)
