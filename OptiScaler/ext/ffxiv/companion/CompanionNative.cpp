@@ -209,7 +209,19 @@ void Install()
 }
 void Detach()
 {
-    Layer::Stop();
+    // Companion::Unhook() wraps the whole Native::Detach() call in a catch-all that only
+    // logs and otherwise papers over a partial failure; that must not be the only thing
+    // standing between a thrown exception and leaving `installed`/hook state stale. Contain
+    // Layer::Stop() specifically (it touches std::lock_guard/std::filesystem via the replay
+    // capture path, both of which can throw under resource exhaustion) so our own cleanup
+    // below -- and the already-late installed.store(true) further down, inside the
+    // DetourTransactionCommit success branch -- still runs and stays truthful.
+    try { Layer::Stop(); }
+    catch (...) { LOG_WARN("Companion native submissions: Layer::Stop() failed during teardown; continuing hook detach"); }
+    // Best-effort bounded wait for the nameplate-live worker thread (it keeps running its own
+    // D3D11/DXGI/DirectComposition present loop for up to ~50ms per poll after Stop()'s atomics
+    // are set) so it is not still touching the D3D11 context while we revert these hooks.
+    ext::ffxiv::companion::replay::FfxivNameplateLive::JoinWorker();
     Gpu::requested.store(false); Gpu::Clear();
     requested.store(false);
     beginNativeDraw.store(nullptr); endNativeDraw.store(nullptr);

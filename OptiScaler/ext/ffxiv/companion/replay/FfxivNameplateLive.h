@@ -49,6 +49,40 @@ inline double Seconds() { LARGE_INTEGER t,f; QueryPerformanceCounter(&t); QueryP
 inline void Status(std::string value) { std::lock_guard lock(mutex); status=std::move(value); }
 inline std::string Status() { std::lock_guard lock(mutex); return status; }
 inline void Stop() { stop.store(true); ready.store(false); preparing.store(false); requested.store(false); }
+// Stop() only flips atomics and returns immediately: the worker (its own D3D11
+// device/DXGI swapchain/DirectComposition present loop, polling at up to ~50ms via
+// WaitForSingleObject(pacing.value,50) in Run()) keeps running for a little while after.
+// Stop() itself is called from several live, non-teardown paths (menu toggles, the render
+// thread's own Tick()/Poll(), and even from inside a batch-filter construction on the
+// native draw path) where blocking would stall the game, so it stays non-blocking.
+// JoinWorker() is the bounded, blocking wait for callers that actually need the worker
+// gone before proceeding -- currently only ext::ffxiv::companion::Native::Detach() during
+// teardown. Never call this from the worker thread itself, and never while already
+// holding `mutex` (the worker's own loop and Status() take it too).
+inline void JoinWorker(DWORD timeoutMs=3000)
+{
+    HANDLE handle=nullptr;
+    {
+        std::lock_guard lock(mutex);
+        if(!worker || GetCurrentThreadId()==GetThreadId(worker)) return;
+        if(!DuplicateHandle(GetCurrentProcess(),worker,GetCurrentProcess(),&handle,0,FALSE,DUPLICATE_SAME_ACCESS))
+        {LOG_WARN("FFXIV nameplate live: cannot duplicate worker handle for teardown wait");return;}
+    }
+    const auto result=WaitForSingleObject(handle,timeoutMs);
+    if(result==WAIT_TIMEOUT)
+        LOG_WARN("FFXIV nameplate live: worker thread did not exit within {} ms during teardown; leaving it running",timeoutMs);
+    else if(result!=WAIT_OBJECT_0)
+        LOG_WARN("FFXIV nameplate live: wait for worker thread during teardown returned {}",result);
+    else
+    {
+        // The worker exited: match Request()'s own precedent of closing a finished
+        // worker handle so a later Request() can safely create a fresh one. Re-check
+        // under the lock in case a concurrent Request() already did this.
+        std::lock_guard lock(mutex);
+        if(worker && WaitForSingleObject(worker,0)==WAIT_OBJECT_0){CloseHandle(worker);worker=nullptr;}
+    }
+    CloseHandle(handle);
+}
 inline bool WantFrame() { return ready.load() && !stop.load() && (!endTime.load() || GetTickCount64()<endTime.load()); }
 inline bool Request(ULONGLONG duration=30000)
 {
