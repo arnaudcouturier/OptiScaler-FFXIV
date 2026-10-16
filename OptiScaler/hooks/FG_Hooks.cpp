@@ -1075,7 +1075,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     if (ext::core::HooksBypassed()) // ext: C7
-        return o_FGSCPresent(This, SyncInterval, Flags); // ext: C7
+        return o_FGSCPresent(This, SyncInterval, Flags);
     // Skip XeFG's internal call
     if (_skipPresent)
     {
@@ -1112,7 +1112,7 @@ HRESULT FGHooks::hkFGPresent1(IDXGISwapChain1* This, UINT SyncInterval, UINT Fla
                               const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
     if (ext::core::HooksBypassed()) // ext: C7
-        return o_FGSCPresent1(This, SyncInterval, Flags, pPresentParameters); // ext: C7
+        return o_FGSCPresent1(This, SyncInterval, Flags, pPresentParameters);
     // Skip XeFG's internal call
     if (_skipPresent1)
     {
