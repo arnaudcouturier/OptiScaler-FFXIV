@@ -4,6 +4,7 @@
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/geometry/FfxivGeometry.h"
 #include "ext/ffxiv/lighting/FfxivLighting.h"
+#include "ext/ffxiv/markers/FfxivMarkers.h"
 #include "ext/ffxiv/quality/FfxivQuality.h"
 #include "ext/game/Game.h"
 #include "ext/hdr/HdrScene.h"
@@ -43,6 +44,7 @@ const Game& SelectGame()
         ffxiv.lighting = &ext::ffxiv::lighting::Provider();
         ffxiv.quality = &ext::ffxiv::quality::Provider();
         ffxiv.geometry = &ext::ffxiv::geometry::Provider();
+        ffxiv.fgMarkers = &ext::ffxiv::markers::Provider();
         ffxiv.ngx = &quirks;
         ffxiv.nrQuirks = &quirks;
         ext::SetActive(ext::F::Game, true);
