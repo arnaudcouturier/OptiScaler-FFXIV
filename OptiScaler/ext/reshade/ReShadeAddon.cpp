@@ -56,7 +56,11 @@ std::string ModuleVersion(HMODULE module)
 }
 } // namespace
 
-bool ProbeEnabled() { return ext::Cfg().reshade.probe.value_or_default(); }
+// The ONE place that decides it: the probe's own key, or package A's [HudLess] Diagnostics (stacked, S10).
+bool ProbeEnabled()
+{
+    return ext::Cfg().reshade.probe.value_or_default() || ext::Cfg().ui.diagnostics.value_or_default();
+}
 
 AddonStatus Status()
 {

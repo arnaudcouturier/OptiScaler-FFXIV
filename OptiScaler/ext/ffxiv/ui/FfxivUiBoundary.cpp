@@ -10,6 +10,7 @@
 #include "ext/ffxiv/ui/UiSnapshot.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 #include "ext/hudless/HudlessSource.h"
+#include "ext/reshade/ReShadeAddon.h"
 
 #include <State.h>
 
@@ -143,6 +144,10 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
         Core& core = C();
         const int64_t start = Qpc();
         const Core::DrawResult res = core.OnDraw(context);
+        // S10 D0: the ReShade feasibility probe runs at the earliest candidate boundary (R3 moved), before that draw runs.
+        // One atomic load and a failed compare unless the user armed it from its menu card.
+        if (res.moved)
+            ext::reshade::ProbeAtBoundary(context);
         if (res.change != 0 && snapshot::Armed())
             snapshot::OnCandidate(context, core, res); // before the candidate draw runs
         core.AddHookTicks(Qpc() - start);
