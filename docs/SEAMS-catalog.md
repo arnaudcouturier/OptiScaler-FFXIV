@@ -406,7 +406,22 @@ Single-field exceptions kept inline (hot path, per resource or per present, mark
 
 # (d) Measured footprint
 
-Basis: added plus removed lines against upstream base `fd6c2870`, reported by `tools\footprint.ps1`. For the committed S6 stack at `373dab43`: **58 upstream files; +1115/-266 = 1381 total lines; `[UP]` 787 lines; persistent seam surface 594 lines.** The current policy in [SEAMS.md](SEAMS.md) section 1.3 is persistent surface <= 600 lines. `[UP]` is reported separately; touched-file count is informational. The S6 stack has six lines of persistent-surface headroom after C9. S7 and S10 are not included in this measurement; measure and explain their actual changes at those wave boundaries. The former <=40-file/<=1000-total projection and the 122-line `OS_*` resampler estimate are obsolete.
+Basis: added plus removed lines against upstream base `fd6c2870`, reported by `tools\footprint.ps1`. For the committed S6 stack at `373dab43`: **58 upstream files; +1115/-266 = 1381 total lines; `[UP]` 787 lines; persistent seam surface 594 lines.** The current policy in [SEAMS.md](SEAMS.md) section 1.3 is persistent surface <= 600 lines. `[UP]` is reported separately; touched-file count is informational. The S6 stack has six lines of persistent-surface headroom after C9. The former <=40-file/<=1000-total projection and the 122-line `OS_*` resampler estimate are obsolete.
+
+**S7, measured at completion (`f9348a8e`): 67 upstream files; +1185/-274 = 1459 total lines; `[UP]` 787 lines (unchanged); persistent seam surface 672 lines (target <= 600, OVER by 72, disclosed).** Per-wave delta against the S7 CORE checkpoint (613/600, before any of C1-C7/IFgMarkers landed):
+
+| Wave | Persistent surface after | Delta | Upstream files touched |
+|---|---|---|---|
+| S7 CORE checkpoint (F1, C5 module match, B6, D3) | 613 | — | 61 |
+| C1/C5 (native quality forcing) | 625 | +12 | `NVNGX_Parameter.cpp`, `IFeature.cpp` |
+| C2/C3 (render geometry gate) | 637 | +12 | `IFeature.cpp`, `IFeature_Dx11wDx12.cpp`, `IFeature_VkwDx12.cpp`, `DLSSFeature.cpp`, `DLSSDFeature.cpp` |
+| C4 (forced-quality colour scale) | 656 | +19 | `IFeature_Dx11wDx12.cpp` (+16), `IFeature_Dx11wDx12.h` (+3, first touch) |
+| C7 (Companion device-hook wiring, `AfterSharedCopy`, `HooksBypassed` readers) | 672 | +16 | `D3D11_Hooks.cpp`, `Dxgi_Hooks.cpp`, `FG_Hooks.cpp`, `dx11_with_dx12_sc.cpp` |
+| IFgMarkers | 672 | +0 | none — every consuming seam was already wired by earlier waves; this wave only added `ext/` provider code |
+
+No single wave is the overage's cause: each added only the minimum seam call plus a one-line `// ext:` marker at its host site, spread across 67 upstream files total. No reduction lever beyond what's already applied is documented anywhere in this catalog; cutting further would mean removing a ported feature, not tightening its footprint. The overage is disclosed to and accepted by the user as of the `ffxiv-ref-equiv-fd6c2870` tag (2026-10-15) — see `HANDOFF-phase3.md` for the full decision record.
+
+**Known gap in the `ffxiv-ref-equiv-fd6c2870` tag:** E5 (swapchain size-to-window/composition hook, `FEATURE-INVENTORY.md`: "keep") was slotted into S1 by the original `PHASE3-PLAN.md` wave breakdown but was never actually ported — it needed an NBA 2K26 test that this FFXIV-focused run never ran (see `phase3-ledger/U4-hooks-wrapped-restrack.md` open question 1). The tag therefore does not cover 100% of what S0-S7 was originally scoped to include. The user was told plainly and chose to leave the tag as pushed, track E5 as a known gap, and not rewrite the public tag. The `HooksBypassed` row above already records E5's specific obligation (the composition pass-through needs `ext::core::HooksBypassed()` once E5 lands).
 # (e) Unresolved conflicts between ledgers that SEAMS.md does not settle
 
 1. **Recorded Init dependency on C6/C10.** SEAMS 5 makes it `[UP]`; U3 proposed an out-of-line `ext::dx11bridge::InitFeature` using `Hdr10::ResetCommands/ExecuteCommands`. A self-contained `[UP]` commit can only use raw `Reset`/`ExecuteCommandLists`; the C6 and C10 series then add inline `ext::gpu::*` and `ext::hdr::BridgeInitScope` lines inside the block (+4-6 lines). Decide whether Init needs GpuLifetime registration at all (U3 notes the Vulkan variant uses raw calls). The catalog assumes raw in `[UP]`, one RAII line from C10, no `ext::gpu` in Init.
