@@ -30,8 +30,20 @@ probe::Session* g_session = nullptr; // set once by InstallProbe, never freed
 probe::FileReport* g_report = nullptr;
 std::atomic<bool> g_installed { false };
 
+std::atomic<bool> g_begun { false };
+std::string* g_beginLine = nullptr; // heap, never freed; set before g_session is published
+
 // Callbacks may still arrive while the process shuts down: upstream sets isShuttingDown before it frees ReShade.
-bool Live() { return g_session != nullptr && !State::Instance().isShuttingDown; }
+// The first callback also writes the report header: InstallProbe runs inside DllMain (loader lock), where the report folder
+// and file must not be created.
+bool Live()
+{
+    if (g_session == nullptr || State::Instance().isShuttingDown)
+        return false;
+    if (!g_begun.load(std::memory_order_acquire) && !g_begun.exchange(true))
+        g_session->Begin(g_beginLine != nullptr ? *g_beginLine : std::string());
+    return true;
+}
 
 int64_t NowQpc()
 {
@@ -656,7 +668,7 @@ bool InstallProbe(const std::filesystem::path& baseFolder, const std::string& re
         static LiveBackend* backend = new LiveBackend; // never destroyed
         g_report = new probe::FileReport(baseFolder);
         probe::Session* session = new probe::Session(*backend, *g_report);
-        session->Begin(registrationLine);
+        g_beginLine = new std::string(registrationLine); // written by the first callback, not here (DllMain)
 
         // Make the session visible to the callbacks only after it is complete.
         g_session = session;
