@@ -14,6 +14,7 @@
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
 #include "ext/nr/NrSeams.h"
+#include "ext/present/PresentSeams.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
 #include <cstddef>
@@ -145,7 +146,6 @@ void OnD3D11Unhook();
 
 // Groups of later series. Declarations are added here together with the SEAMS-catalog.md row.
 namespace nr {}
-namespace present {}
 namespace streamline {}
 namespace hdr {}
 namespace hudless {}

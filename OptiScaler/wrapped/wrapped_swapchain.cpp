@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "wrapped_swapchain.h"
+#include "ext/Seams.h"
 
 #include <Util.h>
 #include <Config.h>
@@ -567,9 +568,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 }
 
 WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags,
-                                               bool isUWP)
+                                               bool isUWP, bool isComposition) // ext: E5
     : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP)
 {
+    _composition = isComposition; // ext: E5
     _id = ++scCount;
     _lastFlags = flags;
 
@@ -802,6 +804,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
     OwnedLockGuard lock(_localMutex, 4);
 #endif
 
+    if (_composition && !ext::present::ResolveCompositionHandle(_handle)) // ext: E5 no usable window yet
+        return _real->Present(SyncInterval, Flags);
+
     HRESULT result;
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
@@ -925,7 +930,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 
     State::Instance().scChanged = true;
 
-    if (Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen && // ext: E5
         State::Instance().currentFG == nullptr)
     {
         LOG_DEBUG("Overriding flags");
@@ -1161,6 +1166,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
     OwnedLockGuard lock(_localMutex, 5);
 #endif
 
+    if (_composition && !ext::present::ResolveCompositionHandle(_handle)) // ext: E5 no usable window yet
+        return _real1->Present1(SyncInterval, Flags, pPresentParameters);
+
     HRESULT result;
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
@@ -1324,7 +1332,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 
     State::Instance().scChanged = true;
 
-    if (Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen && // ext: E5
         State::Instance().currentFG == nullptr)
     {
         LOG_DEBUG("Overriding flags");
