@@ -66,8 +66,8 @@ void DrawReShadeCard(ext::menu::Ctx&)
         {
             session->Note("[F1] WARNING: registered with ReShade but NO event has been delivered (seen from the menu card). "
                           "Either the registration made in DllMain was too early for this ReShade (it searches for add-ons later, "
-                          "at the first device creation) or this build restricts the events. This report existing with no "
-                          "event lines IS the answer for F1-F5: nothing can be probed. Next registration point to try: the "
+                          "at the first device creation) or this build restricts the events. This note is written when the card is drawn with zero events so far; if event lines follow it, ignore it. A report with no "
+                          "event lines after it IS the answer for F1-F5: nothing can be probed. Next registration point to try: the "
                           "existing ext::game::OnD3D11DeviceHooked seam.");
             LOG_WARN("ReShade built-in add-on: registered but ReShade has delivered no event");
         }
