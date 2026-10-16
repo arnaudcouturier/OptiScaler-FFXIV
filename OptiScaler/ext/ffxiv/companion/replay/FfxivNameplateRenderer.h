@@ -1,5 +1,6 @@
 #pragma once
 #include "FfxivNameplatePackets.h"
+#include "../../../core/Crc32.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -13,12 +14,9 @@ namespace ext::ffxiv::companion::replay::FfxivNameplateRenderer
 using Microsoft::WRL::ComPtr;
 inline constexpr GUID vertexCodeTag {0x2ddb1677,0x8cc9,0x4116,{0xb8,0x01,0x34,0x95,0x80,0x11,0x27,0x19}};
 inline thread_local bool executing=false;
-inline UINT Crc(const void* ptr,size_t size)
-{
-    UINT crc=~0u; auto bytes=static_cast<const unsigned char*>(ptr);
-    for(size_t i=0;i<size;++i) { crc^=bytes[i]; for(int b=0;b<8;++b) crc=(crc>>1)^(0xedb88320u& (0u-(crc&1))); }
-    return ~crc;
-}
+// Canonical loop lives in ext::core::Crc32 (ext/core/Crc32.h); forwarder kept because
+// FfxivNameplateGpu.h calls this qualified name externally.
+inline UINT Crc(const void* ptr,size_t size) { return ext::core::Crc32(ptr,size); }
 inline int Variant(UINT crc)
 {
     switch(crc) { case 3865947726u:return 0; case 1823062889u:return 4;

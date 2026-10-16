@@ -14,6 +14,7 @@
 #include <vector>
 #include <span>
 #include "Icc.h"
+#include "../../core/Crc32.h"
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -31,11 +32,9 @@ inline void WriteBE(std::ostream& out, uint32_t v) {
     const BYTE bytes[]={BYTE(v>>24),BYTE(v>>16),BYTE(v>>8),BYTE(v)};
     out.write(reinterpret_cast<const char*>(bytes),4);
 }
-inline uint32_t Crc(const BYTE* bytes, size_t size) {
-    uint32_t crc=0xffffffff;
-    for(size_t i=0;i<size;++i) { crc^=bytes[i]; for(int k=0;k<8;++k) crc=(crc>>1)^(0xedb88320u & (0u-(crc&1))); }
-    return ~crc;
-}
+// Canonical loop lives in ext::core::Crc32 (ext/core/Crc32.h); this is the original call site,
+// kept as a one-line forwarder so every other duplicate can point back at it.
+inline uint32_t Crc(const BYTE* bytes, size_t size) { return ext::core::Crc32(bytes, size); }
 inline void WriteColourChunk(std::ostream& out, bool hdr, bool iccOnly = false)
 {
     if (hdr && iccOnly) {

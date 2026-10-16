@@ -1,6 +1,7 @@
 #pragma once
 #include "CompanionGeometry.h"
 #include "CompanionPackets.h"
+#include "../../core/Crc32.h"
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -41,10 +42,9 @@ inline ULONGLONG publishedAt = 0;
 inline UINT Identify(const void* data, SIZE_T size)
 {
     if (!data || size < 32 || size > 256 * 1024 || std::memcmp(data, "DXBC", 4)) return 0;
-    UINT crc = ~0u;
-    for (auto p = static_cast<const unsigned char*>(data); size--; ++p)
-    { crc ^= *p; for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1))); }
-    switch (~crc)
+    // Canonical loop lives in ext::core::Crc32 (ext/core/Crc32.h); it already applies the final
+    // complement, so switch on its result directly.
+    switch (ext::core::Crc32(data, size))
     {
     case 3865947726u: return 1; // native layout 0
     case 1823062889u: return 5; // native layout 4

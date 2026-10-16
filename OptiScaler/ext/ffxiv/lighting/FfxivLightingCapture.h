@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include "../../core/Crc32.h"
 #include "ext/core/DetourThreads.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
@@ -53,16 +54,9 @@ inline std::array<std::atomic<UINT>,shaders.size()> created {};
 inline std::atomic<bool> installed {false};
 inline ID3D11DeviceContext* context = nullptr; // Identity only; no idle COM ownership.
 inline thread_local bool inside = false;
-inline UINT Crc(const void* input, size_t size)
-{
-    UINT crc = ~0u;
-    for (auto p = static_cast<const unsigned char*>(input); size--; ++p)
-    {
-        crc ^= *p;
-        for (int i=0; i<8; ++i) crc = (crc>>1) ^ (0xedb88320u & (0u-(crc&1u)));
-    }
-    return ~crc;
-}
+// Canonical loop lives in ext::core::Crc32 (ext/core/Crc32.h); kept as a named forwarder since
+// this function's signature/name is part of this file's own shader-identification API.
+inline UINT Crc(const void* input, size_t size) { return ext::core::Crc32(input, size); }
 inline UINT Identify(const void* input, size_t size)
 {
     if (!input || size < 32 || std::memcmp(input,"DXBC",4)) return 0;
