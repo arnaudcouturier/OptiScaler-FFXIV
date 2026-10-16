@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/reshade/ReShadeAddon.h"
 #include "ext/reshade/ReShadeEvents.h"
 
 // ReShade's headers and ImGui never share a translation unit (see ReShadeRegister.cpp).
@@ -149,6 +150,20 @@ class LiveBackend final : public probe::IBackend
             return false;
         }
     }
+
+    // Invasive probe steps: replaced by the D3D11 implementation in the next commit; refuse until then.
+    uint64_t PickRuntime(void*, const std::vector<uint64_t>&, std::string& why) override
+    {
+        why = "live backend not implemented yet";
+        return 0;
+    }
+    probe::BoundaryInfo Inspect(void*, uint64_t) override { return {}; }
+    probe::DepthReport QueryDepth(uint64_t, const probe::BoundaryInfo&) override { return {}; }
+    void SnapshotBefore(void*, const probe::BoundaryInfo&) override {}
+    probe::PixelDiff SnapshotAfterAndDiff(void*, const probe::BoundaryInfo&) override { return {}; }
+    probe::CallOutcome RenderEffects(void*, uint64_t, const probe::BoundaryInfo&) override { return {}; }
+    bool GetEffectsState(uint64_t, bool&) override { return false; }
+    bool SetEffectsState(uint64_t, bool) override { return false; }
 };
 
 // ---- ReShade callbacks (noexcept: nothing may escape into ReShade or the game) -------------------------------------
@@ -216,6 +231,14 @@ void OnQueuePresent(command_queue*, swapchain*, const rect*, const rect*, uint32
 } // namespace
 
 probe::Session* ProbeSession() { return g_session; }
+
+void ProbeAtBoundary(ID3D11DeviceContext* context)
+{
+    probe::Session* session = g_session;
+    if (session == nullptr || !session->Armed() || State::Instance().isShuttingDown)
+        return;
+    session->ProbeAtBoundary(context);
+}
 probe::FileReport* ProbeReport() { return g_report; }
 
 bool InstallProbe(const std::filesystem::path& baseFolder, const std::string& registrationLine)

@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+struct ID3D11DeviceContext;
+
 namespace ext::reshade
 {
 struct AddonStatus
@@ -19,6 +21,11 @@ struct AddonStatus
 
 // Cheap, any thread.
 AddonStatus Status();
+
+// Entry point of the invasive probe: package A's boundary detector calls this at its candidate boundary (immediate
+// context, before the boundary draw). One atomic load and a failed compare when the probe is not armed from the menu
+// card; never throws, never lets an access violation out. Safe to call unconditionally.
+void ProbeAtBoundary(ID3D11DeviceContext* context);
 
 // True when the diagnostics are on. The ONE place that decides it (see ReShadeConfig.h).
 bool ProbeEnabled();

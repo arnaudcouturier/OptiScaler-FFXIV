@@ -58,6 +58,15 @@ struct FakeBackend final : IBackend
             out.techniques.clear();
         return true;
     }
+    // invasive steps: unused by these tests
+    uint64_t PickRuntime(void*, const std::vector<uint64_t>&, std::string&) override { return 0; }
+    BoundaryInfo Inspect(void*, uint64_t) override { return {}; }
+    DepthReport QueryDepth(uint64_t, const BoundaryInfo&) override { return {}; }
+    void SnapshotBefore(void*, const BoundaryInfo&) override {}
+    PixelDiff SnapshotAfterAndDiff(void*, const BoundaryInfo&) override { return {}; }
+    CallOutcome RenderEffects(void*, uint64_t, const BoundaryInfo&) override { return {}; }
+    bool GetEffectsState(uint64_t, bool&) override { return false; }
+    bool SetEffectsState(uint64_t, bool) override { return false; }
 };
 
 RuntimeInfo SampleRuntime()
