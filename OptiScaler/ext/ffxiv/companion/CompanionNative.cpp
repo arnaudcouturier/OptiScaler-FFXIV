@@ -55,9 +55,19 @@ static void Begin() noexcept
     pending.begun = false;
     if (!pending.packets.empty()) { ++fallbacks; pending.packets.clear(); }
     if (!requested.load() || !installed.load() || pending.inside) return;
-    Layer::BeginSnapshot();
-    pending.before = Queue();
-    pending.begun = pending.before.address != 0;
+    try
+    {
+        Layer::BeginSnapshot();
+        pending.before = Queue();
+        pending.begun = pending.before.address != 0;
+    }
+    // Begin() is noexcept but reaches Layer::BeginSnapshot()/Queue() (Packets::Snapshot), which
+    // is not guaranteed not to throw (e.g. std::bad_alloc), and is invoked across the DLL export
+    // boundary (OptiScalerCompanion_BeginNamePlateV1). An escaping exception here is
+    // std::terminate() territory on top of being UB at the boundary. pending.begun was already
+    // set false above, before the risky calls, so a throw just means "begin" never completed --
+    // mirror End()'s own catch (fallbacks counter, drop any stale frame state).
+    catch (...) { ++fallbacks; Layer::InvalidateFrame(); }
 }
 static void End() noexcept
 {
