@@ -68,7 +68,13 @@ ColorScaler_Dx12::ColorScaler_Dx12(std::string InName, ID3D12Device* InDevice, b
 
 ColorScaler_Dx12::~ColorScaler_Dx12()
 {
-    if (!IsInit() || State::Instance().isShuttingDown)
+    // No IsInit() gate here: IsInit() reflects the base class's own descriptor-heap/pipeline construction, which
+    // is independent of _buffer -- CreateBufferResource (above) allocates it separately and never checks IsInit()
+    // first, so a partially-failed base construction can still leave _buffer non-null. SAFE_RELEASE no-ops safely
+    // on nullptr, so releasing unconditionally (module teardown aside) is correct whether or not the base init
+    // succeeded. isShuttingDown stays: process teardown order can make the D3D12 device/resources unsafe to touch
+    // by the time this runs (same guard as Shader_Dx12/OS_Dx12's own destructors).
+    if (State::Instance().isShuttingDown)
         return;
 
     SAFE_RELEASE(_buffer);
