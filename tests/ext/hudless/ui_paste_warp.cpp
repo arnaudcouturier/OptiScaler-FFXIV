@@ -491,6 +491,124 @@ void TypelessAndHdr(Rig& rig)
     UiPaste::Release();
 }
 
+void OtherFormats(Rig& rig)
+{
+    std::printf("  SDR final formats: B8G8R8A8 (channel order) and R16G16B16A16_FLOAT (FP16 storage)\n");
+    const UINT w = 24, h = 16;
+    auto inBlock = [](UINT x, UINT y) { return x >= 8 && x <= 11 && y >= 6 && y <= 9; };
+
+    // --- B8G8R8A8 inputs and backbuffer: the pasted block keeps its logical colour, the rest is untouched ---
+    {
+        auto swap = [](Image8 image)
+        {
+            for (size_t i = 0; i < image.px.size(); i += 4)
+                std::swap(image.px[i], image.px[i + 2]);
+            return image;
+        };
+        Image8 hudless(w, h, 60, 60, 60), withUi = hudless;
+        Fill(withUi, 8, 6, 11, 9, 200, 50, 20);
+        const Image8 bgraFinal = swap(withUi), bgraHudless = swap(hudless);
+        auto finalTex = rig.Upload(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, bgraFinal.px.data(), 4);
+        auto hudTex = rig.Upload(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, bgraHudless.px.data(), 4);
+        const Image8 bg = swap(Image8(w, h, kBg[0], kBg[1], kBg[2], kBg[3]));
+        FakeSwapChain chain;
+        chain.buffer = rig.Upload(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, bg.px.data(), 4, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        UiPaste::Produce(rig.device.Get(), rig.queue.Get(), finalTex.Get(), DXGI_FORMAT_B8G8R8A8_UNORM, hudTex.Get(),
+                         DXGI_FORMAT_B8G8R8A8_UNORM, nullptr, Params(0.008f, 0));
+        rig.WaitIdle();
+        UiPaste::Paste(&chain, rig.queue.Get());
+        rig.WaitIdle();
+        const auto out = rig.Download(chain.buffer.Get(), D3D12_RESOURCE_STATE_COMMON, 4);
+        bool exact = out.size() == size_t(w) * h * 4;
+        for (UINT y = 0; exact && y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+            {
+                const uint8_t* px = &out[(size_t(y) * w + x) * 4]; // memory order B, G, R, A
+                const bool ok = inBlock(x, y) ? (px[0] == 20 && px[1] == 50 && px[2] == 200 && px[3] == 255)
+                                              : (px[0] == kBg[2] && px[1] == kBg[1] && px[2] == kBg[0] && px[3] == kBg[3]);
+                if (!ok)
+                    exact = false;
+            }
+        EXPECT(exact, "B8G8R8A8: the block keeps its logical colour (no red / blue swap), the rest is untouched");
+        EXPECT(std::abs(UiPaste::Snapshot().coverage - 16.0f / float(w * h)) < 1e-6f, "B8G8R8A8 coverage %f",
+               UiPaste::Snapshot().coverage);
+        UiPaste::Release();
+    }
+
+    // --- R16G16B16A16_FLOAT final: the images are FP16, values and the cleanup level survive exactly ---
+    {
+        auto half4 = [](float r, float g, float b) { return std::vector<uint16_t> { Half(r), Half(g), Half(b), Half(1.0f) }; };
+        auto image = [&](bool ui)
+        {
+            std::vector<uint16_t> px;
+            for (UINT y = 0; y < h; ++y)
+                for (UINT x = 0; x < w; ++x)
+                {
+                    const auto p = (ui && inBlock(x, y)) ? half4(0.75f, 0.5f, 0.375f) : half4(0.25f, 0.25f, 0.25f);
+                    px.insert(px.end(), p.begin(), p.end());
+                }
+            return px;
+        };
+        const auto lit = image(true), plain = image(false);
+        FakeSwapChain chain;
+        auto background = [&]
+        {
+            std::vector<uint16_t> px;
+            for (UINT i = 0; i < w * h; ++i)
+            {
+                const auto p = half4(0.0625f, 0.125f, 0.1875f);
+                px.insert(px.end(), p.begin(), p.end());
+            }
+            chain.buffer = rig.Upload(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, px.data(), 8, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        };
+        auto frame = [&](const std::vector<uint16_t>& finalPx)
+        {
+            auto finalTex = rig.Upload(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, finalPx.data(), 8);
+            auto hudTex = rig.Upload(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, plain.data(), 8);
+            background();
+            UiPaste::Produce(rig.device.Get(), rig.queue.Get(), finalTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, hudTex.Get(),
+                             DXGI_FORMAT_R16G16B16A16_FLOAT, nullptr, Params(0.008f, 0));
+            rig.WaitIdle();
+            UiPaste::Paste(&chain, rig.queue.Get());
+            rig.WaitIdle();
+            const auto bytes = rig.Download(chain.buffer.Get(), D3D12_RESOURCE_STATE_COMMON, 8);
+            std::vector<uint16_t> words(bytes.size() / 2);
+            std::memcpy(words.data(), bytes.data(), bytes.size());
+            return words;
+        };
+        auto expectPixel = [&](const std::vector<uint16_t>& words, UINT x, UINT y, float r, float g, float b)
+        {
+            const uint16_t* px = &words[(size_t(y) * w + x) * 4];
+            return px[0] == Half(r) && px[1] == Half(g) && px[2] == Half(b);
+        };
+
+        const auto f1 = frame(lit);
+        bool exact = f1.size() == size_t(w) * h * 4;
+        for (UINT y = 0; exact && y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+                if (!(inBlock(x, y) ? expectPixel(f1, x, y, 0.75f, 0.5f, 0.375f) : expectPixel(f1, x, y, 0.0625f, 0.125f, 0.1875f)))
+                    exact = false;
+        EXPECT(exact, "FP16: the block is pasted bit-exact, the rest untouched");
+
+        const auto f2 = frame(plain); // UI closed: cleanup level (alpha 0.5) must still paste the final colour
+        exact = f2.size() == size_t(w) * h * 4;
+        for (UINT y = 0; exact && y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+                if (!(inBlock(x, y) ? expectPixel(f2, x, y, 0.25f, 0.25f, 0.25f) : expectPixel(f2, x, y, 0.0625f, 0.125f, 0.1875f)))
+                    exact = false;
+        EXPECT(exact, "FP16: one frame after the UI closed the old area carries the final colour (cleanup alpha kept)");
+
+        const auto f3 = frame(plain);
+        exact = f3.size() == size_t(w) * h * 4;
+        for (UINT y = 0; exact && y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+                if (!expectPixel(f3, x, y, 0.0625f, 0.125f, 0.1875f))
+                    exact = false;
+        EXPECT(exact, "FP16: two frames after, nothing is pasted");
+        UiPaste::Release();
+    }
+}
+
 void RingAndFences(Rig& rig)
 {
     std::printf("  ring: Produce never waits, a busy slot is never overwritten, pastes pin their image\n");
@@ -690,6 +808,7 @@ try
     CleanupLevels(rig);
     RandomAgainstReference(rig);
     TypelessAndHdr(rig);
+    OtherFormats(rig);
     RingAndFences(rig);
     TimingAndLifecycle(rig);
     std::printf("[ui_paste_warp] failures: %d\n", g_failures);

@@ -195,8 +195,10 @@ Done ReadFences(Core& c)
     return done;
 }
 
-// Frees retired images whose write and last read completed (or whose device was removed).
-void CollectRetiredLocked(Core& c, const Done& done)
+// Moves the retired images whose write and last read completed (or whose device was removed) into reed. The caller
+// lets reed die AFTER it released c.mutex: releasing a committed 4K texture can take milliseconds in the driver and
+// the consumer's pick needs that lock.
+void CollectRetiredLocked(Core& c, const Done& done, std::vector<Retired>& freed)
 {
     std::erase_if(c.retired,
                   [&](Retired& item)
@@ -208,6 +210,7 @@ void CollectRetiredLocked(Core& c, const Done& done)
                       {
                           return false;
                       }
+                      freed.push_back(std::move(item));
                       return true;
                   });
 }
@@ -599,6 +602,7 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
         UINT height = 0;
         DXGI_FORMAT imageFormat = DXGI_FORMAT_UNKNOWN;
         DXGI_FORMAT finalView = DXGI_FORMAT_UNKNOWN, hudlessView = DXGI_FORMAT_UNKNOWN, hdrView = DXGI_FORMAT_UNKNOWN;
+        std::vector<Retired> freed; // destroyed after the lock below is released (also on the early returns)
         {
             std::lock_guard lock(c.mutex);
             previous = c.ring.Tick();
@@ -627,7 +631,7 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
                 SetMessageLocked(c, "D3D12 device removed");
                 return;
             }
-            CollectRetiredLocked(c, done);
+            CollectRetiredLocked(c, done, freed);
             HarvestCoverageLocked(c, done);
 
             const auto finalDesc = finalImage->GetDesc();
@@ -689,6 +693,8 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
             }
             c.ring.BeginWrite(target);
         }
+
+        freed.clear();
 
         // ---- phase 2: create, record, submit (producer-private objects only; the consumer cannot see `target`) ------
         if (!c.images[target])
@@ -854,10 +860,11 @@ void Release()
     try
     {
         Core& c = C();
+        std::vector<Retired> freed; // declared first: destroyed after both locks are released
         std::lock_guard producer(c.prodMutex);
         std::lock_guard lock(c.mutex);
         RetireAllLocked(c);
-        CollectRetiredLocked(c, ReadFences(c));
+        CollectRetiredLocked(c, ReadFences(c), freed);
     }
     catch (...)
     {
