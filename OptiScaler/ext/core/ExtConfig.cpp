@@ -175,6 +175,7 @@ void ExtConfig::Bind(config::Binder& b)
     ui.Bind(b);
     nr.Bind(b);
     hdr.Bind(b);
+    hudless.Bind(b);
     upscaler.Bind(b);
 }
 
@@ -183,6 +184,7 @@ void ExtConfig::PostLoad()
     fg.PostLoad();
     nr.PostLoad();
     hdr.PostLoad();
+    hudless.PostLoad();
 }
 
 ExtConfig& Cfg()

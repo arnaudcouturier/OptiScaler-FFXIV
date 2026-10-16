@@ -32,6 +32,7 @@
 #include "ext/ffxiv/FfxivConfig.h"
 #include "ext/ffxiv/ui/UiConfig.h"
 #include "ext/hdr/HdrConfig.h"
+#include "ext/hudless/HudlessConfig.h"
 #include "ext/nr/NrConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
 
@@ -167,6 +168,7 @@ struct ExtConfig
     ext::ffxiv::ui::UiConfig ui; // ext/ffxiv/ui (S10 A): [HudLess] Diagnostics
     NrConfig nr; // ext/nr
     HdrConfig hdr; // ext/hdr
+    HudlessConfig hudless; // ext/hudless
     UpscalerConfig upscaler; // ext/upscaler
 
     void Bind(config::Binder& b);
