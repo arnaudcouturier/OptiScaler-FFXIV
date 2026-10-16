@@ -17,16 +17,19 @@
 #include <vector>
 
 #include "ext/core/ExtConfig.h"
+#include "ext/core/ProcessMemory.h"
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
 namespace ext::ffxiv::quality::FfxivNativeQualityHooks
 {
+// Canonical implementation lives in ext::core::ReadProcessBytes (ext/core/ProcessMemory.h, also
+// used by ext::ffxiv::companion::Packets); kept as a named forwarder since this module calls
+// ReadMemory(const void*, ...) throughout and deliberately does not include a companion header
+// to get the shared helper (see ProcessMemory.h's own comment on why it lives in ext/core).
 inline bool ReadMemory(const void* address, void* output, size_t bytes)
 {
-    SIZE_T copied = 0;
-    return address != nullptr && ReadProcessMemory(GetCurrentProcess(), address, output, bytes, &copied) &&
-           copied == bytes;
+    return ext::core::ReadProcessBytes(reinterpret_cast<uintptr_t>(address), output, bytes);
 }
 
 inline uintptr_t Base() { return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); }

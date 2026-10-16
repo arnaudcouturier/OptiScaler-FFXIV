@@ -21,16 +21,13 @@ struct Capture { Queue before,after; std::vector<Packet> packets; UINT rejected=
 inline Capture pending;
 inline void (*onCapture)(const Capture&)=nullptr;
 inline void (*onSaved)(const std::filesystem::path&)=nullptr;
-template<class T> inline bool Read(uintptr_t address,T& value)
-{
-    SIZE_T got=0;
-    return address && ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(address),&value,sizeof(value),&got) && got==sizeof(value);
-}
-inline bool ReadBytes(uintptr_t address,void* dst,size_t size)
-{
-    SIZE_T got=0;
-    return address && ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(address),dst,size,&got) && got==size;
-}
+// This namespace nests under ext::ffxiv::companion, which already has the canonical
+// Packets::Read/Packets::ReadBytes (CompanionPackets.h, included above); reuse those instead of
+// a second local copy. The using-declarations keep both the unqualified calls below and the
+// qualified ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(...) calls made from
+// FfxivNameplateRenderer.h/FfxivNameplateLive.h/FfxivNameplateGpu.h compiling unchanged.
+using Packets::Read;
+using Packets::ReadBytes;
 inline Queue ReadQueue(uintptr_t queue)
 {
     Queue q;

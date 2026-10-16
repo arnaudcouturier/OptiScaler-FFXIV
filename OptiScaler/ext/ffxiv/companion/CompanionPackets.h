@@ -1,6 +1,7 @@
 #pragma once
 #include <Windows.h>
 #include "../GameBuild.h"
+#include "../../core/ProcessMemory.h"
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -26,18 +27,11 @@ struct Packet
     alignas(16) std::array<unsigned char, ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> header {};
 };
 using Entry = std::array<uintptr_t, 2>;
-template<class T> bool Read(uintptr_t address, T& value)
-{
-    SIZE_T got = 0;
-    return address && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
-        &value, sizeof(value), &got) && got == sizeof(value);
-}
-inline bool ReadBytes(uintptr_t address, void* out, size_t size)
-{
-    SIZE_T got = 0;
-    return address && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
-        out, size, &got) && got == size;
-}
+// Canonical implementation lives in ext::core::ReadProcessValue/ReadProcessBytes
+// (ext/core/ProcessMemory.h); kept as named forwarders since Read/ReadBytes are this module's
+// own public API, called throughout ext::ffxiv::companion.
+template<class T> bool Read(uintptr_t address, T& value) { return ext::core::ReadProcessValue(address, value); }
+inline bool ReadBytes(uintptr_t address, void* out, size_t size) { return ext::core::ReadProcessBytes(address, out, size); }
 inline Queue Snapshot(uintptr_t queue)
 {
     Queue q;
