@@ -214,17 +214,25 @@ void Detach()
     // standing between a thrown exception and leaving `installed`/hook state stale. Contain
     // Layer::Stop() specifically (it touches std::lock_guard/std::filesystem via the replay
     // capture path, both of which can throw under resource exhaustion) so our own cleanup
-    // below -- and the already-late installed.store(true) further down, inside the
+    // below -- and the already-late installed.store(false) further down, inside the
     // DetourTransactionCommit success branch -- still runs and stays truthful.
+    //
+    // Signal the nameplate-live worker directly first: it is only atomic stores, so it cannot
+    // throw, and it must run even if Layer::Stop() throws before reaching its own internal call
+    // to the same function below (otherwise JoinWorker() further down would wait out its full
+    // timeout for a worker that was never actually told to stop).
+    ext::ffxiv::companion::replay::FfxivNameplateLive::Stop();
     try { Layer::Stop(); }
     catch (...) { LOG_WARN("Companion native submissions: Layer::Stop() failed during teardown; continuing hook detach"); }
-    // Best-effort bounded wait for the nameplate-live worker thread (it keeps running its own
-    // D3D11/DXGI/DirectComposition present loop for up to ~50ms per poll after Stop()'s atomics
-    // are set) so it is not still touching the D3D11 context while we revert these hooks.
-    ext::ffxiv::companion::replay::FfxivNameplateLive::JoinWorker();
     Gpu::requested.store(false); Gpu::Clear();
     requested.store(false);
     beginNativeDraw.store(nullptr); endNativeDraw.store(nullptr);
+    // Best-effort bounded wait for the nameplate-live worker thread to actually exit. Nothing
+    // else in this teardown path waits for it, and an independent D3D11/DXGI/DirectComposition
+    // present loop left running past Detach() is undesirable on its own regardless of this
+    // function's own hook state; placed after the resets above so substitution is already off
+    // for the duration of the wait.
+    ext::ffxiv::companion::replay::FfxivNameplateLive::JoinWorker();
     if (!installed.load()) return;
     // Same enlistment as Install(): on detach specifically, if another thread's saved
     // instruction pointer sits inside a patched prologue when the trampoline is reverted,

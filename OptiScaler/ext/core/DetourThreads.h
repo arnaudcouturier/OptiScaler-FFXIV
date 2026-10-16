@@ -18,13 +18,18 @@
 // earlier would leave threads suspended. Letting it go out of scope afterward closes every
 // handle on every path (success, partial failure, or construction failure).
 //
-// Known, accepted risk: this suspends every other process thread (THREAD_SUSPEND_RESUME) before
-// the heap-allocating work in DetourAttach/DetourTransactionCommit and this class's own vector
-// growth run. Detours' documented design allocates trampolines via VirtualAlloc rather than the
-// CRT heap specifically to avoid this class of hazard, but that has not been independently
-// verified against the vendored binary in this repo (see the longer note in DoInstall). Not
-// restructured here for the same reason: a wrong fix for a theoretical hazard risks introducing
-// a real one.
+// Known, accepted risk: THREAD_SUSPEND_RESUME (requested on OpenThread, below) is only an
+// access right -- it does not suspend anything by itself. The actual suspension happens inside
+// Update()'s DetourUpdateThread calls, each of which may allocate its own per-thread bookkeeping
+// while earlier threads in the same call are already suspended; DetourAttach/DetourDetach and
+// DetourTransactionCommit can allocate too, all before the transaction resumes anyone. Whether
+// that bookkeeping comes from the CRT heap (hazardous: another suspended thread could hold its
+// lock) or elsewhere is not verified: this repo vendors only detours.h and a prebuilt
+// detours.lib, no source, so Detours' internal allocator cannot be inspected here. Trampolines
+// themselves are conventionally VirtualAlloc'd, but that is a different allocation path and is
+// not a mitigation for this one. Not restructured here for the same reason: a wrong fix for an
+// unverified hazard risks introducing a real bug in exchange for a theoretical one (see the
+// longer note in DoInstall).
 namespace ext::core
 {
 class DetourThreadScope
