@@ -803,7 +803,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 #ifdef USE_LOCAL_MUTEX
     OwnedLockGuard lock(_localMutex, 4);
 #endif
-
     if (_composition && !ext::present::ResolveCompositionHandle(_handle)) // ext: E5 no usable window yet
         return _real->Present(SyncInterval, Flags);
 
@@ -1165,7 +1164,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 #ifdef USE_LOCAL_MUTEX
     OwnedLockGuard lock(_localMutex, 5);
 #endif
-
     if (_composition && !ext::present::ResolveCompositionHandle(_handle)) // ext: E5 no usable window yet
         return _real1->Present1(SyncInterval, Flags, pPresentParameters);
 

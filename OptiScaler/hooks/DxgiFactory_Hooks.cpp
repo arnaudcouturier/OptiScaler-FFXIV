@@ -342,7 +342,6 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
         o_EnumAdapterByLuid = nullptr;
         o_EnumAdapterByGpuPreference = nullptr;
     }
-
     ext::present::HookFactoryComposition(real); // ext: E5 CreateSwapChainForComposition (own transaction)
 }
 
