@@ -26,6 +26,7 @@
 #include "ext/nr/hybrid/DlssNrHybridAssets.h"
 #include "ext/nr/native/DlssNrVitReuse.h"
 #include "ext/nr/native/DlssNrModuleProfiles.h"
+#include "ext/nr/native/DlssNrVitCapture.h"
 #include "SysUtils.h"
 #pragma comment(lib,"bcrypt.lib")
 namespace DlssNrNative {namespace {
@@ -125,6 +126,87 @@ ModuleIdentity IdentifyModule(const void* data, unsigned bytes)
     else { constexpr char hex[]="0123456789abcdef";for(auto v:hash){result.sha+=hex[v>>4];result.sha+=hex[v&15];} }
     return result;
 }
+// ---- VitCapture file side (DlssNrVitCapture.h is the pure side; docs/nr-vit-reuse-profile-runbook.md) ----
+// Everything here is called from the NvAPI module/function creation hooks or from EndEvaluate, under the runtime mutex and
+// never while a driver call is pending. Nothing may throw into NVIDIA's DLL: every failure ends the capture, not the game.
+struct CaptureFiles { fs::path dir;std::string runId;bool ready=false,failed=false; };
+CaptureFiles& Files(){static CaptureFiles f;return f;}
+fs::path CaptureRoot()
+{
+    wchar_t path[32768]{};HMODULE module=nullptr;
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(&CaptureRoot),&module)||!GetModuleFileNameW(module,path,32768))return {};
+    return fs::path(path).parent_path()/"OptiScaler"/"nr-vit-capture";
+}
+// <game>\OptiScaler\nr-vit-capture\<YYYYMMDD-HHMMSS>\, created at the first write; older runs beyond kKeepRuns are removed.
+bool EnsureCaptureDir()
+{
+    auto& f=Files();
+    if(f.ready)return true;
+    if(f.failed)return false;
+    try{
+        const auto root=CaptureRoot();
+        if(root.empty()){f.failed=true;return false;}
+        std::tm local{};const std::time_t now=std::time(nullptr);
+        if(localtime_s(&local,&now)!=0){f.failed=true;return false;}
+        f.runId=DlssNrVitCapture::FormatRunId(local);f.dir=root/f.runId;
+        std::error_code ec;fs::create_directories(f.dir,ec);
+        if(ec||!fs::is_directory(f.dir,ec)){f.failed=true;LOG_WARN("NR ViT capture: cannot create {}: {}",f.dir.string(),ec.message());return false;}
+        std::vector<std::string> names;ec.clear();
+        for(fs::directory_iterator it(root,ec),end;!ec&&it!=end;it.increment(ec)){std::error_code isDir;if(it->is_directory(isDir)&&!isDir)names.push_back(it->path().filename().string());}
+        if(!ec)for(const auto& old:DlssNrVitCapture::RunsToPrune(names)){if(old==f.runId)continue;std::error_code rm;fs::remove_all(root/old,rm);}
+        f.ready=true;return true;
+    }catch(...){f.failed=true;return false;}
+}
+bool AppendCapture(const std::string& text)
+{
+    auto& cap=DlssNrVitCapture::Instance();
+    if(text.empty()||!EnsureCaptureDir())return false;
+    std::string out;
+    if(cap.NeedsHeader()){out=DlssNrVitCapture::FormatHeader(Files().runId);cap.HeaderTaken();}
+    out+=text;
+    std::ofstream file(Files().dir/"capture.txt",std::ios::binary|std::ios::app);
+    if(!file)return false;
+    file.write(out.data(),static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(file);
+}
+// End of one NR evaluation: close its record and append what the capture buffered to capture.txt.
+void FlushCapture(bool success)
+{
+    auto& cap=DlssNrVitCapture::Instance();
+    try{
+        const bool ended=cap.EndEvaluation(success);
+        if(!ended&&!(cap.Failed()&&cap.HasPending()))return;
+        if(!AppendCapture(cap.TakePending())){cap.Fail("write_failed");LOG_WARN("NR ViT capture: cannot write {}; capture stopped",(Files().dir/"capture.txt").string());return;}
+        if(ended&&cap.Evaluations()==1)LOG_INFO("NR ViT capture: recording the first {} NR evaluations (observation only) into {}",DlssNrVitCapture::kEvaluations,Files().dir.string());
+        if(cap.Done())LOG_INFO("NR ViT capture complete: {} evaluations, {} module dumps, folder {}",cap.Evaluations(),cap.ModuleDumps(),Files().dir.string());
+        if(cap.Failed())LOG_WARN("NR ViT capture stopped early; see the NOTE record in {}",(Files().dir/"capture.txt").string());
+    }catch(...){cap.Fail();}
+}
+uint64_t HandleValue(NVDX_ObjectHandle h){return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(h));}
+// Writes one CUDA module blob to <run>\modules\<sha256>.bin (once per digest, bounded) and notes the MODULE record.
+// `data` may be null when the blob could not be kept; `reason` then says why nothing is written.
+void DumpModuleBlob(NVDX_ObjectHandle module,const void* data,unsigned bytes,const ModuleIdentity& id,const char* reason=nullptr)
+{
+    auto& cap=DlssNrVitCapture::Instance();
+    DlssNrVitCapture::ModuleNote note;note.handle=HandleValue(module);note.bytes=bytes;note.sha256=id.sha;
+    try{
+        if(data&&bytes>=4)note.magic=DlssNrVitCapture::Hex(data,4);
+        const auto why=reason?std::string_view(reason):DlssNrVitCapture::WhyNotDumped(bytes,cap.ModuleDumps(),cap.ShaDumped(id.sha));
+        if(!why.empty()){note.status=std::string(why);if(why=="duplicate")note.dump="modules/"+id.sha+".bin";}
+        else if(!data||id.sha.size()!=64)note.status="no_digest";
+        else if(!EnsureCaptureDir())note.status="no_folder";
+        else{
+            const auto dir=Files().dir/"modules";std::error_code ec;fs::create_directories(dir,ec);
+            std::ofstream file(dir/(id.sha+".bin"),std::ios::binary|std::ios::trunc);
+            if(ec||!file)note.status="write_failed";
+            else{
+                file.write(static_cast<const char*>(data),static_cast<std::streamsize>(bytes));file.flush();
+                note.status=file?"dumped":"write_failed";if(file)note.dump="modules/"+id.sha+".bin";
+            }
+        }
+    }catch(...){note.status="error";}
+    cap.NoteModule(note);
+}
 NvAPI_Status __cdecl CreateModule(ID3D12Device*d,const void*b,NvU32 n,NVDX_ObjectHandle*out)
 {
     auto&s=S();std::lock_guard<std::recursive_mutex> guard(s.mutex);
@@ -135,6 +217,11 @@ NvAPI_Status __cdecl CreateModule(ID3D12Device*d,const void*b,NvU32 n,NVDX_Objec
         const auto& id=s.moduleIdentities[*out];
         s.modules[*out]=DlssNrModules::Classify(n,id.sha);
         LOG_DEBUG("NR reuse CUDA module: bytes={}, sha256={}, verified={}, hybrid={}",id.bytes,id.sha,s.modules[*out].reuse,s.modules[*out].hybrid);
+        // VitCapture (off by default): a blob that names a cc_vit_ kernel is dumped now, while the pointer is valid.
+        if(auto& cap=DlssNrVitCapture::Instance();cap.Open()){
+            cap.RememberModule(HandleValue(*out),b,n);
+            if(DlssNrVitCapture::ContainsVitKernel(b,n))DumpModuleBlob(*out,b,n,id);
+        }
     }
     return rc;
 }
@@ -153,6 +240,16 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device*d,NVDX_ObjectHandle m,const cha
                 LOG_INFO("NR reuse module: bytes={}, sha256={}, verified={}, hybrid={}, first kernel={}",id.bytes,id.sha,s.modules[m].reuse,s.modules[m].hybrid,n);
             }
         }
+        if(auto& cap=DlssNrVitCapture::Instance();cap.Open()){
+            cap.NoteFunction(HandleValue(*out),HandleValue(m),n);
+            // The module bytes did not name a cc_vit_ kernel (so no dump yet): use the copy kept from its creation, if it is that one.
+            if(DlssNrVitCapture::IsVitKernel(n)&&!cap.ModuleNoted(HandleValue(m))){
+                const auto* kept=cap.RememberedModule(HandleValue(m));
+                const auto& id=s.moduleIdentities[m];
+                if(kept)DumpModuleBlob(m,kept->data(),static_cast<unsigned>(kept->size()),id);
+                else DumpModuleBlob(m,nullptr,id.bytes,id,"blob_not_retained");
+            }
+        }
         unsigned kind=99;
         if(!strcmp(n,"cc_vit_1d_ffn_expand_publish_fp8"))kind=0;
         else if(!strcmp(n,"cc_vit_1d_ffn_expand_chained_fp8"))kind=1;
@@ -166,7 +263,10 @@ bool VitDrop(State&s,const Kernel*k,NvU32 count,std::vector<Kernel>&kept)
 {
     if(!k||!count||!s.vit.Evaluating())return false;
     bool any=false;auto&o=Observation();
+    auto&capture=DlssNrVitCapture::Instance();const bool watching=capture.Capturing();
     for(NvU32 i=0;i<count;++i){
+        // VitCapture: record the launch as issued, read-only, before any drop decision below.
+        if(watching)capture.Observe(k[i]);
         ++o.launches;
         const auto role=s.vitRole.Lookup(k[i].hFunction,s.allowUnverified);
         if(role!=DlssNrVitReuse::Role::None)++o.known;
@@ -242,7 +342,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList*c,const NVAPI_CU_KERNEL_LA
  struct Epilogue{uint64_t gemm,skip,cosine,output;unsigned rows,pad;uint64_t done,counter,expand_done;}ep{contractionOutput,p[1],d.weights.address()+w.cos,p[2],(unsigned)tokens,0,p[7],p[4],cycle.done};IO(c,epilogue,ep,(unsigned)tokens*1024/2);
  cycle.pending=false;++cycle.block;++cycle.pairs;++s.launches;s.status=(s.candidate?"Candidate hybrid M=":"Fused hybrid M=")+std::to_string(tokens)+" dims="+std::to_string(dims[0])+"x"+std::to_string(dims[1])+" FFN pairs recorded "+std::to_string(cycle.pairs)+"/8 ("+std::to_string(cycle.pairs*2)+"/16 original launches); other operators FP8";return NVAPI_OK;
  }catch(const std::exception&e){bool pending=false;for(auto&entry:s.sessions)if(std::get<0>(entry.first)==c){pending|=entry.second.pending;if(!entry.second.pending)entry.second.active=false;}std::string shape;if(k&&k->pParams&&k->paramSize==72){unsigned dims[2];memcpy(dims,(char*)k->pParams+64,8);shape="M="+std::to_string((uint64_t)dims[0]*dims[1])+" dims="+std::to_string(dims[0])+"x"+std::to_string(dims[1])+" ";}s.restartRequired|=pending;s.status=std::string(pending?"Restart required: hybrid failed after replacement: ":"Original FP8 fallback: ")+shape+e.what();fprintf(stderr,"%s\n",s.status.c_str());return pending?NVAPI_ERROR:s.launch(c,k,count);}}
-NvAPI_Status __cdecl DestroyFunction(ID3D12Device*d,NVDX_ObjectHandle f){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.targets.erase(f);if(s.vitRole.RemoveFunction(f))s.vit.Clear();s.observedFunctions.erase(f);return s.destroyFunction(d,f);}
+NvAPI_Status __cdecl DestroyFunction(ID3D12Device*d,NVDX_ObjectHandle f){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.targets.erase(f);DlssNrVitCapture::Instance().ForgetFunction(HandleValue(f));if(s.vitRole.RemoveFunction(f))s.vit.Clear();s.observedFunctions.erase(f);return s.destroyFunction(d,f);}
 NvAPI_Status __cdecl DestroyModule(ID3D12Device*d,NVDX_ObjectHandle m){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);s.modules.erase(m);if(s.vitRole.RemoveModule(m))s.vit.Clear();s.moduleIdentities.erase(m);for(auto it=s.observedFunctions.begin();it!=s.observedFunctions.end();)if(it->second.module==m)it=s.observedFunctions.erase(it);else++it;for(auto i=s.targets.begin();i!=s.targets.end();)if(i->second.module==m)i=s.targets.erase(i);else++i;return s.destroyModule(d,m);}
 }
 void*WrapNvapi(unsigned id,void*raw){if(!raw)return raw;auto&s=S();std::lock_guard<std::recursive_mutex>apiGuard(s.mutex);switch(id){case 0xad1a677d:s.createModule=(decltype(s.createModule))raw;return(void*)&CreateModule;case 0xe2436e22:s.createFunction=(decltype(s.createFunction))raw;return(void*)&CreateFunction;case 0x846a9bf0:s.launchEx.store(reinterpret_cast<decltype(&NvAPI_D3D12_LaunchCuKernelChainEx)>(raw));return(void*)&LaunchEx;case 0x24973538:s.launch=(decltype(s.launch))raw;return(void*)&Launch;case 0x41c65285:s.destroyModule=(decltype(s.destroyModule))raw;return(void*)&DestroyModule;case 0xdf295ea6:s.destroyFunction=(decltype(s.destroyFunction))raw;return(void*)&DestroyFunction;default:return raw;}}
@@ -252,6 +352,7 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
  s.enabled=on;s.candidate=candidate;s.status=candidate?"Candidate hybrid selected; waiting for original model":on?"Hybrid FFN selected; waiting for supported original model":"Original FP8 selected";
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
+void SetCapture(bool on){DlssNrVitCapture::Instance().SetWanted(on);}
 void BeginEvaluate(const void*feature,bool reset,unsigned every,bool allowUnverified)
 {
     auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
@@ -260,15 +361,28 @@ void BeginEvaluate(const void*feature,bool reset,unsigned every,bool allowUnveri
         LOG_INFO("NR reuse unverified-kernel override: {}",allowUnverified ? "enabled (experimental)" : "disabled");
     }
     if(s.enabled){s.vit.Clear();return;}
-    if(every<2){s.vit.Invalidate(feature);return;}
+    auto&capture=DlssNrVitCapture::Instance();
+    if(every<2){
+        s.vit.Invalidate(feature);
+        // VitCapture without reuse: the evaluation is only watched (Filter::BeginObserve never drops anything).
+        if(!s.restartRequired&&capture.BeginEvaluation(feature,reset,every,allowUnverified)){
+            ++s.evaluations;Observation()={};Observation().reset=reset;
+            s.vit.BeginObserve(feature);
+        }
+        return;
+    }
     ++s.evaluations;Observation()={};Observation().reset=reset;
+    capture.BeginEvaluation(feature,reset,every,allowUnverified);
     s.vit.Begin(feature,reset,2);
 }
 void EndEvaluate(bool success)
 {
     auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
     if(!s.vit.Evaluating())return;
-    const auto o=Observation();s.vit.End();if(!success)s.vit.Clear();
+    const auto o=Observation();const bool watchedOnly=s.vit.ObserveOnly();
+    s.vit.End();if(!success&&!watchedOnly)s.vit.Clear();
+    FlushCapture(success);
+    if(watchedOnly)return; // capture-only evaluation: no reuse was asked for, so no reuse status either
     std::string reason;
     if(!success)reason="NR evaluation failed; cached result invalidated";
     else if(s.vit.Disabled())reason="unexpected NR launch order; restart required";

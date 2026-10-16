@@ -68,6 +68,9 @@ struct NrConfig
     // Clamped to 1..2 on load.
     CustomOptional<uint32_t> vitEvery { 1 };
     CustomOptional<bool> vitAllowUnverified { false };
+    // Log-only capture of the first NR evaluations' CUDA launches (raw parameter bytes) and the ViT module blobs, for profiling a new
+    // NR model file (docs/nr-vit-reuse-profile-runbook.md). Never changes a launch; needs to be set before the game starts.
+    CustomOptional<bool> vitCapture { false };
     CustomOptional<bool> vitFirstPassOnly { true };
     // Fraction of the frame's resolution the model works at (only the model's contribution is computed small).
     CustomOptional<float> workingScale { 1.0f };

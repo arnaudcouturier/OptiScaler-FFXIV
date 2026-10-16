@@ -3,6 +3,7 @@
 #include "ext/nr/NrConfig.h"
 #include "ext/ExtFeatures.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/nr/native/DlssNrNative.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +46,7 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "PassFeedback", passFeedback);
     b.Add("DlssNr", "VitEvery", vitEvery);
     b.Add("DlssNr", "VitAllowUnverified", vitAllowUnverified);
+    b.Add("DlssNr", "VitCapture", vitCapture);
     b.Add("DlssNr", "VitFirstPassOnly", vitFirstPassOnly);
     b.Add("DlssNr", "WorkingScale", workingScale);
     b.AddEnum("DlssNr", "ScalingDownscaler", scalingDownscaler, Scaler::Count);
@@ -118,6 +120,9 @@ void NrConfig::PostLoad()
 
     if (precision.value_or_default() != 4)
         precision = 0u;
+
+    // The runtime creates its CUDA modules before the first evaluation, so the capture must know at load time.
+    DlssNrNative::SetCapture(vitCapture.value_or_default());
 
     if (vitEvery.value_or_default() < 1u || vitEvery.value_or_default() > 2u)
         vitEvery = std::clamp<uint32_t>(vitEvery.value_or_default(), 1u, 2u);

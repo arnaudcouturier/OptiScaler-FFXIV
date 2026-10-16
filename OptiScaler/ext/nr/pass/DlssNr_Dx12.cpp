@@ -2648,6 +2648,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const unsigned reuseEvery = DlssNrNative::ReuseEveryForPass(0, nr.vitEvery.value_or_default());
     const bool reuseFirstPassOnly = nr.vitFirstPassOnly.value_or_default();
     const bool reuseOverride = nr.vitAllowUnverified.value_or_default();
+    DlssNrNative::SetCapture(nr.vitCapture.value_or_default());
     const float passFeedback = std::isfinite(nr.passFeedback.value_or_default())
         ? std::clamp(nr.passFeedback.value_or_default(), 0.0f, 1.0f) : 1.0f;
     if (g_nr.previousReuseEvery != reuseEvery || g_nr.previousReuseOverride != reuseOverride ||

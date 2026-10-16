@@ -4,6 +4,10 @@ namespace DlssNrNative {
 void* WrapNvapi(unsigned id,void* original);
 void SetEnabled(bool enabled);
 void SetPrecision(unsigned precision);
+// [DlssNr] VitCapture: log-only recording of the first NR evaluations' CUDA launches and the ViT module blobs
+// (DlssNrVitCapture.h). Set from config load and before every NR evaluation; the module dump needs it set before
+// the runtime creates its modules.
+void SetCapture(bool enabled);
 void BeginEvaluate(const void* feature, bool reset, unsigned every, bool allowUnverified = false);
 void EndEvaluate(bool success = true);
 // The stable policy recomputes downstream passes; disabling it restores all-pass reuse.

@@ -90,14 +90,26 @@ class Filter
         c.every = every < 1 ? 1 : every;
     }
 
+    // Start of an evaluation that is only watched (the capture mode with VitEvery=1): launches are seen by Evaluating() and
+    // Drop() but nothing is ever dropped, and neither the cache entries nor the computed/reused counters are touched.
+    void BeginObserve(const void* feature)
+    {
+        Ctx& c = ctx();
+        c = Ctx {};
+        c.active = true;
+        c.observe = true;
+        c.key = feature;
+    }
+
     bool Evaluating() const { return ctx().active; }
+    bool ObserveOnly() const { return ctx().active && ctx().observe; }
 
     // True when this launch is to be dropped. Must be called for every launch of the evaluation, in order.
     bool Drop(Role role)
     {
         Ctx& c = ctx();
 
-        if (!c.active)
+        if (!c.active || c.observe)
             return false;
 
         switch (role)
@@ -172,6 +184,12 @@ class Filter
         if (!c.active)
             return true;
 
+        if (c.observe)
+        {
+            c = Ctx {};
+            return true;
+        }
+
         if (c.inRange)
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -227,6 +245,7 @@ class Filter
     struct Ctx
     {
         bool active = false;
+        bool observe = false; // watched only: Drop() always says keep
         const void* key = nullptr;
         bool reset = false;
         unsigned every = 1;

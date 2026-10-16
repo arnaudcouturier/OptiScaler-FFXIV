@@ -31,3 +31,12 @@ Build-Test 'global-clear' @()
 & "$Out/global-clear.exe"
 if ($LASTEXITCODE -ne 1) { throw 'Global cache clearing was not rejected' }
 Write-Output 'PASS: negative control detects downstream passes cancelling first-pass reuse'
+# Negative control: a capture that only watches launches the override is not allowed to drop would miss exactly the launches
+# an override run discards (recording has to precede the drop decision).
+$bad = $extract.Replace('if(watching)capture.Observe(k[i]);', 'if(watching&&!s.allowUnverified)capture.Observe(k[i]);')
+if ($bad -ceq $extract) { throw 'Capture-order negative control no longer matches production.' }
+[IO.File]::WriteAllText($include, $bad)
+Build-Test 'late-capture' @()
+& "$Out/late-capture.exe"
+if ($LASTEXITCODE -ne 1) { throw 'A capture that skips override-dropped launches was not rejected' }
+Write-Output 'PASS: negative control detects a capture that records after the drop decision'

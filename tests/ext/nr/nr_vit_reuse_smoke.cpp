@@ -169,6 +169,25 @@ int main()
         CHECK(!r.wellFormed && f.Disabled());
     }
 
+    { // a watched evaluation (capture mode with VitEvery=1) never drops, and leaves the cache, the cycle and the counters alone
+        Filter f;
+        CHECK(Kept(Eval(f, &a, false, 2))); // warm: the next full evaluation would reuse
+        f.BeginObserve(&a);
+        CHECK(f.Evaluating() && f.ObserveOnly());
+        for (int pass = 0; pass < 3; ++pass)
+            for (Role role : kEval)
+                CHECK(!f.Drop(role));
+        CHECK(f.End());
+        CHECK(!f.Evaluating() && !f.ObserveOnly());
+        CHECK(f.Computed() == 1 && f.Reused() == 0);
+        CHECK(Dropped(Eval(f, &a, false, 2))); // still warm, still on the same cycle
+        f.BeginObserve(&a); // an odd order while watching is not an anomaly: the feature stays enabled
+        f.Drop(Role::End);
+        f.Drop(Role::Start);
+        f.Drop(Role::Start);
+        CHECK(f.End() && !f.Disabled());
+    }
+
     { // the evaluation context belongs to its thread: a launch from another thread is not part of it
         Filter f;
         Eval(f, &a, false, 2);
