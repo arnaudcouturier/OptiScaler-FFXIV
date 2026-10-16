@@ -6,6 +6,7 @@
 #include "ext/ffxiv/lighting/FfxivLighting.h"
 #include "ext/ffxiv/markers/FfxivMarkers.h"
 #include "ext/ffxiv/quality/FfxivQuality.h"
+#include "ext/ffxiv/ui/FfxivUiBoundary.h"
 #include "ext/game/Game.h"
 #include "ext/hdr/HdrScene.h"
 
@@ -45,6 +46,7 @@ const Game& SelectGame()
         ffxiv.quality = &ext::ffxiv::quality::Provider();
         ffxiv.geometry = &ext::ffxiv::geometry::Provider();
         ffxiv.fgMarkers = &ext::ffxiv::markers::Provider();
+        ffxiv.hudless = &ext::ffxiv::ui::Provider(); // S10 A
         ffxiv.ngx = &quirks;
         ffxiv.nrQuirks = &quirks;
         ext::SetActive(ext::F::Game, true);

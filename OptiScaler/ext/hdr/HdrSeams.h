@@ -167,7 +167,7 @@ namespace ext::dx11bridge
 // every exit of Present (ISceneHdr::EndFrame). No-op without a scene provider.
 struct PresentScope
 {
-    PresentScope() = default;
+    PresentScope(); // S10 A: Present-entry bookkeeping (BridgeHdr.cpp)
     ~PresentScope();
     PresentScope(const PresentScope&) = delete;
     PresentScope& operator=(const PresentScope&) = delete;

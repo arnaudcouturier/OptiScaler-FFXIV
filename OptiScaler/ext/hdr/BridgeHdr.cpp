@@ -7,6 +7,8 @@
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/screenshot/HdrScreenshot.h"
 #include "ext/game/Game.h"
+#include "ext/ffxiv/ui/FfxivUiBoundary.h"
+#include "ext/hudless/HudlessSource.h"
 
 #include <framegen/IFGFeature_Dx12.h>
 
@@ -143,10 +145,21 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
                                   sdrSource, bridge.screenshotSdrState);
 }
 
+// S10 A: the game's hud-less source observes the frame from Present entry to Present exit (docs/HUDLESS.md section 10).
+// The constructor refreshes its arming cache and runs the per-frame bookkeeping (D1 probes), the destructor closes the
+// frame. Both cost one pointer test on a game without a source.
+PresentScope::PresentScope()
+{
+    if (game::Current().hudless)
+        ffxiv::ui::OnPresentBegin();
+}
+
 PresentScope::~PresentScope()
 {
     if (auto* scene = game::Current().hdr)
         scene->EndFrame();
+    if (auto* hudless = game::Current().hudless)
+        hudless->EndFrame();
 }
 
 void BeforeSharedCopy(Dx11wDx12SC& sc)

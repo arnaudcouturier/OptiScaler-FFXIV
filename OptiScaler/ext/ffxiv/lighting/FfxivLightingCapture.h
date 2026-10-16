@@ -10,6 +10,7 @@
 #include "ext/core/DetourThreads.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
+#include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 
@@ -110,10 +111,12 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         }
     if (SUCCEEDED(hr) && out && *out && code && size>=32 && !std::memcmp(code,"DXBC",4))
         ext::hdr::FfxivSceneHdr::Tag(*out,Crc(code,size));
+    if (SUCCEEDED(hr) && out && *out) ext::ffxiv::ui::TagShader(*out,code,size); // ext: S10 A (UI shader registry; one atomic test while disarmed)
     return hr;
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
+    if(!inside && ext::ffxiv::ui::Armed()){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
     if(c==context && !inside && companionCallbacks.observeDraw) companionCallbacks.observeDraw(c);
     const bool wanted=ext::Cfg().nr.whitePointSource.value_or_default()==2;
     if (!inside && c==context && ext::hdr::FfxivSceneHdr::Requested()) {
