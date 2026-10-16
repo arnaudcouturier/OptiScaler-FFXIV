@@ -57,12 +57,27 @@ ID3D12Resource* PrepareUpscalerColor(IFeature_Dx11wDx12& feature, ID3D12Graphics
         return color;
 
     const auto desc = color->GetDesc();
-    const auto renderWidth = feature.RenderWidth();
-    const auto renderHeight = feature.RenderHeight();
+    auto renderWidth = feature.RenderWidth();
+    auto renderHeight = feature.RenderHeight();
 
     unsigned int subrectWidth = 0, subrectHeight = 0;
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight);
+
+    // feature.RenderWidth()/RenderHeight() above are last frame's cache -- CorrectRenderSubrect, and the inner
+    // feature's own ProcessEvaluateParams, only refresh them moments later in this same Evaluate(). Resolve THIS
+    // frame's render size now, through the same geometry seam, seeded the same way IFeature::GetRenderResolution's
+    // own subrect read would seed it: on a genuine resolution change (DRS, a quality-preset change, a resolution/
+    // window change) the staging texture below is then sized to what the subrect will actually be corrected to,
+    // not to stale data. No inner feature yet -> leave renderWidth/renderHeight at their RenderWidth()/
+    // RenderHeight() default (0), same no-op outcome as before.
+    if (auto* inner = Access::Bridge::InnerFeature(feature))
+    {
+        unsigned int resolvedWidth = subrectWidth, resolvedHeight = subrectHeight;
+        ext::upscaler::ResolveRenderGeometry(inner, params, &resolvedWidth, &resolvedHeight);
+        renderWidth = resolvedWidth;
+        renderHeight = resolvedHeight;
+    }
 
     // Folds the oracle's two remaining checks (render already equals the allocation -> nothing to scale; the
     // game's subrect doesn't describe the full allocation -> don't second-guess it) into one interface call --

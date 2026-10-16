@@ -26,6 +26,13 @@ struct ext::Access::Bridge
         return *feature._ext;
     }
 
+    // C4 (Fix 2): ext::dx11bridge::PrepareUpscalerColor needs this frame's actual render size, not the (one-frame-
+    // stale) IFeature_Dx11wDx12::RenderWidth()/RenderHeight() public accessor -- it resolves it itself through
+    // ext::upscaler::ResolveRenderGeometry, which needs the same feature identity CorrectRenderSubrect passes
+    // moments later (dx12Feature.get(), not `&feature`) so UpscalerSeams.cpp's per-feature geometry-log dedup state
+    // isn't bounced between two different pointers for what is really one logical feature.
+    static IFeature* InnerFeature(IFeature_Dx11wDx12& feature) { return feature.dx12Feature.get(); }
+
     static IDXGISwapChain4* FgSwapChain(Dx11wDx12SC& sc) { return sc._fgSwapChain; }
     static DXGI_FORMAT BufferFormat(const Dx11wDx12SC& sc) { return sc._bufferFormat; }
     static ID3D12Device* Dx12Device(Dx11wDx12SC& sc) { return sc._dx12Device; }
