@@ -181,18 +181,17 @@ void Install()
     enqueue=reinterpret_cast<Enqueue>(base+build.enqueueRva);bindState=reinterpret_cast<BindState>(base+build.bindStateRva);
     batch16 = reinterpret_cast<Batch>(base + build.batch16Rva);
     batch32 = reinterpret_cast<Batch>(base + build.batch32Rva);
-    // Enlist every other process thread so Detours can relocate any instruction pointer that
-    // happens to sit inside a patched prologue (these hooks patch widely-shared D3D11 vtable
-    // slots while the game runs with multiple live threads). See ext/core/DetourThreads.h.
-    ext::core::DetourThreadScope threads;
-    if (!threads.Ok())
-    {
-        batch16 = batch32 = nullptr;
-        LOG_WARN("Companion native submissions: unable to enlist game threads; hooks disabled");
-        return;
-    }
+    // Single-thread enlistment only, deliberately, even though Detach() below enlists every
+    // process thread. Install happens once per launch, early; Detours itself allocates (per
+    // ext::core::DetourThreadScope's own comment, now verified against the real detours.cpp
+    // source) while every enlisted thread sits suspended for the whole transaction, so enlisting
+    // more threads here would spread a confirmed deadlock hazard to a path that fires on every
+    // single session, not just the rare detach path. The crash risk multi-thread enlistment
+    // exists to prevent (resuming a thread with its IP inside a patched prologue) is accepted
+    // here, matching this codebase's existing convention at 120+ other single-thread Detours call
+    // sites -- see the code-review ledger entry for the full trade-off.
     if (DetourTransactionBegin() != NO_ERROR) { batch16 = batch32 = nullptr; return; }
-    bool ok = threads.Update() == NO_ERROR;
+    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&batch16), OnBatch16) == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&batch32), OnBatch32) == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&enqueue), OnEnqueue) == NO_ERROR;

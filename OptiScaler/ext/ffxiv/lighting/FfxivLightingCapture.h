@@ -170,18 +170,17 @@ inline void Install(ID3D11Device* d)
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
-    // Enlist every other process thread so Detours can relocate any instruction pointer that
-    // happens to sit inside a patched prologue (these hooks patch widely-shared D3D11 vtable
-    // slots while the game runs with multiple live threads). See ext/core/DetourThreads.h.
-    ext::core::DetourThreadScope threads;
-    if (!threads.Ok())
-    {
-        create=nullptr;
-        LOG_WARN("FFXIV lighting: unable to enlist game threads; hooks disabled");
-        return;
-    }
+    // Single-thread enlistment only, deliberately, even though Detach() below enlists every
+    // process thread. Install happens once per device, early; Detours itself allocates (per
+    // ext::core::DetourThreadScope's own comment, now verified against the real detours.cpp
+    // source) while every enlisted thread sits suspended for the whole transaction, so enlisting
+    // more threads here would spread a confirmed deadlock hazard to a path that fires on every
+    // single session, not just the rare detach path. The crash risk multi-thread enlistment
+    // exists to prevent (resuming a thread with its IP inside a patched prologue) is accepted
+    // here, matching this codebase's existing convention at 120+ other single-thread Detours call
+    // sites -- see the code-review ledger entry for the full trade-off.
     if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
-    bool ok=threads.Update()==NO_ERROR;
+    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
     LIGHT_ATTACH(createLayout,OnCreateLayout);

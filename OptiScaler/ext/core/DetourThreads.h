@@ -18,18 +18,28 @@
 // earlier would leave threads suspended. Letting it go out of scope afterward closes every
 // handle on every path (success, partial failure, or construction failure).
 //
-// Known, accepted risk: THREAD_SUSPEND_RESUME (requested on OpenThread, below) is only an
-// access right -- it does not suspend anything by itself. The actual suspension happens inside
-// Update()'s DetourUpdateThread calls, each of which may allocate its own per-thread bookkeeping
-// while earlier threads in the same call are already suspended; DetourAttach/DetourDetach and
-// DetourTransactionCommit can allocate too, all before the transaction resumes anyone. Whether
-// that bookkeeping comes from the CRT heap (hazardous: another suspended thread could hold its
-// lock) or elsewhere is not verified: this repo vendors only detours.h and a prebuilt
-// detours.lib, no source, so Detours' internal allocator cannot be inspected here. Trampolines
-// themselves are conventionally VirtualAlloc'd, but that is a different allocation path and is
-// not a mitigation for this one. Not restructured here for the same reason: a wrong fix for an
-// unverified hazard risks introducing a real bug in exchange for a theoretical one (see the
-// longer note in DoInstall).
+// Known, accepted risk, CONFIRMED against the real microsoft/Detours source (detours.cpp,
+// v4.0.1; this repo vendors only detours.h and a prebuilt detours.lib, so the confirmation came
+// from reading the upstream source directly, not from inspecting what's vendored here).
+// THREAD_SUSPEND_RESUME (requested on OpenThread, below) is only an access right -- it does not
+// suspend anything by itself. The actual suspension happens inside DetourUpdateThread itself
+// (immediately, via SuspendThread), and the thread stays suspended through every subsequent
+// DetourUpdateThread/DetourAttach call and the whole DetourTransactionCommit -- Detours only
+// calls ResumeThread once, at the very end of the commit (or on abort). DetourAttach allocates
+// (`new DetourOperation`, trampoline VirtualAlloc) and DetourTransactionCommit frees (`delete`,
+// VirtualFree) while threads enlisted earlier in the same transaction are still suspended.
+// VirtualAlloc is used for trampoline memory, but that is a separate allocation path (chosen to
+// place trampolines near their target, not to avoid heap-lock contention) and is not a
+// mitigation: the `new`/`delete` calls above still go through the ordinary CRT/process heap. A
+// thread suspended while holding that heap's lock would deadlock the installing thread's own
+// next allocation -- this is a real, confirmed hazard, not a theoretical one, and Detours itself
+// does nothing to avoid it. Not restructured here regardless: the alternative (not enlisting
+// other threads at all) trades this hazard for the different, also-real crash this scope exists
+// to prevent -- resuming a thread whose instruction pointer sits inside a prologue this
+// transaction just patched. Both are real; this file's callers only enlist on Detach (currently
+// unreachable in this build) specifically so the live, every-session Install path doesn't carry
+// either risk unnecessarily -- see each Install's own comment and the code-review ledger entry
+// for the full trade-off.
 namespace ext::core
 {
 class DetourThreadScope
