@@ -134,7 +134,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 
 ### 3.9 Hook bypass scope
 
-`ext::core::HooksBypassed()` is an inline `thread_local` test. It replaces the six `FfxivNameplateLiveScope::active` guards. Any fork code that issues its own native draws or device calls wraps them in `ext::core::BypassScope`. It is not FFXIV-specific.
+`ext::core::HooksBypassed()` is an inline `thread_local` test. It replaces the oracle's `FfxivNameplateLiveScope::active` guards: 8 occurrences total ("six" in an earlier draft of this note was a miscount), 7 of them ported (S7 C7: `D3D11_Hooks.cpp` x2, `Dxgi_Hooks.cpp` x3, `FG_Hooks.cpp` x2), the 8th inside `DxgiFactory_Hooks.cpp`'s `CreateSwapChainForComposition`, a hook function E5 (not yet ported) owns -- see the catalog's `HooksBypassed` row for the obligation this leaves for E5. Any fork code that issues its own native draws or device calls wraps them in `ext::core::BypassScope`. It is not FFXIV-specific.
 
 ### 3.10 Logging and version
 
