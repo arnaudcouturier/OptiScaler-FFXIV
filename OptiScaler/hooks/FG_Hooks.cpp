@@ -1076,7 +1076,6 @@ HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags
 {
     if (ext::core::HooksBypassed()) // ext: C7
         return o_FGSCPresent(This, SyncInterval, Flags);
-
     // Skip XeFG's internal call
     if (_skipPresent)
     {
@@ -1114,7 +1113,6 @@ HRESULT FGHooks::hkFGPresent1(IDXGISwapChain1* This, UINT SyncInterval, UINT Fla
 {
     if (ext::core::HooksBypassed()) // ext: C7
         return o_FGSCPresent1(This, SyncInterval, Flags, pPresentParameters);
-
     // Skip XeFG's internal call
     if (_skipPresent1)
     {

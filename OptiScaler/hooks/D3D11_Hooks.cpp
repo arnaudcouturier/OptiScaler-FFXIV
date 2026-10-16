@@ -468,7 +468,6 @@ static HRESULT hkCreateSamplerState(ID3D11Device* This, const D3D11_SAMPLER_DESC
 {
     if (ext::core::HooksBypassed()) // ext: C7
         return o_CreateSamplerState(This, pSamplerDesc, ppSamplerState);
-
     if (pSamplerDesc == nullptr || This == nullptr)
         return E_INVALIDARG;
 
