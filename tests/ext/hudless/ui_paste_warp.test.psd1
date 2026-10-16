@@ -1,0 +1,9 @@
+@{
+    Class       = 'warp'
+    Note        = 'S10 UI paste on WARP through the public API (Produce -> Paste -> backbuffer readback): threshold, dilation 0..5, cleanup levels, SDR + PQ storage, coverage counter, CPU reference on random images, ring / fence / queue rules, steady timing, stale, resize, Release'
+    Prepare     = 'prepare_ui_shaders.ps1'
+    Sources     = @('ui_paste_warp.cpp', '{repo}/OptiScaler/ext/hudless/UiPaste.cpp', '{repo}/OptiScaler/ext/gpu/Gpu.cpp', '{repo}/OptiScaler/ext/gpu/GpuLifetime.cpp')
+    IncludeDirs = @('ui_stubs', '../gpu/stubs', '{out}', '{repo}/OptiScaler')
+    Libs        = @('d3d12.lib', 'dxgi.lib', 'ole32.lib')
+    Defines     = @('NOMINMAX')
+}
