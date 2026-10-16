@@ -17,6 +17,19 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
     if (device == nullptr)
         return;
 
+    // Diagnostic for a code-review finding (not a fix): this seam fires on every device that reaches
+    // HookToDeviceLocal, matching the oracle's own placement (D3D11_Hooks.cpp, before the "already hooked"
+    // guard) -- so whichever device gets here first is the one lighting's Install latches onto. If anything
+    // other than the game's own render device (an overlay's capability-probe device, Dalamud, ReShade) wins
+    // that race, lighting's native capture binds to the wrong device and the real game device's later call
+    // here is a silent no-op. Phase 4: confirm in-game that exactly one "lighting device hooked" line appears
+    // per session and that the logged context matches the game's real device.
+    if (Current().lighting != nullptr)
+    {
+        LOG_INFO("FFXIV lighting: device {:#x} reached OnD3D11DeviceHooked (already latched: {})", (size_t) device,
+                 ext::ffxiv::lighting::FfxivLightingCapture::installed.load());
+    }
+
     if (Current().hdr != nullptr)
     {
         // Companion has no dedicated Game interface slot (unlike lighting); gate on the same hdr != nullptr
@@ -36,7 +49,12 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
     }
 
     if (Current().lighting != nullptr)
+    {
         ext::ffxiv::lighting::OnDeviceHooked(device);
+        LOG_INFO("FFXIV lighting: latched onto device {:#x}, context {:#x}, installed={}", (size_t) device,
+                 (size_t) ext::ffxiv::lighting::FfxivLightingCapture::context,
+                 ext::ffxiv::lighting::FfxivLightingCapture::installed.load());
+    }
 
     if (Current().hdr != nullptr)
         ext::ffxiv::companion::Install(device);

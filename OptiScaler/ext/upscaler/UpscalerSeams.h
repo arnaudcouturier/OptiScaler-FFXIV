@@ -59,5 +59,15 @@ bool ResolveRenderGeometry(IFeature* feature, const NVSDK_NGX_Parameter* InParam
 // GetRenderResolution again on an arbitrary feature, so no declaration is added to IFeature.h beyond the friend
 // line. Same gate as ResolveRenderGeometry, checked here too before touching anything: a complete no-op (not even
 // the extra GetRenderResolution call) when geometry is null or the config flag is off.
+//
+// Called from BOTH host sites on the same frame -- not redundant, despite looking it. The bridge-layer call
+// (IFeature_Dx11wDx12.cpp/IFeature_VkwDx12.cpp) runs before ext::nr::EvalBefore's pre-SR pass (which reads the
+// subrect straight off `params`) and before IFeature_Dx12::Evaluate's own useOutputScaling decision
+// (RenderWidth()==DisplayWidth(), evaluated before EvaluateInternal/ProcessEvaluateParams) -- both would see a
+// stale, uncorrected subrect without it. The later call inside ProcessEvaluateParams is what the non-bridge
+// (standalone DX12) path relies on, since it never reaches the bridge-layer call at all. Deleting either call
+// reopens the staleness class the bridge-layer call exists to close on its own path. A code review flagged the
+// double call as wasted per-frame work (true) and risked deleting one as "redundant" (it isn't) -- left as-is,
+// documented here instead.
 void CorrectRenderSubrect(IFeature* feature, NVSDK_NGX_Parameter* InParameters);
 } // namespace ext::upscaler
