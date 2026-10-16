@@ -1491,9 +1491,25 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
                     {
                         LOG_DEBUG("Backbuffer {}: {:X}", i, (size_t) backBuffer);
                         auto refCount = backBuffer->Release();
-                        const bool releaseBackbufferOnce =
+                        const bool releaseBackbufferOnce = // ext: D3
                             static_cast<bool>(State::Instance().gameQuirks & GameQuirk::ReleaseBackbufferOnce);
-                        while (!releaseBackbufferOnce && refCount > XEFG_RESOURCE_REF_LIMIT)
+
+                        // ext: D3 one-time diagnostic: ReleaseBackbufferOnce assumes a single Release() always
+                        // reaches XEFG_RESOURCE_REF_LIMIT for FFXIV. Nothing in this repo proves that, so warn once
+                        // if it doesn't instead of silently leaving extra references outstanding.
+                        if (releaseBackbufferOnce && refCount > XEFG_RESOURCE_REF_LIMIT)
+                        {
+                            static bool releaseBackbufferOnceWarned = false;
+                            if (!releaseBackbufferOnceWarned)
+                            {
+                                LOG_WARN("ReleaseBackbufferOnce quirk active: backbuffer {} RefCount {} still above "
+                                         "limit {} after single Release()",
+                                         i, refCount, XEFG_RESOURCE_REF_LIMIT);
+                                releaseBackbufferOnceWarned = true;
+                            }
+                        }
+
+                        while (!releaseBackbufferOnce && refCount > XEFG_RESOURCE_REF_LIMIT) // ext: D3
                         {
                             LOG_DEBUG("Releasing backbuffer {}: RefCount {}", i, refCount);
                             refCount = backBuffer->Release();
