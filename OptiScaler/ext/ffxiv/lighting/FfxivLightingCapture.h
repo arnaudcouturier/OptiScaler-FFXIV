@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include "ext/core/DetourThreads.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
 #include "ext/hdr/FfxivHdrPreview.h"
@@ -175,8 +176,18 @@ inline void Install(ID3D11Device* d)
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
+    // Enlist every other process thread so Detours can relocate any instruction pointer that
+    // happens to sit inside a patched prologue (these hooks patch widely-shared D3D11 vtable
+    // slots while the game runs with multiple live threads). See ext/core/DetourThreads.h.
+    ext::core::DetourThreadScope threads;
+    if (!threads.Ok())
+    {
+        create=nullptr;
+        LOG_WARN("FFXIV lighting: unable to enlist game threads; hooks disabled");
+        return;
+    }
     if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
-    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
+    bool ok=threads.Update()==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
     LIGHT_ATTACH(createLayout,OnCreateLayout);
@@ -193,9 +204,23 @@ inline void Detach()
 {
     ext::hdr::FfxivSceneHdr::EndFrame();
     FfxivLightingScan::Stop();
-    installed.store(false);
-    if (!create || DetourTransactionBegin()!=NO_ERROR) return;
-    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
+    // installed only flips to false once the detach transaction actually commits (below): if
+    // create is null (never attached) or the transaction fails/aborts, installed must stay
+    // exactly as it was, since SceneLightingProvider::Status() reads this flag as a diagnostics
+    // surface and the hooks remain physically attached until a commit says otherwise.
+    if (!create) return; // nothing was ever attached; installed is already false
+    // Enlist every other process thread so Detours can relocate any instruction pointer that
+    // happens to sit inside a patched prologue. On detach specifically, if another thread's
+    // saved instruction pointer sits inside a patched prologue when the trampoline is reverted,
+    // resuming that thread unrelocated can crash the game. See ext/core/DetourThreads.h.
+    ext::core::DetourThreadScope threads;
+    if (!threads.Ok())
+    {
+        LOG_WARN("FFXIV lighting: unable to enlist game threads; hooks left attached");
+        return;
+    }
+    if (DetourTransactionBegin()!=NO_ERROR) return;
+    bool ok=threads.Update()==NO_ERROR;
 #define LIGHT_DETACH(o,h) ok &= DetourDetach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_DETACH(create,CreateShader); LIGHT_DETACH(draw,OnDraw); LIGHT_DETACH(indexed,OnIndexed);
     LIGHT_DETACH(createLayout,OnCreateLayout);
@@ -203,7 +228,7 @@ inline void Detach()
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; createLayout=nullptr; context=nullptr; } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; } }
     else DetourTransactionAbort();
 }
 }

@@ -4,6 +4,8 @@
 #include "CompanionRuntime.h"
 #include "CompanionGpu.h"
 #include "CompanionLayer.h"
+#include "ext/core/DetourThreads.h"
+#include "replay/FfxivNameplateLive.h"
 #include <detours/detours.h>
 #include <filesystem>
 
@@ -171,8 +173,18 @@ void Install()
     enqueue=reinterpret_cast<Enqueue>(base+build.enqueueRva);bindState=reinterpret_cast<BindState>(base+build.bindStateRva);
     batch16 = reinterpret_cast<Batch>(base + build.batch16Rva);
     batch32 = reinterpret_cast<Batch>(base + build.batch32Rva);
+    // Enlist every other process thread so Detours can relocate any instruction pointer that
+    // happens to sit inside a patched prologue (these hooks patch widely-shared D3D11 vtable
+    // slots while the game runs with multiple live threads). See ext/core/DetourThreads.h.
+    ext::core::DetourThreadScope threads;
+    if (!threads.Ok())
+    {
+        batch16 = batch32 = nullptr;
+        LOG_WARN("Companion native submissions: unable to enlist game threads; hooks disabled");
+        return;
+    }
     if (DetourTransactionBegin() != NO_ERROR) { batch16 = batch32 = nullptr; return; }
-    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
+    bool ok = threads.Update() == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&batch16), OnBatch16) == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&batch32), OnBatch32) == NO_ERROR;
     ok &= DetourAttach(reinterpret_cast<PVOID*>(&enqueue), OnEnqueue) == NO_ERROR;
@@ -191,8 +203,18 @@ void Detach()
     Gpu::requested.store(false); Gpu::Clear();
     requested.store(false);
     beginNativeDraw.store(nullptr); endNativeDraw.store(nullptr);
-    if (!installed.load() || DetourTransactionBegin() != NO_ERROR) return;
-    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
+    if (!installed.load()) return;
+    // Same enlistment as Install(): on detach specifically, if another thread's saved
+    // instruction pointer sits inside a patched prologue when the trampoline is reverted,
+    // resuming that thread unrelocated can crash the game.
+    ext::core::DetourThreadScope threads;
+    if (!threads.Ok())
+    {
+        LOG_WARN("Companion native submissions: unable to enlist game threads; hooks left attached");
+        return;
+    }
+    if (DetourTransactionBegin() != NO_ERROR) return;
+    bool ok = threads.Update() == NO_ERROR;
     ok &= DetourDetach(reinterpret_cast<PVOID*>(&batch16), OnBatch16) == NO_ERROR;
     ok &= DetourDetach(reinterpret_cast<PVOID*>(&batch32), OnBatch32) == NO_ERROR;
     ok &= DetourDetach(reinterpret_cast<PVOID*>(&enqueue), OnEnqueue) == NO_ERROR;

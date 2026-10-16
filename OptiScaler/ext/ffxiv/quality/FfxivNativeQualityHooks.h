@@ -244,6 +244,19 @@ inline uintptr_t ObserveQuery(const unsigned int* display, unsigned int* optimal
     return result;
 }
 
+// Known, accepted risk (reviewed, not an oversight): this function suspends every other
+// process thread (THREAD_SUSPEND_RESUME, below) before the heap-allocating work in
+// DetourAttach/DetourTransactionCommit and this function's own std::vector growth run.
+// Conventionally, Detours allocates trampolines via VirtualAlloc rather than the CRT heap,
+// specifically to avoid a suspended thread blocking inside an allocator another thread holds
+// a lock on -- but that has not been independently verified against the vendored binary in
+// this repo (its internal allocator behavior cannot be confirmed from source alone), so this is
+// rated a plausible, not confirmed, hazard. Deliberately not restructured: changing the
+// suspend/attach ordering to address an unverified hazard risks introducing a real bug in
+// exchange for a theoretical one. The same note applies to ext::core::DetourThreadScope
+// (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
+// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and
+// ext::ffxiv::lighting::FfxivLightingCapture).
 inline bool DoInstall()
 {
     if (!SettingsGuardOk())
