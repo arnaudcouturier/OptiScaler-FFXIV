@@ -157,7 +157,6 @@ void OnPresentBegin()
             return;
 
         Core& core = C();
-        core.BeginRenderThread(GetCurrentThreadId());
         if (DiagnosticsOn())
         {
             diag::OnPresentEntry(core);

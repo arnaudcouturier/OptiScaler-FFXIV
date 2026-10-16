@@ -144,7 +144,6 @@ void Run()
 
     auto* core = new Core;
     core->SetBackbufferProvider(&Backbuffer);
-    core->BeginRenderThread(GetCurrentThreadId());
     core->TagShader(psScene.Get(), 0x85E777EFu, 1512);
     core->TagShader(psGamma.Get(), 0xF6E81A1Bu, 900);
     core->TagShader(psUi.Get(), 3865947726u, 2048);
@@ -170,6 +169,8 @@ void Run()
     ctx->ClearRenderTargetView(bbRtv.Get(), black);
     auto r1 = draw(psScene.Get());                                      // #1 stage 1 into the backbuffer
     CHECK_EQ(r1.ordinal, 1u);
+    std::thread([&] { core->OnDraw(ctx); }).join();                      // a foreign thread's draw during the frame is ignored
+    CHECK_EQ(core->Stats().otherThreadDraws, 1u);
     CHECK_EQ(r1.stage, 1);
     ctx->OMSetRenderTargets(1, otherRtv.GetAddressOf(), nullptr);
     draw(psPlain.Get());                                                // #2 untagged, other target
@@ -241,7 +242,7 @@ void Run()
     CHECK_EQ(rec.presentDraws, 2u);
     CHECK_EQ(rec.present.size(), 2u);
     CHECK(rec.present.size() == 2 && rec.present[0].id == "0x12345678");
-    CHECK_EQ(core->Stats().otherThreadDraws, 1u);
+    CHECK_EQ(core->Stats().otherThreadDraws, 2u);
     CHECK_EQ(rec.candidates.r1, 5u);
     CHECK_EQ(rec.candidates.r2, 5u);
     CHECK_EQ(rec.summary.unknownDraws, 1u);   // the shader created before the hook

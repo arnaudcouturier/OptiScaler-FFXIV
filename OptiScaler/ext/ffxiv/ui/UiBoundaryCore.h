@@ -3,8 +3,8 @@
 // dependencies (no pch, config, log, files, swapchain access) so the WARP test builds it standalone. The game integration
 // is FfxivUiBoundary.cpp; the files are UiDiag.cpp.
 //
-// Threading: TagShader() may run on any thread (shader creation). Everything else runs on the render thread, the thread
-// of the bridge's Present (set by BeginRenderThread); draws from another thread are counted and ignored. COM objects are
+// Threading: TagShader() may run on any thread (shader creation). Everything else runs on the render thread (the thread of
+// the first draw of a frame, the presenting thread inside Present); draws from another thread are counted and ignored. COM objects are
 // never retained: a backbuffer or render target is only ever compared by pointer.
 //
 // Frame life cycle (driven by PresentScope through FfxivUiBoundary.cpp):
@@ -115,12 +115,6 @@ class Core
     // ---- wiring ---------------------------------------------------------------------------------------------------
     void SetGameStageTag(const GUID* tag) { _gameTag = tag; }
     void SetBackbufferProvider(BackbufferFn fn) { _bbFn = fn; }
-    void BeginRenderThread(DWORD tid)
-    {
-        if (_tid != 0 && _tid != tid)
-            ++_cnt.renderThreadChanges;
-        _tid = tid;
-    }
 
     // ---- shader creation (any thread) ----------------------------------------------------------------------------
     // Registers the program (key = CRC) and stamps the shader object with a pointer to its record.
@@ -152,17 +146,34 @@ class Core
     DrawResult OnDraw(ID3D11DeviceContext* c)
     {
         DrawResult res;
-        if (_tid == 0 || GetCurrentThreadId() != _tid)
+        const DWORD me = GetCurrentThreadId();
+        if (_inPresent)
+        {
+            // Inside Present only the presenting thread is followed.
+            if (me != _presentTid)
+            {
+                ++_cnt.otherThreadDraws;
+                return res;
+            }
+            res.counted = true;
+            OnPresentDraw(c);
+            return res;
+        }
+        // The thread of the first draw of a frame is the render thread of that frame; a draw from any other thread is counted
+        // and ignored (the immediate context is single threaded by contract).
+        if (_tid == 0)
+        {
+            _tid = me;
+            if (_lastTid != 0 && _lastTid != me)
+                ++_cnt.renderThreadChanges;
+            _lastTid = me;
+        }
+        else if (me != _tid)
         {
             ++_cnt.otherThreadDraws;
             return res;
         }
         res.counted = true;
-        if (_inPresent)
-        {
-            OnPresentDraw(c);
-            return res;
-        }
 
         ++_cnt.gameDraws;
         EnsureBackbuffer();
@@ -209,6 +220,7 @@ class Core
     {
         _inPresent = true;
         _frozen = true;
+        _presentTid = GetCurrentThreadId();
     }
 
     // Present exit: returns the record of the frame that just ended and resets per-frame state.
@@ -249,6 +261,7 @@ class Core
         _bbValid = false;
         _inPresent = false;
         _frozen = false;
+        _tid = 0;
         ++_frame;
         return o;
     }
@@ -568,7 +581,7 @@ class Core
     int64_t _freq = 1;
     const GUID* _gameTag = nullptr;
     BackbufferFn _bbFn = nullptr;
-    DWORD _tid = 0;
+    DWORD _tid = 0, _lastTid = 0, _presentTid = 0;
 
     // shader registry
     std::mutex _mutex;

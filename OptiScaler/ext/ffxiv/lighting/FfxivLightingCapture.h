@@ -116,7 +116,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
-    if(!inside && ext::ffxiv::ui::Armed()){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
+    if(ext::ffxiv::ui::Armed() && !inside){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
     if(c==context && !inside && companionCallbacks.observeDraw) companionCallbacks.observeDraw(c);
     const bool wanted=ext::Cfg().nr.whitePointSource.value_or_default()==2;
     if (!inside && c==context && ext::hdr::FfxivSceneHdr::Requested()) {
