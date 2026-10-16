@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HUD-less engine shaders (S10, docs/HUDLESS.md sections 7 and 13). Picked up automatically by ext\ext.props.
+  Headers are generated into $(IntDir)ext_gen\ (never committed). fxc, -O3.
+    * UiPasteProduce / UiRecomposition: cs_5_0 CSMain (16x16 groups); both include UiMask.hlsli (same directory).
+    * UiPasteDraw.hlsl holds the vertex and the pixel shader of the paste draw: two items on one file, entry VSMain/PSMain.
+  tests\ext\hudless\prepare_ui_shaders.ps1 builds the same files with the same names for the standalone tests.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\UiPasteProduce.hlsl"><Variable>UiPasteProduce_cso</Variable><Header>UiPasteProduce_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\UiRecomposition.hlsl"><Variable>UiRecomposition_cso</Variable><Header>UiRecomposition_Shader.h</Header></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\UiPasteDraw.hlsl"><Variable>UiPasteVs_cso</Variable><Header>UiPasteVs_Shader.h</Header><Profile>vs_5_0</Profile><Entry>VSMain</Entry></ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\UiPasteDraw.hlsl"><Variable>UiPastePs_cso</Variable><Header>UiPastePs_Shader.h</Header><Profile>ps_5_0</Profile><Entry>PSMain</Entry></ExtShader>
+  </ItemGroup>
+</Project>
