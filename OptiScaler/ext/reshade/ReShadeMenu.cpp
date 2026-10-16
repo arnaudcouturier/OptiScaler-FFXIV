@@ -7,6 +7,7 @@
 
 #include <imgui/imgui.h>
 
+#include <atomic>
 #include <format>
 
 // Menu card of the ReShade built-in add-on probe (S10 package D0). Plain status structs only: no ReShade types here
@@ -48,6 +49,8 @@ void DrawReShadeCard(ext::menu::Ctx&)
         return;
     }
 
+    ext::reshade::EnsureReportStarted();
+
     ext::reshade::probe::FileReport* report = ext::reshade::ProbeReport();
     const std::string folder = report != nullptr ? report->Folder().string() : std::string();
     const auto status = session->Status(folder, report != nullptr && report->Failed());
@@ -57,6 +60,17 @@ void DrawReShadeCard(ext::menu::Ctx&)
     ImGui::TextWrapped("Events: %s", ext::reshade::probe::FormatEventCounts(status.counts).c_str());
     if (addon.registered && status.counts.Total() == 0)
     {
+        // Once: the report must say so even though no ReShade callback ever started it (registered, but nothing arrives).
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+        {
+            session->Note("[F1] WARNING: registered with ReShade but NO event has been delivered (seen from the menu card). "
+                          "Either the registration made in DllMain was too early for this ReShade (it searches for add-ons later, "
+                          "at the first device creation) or this build restricts the events. This report existing with no "
+                          "event lines IS the answer for F1-F5: nothing can be probed. Next registration point to try: the "
+                          "existing ext::game::OnD3D11DeviceHooked seam.");
+            LOG_WARN("ReShade built-in add-on: registered but ReShade has delivered no event");
+        }
         ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
                            "Registered, but ReShade has delivered no event yet. If this stays so while the game renders, the "
                            "registration was too early or this ReShade build restricts events (see reshade-probe.txt).");

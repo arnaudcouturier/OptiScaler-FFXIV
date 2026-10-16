@@ -240,6 +240,14 @@ std::vector<std::string> FrameLedger::OnFrameEnd(uint64_t runtime)
             "finish={} | rtv={} srgb={} {}x{} fmt={}",
             Hex(runtime), f.frame, f.begin, f.finish, f.spanUs, f.probeBegin, f.probeFinish, Hex(f.rtv), Hex(f.rtvSrgb),
             f.width, f.height, f.format));
+        if (s.frames == kDetailFrames)
+        {
+            lines.push_back(std::format(
+                "VERDICT F3 (passive baseline, no probe): over the first {} ReShade frames of runtime {}: 0 end-of-frame passes in {} "
+                "frames, 1 in {}, 2 or more in {}; pass CPU span us min/avg/max = {:.0f}/{:.0f}/{:.0f}",
+                kDetailFrames, Hex(runtime), s.zeroPass, s.onePass, s.multiPass, s.spanMin,
+                s.spanCount ? s.spanSum / double(s.spanCount) : 0.0, s.spanMax));
+        }
     }
     else if (s.windowFrames >= kSummaryEvery)
     {

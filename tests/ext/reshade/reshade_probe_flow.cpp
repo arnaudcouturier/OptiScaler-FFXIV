@@ -41,6 +41,7 @@ struct FakeBackend final : IBackend
     bool diffValid = true;
     double changedFraction = 0.4;
     bool effectsState = true;
+    bool depthSizeMatches = true;
     // counters
     int renderCalls = 0;
     int inspectCalls = 0;
@@ -86,6 +87,8 @@ struct FakeBackend final : IBackend
     {
         DepthReport d;
         d.anyDepthBound = true;
+        d.sizeMatchesBackBuffer = depthSizeMatches;
+        d.summary = "DepthBufferTex -> 3840x2160 format 40 (back buffer 3840x2160)";
         d.lines.push_back("[F4] DepthBufferTex bound to a 3840x2160 d32_float resource");
         return d;
     }
@@ -153,6 +156,7 @@ struct Rig
         s.OnReloadedEffects(rt);
         s.OnReshadePresent(rt); // a first normal frame: events are flowing
     }
+    bool nullRtv = false; // the end-of-frame pass is a uniforms-only call (rtv = 0)
     void NormalFrame(bool endOfFramePass)
     {
         if (endOfFramePass)
@@ -161,6 +165,7 @@ struct Rig
             e.runtime = rt;
             e.begin = true;
             e.qpc = 5000;
+            e.rtv = nullRtv ? 0 : 0x20;
             s.OnEffects(e);
             e.begin = false;
             e.qpc = 5300;
@@ -188,7 +193,7 @@ void TestHappyPathMethod1()
     assert(r.rep.Has("passes fired inside the call: begin=1 finish=1"));
     assert(r.rep.Has("changed 40.00%"));
     assert(r.rep.Has("VERDICT F2: render_effects returned normally in place"));
-    assert(r.rep.Has("VERDICT F4: a depth-format texture"));
+    assert(r.rep.Has("VERDICT F4: a depth-format texture of the back buffer size is bound: DepthBufferTex"));
     assert(r.rep.Has("VERDICT F5: render_effects took"));
     assert(r.rep.Has("pipeline state restored: yes"));
 
@@ -204,8 +209,23 @@ void TestHappyPathMethod1()
     r.s.ProbeAtBoundary(nullptr);
     r.NormalFrame(true); // this time the end-of-frame pass ran as well
     assert(r.rep.Has("STILL RAN"));
+    assert(r.rep.Has("rtv 0x20: effects would be applied twice"));
     assert(r.rep.Has("try the other skip method"));
     assert(r.s.ProbeStatusCopy().runs == 2);
+}
+
+void TestUniformsOnlyAndDepthSize()
+{
+    Rig r; // the end-of-frame pass after the probe is a uniforms-only call: not "applied twice"
+    r.nullRtv = true;
+    r.be.depthSizeMatches = false;
+    r.s.Arm(SkipMethod::RenderEffectsOnly);
+    r.s.ProbeAtBoundary(nullptr);
+    assert(r.rep.Has("VERDICT F4: a depth-format texture is bound but its size differs from the back buffer"));
+    r.NormalFrame(true);
+    assert(r.rep.Has("ran with a NULL render target view"));
+    assert(r.rep.Has("uniform update only"));
+    assert(!r.rep.Has("STILL RAN"));
 }
 
 void TestMethod2RestoresState()
@@ -347,6 +367,7 @@ void TestTimeouts()
 int main()
 {
     TestHappyPathMethod1();
+    TestUniformsOnlyAndDepthSize();
     TestMethod2RestoresState();
     TestRefusals();
     TestExceptionLatches();

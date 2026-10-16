@@ -14,6 +14,12 @@ namespace ext::reshade
 // ReShade must already have accepted the registration. False = subscription failed (logged by the caller).
 bool InstallProbe(const std::filesystem::path& baseFolder, const std::string& registrationLine);
 
+// Writes the report header (registration line) if no callback has done it yet, which also creates the report folder and file.
+// InstallProbe runs inside DllMain and must not do file I/O; the first ReShade callback normally starts the report, so when
+// ReShade delivers NO event at all (the most likely failure) nothing would exist to send back: the menu card calls this so
+// that opening it leaves a report that says so. Not for DllMain.
+void EnsureReportStarted();
+
 // nullptr until InstallProbe succeeded. Heap-allocated, never destroyed.
 probe::Session* ProbeSession();
 probe::FileReport* ProbeReport();

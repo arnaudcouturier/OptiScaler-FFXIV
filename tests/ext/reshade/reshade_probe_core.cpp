@@ -173,7 +173,7 @@ void TestLedger()
 
     // detail frames up to 120, then silence until the 600-frame summary
     FrameLedger l2(1'000'000);
-    size_t detail = 0, summary = 0;
+    size_t detail = 0, summary = 0, baseline = 0;
     for (uint64_t f = 1; f <= 1300; f++)
     {
         l2.OnEffects(Pass(rt, true, int64_t(f) * 1000));
@@ -193,11 +193,18 @@ void TestLedger()
                 if (summary == 2)
                     assert(l.find("2+ passes=1") != std::string::npos);
             }
+            else if (l.find("VERDICT F3 (passive baseline") != std::string::npos)
+            {
+                baseline++;
+                assert(f == FrameLedger::kDetailFrames);
+                assert(l.find("1 in 120") != std::string::npos);
+            }
             else
                 detail++;
         }
     }
     assert(detail == FrameLedger::kDetailFrames);
+    assert(baseline == 1);
     assert(summary == 2); // frames 600 and 1200
 }
 
@@ -296,6 +303,12 @@ void TestSession()
 
     s.OnReloadedEffects(rt);
     assert(be.techniqueCalls == 1 && rep.Has("3 total, 2 enabled"));
+    assert(rep.Has("VERDICT F1: registered; runtime 0x1562b089470 api=D3D11"));
+    assert(rep.Has("3 techniques, 2 enabled; effects enabled"));
+    const size_t f1Verdicts = rep.Count("VERDICT F1");
+    s.OnReloadedEffects(rt); // a later reload does not repeat the verdict
+    assert(rep.Count("VERDICT F1") == f1Verdicts);
+
     RuntimeInfo got;
     assert(s.Runtime(rt, got) && got.techniques.size() == 3 && got.techniquesKnown);
 
@@ -314,11 +327,11 @@ void TestSession()
     const EventCounts c = s.Counts();
     assert(c.n[size_t(EventKind::InitRuntime)] == 2);
     assert(c.n[size_t(EventKind::DestroyRuntime)] == 1);
-    assert(c.n[size_t(EventKind::ReloadedEffects)] == 1);
+    assert(c.n[size_t(EventKind::ReloadedEffects)] == 2);
     assert(c.n[size_t(EventKind::PresetPath)] == 1);
     assert(c.n[size_t(EventKind::BeginEffects)] == 1 && c.n[size_t(EventKind::FinishEffects)] == 1);
     assert(c.n[size_t(EventKind::ReshadePresent)] == 1 && c.n[size_t(EventKind::QueuePresent)] == 1);
-    assert(c.Total() == 9);
+    assert(c.Total() == 10);
     assert(FormatEventCounts(c).find("reshade_present=1") != std::string::npos);
 
     const SessionStatus st = s.Status("C:\\x", false);

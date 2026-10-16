@@ -2,6 +2,8 @@
 
 #include "ext/reshade/ReShadeProbe.h"
 
+#include "ext/core/HooksBypass.h"
+
 #include <format>
 
 namespace ext::reshade::probe
@@ -140,6 +142,7 @@ void Session::OnReloadedEffects(uint64_t runtime)
         const bool ok = _backend.Describe(runtime, true, info);
 
         std::vector<std::string> lines;
+        std::string verdict;
         {
             std::lock_guard lock(_mutex);
             Entry& e = FindOrCreateLocked(runtime);
@@ -149,11 +152,24 @@ void Session::OnReloadedEffects(uint64_t runtime)
             if (ok)
                 e.info = info;
             e.info.id = runtime;
+            if (ok)
+            {
+                size_t enabledCount = 0;
+                for (const auto& t : e.info.techniques)
+                    enabledCount += t.enabled ? 1 : 0;
+                if (!_f1Verdict.exchange(true))
+                    verdict = std::format("VERDICT F1: registered; runtime {} api={} hwnd={} back buffer {}x{}; {} techniques, {} enabled; "
+                                          "effects {}; preset \"{}\"", Hex(runtime), ApiName(e.info.api), Hex(e.info.hwnd),
+                                          e.info.backBufferWidth, e.info.backBufferHeight, e.info.techniques.size(), enabledCount,
+                                          e.info.effectsEnabled ? "enabled" : "DISABLED", e.info.presetPath);
+            }
             lines = ok ? FormatRuntime(e.info, "reshade_reloaded_effects")
                        : std::vector<std::string> { std::format("[F1] reshade_reloaded_effects runtime {}: description "
                                                                "failed", Hex(runtime)) };
         }
         WriteLines(lines);
+        if (!verdict.empty())
+            _report.Line(verdict);
     }
     catch (...)
     {
@@ -392,6 +408,9 @@ void Session::ProbeAtBoundary(void* context)
     if (!_state.compare_exchange_strong(expected, ProbeState::Running))
         return; // the per-frame cost when not armed: one load and a failed compare
 
+    // Everything below issues D3D11 work on the immediate context (inspect, staging copies, ReShade's own passes): none of
+    // it may look like game work to the draw hooks (lighting capture hooks CopyResource and every draw).
+    ext::core::BypassScope bypass;
     try
     {
         SkipMethod method;
@@ -448,10 +467,13 @@ void Session::ProbeAtBoundary(void* context)
 
         const DepthReport depth = _backend.QueryDepth(runtime, b);
         WriteLines(depth.lines);
-        _report.Line(std::format("VERDICT F4: {} (inferred from texture-variable bindings; the ReShade API has no direct "
-                                 "depth-detection query)",
-                                 depth.anyDepthBound ? "a depth-format texture is bound to an effect texture variable"
-                                                     : "no depth-format texture binding found (see [F4] lines)"));
+        _report.Line(std::format(
+            "VERDICT F4: {} (inferred from texture-variable bindings; the ReShade API has no direct depth-detection query)",
+            !depth.anyDepthBound ? std::string("no depth-format texture binding found (see [F4] lines)")
+            : depth.sizeMatchesBackBuffer
+                ? "a depth-format texture of the back buffer size is bound: " + depth.summary
+                : "a depth-format texture is bound but its size differs from the back buffer (render-resolution depth? effects "
+                  "would sample misaligned depth): " + depth.summary));
 
         _backend.SnapshotBefore(context, b);
         FrameRecord open0;
@@ -564,9 +586,15 @@ void Session::FinishFrame(uint64_t runtime)
                                  "end-of-frame passes after it begin={} finish={}",
                                  f.probeBegin, f.probeFinish, f.begin, f.finish));
         const bool skipped = f.begin == 0 && f.finish == 0;
+        const bool uniformsOnly = !skipped && f.rtv == 0;
         _report.Line(std::format("VERDICT F3 (method: {}): ReShade's own end-of-frame effect pass {} for the probed frame{}",
-                                 SkipMethodName(p.method), skipped ? "was SKIPPED" : "STILL RAN",
-                                 skipped ? "" : " (effects would be applied twice: try the other skip method)"));
+                                 SkipMethodName(p.method),
+                                 skipped ? "was SKIPPED" : uniformsOnly ? "ran with a NULL render target view" : "STILL RAN",
+                                 skipped ? ""
+                                 : uniformsOnly
+                                     ? " (uniform update only, nothing rendered: this is how render_effects documents its skip; "
+                                       "counts as SKIPPED for the picture)"
+                                     : std::format(" (rtv {}: effects would be applied twice; try the other skip method)", Hex(f.rtv))));
         if (f.probeBegin == 0)
             _report.Line("[F3] note: reshade_begin_effects did not fire for the probe's own call (the header says the events "
                          "are delivered 'in other add-ons'; our own callbacks may not see our call, so the skip verdict "

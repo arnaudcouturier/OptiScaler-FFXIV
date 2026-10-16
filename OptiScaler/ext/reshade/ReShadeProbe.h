@@ -47,8 +47,10 @@ struct BoundaryInfo
 
 struct DepthReport
 {
-    bool anyDepthBound = false;
-    std::vector<std::string> lines; // "[F4] ..." lines
+    bool anyDepthBound = false;         // a depth-family texture is bound to a depth-named effect variable
+    bool sizeMatchesBackBuffer = false;  // ... and its size equals the runtime back buffer
+    std::string summary;                 // first such binding: name, size, format, back buffer size
+    std::vector<std::string> lines;      // "[F4] ..." lines
 };
 
 struct CallOutcome
@@ -215,6 +217,7 @@ class Session
     FrameLedger _ledger;
     std::array<std::atomic<uint64_t>, kEventKinds> _counts {};
     std::atomic<uint64_t> _framesSeen { 0 };
+    std::atomic<bool> _f1Verdict { false };
 
     // probe state machine: _state is the only field read without the mutex (the per-call early-out)
     std::atomic<ProbeState> _state { ProbeState::Idle };

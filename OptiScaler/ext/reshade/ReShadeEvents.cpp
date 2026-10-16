@@ -412,6 +412,17 @@ class LiveBackend final : public probe::IBackend
             device* dev = rt->get_device();
             size_t total = 0, named = 0;
             std::vector<std::string> lines;
+            uint32_t bbWidth = 0, bbHeight = 0;
+            if (rt->get_back_buffer_count() != 0)
+            {
+                const ::reshade::api::resource bb = rt->get_back_buffer(0);
+                if (bb.handle != 0)
+                {
+                    const resource_desc bd = dev->get_resource_desc(bb);
+                    bbWidth = bd.texture.width;
+                    bbHeight = bd.texture.height;
+                }
+            }
             rt->enumerate_texture_variables(
                 nullptr,
                 [&](effect_runtime* r, effect_texture_variable variable)
@@ -446,7 +457,15 @@ class LiveBackend final : public probe::IBackend
                         where = std::format("srv {:#x} -> resource {:#x} {}x{} format {}{}", srv.handle, res.handle, d.texture.width,
                                             d.texture.height, static_cast<uint32_t>(d.texture.format),
                                             depthFormat ? " (depth/single-channel float family)" : "");
-                        report.anyDepthBound = report.anyDepthBound || (res.handle != 0 && depthFormat);
+                        if (res.handle != 0 && depthFormat)
+                        {
+                            const bool sameSize = d.texture.width == bbWidth && d.texture.height == bbHeight;
+                            if (!report.anyDepthBound || (sameSize && !report.sizeMatchesBackBuffer))
+                                report.summary = std::format("{} -> {}x{} format {} (back buffer {}x{})", name, d.texture.width,
+                                                             d.texture.height, static_cast<uint32_t>(d.texture.format), bbWidth, bbHeight);
+                            report.anyDepthBound = true;
+                            report.sizeMatchesBackBuffer = report.sizeMatchesBackBuffer || sameSize;
+                        }
                     }
                     lines.push_back(std::format("[F4]   {} ({}): {}", name, effect, where));
                 });
@@ -648,6 +667,8 @@ void OnQueuePresent(command_queue* queue, swapchain*, const rect*, const rect*, 
 } // namespace
 
 probe::Session* ProbeSession() { return g_session; }
+
+void EnsureReportStarted() { Live(); }
 
 void ProbeAtBoundary(ID3D11DeviceContext* context)
 {
