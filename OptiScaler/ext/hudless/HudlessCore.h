@@ -52,6 +52,18 @@ struct IEngineHost
     virtual void Log(const std::string& line) = 0;
 };
 
+// What the paste producer does in PostInteropCopy: exactly one of Produce / Invalidate per ui_free present.
+//   Produce     a capture is staged. Also on PasteNotReady frames (otherwise Ready() would never become true) and on every
+//               frame whose base was swapped (the UI must come back through the paste).
+//   Invalidate  no usable pair this present (any early fallback), or scene HDR owns the frame: stop pasting, the normal
+//               base carries its own UI. Never chosen for a swapped base.
+enum class PasteAction : uint8_t
+{
+    None, // not ui_free
+    Produce,
+    Invalidate,
+};
+
 // Plain copy of the engine state for the menu and the tests
 struct Status
 {
@@ -260,6 +272,15 @@ class Core
 
     // A blocking wait happened on the game thread (only a recopy-style path can cause one; none exists today).
     void NoteBlockingWait() { ++_window.slotWaits; }
+
+    PasteAction PasteDecision() const
+    {
+        if (!_active || _mode != Mode::UiFree)
+            return PasteAction::None;
+        if (!_staged || _reason == Reason::SceneHdrOwnsFrame)
+            return PasteAction::Invalidate;
+        return PasteAction::Produce;
+    }
 
     bool Staged() const { return _staged; }
     bool Swapped() const { return _swapped; }

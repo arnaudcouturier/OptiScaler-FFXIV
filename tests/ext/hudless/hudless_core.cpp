@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ext::hudless;
@@ -193,6 +194,62 @@ void TestReasons()
     // MaskCoverage is exercised in TestCoverage
 }
 
+// The invariant of the traps list: exactly one of Produce / Invalidate per ui_free present, Produce on every swapped base
+// and on PasteNotReady frames (bootstrap), Invalidate on every other fallback, none outside ui_free.
+void TestPasteDecision()
+{
+    auto decide = [](auto&& setup, Mode mode = Mode::UiFree)
+    {
+        FakeHost host;
+        setup(host);
+        Core core(host);
+        const Run r = Present(core, mode);
+        return std::pair { core.PasteDecision(), r };
+    };
+    auto noop = [](FakeHost&) {};
+
+    {
+        const auto [action, r] = decide(noop);
+        assert(r.swapped && action == PasteAction::Produce); // a swapped base always gets its paste
+    }
+    {
+        const auto [action, r] = decide([](FakeHost& h) { h.pasteReady = false; });
+        assert(!r.swapped && r.reason == Reason::PasteNotReady && action == PasteAction::Produce); // bootstrap
+    }
+    {
+        const auto [action, r] = decide([](FakeHost& h) { h.sceneOwns = true; });
+        assert(!r.swapped && action == PasteAction::Invalidate);
+    }
+    for (auto setup : { +[](FakeHost& h) { h.fgActive = false; }, +[](FakeHost& h) { h.provider = Provider::FsrFg; },
+                        +[](FakeHost& h) { h.sourcePtr = nullptr; }, +[](FakeHost& h) { h.compare = true; },
+                        +[](FakeHost& h) { h.source.result = TakeResult::NotThisFrame; },
+                        +[](FakeHost& h) { h.source.result = TakeResult::Rejected; },
+                        +[](FakeHost& h) { h.check = Reason::SizeMismatch; },
+                        +[](FakeHost& h) { h.stage = Reason::SlotBusy; } })
+    {
+        const auto [action, r] = decide(setup);
+        assert(!r.swapped && !r.staged && action == PasteAction::Invalidate);
+    }
+    // never swapped and invalidated in the same present, over any combination of the toggles
+    for (unsigned bits = 0; bits < 64; ++bits)
+    {
+        FakeHost host;
+        host.fgActive = !(bits & 1);
+        host.compare = bits & 2;
+        host.pasteReady = !(bits & 4);
+        host.sceneOwns = bits & 8;
+        host.stage = (bits & 16) ? Reason::SlotBusy : Reason::None;
+        host.source.result = (bits & 32) ? TakeResult::NotThisFrame : TakeResult::Ok;
+        Core core(host);
+        const Run r = Present(core, Mode::UiFree);
+        assert(!(r.swapped && core.PasteDecision() == PasteAction::Invalidate));
+        assert(core.PasteDecision() != PasteAction::None);
+    }
+    // outside ui_free the producer is never involved
+    assert(decide(noop, Mode::Recomposition).first == PasteAction::None);
+    assert(decide(noop, Mode::Off).first == PasteAction::None);
+}
+
 void TestBoundaryText()
 {
     FakeHost host;
@@ -366,6 +423,7 @@ int main()
 {
     TestOff();
     TestReasons();
+    TestPasteDecision();
     TestBoundaryText();
     TestStateMachineAndLogs();
     TestNoFrameGenerationGoesOff();

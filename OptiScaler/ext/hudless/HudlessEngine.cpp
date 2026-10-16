@@ -685,7 +685,7 @@ void Engine::Post(Dx11wDx12SC& sc)
     if (!_core.Staged() || _stagedSlot < 0)
     {
         // Exactly one of Produce / Invalidate per present: no usable pair, so stop pasting (the normal base carries its UI)
-        if (mode == Mode::UiFree)
+        if (_core.PasteDecision() == PasteAction::Invalidate)
             UiPaste::Invalidate(ReasonText(_core.PresentReason()));
         Finish();
         return;
@@ -740,17 +740,17 @@ void Engine::Post(Dx11wDx12SC& sc)
             _core.Fail(Reason::CaptureRejected);
     }
 
-    if (mode == Mode::UiFree)
+    const PasteAction action = _core.PasteDecision();
+    bool produced = true;
+    if (action == PasteAction::Produce)
+        produced = ProducePaste(sc, slot, finalImage, fg);
+    else if (action == PasteAction::Invalidate)
+        UiPaste::Invalidate(ReasonText(_core.PresentReason()));
+
+    if (!produced)
     {
-        if (_core.PresentReason() == Reason::SceneHdrOwnsFrame)
-        {
-            UiPaste::Invalidate(ReasonText(Reason::SceneHdrOwnsFrame));
-        }
-        else if (!ProducePaste(sc, slot, finalImage, fg))
-        {
-            UiPaste::Invalidate("the paste producer could not run");
-            _core.Fail(Reason::PasteNotReady);
-        }
+        UiPaste::Invalidate("the paste producer could not run");
+        _core.Fail(Reason::PasteNotReady);
     }
 
     Finish();
