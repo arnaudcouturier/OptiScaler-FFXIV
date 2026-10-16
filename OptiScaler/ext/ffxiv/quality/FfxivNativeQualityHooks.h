@@ -34,25 +34,13 @@ inline bool ReadMemory(const void* address, void* output, size_t bytes)
 
 inline uintptr_t Base() { return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); }
 
-// Matches the running process against GameBuild.h the same way Game.cpp's SelectGame does (duplicated rather than
-// shared, same as ext::ffxiv::companion::Install: this module has to work even if Game::Current() has not reached
-// here yet, and it is cheap -- a handful of in-process pointer reads, no syscalls). Computed once: the match
-// cannot change during the process lifetime.
+// Matches the running process against GameBuild.h via the shared ext::ffxiv::MatchCurrentProcess
+// walk (GameBuild.cpp/.h; also used by ext::ffxiv::companion::Native::Install): this module has
+// to work even if Game::Current() has not reached here yet. Computed once: the match cannot
+// change during the process lifetime.
 inline const NativeQualityBuild* MatchedBuildOnce()
 {
-    const auto base = Base();
-    if (base == 0)
-        return nullptr;
-
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000)
-        return nullptr;
-
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-        return nullptr;
-
-    const auto* build = ext::ffxiv::MatchBuild(nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
+    const auto* build = ext::ffxiv::MatchCurrentProcess();
     return build != nullptr ? &build->nativeQuality : nullptr;
 }
 

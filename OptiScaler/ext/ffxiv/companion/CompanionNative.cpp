@@ -149,11 +149,9 @@ void Install()
     GetModuleFileNameW(nullptr, executable, MAX_PATH);
     if (_wcsicmp(std::filesystem::path(executable).filename().c_str(), L"ffxiv_dx11.exe")) return;
     base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    IMAGE_DOS_HEADER dos {};
-    IMAGE_NT_HEADERS64 nt {};
-    if (!Packets::Read(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 ||
-        dos.e_lfanew > 4096 || !Packets::Read(base + dos.e_lfanew, nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
-        ext::ffxiv::MatchBuild(nt.FileHeader.TimeDateStamp, nt.OptionalHeader.SizeOfImage) == nullptr)
+    // Shared with ext::ffxiv::quality::FfxivNativeQualityHooks::MatchedBuildOnce: both used to
+    // re-walk the DOS/NT headers themselves (see GameBuild.h's MatchCurrentProcess comment).
+    if (!ext::ffxiv::MatchCurrentProcess())
     { LOG_WARN("Companion native submissions: unsupported executable; no batch hooks installed"); return; }
     const auto& build = ext::ffxiv::kCurrentBuild.companion;
     // Current disk SHA256 was verified as B38840761E2677128B6BEC1CEAEE3F2870CD84E1D38AB7958216373058383780. In-process guards also reject

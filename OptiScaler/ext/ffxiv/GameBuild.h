@@ -127,4 +127,14 @@ struct GameBuild
 inline constexpr GameBuild kCurrentBuild {};
 
 const GameBuild* MatchBuild(std::uint32_t timeDateStamp, std::uint32_t sizeOfImage);
+
+// Walks the CURRENT process's own module headers (GetModuleHandleW(nullptr)) and checks them
+// against MatchBuild: the "is this the matched FFXIV build" in-process identity gate. Shared by
+// every site that needs this before ext::game::Current() may have run --
+// ext::ffxiv::quality::FfxivNativeQualityHooks::MatchedBuildOnce and
+// ext::ffxiv::companion::Native::Install both used to re-walk the DOS/NT headers themselves and
+// now call this instead. ext::game::SelectGame (ext/game/Game.cpp) has its own equivalent walk;
+// it is pre-existing, already working, and intentionally left alone here -- a future cleanup
+// could have it call this too for consistency.
+const GameBuild* MatchCurrentProcess();
 } // namespace ext::ffxiv
