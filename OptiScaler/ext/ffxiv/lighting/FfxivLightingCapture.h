@@ -111,7 +111,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         }
     if (SUCCEEDED(hr) && out && *out && code && size>=32 && !std::memcmp(code,"DXBC",4))
         ext::hdr::FfxivSceneHdr::Tag(*out,Crc(code,size));
-    if (SUCCEEDED(hr) && out && *out) ext::ffxiv::ui::TagShader(*out,code,size); // ext: S10 A (UI shader registry; one atomic test while disarmed)
+    if (ext::ffxiv::ui::Armed() && SUCCEEDED(hr) && out && *out) ext::ffxiv::ui::TagShader(*out,code,size); // ext: S10 A (UI shader registry; one atomic test while disarmed)
     return hr;
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)

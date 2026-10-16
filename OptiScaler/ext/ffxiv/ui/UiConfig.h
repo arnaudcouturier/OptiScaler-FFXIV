@@ -3,9 +3,10 @@
 // Package B's HudlessConfig owns every other [HudLess] key; this binder owns only Diagnostics, in the same ini section.
 //
 // Armed() = Diagnostics || ext::hudless::Wanted(). It sits on the draw hook, so it is ONE relaxed atomic load of a cached
-// state. The cache is settled at the first Present (and refreshed at every Present afterwards, so a Mode change from the
-// menu takes effect at the next Present). Before the first Present the state is "unsettled" and each call re-evaluates the
-// config, because the very first shader creations happen before any Present and must already be tagged.
+// state. The cache is unsettled (0) until the first Armed() call, which evaluates the live config once and settles it (the
+// hooks that call it are installed after the config is loaded; the very first shader creations precede any Present and must
+// already be stamped, so the first Present cannot be the settling point). A bridge Present refreshes it every time, so a
+// Mode change from the menu takes effect at the next Present.
 
 #include <Config.h>
 
@@ -32,7 +33,7 @@ struct UiConfig
 inline std::atomic<uint8_t> g_armState { 0 };
 
 bool EvaluateArmed();      // Diagnostics || Wanted(), reads the live config (UiConfig.cpp)
-bool ArmedSlow();          // unsettled path of Armed()
+bool ArmedSlow();          // unsettled path of Armed(): evaluates once and settles the cache
 void RefreshArmed();       // settles the cache from the live config; called at every Present
 
 inline bool Armed()

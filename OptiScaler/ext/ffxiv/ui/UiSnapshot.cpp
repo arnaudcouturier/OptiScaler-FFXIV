@@ -153,6 +153,8 @@ void Pump(State_& s, ID3D11DeviceContext* c, uint64_t frame)
         ++s.images;
         diag::SetSnapshotStatus(s.press, s.images, AnyPending(s) ? "reading back" : "idle");
     }
+    if (!AnyPending(s)) // a readback that failed or timed out must not leave the status at "reading back"
+        diag::SetSnapshotStatus(s.press, s.images, "idle");
 }
 
 void WriteInfo(State_& s, Core& core)
@@ -205,6 +207,13 @@ void OnPresentEntry(Core& core)
         {
             r2.filled = r2.pending = false;
             r2.note = "stale: the candidate was superseded, the final R2 is ordinal " + std::to_string(last.r2);
+        }
+
+        if (r1.filled && r2.filled && r1.ordinal == r2.ordinal)
+        {
+            // Same draw, same picture: keep the R1 file only.
+            r2.filled = r2.pending = false;
+            r2.note = "same draw as R1 (see the R1 image)";
         }
 
         if (!r1.filled && !r2.filled)
@@ -314,17 +323,7 @@ void OnCandidate(ID3D11DeviceContext* context, Core& core, const Core::DrawResul
     if ((draw.change & 1) && c.r1 == ordinal)
         took |= DescribeAndCopy(context, core, s.slots[SlotR1], ordinal) != 0;
     if ((draw.change & 2) && c.r2 == ordinal)
-    {
-        // Same draw as R1: one picture is enough (identical content), the slot just records that.
-        if (c.r1 == ordinal && s.slots[SlotR1].filled)
-        {
-            s.slots[SlotR2].filled = false;
-            s.slots[SlotR2].pending = false;
-            s.slots[SlotR2].note = "same draw as R1 (see the R1 image)";
-        }
-        else
-            took |= DescribeAndCopy(context, core, s.slots[SlotR2], ordinal) != 0;
-    }
+        took |= DescribeAndCopy(context, core, s.slots[SlotR2], ordinal) != 0;
     if (took)
         s.captureFrame = frame;
 }
