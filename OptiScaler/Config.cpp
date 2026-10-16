@@ -40,11 +40,7 @@ static inline bool isFloat(const std::string& str, float& value)
     return (iss >> value) && iss.eof();
 }
 
-Config::Config()
-{
-    absoluteFileName = Util::DllPath().parent_path() / fileName;
-    Reload(absoluteFileName);
-}
+Config::Config() { absoluteFileName = Util::DllPath().parent_path() / fileName; }
 
 bool Config::Reload(std::filesystem::path iniPath)
 {
@@ -1879,7 +1875,18 @@ template <typename Enum> std::optional<Enum> Config::readEnum(std::string sectio
 Config* Config::Instance()
 {
     if (!_config)
+    {
+        // ext: fix assign the singleton before Reload() runs, not after: ext::config::Load (called from
+        // Reload) walks fork config Bind() methods, and FgConfig::Bind() reads two upstream Config fields via
+        // Config::Instance() for their [LowLatency] persistence. With the old new-then-assign order, that
+        // nested call saw _config still null and recursed into constructing a second Config, re-entering
+        // ext::config::Table()'s thread-safe static initializer on the same thread while the first one was
+        // still running -- a same-thread wait that can never resolve (100% reproducible hang on every launch,
+        // before the logger or any window ever appears). Assigning first makes the nested Instance() call
+        // just return the in-progress object instead of recursing.
         _config = new Config();
+        _config->Reload(_config->absoluteFileName);
+    }
 
     return _config;
 }
