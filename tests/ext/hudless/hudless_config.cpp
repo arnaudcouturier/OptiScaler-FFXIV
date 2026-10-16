@@ -93,7 +93,9 @@ int main()
     assert(std::string(out.GetValue("HudLess", "SteadyTiming", "")) == "true");
     assert(std::string(out.GetValue("HudLess", "PasteCleanup", "")) == "false");
     assert(out.GetValue("FrameGen", "ExternalUIFreeFrameGen", nullptr) == nullptr);
-    assert(out.GetValue("HudLess", "Diagnostics", nullptr) == nullptr);
+    // [HudLess] Diagnostics is bound by package A's UiConfig (ext/ffxiv/ui) in the same table; HudlessConfig does not own it,
+    // but once both packages are stacked the key is part of the saved section.
+    assert(out.GetValue("HudLess", "Diagnostics", nullptr) != nullptr);
 
     // Menu path: SetMode rewrites the key and republishes everything.
     hudless::SetMode(Mode::Recomposition);
