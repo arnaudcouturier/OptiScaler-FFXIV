@@ -10,6 +10,7 @@ class DxgiFactoryHooks
   public:
     static void HookToFactory(IDXGIFactory* pFactory);
     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
+    static bool SkipFgSwapChainCreation() { return _skipFGSwapChainCreation; } // ext: E5
 
   private:
     using PFN_EnumAdapterByGpuPreference =
