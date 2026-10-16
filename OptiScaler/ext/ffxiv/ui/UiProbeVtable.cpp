@@ -3,6 +3,7 @@
 #include "ext/ffxiv/ui/UiProbe.h"
 
 #include "ext/core/ProcessMemory.h"
+#include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 
 #include <State.h>
 
@@ -109,14 +110,19 @@ std::string VtableText()
         const HRESULT ri = chain->GetBuffer(index, IID_PPV_ARGS(&bi));
         DXGI_SWAP_CHAIN_DESC d {};
         chain->GetDesc(&d);
+        Microsoft::WRL::ComPtr<ID3D11Device> chainDevice, gameDevice;
+        chain->GetDevice(IID_PPV_ARGS(&chainDevice));
+        if (auto* context = ext::ffxiv::lighting::FfxivLightingCapture::context)
+            context->GetDevice(&gameDevice);
         char b[400];
         snprintf(b, sizeof b,
                  "  backbuffer: IDXGISwapChain3=%s currentIndex=%u GetBuffer(0)=%s hr=0x%08lX GetBuffer(index)=%s hr=0x%08lX same=%s "
-                 "buffers=%u swapEffect=%d format=%u %ux%u\n",
+                 "buffers=%u swapEffect=%d format=%u %ux%u device_is_latched_context_device=%s\n",
                  has3 ? "yes" : "no", index, Hex(reinterpret_cast<uintptr_t>(b0.Get())).c_str(), static_cast<unsigned long>(r0),
                  Hex(reinterpret_cast<uintptr_t>(bi.Get())).c_str(), static_cast<unsigned long>(ri),
                  b0.Get() == bi.Get() ? "yes" : "NO", d.BufferCount, static_cast<int>(d.SwapEffect),
-                 static_cast<unsigned>(d.BufferDesc.Format), d.BufferDesc.Width, d.BufferDesc.Height);
+                 static_cast<unsigned>(d.BufferDesc.Format), d.BufferDesc.Width, d.BufferDesc.Height,
+                 chainDevice.Get() && chainDevice.Get() == gameDevice.Get() ? "yes" : "NO");
         out += b;
     }
     return out;

@@ -26,14 +26,21 @@ inline int64_t Qpc()
     return v.QuadPart;
 }
 
-// The swapchain backbuffer the bridge copies from (Dx11wDx12SC::_CopyDx11BackBufferToShared uses GetBuffer(index) with
-// index = GetCurrentBackBufferIndex() when IDXGISwapChain3 exists). Only the pointer value and the description are kept:
-// a retained reference would make ResizeBuffers fail.
-bool Backbuffer(const void** texture, dfmt::RtShape* shape)
+// The buffer of `chain` the bridge copies from (Dx11wDx12SC::_CopyDx11BackBufferToShared uses GetBuffer(index) with
+// index = GetCurrentBackBufferIndex() when IDXGISwapChain3 exists). `device` (may be null) restricts the choice to a chain
+// on the game's device: another component's helper chain (State::currentRealSwapchain can be replaced by a composition
+// swapchain of an overlay) must not become "the backbuffer". Only the pointer value and the description are kept: a
+// retained reference would make ResizeBuffers fail.
+bool BufferOf(IDXGISwapChain* chain, ID3D11Device* device, const void** texture, dfmt::RtShape* shape)
 {
-    IDXGISwapChain* chain = State::Instance().currentRealSwapchain;
     if (!chain)
         return false;
+    if (device)
+    {
+        Microsoft::WRL::ComPtr<ID3D11Device> owner;
+        if (FAILED(chain->GetDevice(IID_PPV_ARGS(&owner))) || owner.Get() != device)
+            return false;
+    }
 
     UINT index = 0;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> chain3;
@@ -52,6 +59,17 @@ bool Backbuffer(const void** texture, dfmt::RtShape* shape)
     return true; // `buffer` is released on return; the pointer stays valid as an identity for the frame
 }
 
+bool Backbuffer(const void** texture, dfmt::RtShape* shape)
+{
+    auto& st = State::Instance();
+    Microsoft::WRL::ComPtr<ID3D11Device> game;
+    if (auto* context = ext::ffxiv::lighting::FfxivLightingCapture::context)
+        context->GetDevice(&game);
+    // Prefer a chain on the game's device; fall back to the bridge's real chain whatever its device (a proxied device
+    // object may not compare equal).
+    return BufferOf(st.currentRealSwapchain, game.Get(), texture, shape) || BufferOf(st.currentSwapchain, game.Get(), texture, shape) ||
+           BufferOf(st.currentRealSwapchain, nullptr, texture, shape);
+}
 Core& C()
 {
     static Core* core = []
