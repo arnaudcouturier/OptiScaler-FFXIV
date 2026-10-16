@@ -17,7 +17,7 @@ With DLSS-G at 2-4x the HUD stays sharp (no smear/ghost) in fast camera motion: 
 | `[HudLess] Mode = off | recomposition | ui_free`, default off | Section 11 |
 | Fail open | Any doubt means today's behaviour (section 5) |
 | HDR via SDR capture + OptiHDR conversion; scene HDR keeps priority on frames it imports | Section 8 |
-| ReShade presets on the final frame (option A, provisional) | Open until D1 measures ReShade's position; outcome table in `S10-PLAN.md` section 2b |
+| ReShade integrated as a built-in add-on (decided 2026-10-16, replaces option A) | Section 16: presets are applied in place at the UI boundary, the HUD stays unfiltered; fail open if ReShade is absent or the integration fails |
 | Dalamud overlays count as UI if the hook order allows | Measured by D1 |
 | Base branch `w5` | Footprint baseline 746 |
 
@@ -271,3 +271,23 @@ Done when (wave A): each branch builds at every commit, its tests pass, upstream
 5. Hook cost per frame in a city scene.
 6. Whether deferred contexts are used.
 7. Whether the RT at the boundary is the backbuffer (else the capture source or the ring assumption changes).
+
+## 16. ReShade integration (built-in add-on; decided 2026-10-16)
+
+**Why:** the user's ReShade 6.8.0 is outermost on the game's D3D11 swapchain (`ReShade.log`: it "redirects" the game's `CreateSwapChain`, one runtime, on that chain). Its effect pass therefore runs in its Present hook, before the bridge copy, on the full frame including the HUD. A UI-free image snapshotted at the first UI draw is taken before that pass, so without help FG would drop the presets and the difference mask would flag every preset-changed pixel.
+
+**Design (REST's behaviour, native, no REST / marker / extra file):**
+1. `ext/reshade/ReShadeAddon`: after OptiScaler loads ReShade (`dllmain.cpp` ~1165-1179, one seam call `ext::reshade::OnReshadeLoaded(module)`), register OptiScaler's own module with `ReShadeRegisterAddon(module, 20)` (header-only registration in ReShade's public API headers, vendored, `BSD-3-Clause OR MIT`) and subscribe to `init_effect_runtime`, `destroy_effect_runtime`, `reshade_begin_effects`, `reshade_finish_effects`, `reshade_present`.
+2. At the boundary (package A's detector) call `effect_runtime::render_effects(cmd_list, rtv, rtv_srgb)` for the runtime of the game chain, in place on the scene render target; then snapshot. The HUD is drawn afterwards and is not filtered.
+3. Suppress ReShade's own end-of-frame effect pass for that frame so the effects are not applied twice.
+4. Engine state: new fallback reasons `ReShadeUnavailable`, `ReShadeEffectsFailed`. Any failure in steps 1-3 means: no presets applied at the boundary, the end-of-frame pass is left alone, the engine falls back to normal full-frame FG (today's behaviour). Never a half-applied frame.
+5. The full integration (package D) is built only after the diagnostic build answers F1-F5 (below). The probe package D0 contains only registration, event logging and the guarded probes.
+
+**Feasibility questions F1-F5** (answered by D1 + D0 in Session 1, written to `reshade-probe.txt`):
+- **F1** registration succeeds in-process; the runtime on the game chain appears (device API, hwnd, technique names with enabled state, preset path).
+- **F2** `render_effects` can be called in place from a draw-time hook on the immediate context without corrupting game or ReShade state (probe armed from the menu, one frame; compare the render target before/after; run twice).
+- **F3** ReShade's end-of-frame pass can be skipped for that frame (event or effects state), checked by counting effect passes per frame.
+- **F4** depth-based techniques see valid depth at the boundary (log ReShade's depth-buffer detection state).
+- **F5** cost: effects run once per real frame; measured with QPC around the call.
+
+**Not in scope:** HDR-specific ReShade handling (effects stay SDR), ReShade versions other than the user's 6.8.0 (API 20; other versions fail the registration check and fall back).
