@@ -203,6 +203,37 @@ int wmain(int argc, wchar_t** argv) try
     const auto decoded = run();
     expect(!near3(decoded[0], frame[0], 0.05f), "Mode 0 must still sRGB-decode the proxy");
     std::puts("PASS: other modes still decode the proxy as sRGB (negative control)");
+
+    // Matched residual (Transfer 1 with a residual path): the proxy is rebuilt at full resolution from the frame. For
+    // linear light that rebuild is saturate(frame / white) - the same surface the encode wrote - so a model that
+    // returns its input still gives the frame back, and an edit still reaches the output.
+    settings.Transfer = 1;
+    settings.SpatialResidual = 1;
+    settings.ReversibleMode = 5;
+    const auto matched = run();
+    for (const UINT i : { 0u, 2u })
+    {
+        const float tol = 0.002f * std::fmax(1.0f, std::fmax(frame[i].r, std::fmax(frame[i].g, frame[i].b)));
+        if (!near3(matched[i], frame[i], tol))
+            std::fprintf(stderr, "matched pixel %u: got %.5f %.5f %.5f, want %.5f %.5f %.5f\n", i, matched[i].r,
+                         matched[i].g, matched[i].b, frame[i].r, frame[i].g, frame[i].b);
+        expect(near3(matched[i], frame[i], tol), "Linear light matched residual changed a frame the model left alone");
+    }
+    ctx->UpdateSubresource(model.Get(), 0, nullptr, darker.data(), sizeof(darker), 0);
+    const auto matchedEdit = run();
+    expect(matchedEdit[0].r < frame[0].r * 0.9f && matchedEdit[0].g < frame[0].g * 0.9f,
+           "Linear light matched residual ignored the model");
+    // proxy + (model - proxy) is the model when the rebuilt proxy is the encoded one, so the matched-residual result
+    // has to equal the classic one (computed above as `edited`). A differently rebuilt proxy would make them differ.
+    for (UINT i = 0; i < kCount; ++i)
+    {
+        const float tol = 0.002f * std::fmax(1.0f, std::fmax(edited[i].r, std::fmax(edited[i].g, edited[i].b)));
+        if (!near3(matchedEdit[i], edited[i], tol))
+            std::fprintf(stderr, "matched edit pixel %u: got %.5f %.5f %.5f, classic %.5f %.5f %.5f\n", i,
+                         matchedEdit[i].r, matchedEdit[i].g, matchedEdit[i].b, edited[i].r, edited[i].g, edited[i].b);
+        expect(near3(matchedEdit[i], edited[i], tol), "Linear light matched residual disagrees with the classic transfer");
+    }
+    std::puts("PASS: linear light matched residual rebuilds the linear proxy (identity, edit equals the classic transfer)");
     return 0;
 }
 catch (const std::exception& e)
