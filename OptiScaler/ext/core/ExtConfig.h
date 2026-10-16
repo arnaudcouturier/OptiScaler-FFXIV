@@ -34,6 +34,7 @@
 #include "ext/hdr/HdrConfig.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/nr/NrConfig.h"
+#include "ext/reshade/ReShadeConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
 
 #include <cstdint>
@@ -170,6 +171,7 @@ struct ExtConfig
     HdrConfig hdr; // ext/hdr
     HudlessConfig hudless; // ext/hudless
     UpscalerConfig upscaler; // ext/upscaler
+    ReShadeConfig reshade; // ext/reshade
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)

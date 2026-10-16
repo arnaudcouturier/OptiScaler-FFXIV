@@ -16,6 +16,7 @@
 #include "ext/hudless/HudlessSeams.h"
 #include "ext/nr/NrSeams.h"
 #include "ext/present/PresentSeams.h"
+#include "ext/reshade/ReShadeSeams.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
 #include <cstddef>

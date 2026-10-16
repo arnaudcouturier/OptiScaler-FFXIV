@@ -168,6 +168,8 @@ void UpscalerConfig::Bind(config::Binder& b)
     b.Add("Hotfix", "RenderSizeFromWidthHeight", renderSizeFromWidthHeight);
 }
 
+void ReShadeConfig::Bind(config::Binder& b) { b.Add("HudLess", "ReShadeProbe", probe); }
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -177,6 +179,7 @@ void ExtConfig::Bind(config::Binder& b)
     hdr.Bind(b);
     hudless.Bind(b);
     upscaler.Bind(b);
+    reshade.Bind(b);
 }
 
 void ExtConfig::PostLoad()

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ReShade built-in add-on (S10 package D0). No shaders here: the file name ends in .shaders.props only because
+  ext.props imports ext\*\*.shaders.props automatically, and this is how a feature ships a licence text with the build
+  (same pattern as ext\hdr\hdr.shaders.props). The vendored ReShade headers are compiled into OptiScaler, so their
+  licence notice ships with every build.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtPackageFile Include="$(MSBuildThisFileDirectory)ReShade_ATTRIBUTION.txt"><Dest>Licenses\ReShade_ATTRIBUTION.txt</Dest></ExtPackageFile>
+  </ItemGroup>
+</Project>

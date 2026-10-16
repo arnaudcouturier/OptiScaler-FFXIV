@@ -264,6 +264,14 @@ All five attachment points are declared in `ext/hudless/HudlessSeams.h` (include
 | `ext::fg::AdjustDlssgOptions` | hook | `DLSSG_Common.cpp` `SetOptions` | D1, D2, C11 | at creation | P7: see group `fg`. |
 | Source P0 | - | `ext/ffxiv/ui/FfxivUiBoundary` (package A), implements `IHudlessSource` | G | - | no upstream hook |
 
+## reshade
+
+OptiScaler registers itself with the user's ReShade as a built-in add-on (docs/HUDLESS.md section 16; package D0 of S10). ReShade's public API headers are vendored under `ext/reshade/third_party/reshade/` (tag v6.8.0, `BSD-3-Clause OR MIT`, unmodified); the licence notice ships as `Licenses/ReShade_ATTRIBUTION.txt`.
+
+| Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
+|---|---|---|---|---|---|
+| `ext::reshade::OnReshadeLoaded(HMODULE reshadeModule)` | hook | `dllmain.cpp` `CheckWorkingMode`, one line right after the `LoadReShade` block (`// ext: S10` marker) | S10 D0 | init, once, inside DllMain (loader lock) | Registers OptiScaler's own module as a ReShade add-on (API 20) and logs ONE line (`ReShade built-in add-on: registered (API 20)` or the reason it stays inert). `reshadeModule` may be null (LoadReShade off, or ReShade loaded by something else: the process is searched for a module exporting `ReShadeRegisterAddon`). Idempotent, never throws, no file I/O. Subscribes to runtime events only when `[HudLess] ReShadeProbe` is true. The declaration is `ext/reshade/ReShadeSeams.h` (included by `ext/Seams.h`). |
+
 ## game
 
 `ext::game::Current()` returns a struct of interface pointers selected once at init (null for every game except a matched FFXIV build). Seam bodies test a pointer, never a `gameExe` string. `ext/ffxiv/GameBuild.h` is the only file with FFXIV addresses; the offsets hard-coded inside `ProcessFfxivQualityRequest` move there too. The current descriptor is keyed by `TimeDateStamp=0x6ac3dc96` and `SizeOfImage=0x380a000`; its native-quality and Companion RVAs, structure offsets, and byte guards are centralized in that descriptor.
@@ -329,10 +337,11 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | gpu | 2 | 0 |
 | hdr | 11 (+2 contingent) | 1 inline-guarded, 3 RAII |
 | hudless | 4 (`BeforeOverlay` is counted under `present`) | 0 |
+| reshade | 1 | 0 |
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
-| **Total** | **117** | |
+| **Total** | **118** | |
 
 # (a) `[UP]` fix list
 

@@ -1177,6 +1177,7 @@ static void CheckWorkingMode()
 
         LOG_INFO("Loading {}, result: {:X}", rsFile.filename().string(), (size_t) reshadeModule);
     }
+    ext::reshade::OnReshadeLoaded(reshadeModule); // ext: S10 register as a ReShade add-on (once, any outcome)
 
     // Version check
     if (Config::Instance()->CheckForUpdate.value_or_default())
