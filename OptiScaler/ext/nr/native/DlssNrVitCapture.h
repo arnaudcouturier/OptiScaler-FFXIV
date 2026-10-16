@@ -542,9 +542,11 @@ class Recorder
     uint64_t slotHandle_ = 0;
 };
 
+// Deliberately never destroyed, like the native runtime state (DlssNrNative.cpp S()): NVIDIA's runtime may still destroy CUDA
+// functions during process teardown, and DestroyFunction reaches this object on every destroy, whatever the setting.
 inline Recorder& Instance()
 {
-    static Recorder recorder;
-    return recorder;
+    static Recorder* recorder = new Recorder;
+    return *recorder;
 }
 } // namespace DlssNrVitCapture

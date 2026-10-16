@@ -130,7 +130,7 @@ ModuleIdentity IdentifyModule(const void* data, unsigned bytes)
 // Everything here is called from the NvAPI module/function creation hooks or from EndEvaluate, under the runtime mutex and
 // never while a driver call is pending. Nothing may throw into NVIDIA's DLL: every failure ends the capture, not the game.
 struct CaptureFiles { fs::path dir;std::string runId;bool ready=false,failed=false; };
-CaptureFiles& Files(){static CaptureFiles f;return f;}
+CaptureFiles& Files(){static CaptureFiles*f=new CaptureFiles;return *f;} // never destroyed, like S()
 fs::path CaptureRoot()
 {
     wchar_t path[32768]{};HMODULE module=nullptr;
