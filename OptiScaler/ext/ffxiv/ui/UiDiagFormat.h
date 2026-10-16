@@ -21,7 +21,7 @@
 #include <string_view>
 #include <vector>
 
-namespace ext::ffxiv::ui::fmt
+namespace ext::ffxiv::ui::dfmt
 {
 inline constexpr int kFormatVersion = 1;
 inline constexpr size_t kMaxRtSet = 8;       // distinct render-target shapes kept per shader
@@ -588,4 +588,4 @@ struct RawHeader
     uint32_t width = 0, height = 0, format = 0, rowPitch = 0, frame = 0, reserved = 0;
 };
 static_assert(sizeof(RawHeader) == 32);
-} // namespace ext::ffxiv::ui::fmt
+} // namespace ext::ffxiv::ui::dfmt

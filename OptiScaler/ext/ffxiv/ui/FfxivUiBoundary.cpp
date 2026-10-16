@@ -6,6 +6,7 @@
 #include "ext/core/HooksBypass.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
+#include "ext/ffxiv/ui/UiDiag.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 #include "ext/hudless/HudlessSource.h"
 
@@ -27,7 +28,7 @@ inline int64_t Qpc()
 // The swapchain backbuffer the bridge copies from (Dx11wDx12SC::_CopyDx11BackBufferToShared uses GetBuffer(index) with
 // index = GetCurrentBackBufferIndex() when IDXGISwapChain3 exists). Only the pointer value and the description are kept:
 // a retained reference would make ResizeBuffers fail.
-bool Backbuffer(const void** texture, fmt::RtShape* shape)
+bool Backbuffer(const void** texture, dfmt::RtShape* shape)
 {
     IDXGISwapChain* chain = State::Instance().currentRealSwapchain;
     if (!chain)
@@ -93,7 +94,8 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
         try
         {
             FrameOutcome outcome = C().CompleteFrame();
-            (void) outcome;
+            if (DiagnosticsOn())
+                diag::OnFrameComplete(C(), std::move(outcome), Others().Get());
         }
         catch (...)
         {
@@ -153,6 +155,8 @@ void OnPresentBegin()
 
         Core& core = C();
         core.BeginRenderThread(GetCurrentThreadId());
+        if (DiagnosticsOn())
+            diag::OnPresentEntry(core);
         core.FreezeFrame();
     }
     catch (...)

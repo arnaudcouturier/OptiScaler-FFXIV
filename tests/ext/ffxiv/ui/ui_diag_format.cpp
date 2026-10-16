@@ -5,7 +5,7 @@
 #include <ctime>
 
 using namespace ext::ffxiv::ui;
-using namespace ext::ffxiv::ui::fmt;
+using namespace ext::ffxiv::ui::dfmt;
 
 namespace
 {

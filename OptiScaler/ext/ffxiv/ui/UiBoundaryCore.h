@@ -37,18 +37,18 @@ struct ShaderRec
     uint32_t instances = 0;
     uint32_t index = 0; // N of "pre#N"
     uint64_t draws = 0, firstFrame = 0;
-    fmt::RtShape rt[fmt::kMaxRtSet] {};
+    dfmt::RtShape rt[dfmt::kMaxRtSet] {};
     uint8_t rtCount = 0;
     uint32_t rtOverflow = 0;
     uint64_t rtSamples = 0, bbSamples = 0;
 
-    std::string Id() const { return hasCrc ? fmt::Hex32(crc) : "pre#" + std::to_string(index); }
+    std::string Id() const { return hasCrc ? dfmt::Hex32(crc) : "pre#" + std::to_string(index); }
 };
 
 struct RtInfo
 {
-    fmt::RtKind kind = fmt::RtKind::None;
-    fmt::RtShape shape {};
+    dfmt::RtKind kind = dfmt::RtKind::None;
+    dfmt::RtShape shape {};
     uint32_t samples = 1, arraySize = 1;
 };
 
@@ -62,8 +62,8 @@ struct ContextRec
 struct RtEvent // one distinct (rule, render target kind, shape) seen at a candidate boundary
 {
     uint8_t rule = 0; // 1 = R1, 2 = R2, 3 = R3
-    fmt::RtKind kind = fmt::RtKind::None;
-    fmt::RtShape shape {};
+    dfmt::RtKind kind = dfmt::RtKind::None;
+    dfmt::RtShape shape {};
     uint64_t firstFrame = 0, count = 0;
 };
 
@@ -80,13 +80,13 @@ struct Counters
 
 struct FrameOutcome
 {
-    fmt::FrameRecord record;
+    dfmt::FrameRecord record;
     double hookUs = 0;     // microseconds spent inside the draw hook this frame
     bool listWorthy = false; // anomaly flag for the logger (reason text in record.reason is set by the caller)
     const char* anomaly = ""; // "", or a short reason without spaces
 };
 
-using BackbufferFn = bool (*)(const void** texture, fmt::RtShape* shape);
+using BackbufferFn = bool (*)(const void** texture, dfmt::RtShape* shape);
 
 class Core
 {
@@ -192,7 +192,7 @@ class Core
         const uint32_t ordinal = _tracker.Summary().draws + 1;
         res.ordinal = ordinal;
         res.stage = stage;
-        res.moved = _tracker.OnDraw({ stage, rt.kind == fmt::RtKind::Backbuffer });
+        res.moved = _tracker.OnDraw({ stage, rt.kind == dfmt::RtKind::Backbuffer });
         List(ordinal, stage, looked ? rt : RtInfo {});
         return res;
     }
@@ -255,21 +255,21 @@ class Core
     const BoundaryTracker& Tracker() const { return _tracker; }
     const Candidates& CurrentCandidates() const { return _tracker.Current(); }
     const Counters& Stats() const { return _cnt; }
-    const fmt::Rolling& DrawsPerFrame() const { return _drawsPerFrame; }
-    const fmt::Rolling& HookUsPerFrame() const { return _hookUsPerFrame; }
-    const fmt::Rolling& PresentDrawsPerFrame() const { return _presentPerFrame; }
+    const dfmt::Rolling& DrawsPerFrame() const { return _drawsPerFrame; }
+    const dfmt::Rolling& HookUsPerFrame() const { return _hookUsPerFrame; }
+    const dfmt::Rolling& PresentDrawsPerFrame() const { return _presentPerFrame; }
     const std::vector<RtEvent>& RtEvents() const { return _rtEvents; }
     uint64_t BackbufferWidth() const { return _bbShape.width; }
 
     // Snapshot of every shader record for shaders.csv (render thread: counters are single-writer).
-    std::vector<fmt::ShaderRow> ShaderRows()
+    std::vector<dfmt::ShaderRow> ShaderRows()
     {
         std::lock_guard lock(_mutex);
-        std::vector<fmt::ShaderRow> rows;
+        std::vector<dfmt::ShaderRow> rows;
         rows.reserve(_all.size());
         for (const ShaderRec* s : _all)
         {
-            fmt::ShaderRow r;
+            dfmt::ShaderRow r;
             r.id = s->Id();
             r.hasCrc = s->hasCrc;
             r.crc = s->crc;
@@ -313,14 +313,14 @@ class Core
                 info.samples = td.SampleDesc.Count;
                 info.arraySize = td.ArraySize;
                 if (_bbPtr && res == _bbPtr)
-                    info.kind = fmt::RtKind::Backbuffer;
+                    info.kind = dfmt::RtKind::Backbuffer;
                 else if (_bbPtr && info.shape == _bbShape)
-                    info.kind = fmt::RtKind::SameAsBackbuffer;
+                    info.kind = dfmt::RtKind::SameAsBackbuffer;
                 else
-                    info.kind = fmt::RtKind::Other;
+                    info.kind = dfmt::RtKind::Other;
             }
             else
-                info.kind = fmt::RtKind::Other;
+                info.kind = dfmt::RtKind::Other;
             res->Release();
         }
         rtv->Release();
@@ -346,7 +346,7 @@ class Core
         if (_bbFn)
         {
             const void* t = nullptr;
-            fmt::RtShape s {};
+            dfmt::RtShape s {};
             if (_bbFn(&t, &s))
             {
                 _bbPtr = t;
@@ -417,14 +417,14 @@ class Core
     void NoteShaderRt(ShaderRec& rec, const RtInfo& rt)
     {
         ++rec.rtSamples;
-        if (rt.kind == fmt::RtKind::Backbuffer)
+        if (rt.kind == dfmt::RtKind::Backbuffer)
             ++rec.bbSamples;
-        if (rt.kind == fmt::RtKind::None)
+        if (rt.kind == dfmt::RtKind::None)
             return;
         for (uint8_t i = 0; i < rec.rtCount; ++i)
             if (rec.rt[i] == rt.shape)
                 return;
-        if (rec.rtCount < fmt::kMaxRtSet)
+        if (rec.rtCount < dfmt::kMaxRtSet)
             rec.rt[rec.rtCount++] = rt.shape;
         else
             ++rec.rtOverflow;
@@ -433,14 +433,14 @@ class Core
     void OnPresentDraw(ID3D11DeviceContext* c)
     {
         ++_presentCount;
-        if (_presentLines.size() >= fmt::kMaxPresentDraws)
+        if (_presentLines.size() >= dfmt::kMaxPresentDraws)
         {
             ++_presentOmitted;
             return;
         }
         EnsureBackbuffer();
         ShaderRec* rec = ShaderOf(c);
-        fmt::PresentDrawLine p;
+        dfmt::PresentDrawLine p;
         p.seq = _presentCount;
         p.id = rec ? rec->Id() : "-";
         p.stage = rec ? rec->stage : kStageNone;
@@ -485,7 +485,7 @@ class Core
     }
 
     // Per-frame statistics and the anomaly flag.
-    void Account(const fmt::FrameRecord& r, FrameOutcome& o)
+    void Account(const dfmt::FrameRecord& r, FrameOutcome& o)
     {
         const auto& s = r.summary;
         const auto& c = r.candidates;
@@ -548,7 +548,7 @@ class Core
         o.listWorthy = o.anomaly[0] != '\0';
     }
 
-    void NoteRtEvent(uint8_t rule, fmt::RtKind kind, const fmt::RtShape& shape, uint64_t frame)
+    void NoteRtEvent(uint8_t rule, dfmt::RtKind kind, const dfmt::RtShape& shape, uint64_t frame)
     {
         for (auto& e : _rtEvents)
             if (e.rule == rule && e.kind == kind && e.shape == shape)
@@ -579,17 +579,17 @@ class Core
     uint64_t _frame = 1;
     bool _inPresent = false, _frozen = false, _bbValid = false;
     const void* _bbPtr = nullptr;
-    fmt::RtShape _bbShape {};
+    dfmt::RtShape _bbShape {};
     BoundaryTracker _tracker;
-    std::vector<fmt::DrawLine> _lines;
-    std::vector<fmt::PresentDrawLine> _presentLines;
+    std::vector<dfmt::DrawLine> _lines;
+    std::vector<dfmt::PresentDrawLine> _presentLines;
     uint32_t _sceneListed = 0, _uiListed = 0, _afterAnchorListed = 0, _unknownListed = 0, _extraListed = 0;
     uint32_t _omitted = 0, _presentOmitted = 0, _presentCount = 0;
     int64_t _hookTicks = 0;
 
     // cumulative
     Counters _cnt;
-    fmt::Rolling _drawsPerFrame, _hookUsPerFrame, _presentPerFrame;
+    dfmt::Rolling _drawsPerFrame, _hookUsPerFrame, _presentPerFrame;
     std::vector<RtEvent> _rtEvents;
 };
 
