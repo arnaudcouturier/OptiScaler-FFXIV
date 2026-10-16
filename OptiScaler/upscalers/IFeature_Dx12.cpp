@@ -89,13 +89,20 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     if (!OutputScaler->IsInit())
         useOutputScaling = false;
 
-    ID3D12Resource* paramOutput = nullptr;
-    ID3D12Resource* paramMotion = nullptr;
-    ID3D12Resource* paramDepth = nullptr;
-
-    InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput);
-    InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramMotion);
-    InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth);
+    // ext: fix native NGX parameter blocks keep typed and void* resources in separate slots (see
+    // ext/nr/NgxResourceBinding.h); the D3D11-on-D3D12 bridge writes Output/MotionVectors/Depth through the void*
+    // slot (IFeature_Dx11wDx12.cpp casts each to (void*) before Set), so a plain typed Get here always missed them,
+    // leaving paramOutput null -> currentTarget null -> PreSrScope's constructor below explicitly set NGX's Output
+    // parameter to null right before the real evaluate, which NGX then rejected with "Required Output parameter
+    // not provided" on every single frame. NgxResourceBinding::Binding tries the typed slot first and falls back
+    // to the void* slot, matching how the oracle build reads these three (IFeature_Dx12.cpp: outputBinding /
+    // motionBinding / depthBinding, .original).
+    NgxResourceBinding::Binding<NVSDK_NGX_Parameter> outputBinding(InParameters, NVSDK_NGX_Parameter_Output);
+    NgxResourceBinding::Binding<NVSDK_NGX_Parameter> motionBinding(InParameters, NVSDK_NGX_Parameter_MotionVectors);
+    NgxResourceBinding::Binding<NVSDK_NGX_Parameter> depthBinding(InParameters, NVSDK_NGX_Parameter_Depth);
+    ID3D12Resource* paramOutput = outputBinding.original;
+    ID3D12Resource* paramMotion = motionBinding.original;
+    ID3D12Resource* paramDepth = depthBinding.original;
 
     // Order is important as that's the order of shader dispatch
     std::vector<ShaderPass> pipeline;
