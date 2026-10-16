@@ -27,13 +27,14 @@ int main()
     assert(defaults.screenshotKey.value_or_default() == UnboundKey);
     assert(defaults.screenshotFormat.value_or_default() == 0);
     assert(!defaults.screenshotIccOnly.value_or_default());
+    assert(!defaults.screenshotMenu.value_or_default());
 
     config::Binder binder;
     defaults.Bind(binder);
     const std::vector<std::string> expectedKeys {
         "FfxivHDR", "Mode", "ReShadeHighlights", "NRSceneInput", "DLSSSceneInput", "PeakNits", "PaperWhiteNits",
         "HighlightExpansion", "Contrast", "Saturation", "Vibrance", "ScreenshotKey", "ScreenshotFormat",
-        "ScreenshotIccOnly"
+        "ScreenshotIccOnly", "ScreenshotMenu"
     };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
@@ -60,6 +61,7 @@ int main()
     ini.SetValue("HDR", "ScreenshotKey", "0x79");
     ini.SetValue("HDR", "ScreenshotFormat", "1");
     ini.SetValue("HDR", "ScreenshotIccOnly", "true");
+    ini.SetValue("HDR", "ScreenshotMenu", "true");
     ini.SetValue("HDR", "MenuNits", "203");
     ini.SetValue("HDR", "ScreenshotHotkey", "0x7b");
 
@@ -79,10 +81,12 @@ int main()
     assert(hdr.screenshotKey.value_or_default() == 0x79);
     assert(hdr.screenshotFormat.value_or_default() == 1);
     assert(hdr.screenshotIccOnly.value_or_default());
+    assert(hdr.screenshotMenu.value_or_default());
     assert(hdr::sceneHookInstallCalls == 1);
 
     config::Save(ini);
     assert(std::string(ini.GetValue("HDR", "ScreenshotKey", "")) == "0x79");
+    assert(std::string(ini.GetValue("HDR", "ScreenshotMenu", "")) == "true");
     assert(ini.GetValue("HDR", "FfxivHDR", nullptr) != nullptr);
     assert(ini.GetValue("HDR", "MenuNits", nullptr) == nullptr);
     assert(ini.GetValue("HDR", "ScreenshotHotkey", nullptr) == nullptr);
@@ -90,6 +94,6 @@ int main()
     hdr.PostLoad();
     assert(hdr::sceneHookInstallCalls == 1);
 
-    std::puts("PASS: HDR defaults and 14 INI bindings, round-trip values, hex screenshot key, retired keys, one-time scene hook");
+    std::puts("PASS: HDR defaults and 15 INI bindings (incl. ScreenshotMenu), round-trip values, hex screenshot key, retired keys, one-time scene hook");
     return 0;
 }

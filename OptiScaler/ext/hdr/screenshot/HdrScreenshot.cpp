@@ -4,10 +4,13 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/hdr/screenshot/HdrScreenshot.h"
 #include "ext/hdr/screenshot/Image.h"
+#include "ext/hdr/screenshot/MenuCapture.h"
 #include "ext/hdr/screenshot/Readback.h"
 
+#include <Config.h>
 #include <Logger.h>
 #include <Util.h>
+#include <menu/menu_common.h>
 
 #include <atomic>
 #include <mutex>
@@ -169,6 +172,38 @@ void Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCommandList* comma
             S().busy = false;
         Message("Screenshot allocation failed (see OptiScaler.log)");
         LOG_ERROR("OptiHDR screenshot allocation or preparation failed");
+    }
+}
+
+bool MenuCaptureWanted()
+{
+    const auto& config = ext::Cfg().hdr;
+    return WantsMenuCapture({ Active(), config.screenshotFormat.value_or_default(),
+                              config.screenshotMenu.value_or_default(),
+                              Config::Instance()->OverlayMenu.value_or_default(), MenuCommon::IsVisible() });
+}
+
+void PrepareMenu(ID3D12GraphicsCommandList* commands, ID3D12Resource* output) noexcept
+{
+    try
+    {
+        if (!commands || !output || !Pending() || !MenuCaptureWanted())
+            return;
+
+        ComPtr<ID3D12Device> device;
+        if (FAILED(commands->GetDevice(IID_PPV_ARGS(&device))))
+        {
+            Message("Screenshot source unavailable");
+            return;
+        }
+
+        // Same job as the bridge's capture, HDR only: the source is the finished PQ image in its render target state.
+        Prepare(MenuCommon::Handle(), device.Get(), commands, output, D3D12_RESOURCE_STATE_RENDER_TARGET, output,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    catch (...)
+    {
+        LOG_ERROR("OptiHDR menu screenshot preparation failed");
     }
 }
 

@@ -133,6 +133,9 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
     bridge.screenshotSdrSource = nullptr;
     if (!sdrSource || !ext::hdr::screenshot::Pending())
         return;
+    // F4: with the menu open an HDR PNG is taken after the overlay drew the menu (OverlayScope), so this request is left alone.
+    if (ext::hdr::screenshot::MenuCaptureWanted())
+        return;
 
     auto* device = Access::Bridge::Dx12Device(sc);
     auto* list = Access::Bridge::CopyList(sc, slot);

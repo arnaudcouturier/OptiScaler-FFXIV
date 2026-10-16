@@ -22,6 +22,7 @@ void HdrConfig::Bind(config::Binder& b)
     b.Add("HDR", "ScreenshotKey", screenshotKey, true); // hex when positive (a key code), like the reference build
     b.Add("HDR", "ScreenshotFormat", screenshotFormat);
     b.Add("HDR", "ScreenshotIccOnly", screenshotIccOnly);
+    b.Add("HDR", "ScreenshotMenu", screenshotMenu);
 }
 
 void HdrConfig::PostLoad()

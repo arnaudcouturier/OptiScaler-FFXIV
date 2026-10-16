@@ -139,3 +139,53 @@ This was not searched exhaustively.
 3. Shadows: look for banding (the proxy is FP16 on a linear HDR surface, so none is expected).
 4. SDR / tone-mapped input: the setting must do nothing (passthrough).
 5. Save a preset with the mode selected, reload it; set `ReversibleMode=5` in the ini and confirm the menu shows it.
+
+---
+
+## F4 - HDR PNG option "Include OptiScaler menu" (`[HDR] ScreenshotMenu`)
+
+**Result: reconstructed, high confidence on the behaviour; medium on the identity of two global flags (inferred from
+how they are used).** With HDR PNG selected and the menu open, the PNG is taken from the presented image *after* the
+menu was drawn onto it (so the menu, in its HDR colours, is in the file). With the menu hidden, or with SDR PNG, the
+existing clean capture is used unchanged.
+
+### Evidence (all in `builds\winmm.dll`)
+
+| Observation | Where |
+|---|---|
+| Label `Include OptiScaler menu`, reset id `FfxivHDRScreenshotMenu`, tooltip `HDR PNG: capture the presented image after drawing the visible OptiScaler menu, including its HDR colours. Useful for settings comparisons.` / `With the menu hidden, screenshots use the normal clean capture. Requires the overlay menu. SDR PNG captures remain unchanged. The separate Companion window is not captured.` | strings 0x1818df388, 0x1818df3a0, 0x1818df3c0; single code reference in the HDR menu card function `0x180269f10` |
+| The checkbox sits right after the "Screenshot format" combo, before "HDR PNG: ICC only (sharing)", inside the same `BeginDisabled(format != HDR PNG)` | decompiled HDR menu card |
+| Ini key `ScreenshotMenu` in section `[HDR]` (the section operand is the string "HDR" at 0x18186DEB4, bytes read directly, the same operand `ScreenshotIccOnly` uses), a `CustomOptional<bool>` with value / has-value / default bytes at config offsets 0x31ae / 0x31af / 0x31b0 (between `ScreenshotIccOnly` 0x31a8 and `ScreenshotFormat` 0x31b4) | string 0x1818d1428, load reference 0x1801fea67, save reference 0x180204335 |
+| Default `false`: the object is built by the `CustomOptional<bool>` constructor at 0x18020d940, which stores `DL` in the default byte, called with `edx = 0` | constructor sequence at 0x1801f2df0 |
+| One predicate decides everything (`0x18034ce80`): "HDR output is active" (global byte 0x1819b93fb) **and** screenshot format == 1 (HDR PNG) **and** `ScreenshotMenu` **and** `[Menu] OverlayMenu` (config offset 0x1f28, the key string 0x1818d07a0 is what the config load stores there) **and** "menu is visible" (global byte 0x1819cc620, cleared together with the other menu state when the overlay is not initialised) | tiny function, callers 0x18015a660 (bridge present) and 0x18028dbe0 (the DX12 overlay render) |
+| **Bridge side:** when the predicate holds, the bridge does *not* prepare its own screenshot, so the pending request is left for the overlay | the bridge function guards its screenshot preparation with `!predicate` |
+| **Overlay side** (function with the log tag `RenderImGui_DX12`, 0x18028dbe0): after `RenderDrawData` inside the HDR menu-layer scope, if the HDR overlay path is on and the predicate holds, it calls the screenshot `Prepare` (0x18034cf30, the same function as the bridge's) with the menu window handle, the device, the overlay's command list, the current back buffer, no SDR source, and resource state `4` (= RENDER_TARGET); then it transitions the back buffer to present, closes and executes the list, and submits the job on that queue (0x18034db30) | |
+| `Prepare` is shared: same request window (1000 ms), same screenshot-key range check (1..255), same foreground-window test, same busy flag, same `OptiHDR-<date>-<ms>-<tick>-HDR.png` file name and "HDR screenshot queued" status. No new strings: the screenshot-related strings of the build contain no menu-specific status or log text | string search over `creenshot` |
+
+### What the repo does (all inside `ext/`, zero upstream lines)
+
+* `ext/hdr/HdrConfig.{h,cpp}`: `screenshotMenu` bound to `[HDR] ScreenshotMenu`, default false. `ext/ini/HDR.ini` documents it.
+* `ext/hdr/menu/HdrMenu.cpp`: the checkbox, reset button and Nickle's tooltip, in the same disabled block as the ICC option.
+* `ext/hdr/screenshot/MenuCapture.h`: the pure five-condition decision; `HdrScreenshot.{h,cpp}`: `MenuCaptureWanted()` gathers the five inputs, `PrepareMenu()` runs the existing `Prepare` for the finished PQ output in RENDER_TARGET state.
+* `ext/hdr/menu/Overlay.cpp`: `OverlayScope`'s destructor calls `PrepareMenu` right after the menu layer was composited into the PQ output (the output is still a render target there; upstream transitions it to present afterwards, exactly the state Nickle used). The existing GPU-owner after-execute callback submits the job when the overlay's command list executes (Nickle submitted explicitly right after its own execute; same effect).
+* `ext/hdr/BridgeHdr.cpp`: the bridge leaves the request alone while `MenuCaptureWanted()`.
+* SEAMS catalog: the `PrepareScreenshot` and `OverlayScope` rows note the new behaviour; no new seam.
+
+### Tests
+
+`tests/ext/hdr/hdr_screenshot_menu` (cpu): the five-condition decision, every single dropped condition, format values other than 1, and the exhaustive 32-combination check. `tests/ext/hdr/hdr_config` (existing test) is extended with the new key (default, table entry, ini load and save); no assertion was loosened.
+
+### Unknown / not established
+
+* The exact meaning of the two global bytes is inferred from use: 0x1819b93fb is read by dozens of HDR-aware functions and is the only term that is false when OptiHDR is off; 0x1819cc620 is reset next to the menu's other visibility state in the overlay function.
+* What happens when a menu capture was requested but the overlay does not draw that frame (empty draw data, layer preparation failure): in the binary the request is simply not consumed and expires after one second with no message. The repo behaves the same.
+* Nickle's `Prepare` was compared by reading, not diffed against the baseline's: no difference was seen.
+
+### What to verify in-game
+
+1. Settings, FFXIV HDR card: Screenshot format = **HDR PNG**, tick **Include OptiScaler menu**, bind a screenshot key, save. Open the OptiScaler menu and press the key: one PNG appears in `game\OptiScaler\Screenshots` and the menu is in it, with its HDR colours (not dimmed or tone-mapped, no black rectangle).
+2. Close the menu and press the key again: a clean capture, as before.
+3. Screenshot format = SDR PNG: the option is greyed out and the SDR PNG has no menu.
+4. Frame generation on (DLSS-G / XeFG): still exactly one file per key press, no hitch, no device-removed in `OptiScaler.log`.
+5. Does the screenshot key fire while the menu is open? (The key is polled in the menu's shortcut pass; if it does not fire with the menu up, the menu capture cannot be triggered by the key. That limitation would be shared with Nickle's build.)
+6. `OverlayMenu=false`: the menu cannot be open, so the capture is the clean one.

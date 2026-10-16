@@ -2,6 +2,7 @@
 
 #include "ext/Seams.h"
 #include "ext/hdr/menu/HdrMenuLayer.h"
+#include "ext/hdr/screenshot/HdrScreenshot.h"
 
 #include <State.h>
 
@@ -80,7 +81,12 @@ OverlayScope::OverlayScope(ID3D12GraphicsCommandList* commands, ID3D12Resource* 
 OverlayScope::~OverlayScope()
 {
     if (_active)
+    {
         Overlay().layer->End(_commands, _outputRtv, Overlay().bounds);
+        // F4: the menu now sits in the PQ output (still a render target). An HDR screenshot that should include the
+        // menu is recorded here, before the caller transitions the image to present.
+        screenshot::PrepareMenu(_commands, _output);
+    }
 }
 
 void OverlayRelease()
