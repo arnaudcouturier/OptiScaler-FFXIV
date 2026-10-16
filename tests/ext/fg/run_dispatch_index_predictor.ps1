@@ -20,6 +20,6 @@ $old = [regex]::Replace($predictor, 'if \(HasResource\(FG_ResourceType::Depth\)[
 if ($old -ceq $predictor) { throw 'Predictor negative control no longer matches production.' }
 [IO.File]::WriteAllText($include, $old + "`n" + $consumer)
 Build-Test 'legacy'
-& "$Out/legacy.exe"
+& "$Out/legacy.exe" | Out-Null   # prints the mismatches it is supposed to find
 if ($LASTEXITCODE -ne 1) { throw 'The old Depth-only predictor was not rejected' }
 Write-Output 'PASS: negative control detects the Depth-only predictor'
