@@ -4,6 +4,11 @@
 
 struct ID3D11Device;
 
+namespace ext::hudless
+{
+struct IHudlessSource;
+}
+
 namespace ext::game
 {
 // Selected once at init. Every pointer is null for every game except a matched FFXIV build, so a seam that needs the
@@ -17,6 +22,7 @@ struct Game
     IFgMarkers* fgMarkers = nullptr;
     INgxLifecycle* ngx = nullptr;
     INrQuirks* nrQuirks = nullptr;
+    ext::hudless::IHudlessSource* hudless = nullptr; // S10: UI boundary detector (null until a game module provides one)
 };
 
 const Game& Current();
