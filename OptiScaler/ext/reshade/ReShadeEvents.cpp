@@ -1,6 +1,8 @@
 #include "pch.h"
 
 #include "ext/reshade/ReShadeAddon.h"
+#include "ext/core/HooksBypass.h"
+#include "ext/reshade/ReShadeD3D11.h"
 #include "ext/reshade/ReShadeEvents.h"
 
 // ReShade's headers and ImGui never share a translation unit (see ReShadeRegister.cpp).
@@ -9,6 +11,9 @@
 #endif
 
 #include "ext/reshade/third_party/reshade/reshade.hpp"
+
+#include <d3d11.h>
+#include <wrl/client.h>
 
 #include <atomic>
 #include <format>
@@ -19,6 +24,7 @@ namespace
 {
 using namespace ::reshade::api;
 using probe::EffectsEvent;
+using Microsoft::WRL::ComPtr;
 
 probe::Session* g_session = nullptr; // set once by InstallProbe, never freed
 probe::FileReport* g_report = nullptr;
@@ -72,6 +78,56 @@ probe::Api ToApi(device_api api)
         return probe::Api::D3D12;
     default:
         return probe::Api::Other;
+    }
+}
+
+// effect_runtime::render_effects and the state restore run through the SEH-guarded call (no C++ objects in the thunks).
+struct RenderArgs
+{
+    effect_runtime* runtime;
+    command_list* list;
+    resource_view rtv;
+    resource_view rtvSrgb;
+};
+void RenderThunk(void* p)
+{
+    auto* a = static_cast<RenderArgs*>(p);
+    a->runtime->render_effects(a->list, a->rtv, a->rtvSrgb);
+}
+
+struct ApplyArgs
+{
+    d3d11::StateBlock* state;
+    ID3D11DeviceContext* context;
+};
+void ApplyThunk(void* p)
+{
+    auto* a = static_cast<ApplyArgs*>(p);
+    a->state->Apply(a->context);
+}
+
+// Formats ReShade (and DXGI) use for depth buffers and the single-channel float copies of them.
+bool IsDepthFormat(format f)
+{
+    switch (f)
+    {
+    case format::d16_unorm:
+    case format::d16_unorm_s8_uint:
+    case format::d24_unorm_s8_uint:
+    case format::d32_float:
+    case format::d32_float_s8_uint:
+    case format::r16_typeless:
+    case format::r16_unorm:
+    case format::r24_g8_typeless:
+    case format::r24_unorm_x8_uint:
+    case format::x24_unorm_g8_uint:
+    case format::r32_typeless:
+    case format::r32_float:
+    case format::r32_g8_typeless:
+    case format::r32_float_x8_uint:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -151,19 +207,357 @@ class LiveBackend final : public probe::IBackend
         }
     }
 
-    // Invasive probe steps: replaced by the D3D11 implementation in the next commit; refuse until then.
-    uint64_t PickRuntime(void*, const std::vector<uint64_t>&, std::string& why) override
+    // ---- invasive probe steps (boundary thread) -----------------------------------------------------------------------
+    uint64_t PickRuntime(void* context, const std::vector<uint64_t>& alive, std::string& why) override
     {
-        why = "live backend not implemented yet";
+        try
+        {
+            auto* ctx = static_cast<ID3D11DeviceContext*>(context);
+            ComPtr<ID3D11Device> dev;
+            if (ctx != nullptr)
+                ctx->GetDevice(&dev);
+
+            uint64_t onlyD3D11 = 0;
+            int d3d11Count = 0;
+            for (uint64_t id : alive)
+            {
+                device* d = reinterpret_cast<effect_runtime*>(id)->get_device();
+                if (d == nullptr || d->get_api() != device_api::d3d11)
+                    continue;
+                d3d11Count++;
+                onlyD3D11 = id;
+                if (d->get_native() == reinterpret_cast<uint64_t>(dev.Get()))
+                {
+                    why = std::format("runtime {:#x} owns the context's device {:#x}", id, d->get_native());
+                    return id;
+                }
+            }
+            if (d3d11Count == 1)
+            {
+                why = std::format("the only D3D11 runtime {:#x} (its device {:#x} differs from the context's device {:#x})", onlyD3D11,
+                                  reinterpret_cast<effect_runtime*>(onlyD3D11)->get_device()->get_native(),
+                                  reinterpret_cast<uint64_t>(dev.Get()));
+                return onlyD3D11;
+            }
+            why = std::format("{} D3D11 runtimes alive, none owns the context's device {:#x}", d3d11Count,
+                              reinterpret_cast<uint64_t>(dev.Get()));
+        }
+        catch (...)
+        {
+            why = "exception while matching the runtime";
+        }
         return 0;
     }
-    probe::BoundaryInfo Inspect(void*, uint64_t) override { return {}; }
-    probe::DepthReport QueryDepth(uint64_t, const probe::BoundaryInfo&) override { return {}; }
-    void SnapshotBefore(void*, const probe::BoundaryInfo&) override {}
-    probe::PixelDiff SnapshotAfterAndDiff(void*, const probe::BoundaryInfo&) override { return {}; }
-    probe::CallOutcome RenderEffects(void*, uint64_t, const probe::BoundaryInfo&) override { return {}; }
-    bool GetEffectsState(uint64_t, bool&) override { return false; }
-    bool SetEffectsState(uint64_t, bool) override { return false; }
+
+    probe::BoundaryInfo Inspect(void* context, uint64_t runtime) override
+    {
+        _rtv.Reset();
+        _rtvSrgb.Reset();
+        _target.Reset();
+
+        probe::BoundaryInfo b;
+        b.context = reinterpret_cast<uint64_t>(context);
+        try
+        {
+            auto* ctx = static_cast<ID3D11DeviceContext*>(context);
+            auto* rt = reinterpret_cast<effect_runtime*>(runtime);
+            if (ctx == nullptr)
+            {
+                b.refusal = "null context";
+                return b;
+            }
+
+            command_queue* queue = rt->get_command_queue();
+            command_list* list = queue != nullptr ? queue->get_immediate_command_list() : nullptr;
+            if (list == nullptr)
+            {
+                b.refusal = "the runtime has no immediate command list";
+                return b;
+            }
+            b.cmdListNative = list->get_native();
+            if (b.cmdListNative != b.context)
+            {
+                b.refusal = std::format("ReShade's immediate command list wraps context {:#x}, the probe was called with {:#x}",
+                                        b.cmdListNative, b.context);
+                return b;
+            }
+
+            ComPtr<ID3D11RenderTargetView> bound;
+            ctx->OMGetRenderTargets(1, &bound, nullptr);
+            if (bound == nullptr)
+            {
+                b.refusal = "no render target is bound";
+                return b;
+            }
+            ComPtr<ID3D11Resource> resource;
+            bound->GetResource(&resource);
+            ComPtr<ID3D11Texture2D> texture;
+            if (resource == nullptr || FAILED(resource.As(&texture)))
+            {
+                b.refusal = "the bound render target is not a 2D texture";
+                return b;
+            }
+            D3D11_TEXTURE2D_DESC td {};
+            texture->GetDesc(&td);
+            b.resource = reinterpret_cast<uint64_t>(resource.Get());
+            b.width = td.Width;
+            b.height = td.Height;
+            b.format = static_cast<uint32_t>(td.Format);
+            b.samples = td.SampleDesc.Count;
+            b.arraySize = td.ArraySize;
+
+            device* dev = rt->get_device();
+            const uint32_t count = rt->get_back_buffer_count();
+            resource_desc bbDesc {};
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const ::reshade::api::resource bb = rt->get_back_buffer(i);
+                if (i == 0 && bb.handle != 0)
+                    bbDesc = dev->get_resource_desc(bb);
+                b.isRuntimeBackBuffer = b.isRuntimeBackBuffer || bb.handle == b.resource;
+            }
+
+            if (td.SampleDesc.Count != 1 || td.ArraySize != 1)
+                b.refusal = std::format("the target is multisampled or an array ({} samples, {} slices)", td.SampleDesc.Count, td.ArraySize);
+            else if (td.Width != bbDesc.texture.width || td.Height != bbDesc.texture.height)
+                b.refusal = std::format("the target is {}x{} but the runtime's back buffer is {}x{} (effects are sized for the back buffer)",
+                                        td.Width, td.Height, bbDesc.texture.width, bbDesc.texture.height);
+            else if (!d3d11::SameFamily(td.Format, static_cast<DXGI_FORMAT>(bbDesc.texture.format)))
+                b.refusal = std::format("the target format {} is not in the format family of the back buffer ({})", int(td.Format),
+                                        static_cast<uint32_t>(bbDesc.texture.format));
+            if (!b.refusal.empty())
+                return b;
+
+            // The two views ReShade wants: a linear one and an sRGB one of the same resource.
+            D3D11_RENDER_TARGET_VIEW_DESC bd {};
+            bound->GetDesc(&bd);
+            const d3d11::FormatFamily family = d3d11::FamilyOf(td.Format);
+            const DXGI_FORMAT linearFormat = family.known ? family.linear : td.Format;
+            const DXGI_FORMAT srgbFormat = family.known ? family.srgb : td.Format;
+            ComPtr<ID3D11Device> d3dDevice;
+            ctx->GetDevice(&d3dDevice);
+
+            auto makeView = [&](DXGI_FORMAT format, ComPtr<ID3D11RenderTargetView>& out) -> HRESULT
+            {
+                if (bd.Format == format && bd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D)
+                {
+                    out = bound;
+                    return S_OK;
+                }
+                D3D11_RENDER_TARGET_VIEW_DESC vd {};
+                vd.Format = format;
+                vd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipSlice = 0;
+                return d3dDevice->CreateRenderTargetView(resource.Get(), &vd, &out);
+            };
+
+            const HRESULT hrLinear = makeView(linearFormat, _rtv);
+            std::string note;
+            if (FAILED(hrLinear))
+            {
+                b.refusal = std::format("could not create the linear render target view (format {}, hr {:#x})", int(linearFormat), uint32_t(hrLinear));
+                return b;
+            }
+            note = std::format("rtv: format {} ({})", int(linearFormat), bd.Format == linearFormat ? "the game's own view" : "created");
+            if (!family.known)
+            {
+                _rtvSrgb = _rtv;
+                note += std::format("; rtv_srgb: same view (format {} has no sRGB variant)", int(td.Format));
+            }
+            else
+            {
+                const HRESULT hrSrgb = makeView(srgbFormat, _rtvSrgb);
+                if (FAILED(hrSrgb))
+                {
+                    _rtvSrgb = _rtv;
+                    note += std::format("; rtv_srgb: sRGB view creation failed (hr {:#x}), the linear view is passed instead",
+                                        uint32_t(hrSrgb));
+                }
+                else
+                    note += std::format("; rtv_srgb: format {} ({})", int(srgbFormat),
+                                        bd.Format == srgbFormat ? "the game's own view" : "created");
+            }
+            b.note = note;
+            b.rtv = reinterpret_cast<uint64_t>(_rtv.Get());
+            b.rtvSrgb = reinterpret_cast<uint64_t>(_rtvSrgb.Get());
+            _target = resource;
+            b.ok = true;
+        }
+        catch (...)
+        {
+            b.ok = false;
+            b.refusal = "exception while inspecting the bound render target";
+        }
+        return b;
+    }
+
+    probe::DepthReport QueryDepth(uint64_t runtime, const probe::BoundaryInfo&) override
+    {
+        probe::DepthReport report;
+        try
+        {
+            auto* rt = reinterpret_cast<effect_runtime*>(runtime);
+            device* dev = rt->get_device();
+            size_t total = 0, named = 0;
+            std::vector<std::string> lines;
+            rt->enumerate_texture_variables(
+                nullptr,
+                [&](effect_runtime* r, effect_texture_variable variable)
+                {
+                    total++;
+                    char name[256] = {};
+                    size_t nameSize = sizeof(name);
+                    r->get_texture_variable_name(variable, name, &nameSize);
+                    name[sizeof(name) - 1] = '\0';
+                    std::string lower = name;
+                    for (char& c : lower)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (lower.find("depth") == std::string::npos)
+                        return;
+                    named++;
+                    if (lines.size() >= 24)
+                        return;
+
+                    resource_view srv {}, srvSrgb {};
+                    r->get_texture_binding(variable, &srv, &srvSrgb);
+                    char effect[260] = {};
+                    size_t effectSize = sizeof(effect);
+                    r->get_texture_variable_effect_name(variable, effect, &effectSize);
+                    effect[sizeof(effect) - 1] = '\0';
+
+                    std::string where = "no view bound";
+                    if (srv.handle != 0)
+                    {
+                        const resource res = dev->get_resource_from_view(srv);
+                        const resource_desc d = res.handle != 0 ? dev->get_resource_desc(res) : resource_desc {};
+                        const bool depthFormat = IsDepthFormat(d.texture.format);
+                        where = std::format("srv {:#x} -> resource {:#x} {}x{} format {}{}", srv.handle, res.handle, d.texture.width,
+                                            d.texture.height, static_cast<uint32_t>(d.texture.format),
+                                            depthFormat ? " (depth/single-channel float family)" : "");
+                        report.anyDepthBound = report.anyDepthBound || (res.handle != 0 && depthFormat);
+                    }
+                    lines.push_back(std::format("[F4]   {} ({}): {}", name, effect, where));
+                });
+            report.lines.push_back(std::format(
+                "[F4] {} texture variables in the loaded effects, {} with 'depth' in the name. The ReShade API has no direct depth-"
+                "detection query: this is INFERRED from what is bound to those variables (ReShade binds its detected depth "
+                "buffer to the variable with the DEPTH semantic, usually DepthBufferTex). First {} listed:",
+                total, named, lines.size()));
+            for (auto& l : lines)
+                report.lines.push_back(std::move(l));
+        }
+        catch (...)
+        {
+            report.lines.push_back("[F4] exception while reading the texture bindings");
+        }
+        return report;
+    }
+
+    void SnapshotBefore(void* context, const probe::BoundaryInfo&) override
+    {
+        try
+        {
+            std::string note;
+            _snapshot.Capture(static_cast<ID3D11DeviceContext*>(context), _target.Get(), note);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    probe::PixelDiff SnapshotAfterAndDiff(void* context, const probe::BoundaryInfo&) override
+    {
+        probe::PixelDiff diff;
+        try
+        {
+            diff = _snapshot.CaptureAndDiff(static_cast<ID3D11DeviceContext*>(context), _target.Get());
+        }
+        catch (...)
+        {
+            diff.note = "exception during the comparison";
+        }
+        _rtv.Reset();
+        _rtvSrgb.Reset();
+        _target.Reset();
+        return diff;
+    }
+
+    probe::CallOutcome RenderEffects(void* context, uint64_t runtime, const probe::BoundaryInfo& boundary) override
+    {
+        probe::CallOutcome o;
+        try
+        {
+            auto* ctx = static_cast<ID3D11DeviceContext*>(context);
+            auto* rt = reinterpret_cast<effect_runtime*>(runtime);
+            command_queue* queue = rt->get_command_queue();
+            command_list* list = queue != nullptr ? queue->get_immediate_command_list() : nullptr;
+            if (!boundary.ok || ctx == nullptr || list == nullptr || list->get_native() != reinterpret_cast<uint64_t>(ctx))
+            {
+                o.what = "preconditions no longer hold (boundary, context or immediate command list)";
+                return o;
+            }
+
+            ext::core::BypassScope bypass; // ReShade's own draws and copies must not look like game draws to our hooks
+            d3d11::StateBlock state;
+            state.Capture(ctx);
+
+            RenderArgs args { rt, list, resource_view { boundary.rtv }, resource_view { boundary.rtvSrgb } };
+            const uint32_t code = d3d11::GuardedCall(&RenderThunk, &args);
+
+            ApplyArgs apply { &state, ctx };
+            const uint32_t applyCode = d3d11::GuardedCall(&ApplyThunk, &apply);
+            o.stateRestored = applyCode == 0;
+            o.stateNote = applyCode == 0 ? "D3D11 state block (IA, 6 shader stages with CB/SRV/samplers, RS, OM, CS UAVs) re-applied"
+                                         : std::format("state restore raised {:#x}", applyCode);
+
+            if (code != 0)
+            {
+                o.exception = true;
+                o.code = code;
+                o.what = code == 0xC0000005u ? "access violation" : "exception";
+                return o;
+            }
+            o.ok = true;
+        }
+        catch (...)
+        {
+            o.exception = true;
+            o.what = "C++ exception";
+        }
+        return o;
+    }
+
+    bool GetEffectsState(uint64_t runtime, bool& enabled) override
+    {
+        try
+        {
+            enabled = reinterpret_cast<effect_runtime*>(runtime)->get_effects_state();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool SetEffectsState(uint64_t runtime, bool enabled) override
+    {
+        try
+        {
+            reinterpret_cast<effect_runtime*>(runtime)->set_effects_state(enabled);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+  private:
+    ComPtr<ID3D11RenderTargetView> _rtv;
+    ComPtr<ID3D11RenderTargetView> _rtvSrgb;
+    ComPtr<ID3D11Resource> _target;
+    d3d11::TargetSnapshot _snapshot;
 };
 
 // ---- ReShade callbacks (noexcept: nothing may escape into ReShade or the game) -------------------------------------
@@ -223,10 +617,21 @@ void OnReshadePresent(effect_runtime* runtime) noexcept
         g_session->OnReshadePresent(Id(runtime));
 }
 
-void OnQueuePresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) noexcept
+void OnQueuePresent(command_queue* queue, swapchain*, const rect*, const rect*, uint32_t, const rect*) noexcept
 {
-    if (Live())
-        g_session->OnQueuePresent();
+    if (!Live())
+        return;
+    g_session->OnQueuePresent();
+
+#ifdef HUDLESS_RESHADE_PROBE_DEBUG
+    // DEBUG TRIGGER (compiled only with HUDLESS_RESHADE_PROBE_DEBUG): the start of the game's Present stands in for the HUD
+    // boundary until package A's detector calls ext::reshade::ProbeAtBoundary at the real one. The render target bound at
+    // Present time is not the scene target, so only the mechanics of the probe are exercised, not its meaning.
+    if (queue != nullptr && g_session->Armed())
+        g_session->ProbeAtBoundary(reinterpret_cast<void*>(queue->get_native()));
+#else
+    (void)queue;
+#endif
 }
 } // namespace
 
