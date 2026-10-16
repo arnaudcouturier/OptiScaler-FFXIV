@@ -157,6 +157,11 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("Companion", "HudInterpolation", companionHudInterpolation);
 }
 
+namespace ffxiv::ui
+{
+void UiConfig::Bind(config::Binder& b) { b.Add("HudLess", "Diagnostics", diagnostics); }
+} // namespace ffxiv::ui
+
 void UpscalerConfig::Bind(config::Binder& b)
 {
     b.Add("QualityOverrides", "ForcePerfQuality", forcePerfQuality);
@@ -167,6 +172,7 @@ void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
     ffxiv.Bind(b);
+    ui.Bind(b);
     nr.Bind(b);
     hdr.Bind(b);
     upscaler.Bind(b);

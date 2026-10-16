@@ -30,6 +30,7 @@
 
 #include "ext/fg/FgConfig.h"
 #include "ext/ffxiv/FfxivConfig.h"
+#include "ext/ffxiv/ui/UiConfig.h"
 #include "ext/hdr/HdrConfig.h"
 #include "ext/nr/NrConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
@@ -163,6 +164,7 @@ struct ExtConfig
 {
     FgConfig fg; // ext/fg
     FfxivConfig ffxiv; // ext/ffxiv
+    ext::ffxiv::ui::UiConfig ui; // ext/ffxiv/ui (S10 A): [HudLess] Diagnostics
     NrConfig nr; // ext/nr
     HdrConfig hdr; // ext/hdr
     UpscalerConfig upscaler; // ext/upscaler
