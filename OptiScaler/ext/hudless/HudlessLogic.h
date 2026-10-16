@@ -473,6 +473,15 @@ template <size_t kSlots, size_t kMaxReaders = 6> class SlotRing
 
     // Number of fences still pinning the slot (before any completion check)
     size_t Readers(size_t slot) const { return slot < kSlots ? _slots[slot].count : 0; }
+    // The i-th recorded reader of the slot (for retiring the slot's resources behind exactly these fences)
+    bool Reader(size_t slot, size_t i, const void*& fence, uint64_t& value) const
+    {
+        if (slot >= kSlots || i >= _slots[slot].count)
+            return false;
+        fence = _slots[slot].readers[i].fence;
+        value = _slots[slot].readers[i].value;
+        return true;
+    }
     // Drops every record of the slot (its resources were retired on their own fences)
     void Clear(size_t slot)
     {
@@ -487,7 +496,7 @@ template <size_t kSlots, size_t kMaxReaders = 6> class SlotRing
     uint64_t StaleDrops() const { return _staleDrops; }
 
   private:
-    struct Reader
+    struct ReaderEntry
     {
         const void* fence = nullptr;
         uint64_t value = 0;
@@ -495,7 +504,7 @@ template <size_t kSlots, size_t kMaxReaders = 6> class SlotRing
     };
     struct Slot
     {
-        std::array<Reader, kMaxReaders> readers {};
+        std::array<ReaderEntry, kMaxReaders> readers {};
         size_t count = 0;
     };
     std::array<Slot, kSlots> _slots {};

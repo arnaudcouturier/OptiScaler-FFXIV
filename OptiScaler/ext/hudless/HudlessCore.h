@@ -201,6 +201,13 @@ class Core
         return true;
     }
 
+    // The host found, while swapping the base, that the hud-less image cannot be used after all: undoes the swap.
+    bool Reject(Reason reason)
+    {
+        _swapped = false;
+        return Fail(reason);
+    }
+
     // A failure after the staging (a tag the provider refused, a UI image that could not be built, ...). The first
     // failure of a present wins. Always returns false.
     bool Fail(Reason reason)

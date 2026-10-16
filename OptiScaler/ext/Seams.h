@@ -13,6 +13,7 @@
 #include "ext/hdr/HdrSeams.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
+#include "ext/hudless/HudlessSeams.h"
 #include "ext/nr/NrSeams.h"
 #include "ext/present/PresentSeams.h"
 #include "ext/upscaler/UpscalerSeams.h"
@@ -73,6 +74,11 @@ struct Access
     // with_dx12/dx11_with_dx12_sc.h (friend line). The fork's D3D11-bridge code names its private state through this
     // nested class only; defined in ext/dx11bridge/BridgeAccess.h, which upstream files never include.
     struct Bridge;
+
+    // with_dx12/dx11_with_dx12_sc.h and framegen/IFGFeature_Dx12.h (friend lines). The HUD-less engine (S10) names the
+    // bridge's interop state and the frame generator's UI fence through this nested class only; defined in
+    // ext/hudless/HudlessAccess.h, which upstream files never include.
+    struct Hudless;
 };
 
 // ini load/save hooks in Config.cpp (state: ext/core/ExtConfig)

@@ -390,6 +390,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
+    ext::hudless::PreInteropCopy(*this); // ext: S10 UI-free capture copied on the D3D11 context before the interop signal
+
     if (!_WaitDx11ThenDx12())
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -398,6 +400,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    ext::hudless::PostInteropCopy(*this); // ext: S10 hud-less / UI tags and the UI paste image on the FG queue
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -1218,6 +1222,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     auto sourceBefore = _openedDx11BackBufferStates[copySlot];
     ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot]; // ext: C8
+    ext::hudless::UiFreeFrame(*this, copySlot, copySource, sourceBefore); // ext: S10 UI-free frame generation swaps the base
 
     if (!ext::dx11bridge::ConvertCopySource(*this, copySlot, copySource, sourceBefore)) // ext: C8 OptiHDR PQ conversion
     {
@@ -1349,6 +1354,7 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
 
 void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 {
+    ext::hudless::OnReleaseInterop(*this); // ext: S10 retires the hud-less slots behind their GPU fences
     _interopInitialized = false;
 
     for (auto& resource : _openedDx11BackBuffers)

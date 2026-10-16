@@ -4,7 +4,8 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/FgInternal.h"
-#include "ext/fg/HudlessLink.h"
+#include "ext/hudless/HudlessConfig.h"
+#include "ext/hudless/HudlessEngine.h"
 
 #include <framegen/IFGFeature_Dx12.h>
 #include <hooks/Reflex_Hooks.h>
@@ -40,43 +41,31 @@ void ApplyMenuDlssgInterlock(sl::DLSSGOptions& options)
 }
 
 // Separate UI path: without it DLSS-G treats tagged HUD-less / UI images as hints only and still interpolates the UI.
-// nvngx_dlssg reads it at feature *creation*, so it must already be on for the very first SetOptions. Needs a hud-less
-// source (C11); auto = on whenever the source is in use and UI-free frame generation is off.
+// nvngx_dlssg reads it at feature *creation*, so it must already be on for the very first SetOptions, long before the
+// first capture: it follows [HudLess] Mode == recomposition (and [DLSSG] UIRecomposition, unset = on), not "an image was
+// delivered". The hud-less format is the last captured one, else the bridge's buffer format (S10, ext/hudless).
 void AdjustUiRecomposition(sl::DLSSGOptions& options)
 {
-    const auto& recompositionConfig = ext::Cfg().fg.uiRecomposition;
-    const auto source = ext::fg::hudless::Query();
-    const bool recomposition = source.sourceActive && !source.freeFrameGen &&
-                               (recompositionConfig.has_value() ? recompositionConfig.value() : true);
+    const auto recomposition = ext::hudless::QueryRecomposition();
 
-    if (recomposition)
+    if (recomposition.enabled)
     {
         options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
 
-        if (source.lastFormat != 0)
-        {
-            auto hudlessFormat = static_cast<DXGI_FORMAT>(source.lastFormat);
-            if (hudlessFormat == DXGI_FORMAT_R8G8B8A8_TYPELESS)
-                hudlessFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            else if (hudlessFormat == DXGI_FORMAT_B8G8R8A8_TYPELESS)
-                hudlessFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            else if (hudlessFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS)
-                hudlessFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+        if (recomposition.format != 0)
+            options.hudLessBufferFormat = recomposition.format;
 
-            options.hudLessBufferFormat = static_cast<uint32_t>(hudlessFormat);
-        }
-
-        if (source.uiFromHudless)
-            options.uiBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
+        options.uiBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM); // UiImage::Build's format
     }
 
     static int lastLogged = -1;
-    if (lastLogged != (int) recomposition)
+    if (lastLogged != (int) recomposition.enabled)
     {
-        LOG_INFO("DLSSG UI recomposition: {} (hud-less source active {}, hudless format {}, ui format {}){}",
-                 recomposition, source.sourceActive, options.hudLessBufferFormat, options.uiBufferFormat,
+        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}",
+                 recomposition.enabled, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
+                 recomposition.formatSource, options.uiBufferFormat,
                  lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
-        lastLogged = (int) recomposition;
+        lastLogged = (int) recomposition.enabled;
     }
 }
 

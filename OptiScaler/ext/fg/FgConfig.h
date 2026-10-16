@@ -3,7 +3,8 @@
 // key names identical to the reference build. Use: ext::Cfg().fg.adaMfgUnlock.value_or_default()
 //
 // Dropped with their code: [DLSSG] AdaBlackwellKernels (never read), [FrameGen] External (E6), [FrameGen]
-// ExternalHudless (C11 add-on gate). The [FrameGen] ExternalUI* keys belong to the hudless engine (C11, S10).
+// ExternalHudless (C11 add-on gate). The old [FrameGen] ExternalUI* keys are gone; the hudless engine's keys are [HudLess]
+// (ext/hudless/HudlessConfig.h).
 
 #include <Config.h>
 
@@ -37,8 +38,8 @@ struct FgConfig
     CustomOptional<std::string> ampereMfgSpoofArchToGame { "Auto" };
     CustomOptional<int> ampereMfgLogLevel { 1 };
 
-    // D2/C11: DLSS-G UI recomposition (DLSSGOptions::enableUserInterfaceRecomposition). Unset = on while a hud-less source
-    // is in use (see ext/fg/HudlessLink.h).
+    // D2/C11: DLSS-G UI recomposition (DLSSGOptions::enableUserInterfaceRecomposition). Only matters in [HudLess] Mode =
+    // recomposition, where unset = on (ext::hudless::QueryRecomposition).
     CustomOptional<bool> uiRecomposition { false };
 
     // D3: XeFG extras ([XeFG] section, shared with upstream's keys, which stay in Config.h). PostLoad() range-checks
