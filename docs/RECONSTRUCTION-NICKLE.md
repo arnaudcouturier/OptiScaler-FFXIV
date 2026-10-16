@@ -69,8 +69,9 @@ alpha rule of the other reversible proxies is not touched: mode 5 returns before
 `tests/ext/nr/nr_linear_light_shader` (class `warp`): runs the real `dlssnr.hlsl` on D3D11 WARP. It checks that
 mode 5 encodes `saturate(frame / white)` with opaque alpha and keeps the untouched copy, that mode 0 still writes
 the sRGB soft-knee proxy with the frame's alpha, that the resolve returns the frame when the model returns its
-input, applies a model edit, and that other modes still decode the proxy as sRGB (negative control). The test
-also pins the documented cost: a pixel above the white point is clipped in the proxy, so its hue can shift
+input, applies a model edit, that other modes still decode the proxy as sRGB (negative control), and that the
+matched-residual rebuild (the third shader change) gives the same result as the classic transfer (a mutation that drops
+the mode-5 term from the rebuild makes it fail). The test also pins the documented cost: a pixel above the white point is clipped in the proxy, so its hue can shift
 while its luminance is kept.
 
 ### What to verify in-game
@@ -118,9 +119,11 @@ the clean repo's code path; whether Nickle's build changed one was not exhaustiv
 
 ### Interplay with the NR scene input (`[HDR] NRSceneInput`)
 
-The scene-input code in this repo never reads the mapping mode, and nothing observed in Nickle's build suggests it does:
-the scene path hands NR a linear surface and the mapping setting then applies to it like to any other linear input.
-This was not searched exhaustively.
+Shader side, settled: the NR scene-input shader blob and both `DlssNr_Spatial` blobs in Nickle's build are
+byte-identical to the baseline's (`analysis/dll-string-diff.md` section 5; only `DlssNr_Shader` differs), so the only
+shader that knows about mode 5 is the one reproduced in F2. C++ side: the scene-input code in this repo never reads the
+mapping mode, and nothing observed in Nickle's build suggests it does (the scene path hands NR a linear surface and the
+mapping setting then applies to it like to any other linear input). The C++ side was not searched exhaustively.
 
 ### Unknown / not established
 
@@ -128,7 +131,9 @@ This was not searched exhaustively.
   field offset (0x1198 in the config object) is read from 33 places in Nickle's text section against 31 in the
   baseline (`winmm-ffxiv-20261013.dll`), but that offset is shared with unrelated structures and the two builds differ in
   many other ways, so the difference was not attributed.
-* Nickle's default is `0` (unchanged), inferred from the clamp resetting to 0 and from the unchanged key.
+* Nickle's default for `ReversibleMode` was not observed (the constructor write for the default byte at config offset
+  0x11a0 was not located). The menu resets an out-of-range value to 0, which says nothing about the default; this repo
+  keeps `0` (soft knee), the baseline's default.
 
 ### What to verify in-game
 
@@ -139,6 +144,10 @@ This was not searched exhaustively.
 3. Shadows: look for banding (the proxy is FP16 on a linear HDR surface, so none is expected).
 4. SDR / tone-mapped input: the setting must do nothing (passthrough).
 5. Save a preset with the mode selected, reload it; set `ReversibleMode=5` in the ini and confirm the menu shows it.
+6. Paths no automated test runs with mode 5 (they run the same shaders as Nickle's build, so the behaviour is faithful,
+   but they were not exercised here): working scale below 1 (the box downsample now averages the proxy in linear instead
+   of sRGB), working scale above 1 (supersample), spatial compression on, and matched residual at a reduced scale. The
+   matched-residual rebuild at full scale is covered by the WARP test.
 
 ---
 
@@ -177,13 +186,14 @@ existing clean capture is used unchanged.
 
 ### Unknown / not established
 
-* The exact meaning of the two global bytes is inferred from use: 0x1819b93fb is read by dozens of HDR-aware functions and is the only term that is false when OptiHDR is off; 0x1819cc620 is reset next to the menu's other visibility state in the overlay function.
+* The exact meaning of the two global bytes is inferred from use. 0x1819b93fb: in the overlay function the "HDR overlay on" flag (0x1819b91ad) is set from `0x1819b93fb != 0 && swapchain format == 0x18 (R10G10B10A2)`, which mirrors this repo's `OverlayRtvFormat` (`Active() && format == R10G10B10A2`), so it is the OptiHDR-active flag. 0x1819cc620: reset next to the menu's other visibility state in the overlay function, so it is the menu-visible flag.
 * What happens when a menu capture was requested but the overlay does not draw that frame (empty draw data, layer preparation failure): in the binary the request is simply not consumed and expires after one second with no message. The repo behaves the same.
-* Nickle's `Prepare` was compared by reading, not diffed against the baseline's: no difference was seen.
+* Nickle's `Prepare` and `Submit` were compared by reading against this repo's versions (not diffed byte for byte): no difference was seen.
+* **The one real design difference from Nickle, and the top risk.** Nickle submits the job explicitly right after its own `ExecuteCommandLists` on the overlay queue. This repo relies on the GPU-owner after-execute callback seeing the overlay's command list through the queue `ExecuteCommandLists` detour (which hooks the shared queue vtable, so it should). If the detour misses that list, no PNG is written and the capture stays prepared, blocking further screenshots until the next key press after about 5 seconds drops it.
 
 ### What to verify in-game
 
-1. Settings, FFXIV HDR card: Screenshot format = **HDR PNG**, tick **Include OptiScaler menu**, bind a screenshot key, save. Open the OptiScaler menu and press the key: one PNG appears in `game\OptiScaler\Screenshots` and the menu is in it, with its HDR colours (not dimmed or tone-mapped, no black rectangle).
+1. **Exactly one PNG appears with the menu open** (the top risk above): Settings, FFXIV HDR card: Screenshot format = **HDR PNG**, tick **Include OptiScaler menu**, bind a screenshot key, save. Open the OptiScaler menu and press the key: one PNG appears in `game\OptiScaler\Screenshots`, the menu is in it with its HDR colours (not dimmed or tone-mapped, no black rectangle). If no file appears and the status line stays "HDR screenshot queued" or "Screenshot requested", the overlay's command list did not reach the after-execute callback (check the queue detour, `ext/gpu/QueueHook.cpp`, and that the GPU owner is registered); a later key press after about 5 seconds recovers.
 2. Close the menu and press the key again: a clean capture, as before.
 3. Screenshot format = SDR PNG: the option is greyed out and the SDR PNG has no menu.
 4. Frame generation on (DLSS-G / XeFG): still exactly one file per key press, no hitch, no device-removed in `OptiScaler.log`.
