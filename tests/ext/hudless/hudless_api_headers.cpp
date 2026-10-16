@@ -3,6 +3,7 @@
 // against; a change to a header must update this test and the design doc together.
 #include "ext/hudless/HudlessGpu.h"
 #include "ext/hudless/HudlessSource.h"
+#include "ext/hudless/HudlessState.h"
 
 #include <cassert>
 #include <cstdio>
@@ -53,6 +54,13 @@ int main()
     assert(status.produced == 0 && status.pasted == 0 && status.skipped == 0);
     assert(status.coverage < 0.f); // unknown until the first readback completes
     assert(status.lastMessage[0] == '\0');
+
+    // The shared flag: off by default, writable, readable.
+    assert(!Wanted());
+    SetWanted(true);
+    assert(Wanted());
+    SetWanted(false);
+    assert(!Wanted());
 
     std::puts("PASS: S10 contract headers compile, fake IHudlessSource works, MaskParams/PasteStatus defaults hold");
     return 0;

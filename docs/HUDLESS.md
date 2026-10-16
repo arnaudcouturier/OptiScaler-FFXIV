@@ -53,6 +53,7 @@ game draws scene -> [boundary: first UI draw] source snapshots the bound scene R
 OptiScaler/ext/hudless/                 generic engine, nothing FFXIV-specific
   HudlessSource.h                       contract 4.1 (committed in W6-0)
   HudlessGpu.h                          contract 4.2 (committed in W6-0)
+  HudlessState.{h,cpp}                  the shared Wanted() flag (committed in W6-0; B writes it, A and the hook sites read it)
   HudlessEngine.{h,cpp}                 B: state machine, ring, fences, decisions, summary log, seam entry points
   HudlessConfig.{h,cpp}                 B: [HudLess] binder
   HudlessMenu.cpp                       B: MenuRegistry card
@@ -89,7 +90,7 @@ Existing fork-owned files that gain a few lines: `ext/ffxiv/lighting/FfxivLighti
 | `ext::hudless::PostInteropCopy` (P3/P4) | after `_WaitForInteropCopyOnPresentQueue` | tags, builds UI image / paste image on the FG queue, advances the ring |
 | `ext::hudless::OnReleaseInterop` (P5) | the bridge's release / resize path | drops slots and paste images |
 | `ext::present::BeforeOverlay` (P6) | `LocalPresent`, before `MenuOverlayDx::Present` (`wrapped_swapchain.cpp` ~484) | `UiPaste::Paste` when mode is `ui_free` and a paste image is ready |
-| `ext::hudless::Wanted()` | hook sites | atomic: `Mode != off` and the game source exists (zero-cost early-out) |
+| `ext::hudless::Wanted()` / `SetWanted()` | hook sites; defined in `HudlessState.cpp` (committed in W6-0) | atomic: `Mode != off` and the game source exists (zero-cost early-out). B calls `SetWanted` when the config loads or the menu changes Mode; A and the hook sites only read it |
 | DLSS-G option seam | `ext/fg/dlssg/DlssgSeams.cpp` `AdjustUiRecomposition` | reads engine state instead of the `HudlessLink` stub |
 
 Persistent footprint budget for all upstream-file lines of S10: **<= 25** (baseline 746).
@@ -196,6 +197,8 @@ The tag slot must be the slot the provider's own Dispatch will use (next subsect
 - **R3:** R1 or R2, whichever fires first (union), if neither alone is reliable.
 The capture: before the boundary draw executes, `OMGetRenderTargets` -> RTV 0 resource; require single sample, non-array, same size as the swapchain backbuffer; copy into the reused snapshot texture. D1 logs identity/size/format of that RT against the backbuffer (the engine ring assumes the capture matches the bridge copy source).
 
+**Arming and frame hooks (ownership, so A and B never edit the same lines).** A's `Armed()` is `[HudLess] Diagnostics` (A's own tiny binder `ext/ffxiv/ui/UiConfig`, same ini section as B's keys) **or** `ext::hudless::Wanted()`; `IHudlessSource::Active()` returns `Armed()`. D1 (A alone on top of `s10`) therefore arms from `Diagnostics = true` without any B code. A owns the bridge's `ext::dx11bridge::PresentScope` in `ext/hdr/BridgeHdr.cpp` (constructor runs at bridge `Present` entry, destructor at every exit): the constructor runs the ReShade/Dalamud probe and the per-frame bookkeeping, the destructor calls `ext::game::Current().hudless->EndFrame()` when the pointer is non-null. **B must not call `EndFrame()` and must not edit `PresentScope`.**
+
 **Exclusions:** the Companion nameplate layer is a separate DirectComposition swapchain; it is not in the game's frame and not captured. Draws issued under `ext::core::BypassScope` (`HooksBypassed()`) are ignored. The Companion's `isolateReShade` stays false (as in the Phase 2 build; there is no ReShade marker any more).
 
 **Cost:** with `Mode = off` the added code is one atomic load per draw. With the feature on, the per-draw cost is a pointer test plus `GetPrivateData` on candidate draws only; D1 reports draws per frame and hook ticks per frame.
@@ -212,7 +215,7 @@ PasteCleanup = true        ; advanced: clear ghosts of UI that just closed
 SteadyTiming = false       ; advanced: paste the UI of one real frame behind (steadier, slightly older)
 CoverageGuard = 0.60       ; advanced: fall back when more than this share of pixels is flagged (0 = off)
 ShowDetectedUi = false     ; debug tint on the pasted area
-Diagnostics = false        ; D1 / diagnostic builds only
+Diagnostics = false        ; D1 / diagnostic builds only (bound by A's UiConfig, the rest by B's HudlessConfig)
 ```
 
 Menu card "HUD-less (UI-free frame generation)": status line (state, reason, counters), mode combo, an "Advanced" fold with the tuning keys, "Show detected UI". Changing Mode to/from `recomposition` shows "applies after a game restart". The old `[FrameGen] ExternalUI*` / `ExternalHudless` keys are not read or written.
@@ -251,7 +254,7 @@ Menu card "HUD-less diagnostics": run folder path, counters, the snapshot button
 
 | Package | Owns | Must not touch | Depends on |
 |---|---|---|---|
-| **A** `FfxivUiBoundary v0` + D1 | `ext/ffxiv/ui/**`, `tests/ext/ffxiv/ui/**`, the three hook lines in `FfxivLightingCapture.h`, `Game.cpp` assignment | bridge, `ext/hudless/**` except reading the two headers | `HudlessSource.h` (committed) |
+| **A** `FfxivUiBoundary v0` + D1 | `ext/ffxiv/ui/**` (incl. `UiConfig`), `tests/ext/ffxiv/ui/**`, the three hook lines in `FfxivLightingCapture.h`, `Game.cpp` assignment, `PresentScope` in `ext/hdr/BridgeHdr.cpp` (probe at entry, `EndFrame()` at exit) | the bridge files, `ext/hudless/**` (reads `HudlessSource.h`, `HudlessState.h`) | `HudlessSource.h`, `HudlessState.h` (committed) |
 | **B** engine core | `ext/hudless/{Engine,Config,Menu}*`, `adapters/*`, bridge seams + `wrapped_swapchain.cpp` BeforeOverlay, `IFGFeature.cpp` predictor, `ext/ini/HudLess.ini`, `ext/Seams.*`, deletion of `ext/fg/HudlessLink.*`, catalog rows | shaders, `UiPaste.cpp`, `UiImage.cpp`, `ext/ffxiv/ui/**` | both headers; codes against `HudlessGpu.h` with a stub implementation behind a test flag so it builds before C lands |
 | **C** mask + paste | `ext/hudless/{UiImage,UiPaste}.cpp`, `shaders/**`, `hudless.shaders.props`, WARP tests | engine, bridge, FFXIV | `HudlessGpu.h` (committed) |
 
