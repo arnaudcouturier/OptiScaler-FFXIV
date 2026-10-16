@@ -86,13 +86,11 @@ class FgMarkersProvider final : public game::IFgMarkers
     static bool Enabled()
     {
         auto& state = State::Instance();
-        return MarkersEnabledValue(Config::Instance()->FGEnabled.value_or_default(),
-                                   Config::Instance()->FGDLSSGForceDMFG.value_or_default(),
-                                   state.activeFgInput == FGInput::Upscaler,
-                                   state.activeFgOutput == FGOutput::DLSSG, state.isShuttingDown,
-                                   ReflexHooks::gameIsSendingMarkers(), StreamlineProxy::IsD3D12Inited(),
-                                   StreamlineProxy::GetNewFrameToken() != nullptr,
-                                   StreamlineProxy::PCLSetMarker() != nullptr);
+        return MarkersEnabledValue(
+            Config::Instance()->FGEnabled.value_or_default(), Config::Instance()->FGDLSSGForceDMFG.value_or_default(),
+            state.activeFgInput == FGInput::Upscaler, state.activeFgOutput == FGOutput::DLSSG, state.isShuttingDown,
+            ReflexHooks::gameIsSendingMarkers(), StreamlineProxy::IsD3D12Inited(),
+            StreamlineProxy::GetNewFrameToken() != nullptr, StreamlineProxy::PCLSetMarker() != nullptr);
     }
 
     // Oracle: FfxivDynamicMarkers::Mark(marker, frame) -- fetches a fresh Streamline frame token for `frame` (the
