@@ -255,9 +255,13 @@ void CaptureOpportunities()
     CHECK(!t.OnDraw({ kStageNone, false }));
     CHECK(!t.OnDraw({ 1, false }));
     CHECK(t.OnDraw({ kUiStage, false }));  // R1 fires
+    CHECK_EQ(t.LastChange(), 1);           // bit 0: R1 changed
     CHECK(!t.OnDraw({ kUiStage, false })); // later UI draws change nothing
+    CHECK_EQ(t.LastChange(), 0);
     CHECK(t.OnDraw({ 5, false }));         // a later stage drops the candidate: the capture was stale
+    CHECK_EQ(t.LastChange(), 1);           // R1 cleared; a consumer checks Current().r1 == ordinal before capturing
     CHECK(t.OnDraw({ kUiStage, true }));   // new candidate
+    CHECK_EQ(t.LastChange(), 3);           // R1 and R2 on the same draw
     CHECK_EQ(t.Summary().candidateMoves, 3u);
 }
 

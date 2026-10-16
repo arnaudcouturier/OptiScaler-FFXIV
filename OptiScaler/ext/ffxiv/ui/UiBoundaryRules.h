@@ -75,6 +75,8 @@ class BoundaryTracker
         ++_s.draws;
         const uint32_t ordinal = _s.draws;
         const uint32_t beforeR3 = _c.r3;
+        const uint32_t beforeR1 = _c.r1;
+        const uint32_t beforeR2 = _c.r2;
 
         const bool scene = d.stage >= 1 && d.stage <= 5;
         const bool ui = d.stage == kUiStage;
@@ -122,6 +124,7 @@ class BoundaryTracker
         }
 
         _c.r3 = Min(_c.r1, _c.r2);
+        _change = static_cast<uint8_t>((_c.r1 != beforeR1 ? 1 : 0) | (_c.r2 != beforeR2 ? 2 : 0));
         if (_c.r3 != beforeR3)
         {
             ++_s.candidateMoves;
@@ -131,6 +134,8 @@ class BoundaryTracker
     }
 
     const Candidates& Current() const { return _c; }
+    // Which candidates the last OnDraw changed (set, moved or cleared): bit 0 = R1, bit 1 = R2.
+    uint8_t LastChange() const { return _change; }
     const FrameSummary& Summary() const { return _s; }
 
   private:
@@ -139,6 +144,7 @@ class BoundaryTracker
     Candidates _c {};
     FrameSummary _s {};
     bool _sawStage5 = false;
+    uint8_t _change = 0;
 };
 
 // The same candidates computed from the complete list of a frame's draws (the definition the online tracker implements).

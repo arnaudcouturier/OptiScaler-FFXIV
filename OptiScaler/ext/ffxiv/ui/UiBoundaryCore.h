@@ -99,6 +99,8 @@ class Core
         uint32_t ordinal = 0;
         uint8_t stage = kStageNone;
         bool counted = false;   // false: the draw was ignored (other thread, before the first Present)
+        uint8_t change = 0;     // candidates this draw changed: bit 0 = R1, bit 1 = R2 (see BoundaryTracker::LastChange)
+        Candidates cand {};     // the candidates after this draw
     };
 
     Core()
@@ -193,6 +195,8 @@ class Core
         res.ordinal = ordinal;
         res.stage = stage;
         res.moved = _tracker.OnDraw({ stage, rt.kind == dfmt::RtKind::Backbuffer });
+        res.change = _tracker.LastChange();
+        res.cand = _tracker.Current();
         List(ordinal, stage, looked ? rt : RtInfo {});
         return res;
     }

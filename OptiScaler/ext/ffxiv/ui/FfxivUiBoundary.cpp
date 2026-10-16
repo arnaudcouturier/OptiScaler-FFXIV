@@ -7,6 +7,7 @@
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
 #include "ext/ffxiv/ui/UiDiag.h"
+#include "ext/ffxiv/ui/UiSnapshot.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 #include "ext/hudless/HudlessSource.h"
 
@@ -123,7 +124,9 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
 
         Core& core = C();
         const int64_t start = Qpc();
-        core.OnDraw(context);
+        const Core::DrawResult res = core.OnDraw(context);
+        if (res.change != 0 && snapshot::Armed())
+            snapshot::OnCandidate(context, core, res); // before the candidate draw runs
         core.AddHookTicks(Qpc() - start);
     }
     catch (...)
@@ -156,7 +159,10 @@ void OnPresentBegin()
         Core& core = C();
         core.BeginRenderThread(GetCurrentThreadId());
         if (DiagnosticsOn())
+        {
             diag::OnPresentEntry(core);
+            snapshot::OnPresentEntry(core);
+        }
         core.FreezeFrame();
     }
     catch (...)
