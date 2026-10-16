@@ -25,6 +25,7 @@
 #include "ext/nr/hybrid/DlssNrHybridBuilder.h"
 #include "ext/nr/hybrid/DlssNrHybridAssets.h"
 #include "ext/nr/native/DlssNrVitReuse.h"
+#include "ext/nr/native/DlssNrModuleProfiles.h"
 #include "SysUtils.h"
 #pragma comment(lib,"bcrypt.lib")
 namespace DlssNrNative {namespace {
@@ -59,7 +60,7 @@ struct ModuleIdentity { unsigned bytes=0;std::string sha;bool reported=false; };
 struct ObservedFunction { NVDX_ObjectHandle module=nullptr;std::string name; };
 struct EvaluationObservation { uint64_t launches=0, known=0, unknown=0;bool reset=false;unsigned trace=0; };
 EvaluationObservation& Observation(){static thread_local EvaluationObservation value;return value;}
-struct State{DlssNrVitReuse::Filter vit;DlssNrVitReuse::RoleRegistry<NVDX_ObjectHandle>vitRole;std::recursive_mutex mutex;bool enabled=false,candidate=false,restartRequired=false;std::string status="FP8 selected";uint64_t launches=0,splitLaunches=0;std::map<NVDX_ObjectHandle,bool>modules;std::map<NVDX_ObjectHandle,Target>targets;std::map<std::pair<ID3D12Device*,bool>,Device>devices;std::map<std::tuple<ID3D12GraphicsCommandList*,ID3D12Device*,uint64_t,bool>,Session>sessions;
+struct State{DlssNrVitReuse::Filter vit;DlssNrVitReuse::RoleRegistry<NVDX_ObjectHandle>vitRole;std::recursive_mutex mutex;bool enabled=false,candidate=false,restartRequired=false;std::string status="FP8 selected";uint64_t launches=0,splitLaunches=0;std::map<NVDX_ObjectHandle,DlssNrModules::Flags>modules;std::map<NVDX_ObjectHandle,Target>targets;std::map<std::pair<ID3D12Device*,bool>,Device>devices;std::map<std::tuple<ID3D12GraphicsCommandList*,ID3D12Device*,uint64_t,bool>,Session>sessions;
  std::map<NVDX_ObjectHandle,ModuleIdentity>moduleIdentities;
  std::map<NVDX_ObjectHandle,ObservedFunction>observedFunctions;
  uint64_t evaluations=0, legacyCalls=0, extendedCalls=0;
@@ -113,7 +114,6 @@ void Vendor(ID3D12GraphicsCommandList*c,Device&d,Session&s){auto&t=d.contracts.a
  std::map<std::string,std::pair<uint64_t,uint64_t>>bindings{{"A_packed",{d.weights.address()+(w.cp),2097152}},{"SF_A",{d.weights.address()+(w.cs),262144}},{"B_packed",{s.yp.address(),s.yp.bytes}},{"SF_B",{s.ys.address(),s.ys.bytes}},{"D",{s.c.address(),s.c.bytes}},{"workspace",{workspace.address(),workspace.bytes}}};
  for(auto&x:t.patches){auto it=bindings.find(x.name);if(it==bindings.end()||x.add>=it->second.second)throw std::runtime_error("Unknown/out-of-range vendor binding "+x.name);uint64_t v=it->second.first+x.add;memcpy(p.data()+x.offset,&v,8);}
  LaunchBlob(c,t.fn,p.data(),(unsigned)p.size(),t.grid,t.block,t.shared);ScratchBarrier(c,s.tokens,4,{s.c.gpu.Get()});}
-bool Supported(const void*data,unsigned bytes){if(bytes!=3202680||!data)return false;const unsigned char expected[32]={0x3f,0xa6,0xf0,0x76,0xee,0xcf,0xbb,0x6e,0x19,0xc3,0x78,0xf8,0x4b,0xbb,0x70,0x25,0xcd,0x80,0x5e,0xd4,0xde,0x9a,0x2f,0x9c,0x9b,0x99,0x5e,0xb3,0x4a,0x7f,0x3d,0x76};unsigned char hash[32];return BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,(PUCHAR)data,bytes,hash,32)==0&&!memcmp(hash,expected,32);}
 ModuleIdentity IdentifyModule(const void* data, unsigned bytes)
 {
     ModuleIdentity result;result.bytes=bytes;
@@ -130,9 +130,11 @@ NvAPI_Status __cdecl CreateModule(ID3D12Device*d,const void*b,NvU32 n,NVDX_Objec
     auto&s=S();std::lock_guard<std::recursive_mutex> guard(s.mutex);
     auto rc=s.createModule(d,b,n,out);
     if(rc==NVAPI_OK && out){
-        s.modules[*out]=Supported(b,n);s.moduleIdentities[*out]=IdentifyModule(b,n);
+        // Hashed once; the fingerprint table (DlssNrModuleProfiles.h) decides reuse and hybrid permission separately.
+        s.moduleIdentities[*out]=IdentifyModule(b,n);
         const auto& id=s.moduleIdentities[*out];
-        LOG_DEBUG("NR reuse CUDA module: bytes={}, sha256={}, verified={}",id.bytes,id.sha,s.modules[*out]);
+        s.modules[*out]=DlssNrModules::Classify(n,id.sha);
+        LOG_DEBUG("NR reuse CUDA module: bytes={}, sha256={}, verified={}, hybrid={}",id.bytes,id.sha,s.modules[*out].reuse,s.modules[*out].hybrid);
     }
     return rc;
 }
@@ -144,18 +146,18 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device*d,NVDX_ObjectHandle m,const cha
         auto role=DlssNrVitReuse::RoleOf(n);
         if(role!=DlssNrVitReuse::Role::None){
             s.observedFunctions[*out]={m,n};
-            s.vitRole.Add(*out,m,role,s.modules[m]);
+            s.vitRole.Add(*out,m,role,s.modules[m].reuse);
             auto& id=s.moduleIdentities[m];
             if(!id.reported){
                 id.reported=true;
-                LOG_INFO("NR reuse module: bytes={}, sha256={}, verified={}, first kernel={}",id.bytes,id.sha,s.modules[m],n);
+                LOG_INFO("NR reuse module: bytes={}, sha256={}, verified={}, hybrid={}, first kernel={}",id.bytes,id.sha,s.modules[m].reuse,s.modules[m].hybrid,n);
             }
         }
         unsigned kind=99;
         if(!strcmp(n,"cc_vit_1d_ffn_expand_publish_fp8"))kind=0;
         else if(!strcmp(n,"cc_vit_1d_ffn_expand_chained_fp8"))kind=1;
         else if(!strcmp(n,"cc_vit_1d_ffn_contract_chained_fp8"))kind=2;
-        if(kind!=99)s.targets[*out]={d,m,kind,s.modules[m]};
+        if(kind!=99)s.targets[*out]={d,m,kind,s.modules[m].hybrid};
     }
     return rc;
 }
