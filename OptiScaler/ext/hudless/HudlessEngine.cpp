@@ -10,6 +10,7 @@
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
 #include "ext/hudless/HudlessGpu.h"
+#include "ext/hudless/SharedSlot.h"
 #include "ext/hudless/adapters/Adapters.h"
 
 #include <Config.h>
@@ -133,9 +134,7 @@ class Engine final : public IEngineHost, private FenceReader
 
     struct Slot
     {
-        ComPtr<ID3D11Texture2D> texture; // the shared texture on the game's device (written by the immediate context)
-        HANDLE handle = nullptr;         // its NT handle
-        ComPtr<ID3D12Resource> resource; // the same memory opened on the bridge's D3D12 device
+        SharedTexture shared;            // the D3D11 texture (game device, written by the immediate context) and its D3D12 view
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         UINT width = 0;
         UINT height = 0;
@@ -257,7 +256,7 @@ Reason Engine::StageCapture(const FrameImage& image)
         return Reason::CaptureRejected;
 
     // Same D3D11 immediate context, before the bridge signals its fence: one signal covers both copies.
-    context->CopyResource(_slots[slot].texture.Get(), image.texture.Get());
+    context->CopyResource(_slots[slot].shared.texture.Get(), image.texture.Get());
 
     _stagedSlot = slot;
     _next = (static_cast<size_t>(slot) + 1) % kSlots;
@@ -330,44 +329,23 @@ void Engine::Bind(Dx11wDx12SC& sc)
 bool Engine::EnsureSlot(size_t index, UINT width, UINT height, DXGI_FORMAT format)
 {
     Slot& slot = _slots[index];
-    if (slot.texture != nullptr && slot.resource != nullptr && slot.width == width && slot.height == height &&
-        slot.format == format)
+    if (slot.shared.texture != nullptr && slot.shared.resource != nullptr && slot.width == width &&
+        slot.height == height && slot.format == format)
         return true;
 
     // The slot is free (Acquire): nothing reads the old resources any more.
     RetireSlot(index);
 
-    ID3D11Device* device11 = Access::Hudless::Dx11Device(*_sc);
-    D3D11_TEXTURE2D_DESC desc {};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // the mask / paste shaders sample it from D3D12
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-
-    HRESULT hr = device11->CreateTexture2D(&desc, nullptr, &slot.texture);
-    ComPtr<IDXGIResource1> shared;
-    if (SUCCEEDED(hr))
-        hr = slot.texture.As(&shared);
-    if (SUCCEEDED(hr))
-        hr = shared->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &slot.handle);
-    if (SUCCEEDED(hr))
-        hr = _device12->OpenSharedHandle(slot.handle, IID_PPV_ARGS(&slot.resource));
-
-    if (FAILED(hr) || slot.resource == nullptr ||
-        (slot.resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0)
+    const HRESULT hr =
+        CreateSharedTexture(Access::Hudless::Dx11Device(*_sc), _device12, width, height, format, slot.shared);
+    if (FAILED(hr))
     {
         LOG_ERROR("HudLess: could not create the shared hud-less slot {} ({}x{}, format {}): {:X}", index, width, height,
                   static_cast<UINT>(format), static_cast<UINT>(hr));
-        RetireSlot(index);
         return false;
     }
 
-    slot.resource->SetName(std::format(L"HudLess slot [{}]", index).c_str());
+    slot.shared.resource->SetName(std::format(L"HudLess slot [{}]", index).c_str());
     slot.format = format;
     slot.width = width;
     slot.height = height;
@@ -492,12 +470,12 @@ void Engine::RetireSlot(size_t index)
     keep(slot.hdrList);
     keep(slot.hdrAllocator);
     keep(slot.hdrFinal);
-    keep(slot.resource);
-    keep(slot.texture);
-    if (slot.handle != nullptr)
+    keep(slot.shared.resource);
+    keep(slot.shared.texture);
+    if (slot.shared.handle != nullptr)
     {
-        CloseHandle(slot.handle);
-        slot.handle = nullptr;
+        CloseHandle(slot.shared.handle);
+        slot.shared.handle = nullptr;
     }
     slot.format = DXGI_FORMAT_UNKNOWN;
     slot.width = slot.height = 0;
@@ -651,7 +629,7 @@ void Engine::SwapBase(Dx11wDx12SC& sc, ID3D12Resource*& source, D3D12_RESOURCE_S
         return;
     }
 
-    source = slot.resource.Get();
+    source = slot.shared.resource.Get();
     state = D3D12_RESOURCE_STATE_COMMON; // shared textures rest in COMMON between uses
     _baseSwapped = true;
 }
@@ -680,7 +658,7 @@ bool Engine::ProducePaste(Dx11wDx12SC& sc, Slot& slot, ID3D12Resource* finalImag
 
     // The same queue that waited for the interop copy, so both inputs are complete. Submitted before the frame generator
     // executes its UI list and DLSS-G's own work.
-    UiPaste::Produce(_device12, queue, finalImage, TypedFormat(finalImage->GetDesc().Format), slot.resource.Get(),
+    UiPaste::Produce(_device12, queue, finalImage, TypedFormat(finalImage->GetDesc().Format), slot.shared.resource.Get(),
                      slot.format, hdrFinal, params);
 
     // Whatever Produce submitted, and the HDR stage list, precede this signal on the queue.
@@ -727,7 +705,7 @@ void Engine::Post(Dx11wDx12SC& sc)
     {
         adapters::TagContext context;
         context.device = _device12;
-        context.hudless = slot.resource.Get();
+        context.hudless = slot.shared.resource.Get();
         context.final = finalImage;
         context.hudlessFormat = slot.format;
         context.finalFormat = TypedFormat(finalImage->GetDesc().Format);
