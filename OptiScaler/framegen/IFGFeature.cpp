@@ -12,8 +12,9 @@ int IFGFeature::GetIndexWillBeDispatched()
     auto diff = _frameCount - _lastDispatchedFrame;
     if (diff > Config::Instance()->FGAllowedFrameAhead.value_or_default() || diff < 0 || _lastDispatchedFrame == 0)
     {
-        // If current index has resources, skip to it
-        if (HasResource(FG_ResourceType::Depth))
+        // If current index has resources, skip to it (the same predicate as the resync branch of GetDispatchIndex)
+        if (HasResource(FG_ResourceType::Depth) || HasResource(FG_ResourceType::Velocity) ||
+            HasResource(FG_ResourceType::UIColor) || HasResource(FG_ResourceType::HudlessColor))
         {
             LOG_DEBUG("Skipping not presented frames! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
                       _lastDispatchedFrame);
