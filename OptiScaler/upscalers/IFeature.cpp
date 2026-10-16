@@ -215,6 +215,8 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
                         break;
                     }
 
+                    // ext: C2/C3 only this case (no OutWidth/OutHeight, width >= RenderWidth()) skips the
+                    // correction below; pre-existing, kept for other games -- FFXIV always supplies the subrect.
                     *OutWidth = RenderWidth();
                     *OutHeight = RenderHeight();
                     return;
