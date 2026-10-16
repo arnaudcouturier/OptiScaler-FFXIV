@@ -187,6 +187,7 @@ class Engine final : public IEngineHost, private FenceReader
 
     std::atomic<uint32_t> _lastFormat { 0 };   // typed format of the last staged capture
     std::atomic<uint32_t> _bridgeFormat { 0 }; // typed format of the bridge's backbuffer
+    std::atomic<bool> _bridgeSeen { false };   // a bridge Present ran: its Pre owns the feature bit from then on
 
     std::mutex _statusMutex;
     Status _status;
@@ -574,6 +575,7 @@ void Engine::Pre(Dx11wDx12SC& sc)
     if (State::Instance().isShuttingDown)
         return;
 
+    _bridgeSeen.store(true, std::memory_order_relaxed);
     const Mode mode = CurrentMode();
     _sc = &sc;
     _stagedSlot = -1;
@@ -774,8 +776,19 @@ void Engine::Release(Dx11wDx12SC& sc)
 
 void Engine::Overlay(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue)
 {
-    if (CurrentMode() != Mode::UiFree)
+    const Mode mode = CurrentMode();
+    if (mode != Mode::UiFree)
+    {
+        // A game without the D3D11 bridge never reaches Pre, the only other place that quietens the inline guard when the
+        // mode is off. With a bridge, Pre owns the bit (it still has slots to retire).
+        if (mode == Mode::Off && !_bridgeSeen.load(std::memory_order_relaxed))
+        {
+            ext::SetActive(ext::F::Hudless, false);
+            if (CurrentMode() != Mode::Off) // the menu switched the mode on in the meantime
+                ext::SetActive(ext::F::Hudless, true);
+        }
         return;
+    }
 
     // Only DLSS-G is known to route every generated frame through this present; "Show Detected UI" tints what DLSS-G
     // receives, pasting untinted UI would hide that view (docs/HUDLESS.md 5, DebugTintOn).

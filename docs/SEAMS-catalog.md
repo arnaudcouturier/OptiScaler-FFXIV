@@ -320,7 +320,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | config | 3 | 0 |
 | menu | 13 (1 provisional) | 0 |
 | upscaler | 5 | 0 |
-| dx11bridge | 21 | 2 RAII |
+| dx11bridge | 17 | 2 RAII |
 | nr | 10 | 2 RAII |
 | fg | 27 | 0 |
 | present | 6 | 0 |
@@ -328,7 +328,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | streamline | 7 | 0 |
 | gpu | 2 | 0 |
 | hdr | 11 (+2 contingent) | 1 inline-guarded, 3 RAII |
-| hudless | 4 (+1 `present`) | 0 |
+| hudless | 4 (`BeforeOverlay` is counted under `present`) | 0 |
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
