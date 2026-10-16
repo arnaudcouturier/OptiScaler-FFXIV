@@ -40,7 +40,7 @@ template<class C, class F> void Fields(C& c, F&& f)
     NR_FIELD(Pass3LocalTone, pass3LocalTone, 0, 2); NR_FIELD(Pass3SkinStructure, pass3SkinStructure, -1, 2); NR_FIELD(Pass3AutoMask, pass3AutoMask, 0, 1);
     NR_FIELD(WorkingScale, workingScale, 0.25, 2); NR_FIELD(ScalingDownscaler, scalingDownscaler, 0, 7);
     NR_FIELD(TransferStrength, transferStrength, 0, 2); NR_FIELD(ColourStrength, colourStrength, 0, 4);
-    NR_FIELD(Transfer, transfer, 0, 1); NR_FIELD(ReversibleMode, reversibleMode, 0, 4); NR_FIELD(ApplyModel, applyModel, 0, 1);
+    NR_FIELD(Transfer, transfer, 0, 1); NR_FIELD(ReversibleMode, reversibleMode, 0, 5); NR_FIELD(ApplyModel, applyModel, 0, 1);
     NR_FIELD(MaxRatio, maxRatio, 1, 30); NR_FIELD(SkinProtection, skinProtection, 0, 1);
     NR_FIELD(SkinToneEnabled, skinToneEnabled, 0, 1); NR_FIELD(SkinDetail, skinDetail, 0, 1); NR_FIELD(SkinColour, skinColour, 0, 1);
     NR_FIELD(EnvironmentDetail, environmentDetail, 0, 1); NR_FIELD(EnvironmentColour, environmentColour, 0, 1);

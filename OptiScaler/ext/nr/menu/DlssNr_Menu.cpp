@@ -451,18 +451,20 @@ void RenderMenu(float menuResScale)
         HelpMarker("NR colour strength: 0 = preserve game colours, 1 = model colours, above 1 = stronger saturation.");
 
         // Experimental. 0 off (soft knee), 1 Neutwo + our composition, 2 Neutwo + pure-inverse replace,
-        // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights). Always shown.
+        // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights), 5 linear light + composed
+        // (the normalised frame as it is, clipped at white; Nickle's mode, docs/RECONSTRUCTION-NICKLE.md).
+        // Always shown.
         static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed",
                                                  "Neutwo proxy + replace", "Hybrid proxy + composed",
-                                                 "Hybrid proxy + replace" };
+                                                 "Hybrid proxy + replace", "Linear light + composed" };
         int reversible = (int) nr.reversibleMode.value_or_default();
-        if (reversible < 0 || reversible > 4)
+        if (reversible < 0 || reversible >= IM_ARRAYSIZE(reversibleNames))
             reversible = 0;
         if (ImGui::Combo("HDR mapping (experimental)", &reversible, reversibleNames,
                          IM_ARRAYSIZE(reversibleNames)))
             nr.reversibleMode = (uint32_t) reversible;
 
-        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Neutwo uses a reversible curve. Hybrid preserves midtones and compresses highlights.\nComposed uses the strength and highlight controls. Replace bypasses them and may flicker.");
+        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Neutwo uses a reversible curve. Hybrid preserves midtones and compresses highlights.\nComposed uses the strength and highlight controls. Replace bypasses them and may flicker.\nLinear shows each normalized colour channel directly to NR. It is experimental, applies to linear input, and clips the model input above white; saturated highlights may change hue. Tone-mapped SDR input remains passthrough.");
 
         ImGui::SeparatorText("Model passes");
         ImGui::TextWrapped("Settings apply when you release a slider.");

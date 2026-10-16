@@ -76,3 +76,66 @@ while its luminance is kept.
 ### What to verify in-game
 
 Nothing for F2 alone (it cannot be reached without F3). See F3.
+
+---
+
+## F3 - NR HDR mapping "Linear light + composed"
+
+**Result: reconstructed, high confidence on what the setting is and does, medium on "nothing else changed".** It is
+the sixth value (`5`) of the existing NR setting `[DlssNr] ReversibleMode`, shown in the combo "HDR mapping
+(experimental)". It is not an HDR-output setting (it lives in `ext/nr`, not `ext/hdr`): it decides how a *linear* NR
+input surface is shown to the neural model. The brief expected `ext/hdr`; the code puts the setting in `ext/nr`.
+
+### Evidence (all in `builds\winmm.dll`, Ghidra image base 0x180000000)
+
+| Observation | Where |
+|---|---|
+| Label `Linear light + composed` | string at 0x1818faaf0 (one hit), referenced only by the 6th pointer of the combo's name table at 0x1819a2af0 (6 entries, in order Off / Neutwo composed / Neutwo replace / Hybrid composed / Hybrid replace / Linear light) |
+| Combo built in the NR menu function `0x180350f10`: `HDR mapping (experimental)`, item count 6, stored value reset to 0 when above 5 (`5 < value`) | decompiled block around the label |
+| Tooltip gains a last sentence: `Linear shows each normalized colour channel directly to NR. It is experimental, applies to linear input, and clips the model input above white; saturated highlights may change hue. Tone-mapped SDR input remains passthrough.` | same function |
+| Saved NR presets accept the new value: the `ReversibleMode` range upper bound is the double `0x4014000000000000` = 5.0 (the neighbouring `Transfer` is 1.0, `MaxRatio` 30.0, matching the clean repo) | preset validation function containing the xref 0x18035c72f |
+| Ini key unchanged: `ReversibleMode` (one string, 0x1818d0590, used by config load 0x1801f8c37, save 0x180205fb6 and the preset code); no clamp in the config read, same as before | |
+| Shader side | F2 above (the compiled shader gets the mode from the same constant buffer field `gReversibleMode`) |
+
+### What the repo does
+
+* `ext/nr/shaders/dlssnr.hlsl`: F2.
+* `ext/nr/menu/DlssNr_Menu.cpp`: six entries, the clamp follows the table size, Nickle's tooltip text.
+* `ext/nr/presets/NrUserPresets.h`: `ReversibleMode` range 0..5.
+* `ext/ini/DlssNr.ini` and `ext/nr/NrConfig.h` comments list mode 5.
+* No config code change (a `uint32` read with no clamp, as before). The two dispatch sites and the Vulkan site pass
+  the value through to the shader unchanged, so nothing there needed editing.
+
+### What the proxy surface is (checked, because linear values in an 8-bit surface would band in the shadows)
+
+The encode writes the proxy **in place** into the colour surface NR is handed (`DispatchPass(..., target, ...)` in
+`ext/nr/pass/DlssNr_Dx12.cpp`; the untouched frame is kept in a copy). The pass only leaves passthrough when the frame
+is flagged as linear HDR (`frame.ColourIsLinearHdr`, a decision made before the mapping mode is looked at); for any
+other frame the encode is a plain copy, which is what the tooltip's last sentence says. Linear HDR colour surfaces are
+floating-point (the code's own check, `FormatCanHoldLinearHdr`, lists R16G16B16A16_FLOAT, R32G32B32A32_FLOAT,
+R11G11B10_FLOAT), so mode 5 does not store linear values in an 8-bit target. No mode-dependent surface format exists in
+the clean repo's code path; whether Nickle's build changed one was not exhaustively excluded (see unknowns).
+
+### Interplay with the NR scene input (`[HDR] NRSceneInput`)
+
+The scene-input code in this repo never reads the mapping mode, and nothing observed in Nickle's build suggests it does:
+the scene path hands NR a linear surface and the mapping setting then applies to it like to any other linear input.
+This was not searched exhaustively.
+
+### Unknown / not established
+
+* Whether Nickle's build changed any C++ besides the menu, the preset range and the cbuffer value. The `ReversibleMode`
+  field offset (0x1198 in the config object) is read from 33 places in Nickle's text section against 31 in the
+  baseline (`winmm-ffxiv-20261013.dll`), but that offset is shared with unrelated structures and the two builds differ in
+  many other ways, so the difference was not attributed.
+* Nickle's default is `0` (unchanged), inferred from the clamp resetting to 0 and from the unchanged key.
+
+### What to verify in-game
+
+1. NR on, an HDR (linear FP16) FFXIV session: choose **Linear light + composed**. The picture should stay stable and
+   close to the other "composed" modes; compare against `Off (soft knee)`.
+2. Bright, saturated highlights (spell effects, sky): they may change hue (the model sees a clipped input). That is the
+   documented cost of the mode, not a bug; tell me if it looks worse than the other modes.
+3. Shadows: look for banding (the proxy is FP16 on a linear HDR surface, so none is expected).
+4. SDR / tone-mapped input: the setting must do nothing (passthrough).
+5. Save a preset with the mode selected, reload it; set `ReversibleMode=5` in the ini and confirm the menu shows it.

@@ -115,7 +115,8 @@ struct NrConfig
     // Sequential model layers between one encode and one final composition (clamped in the consumer).
     CustomOptional<uint32_t> passes { 1 };
     CustomOptional<bool> unlockPasses { false };
-    // RenoDX reversible proxy mode, 0 = soft-knee encode + our composition.
+    // RenoDX reversible proxy mode, 0 = soft-knee encode + our composition, 1/2 Neutwo composed/replace, 3/4 hybrid
+    // composed/replace, 5 linear light + composed (Nickle's mode: the normalised frame, clipped at white, no curve).
     CustomOptional<uint32_t> reversibleMode { 0 };
     // Off keeps the pass running but shows the clean upscaler frame.
     CustomOptional<bool> applyModel { true };
