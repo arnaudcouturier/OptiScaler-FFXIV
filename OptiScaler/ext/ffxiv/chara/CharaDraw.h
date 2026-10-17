@@ -60,5 +60,7 @@ struct DrawView
     bool haveViewport = false;
 
     PassState* pass = nullptr; // the render this draw belongs to (shared by the modules)
+    bool passStarted = false;  // this draw is the first accepted geometry draw of a new pass (view.pass->counter was just bumped)
+    bool finisherAccepted = false; // kind == Finisher and the finisher check passed (evaluated before the draw, see FinisherCheck)
 };
 } // namespace ext::ffxiv::chara

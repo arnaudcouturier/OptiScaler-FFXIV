@@ -6,10 +6,15 @@
 // Contract:
 //  * All functions run on the thread that issues draws on the immediate context, except GetCounters/StatusNote (menu).
 //  * Around is called for every draw of the immediate context while [FFXIV] PreviewDLSS is on and Active() is true, after
-//    the dispatcher classified it (view.kind) and before anything else ran. It returns true when it ran the draw (it called
+//    the dispatcher classified it (view.kind) and before anything else ran. Draws that are certainly not preview draws (no
+//    role on the pixel shader and neither render target nor depth texture in the table) are not offered; the rest are,
+//    also when view.kind is Ignore. It returns true when it ran the draw (it called
 //    `draw` exactly once); false makes the dispatcher call `draw` itself. It must never leave pipeline state changed.
-//  * The pass bookkeeping (view.pass) belongs to the dispatcher: the pass starts at the first accepted geometry draw and
-//    ends at a rejected finisher or at the end of the frame.
+//  * The pass bookkeeping (view.pass) belongs to the dispatcher: the pass starts at the first accepted geometry draw
+//    (view.passStarted is true for exactly that draw) and ends at a rejected finisher or at the end of the frame.
+//    For a finisher, view.finisherAccepted is the verdict of the finisher check, evaluated before the draw from the state
+//    the draw runs with; the dispatcher ends the pass itself when it is false, after Around returned.
+//  * A replay of a native draw by another module (the HDR mask replays) never reaches Around: the dispatcher skips it.
 //  * The event hooks below are called only while Active() is true. They run inside the game's own calls: keep them cheap.
 
 #include <d3d11.h>

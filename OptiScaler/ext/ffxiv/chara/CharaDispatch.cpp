@@ -327,12 +327,12 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     if (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer)
     {
         g_lastGeometry = now;
-        if (g_pass.OnGeometry(view.facts))
+        view.passStarted = g_pass.OnGeometry(view.facts);
+        if (view.passStarted)
             ++g_stats.passes;
     }
-    bool finisherAccepted = false;
     if (view.kind == DrawKind::Finisher)
-        finisherAccepted = EvaluateFinisher(context, view);
+        view.finisherAccepted = EvaluateFinisher(context, view);
     identify::Observe(view);
 
     // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native.
@@ -351,8 +351,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
     if (view.kind == DrawKind::Finisher)
     {
-        identify::OnFinisher(finisherAccepted);
-        if (!finisherAccepted)
+        identify::OnFinisher(view.finisherAccepted);
+        if (!view.finisherAccepted)
             g_pass.End();
     }
 }

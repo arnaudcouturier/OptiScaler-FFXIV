@@ -9,7 +9,7 @@ using namespace ext::ffxiv::chara;
 
 namespace
 {
-// The stage-6 UI shader set of ext/hdr/FfxivHdrPreview.h (decimal there), restated in hex from the specification.
+// The UI shader set of ext/hdr/FfxivHdrPreview.h (decimal there), restated in hex.
 constexpr uint32_t kUiCrcs[] = { 0xE00FBAFDu, 0x6CA9BB69u, 0x712EB335u, 0xB0D428D9u, 0xE66DAE4Eu, 0xE95DEEC4u, 0xF2F6BDE8u };
 
 // A pixel shader with just enough behaviour to carry private data.

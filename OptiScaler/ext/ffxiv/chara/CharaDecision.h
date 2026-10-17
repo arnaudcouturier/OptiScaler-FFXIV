@@ -46,7 +46,7 @@ struct DrawFacts
     bool psGeometry = false;
     bool psFinisher = false;
     bool psEquipDisplay = false;
-    bool psUi = false; // one of the UI shaders that can show a preview image (the stage 6 set)
+    bool psUi = false; // one of the UI shaders that can show a preview image (the set of ext/hdr/FfxivHdrPreview.h)
 
     // Targets
     bool rtv0Present = false;
