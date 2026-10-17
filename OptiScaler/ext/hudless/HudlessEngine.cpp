@@ -301,16 +301,15 @@ bool Engine::SceneHdrOwnsFrame()
     if (ext::hdr::screenshot::Pending())
         return true;
 
-    // Scene HDR (mode 1) keeps the frames it supplies a scene for. ISceneHdr has no side-effect free probe: Open() only
-    // counts a request (its 600-request log line sees this present twice) and hands out shared ownership that is dropped
-    // here. Only asked when scene HDR is requested at all. See the log: CONTRACT REQUEST for a probe.
+    // Scene HDR (mode 1) keeps the frames it supplies a scene for. WouldSupplyScene is the side-effect-free twin of the
+    // Open() the bridge makes for the same frame: it counts no request and caches nothing, so ui_free does not double the
+    // scene-HDR statistics. Only asked when scene HDR is requested at all.
     auto* scene = ext::game::Current().hdr;
     if (scene == nullptr || ext::Cfg().hdr.mode.value_or_default() != 1)
         return false;
 
     const Slot& slot = _slots[static_cast<size_t>(_stagedSlot)];
-    const hdr::SceneInput input = scene->Open(_device12, slot.width, slot.height, true);
-    return input.hdr != nullptr;
+    return scene->WouldSupplyScene(slot.width, slot.height);
 }
 
 // ---- ring ------------------------------------------------------------------------------------------------------------------

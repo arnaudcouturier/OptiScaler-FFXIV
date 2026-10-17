@@ -38,6 +38,7 @@ class FfxivProvider final : public game::ISceneHdr
     {
         return FfxivSceneHdr::Open(device, width, height, presentation);
     }
+    bool WouldSupplyScene(UINT width, UINT height) override { return FfxivSceneHdr::WouldSupply(width, height); }
     void PublishReconstructed(SceneInput&& image) override { FfxivSceneHdr::PublishReconstructed(std::move(image)); }
     void EndFrame() override { FfxivSceneHdr::EndFrame(); }
 };

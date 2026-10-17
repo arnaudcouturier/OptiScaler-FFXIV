@@ -211,6 +211,27 @@ inline SceneInput Open(ID3D12Device* d,UINT width,UINT height,bool presentation=
     result.retire=[p](std::function<bool()> done){auto& s=State();std::lock_guard lock(s.mutex);p->dx12Recorded=true;p->done=std::move(done);p->reserved=false;};
     report(0);return presentation?FfxivHdrPreview::Attach(std::move(result),d,width,height):result;
 }
+// Side-effect-free twin of Open(d, width, height, presentation = true): true exactly when Open would return a scene. Same
+// conditions in the same order, but it touches no counter and no log line (no report()), reserves nothing, caches no
+// import and attaches no preview. The device clauses of Open cannot be evaluated without a device and are presumed to hold
+// (ISceneHdr::WouldSupplyScene): the owner of the reconstructed image, and the device a capture was imported on. A capture
+// that was not imported yet is importable when both shared images are NT-handle shareable, the precondition of Open's
+// CreateSharedHandle / OpenSharedHandle; a failure inside the driver is not predictable without importing.
+inline bool WouldSupply(UINT width,UINT height) {
+    if(!Requested() || !width || !height)return false;
+    auto& s=State();std::lock_guard lock(s.mutex);
+    if(s.reconstructed.hdr && s.reconstructed.hdr->GetDesc().Width==width && s.reconstructed.hdr->GetDesc().Height==height)return true;
+    auto p=s.latest;
+    if(!p)return false;
+    if(std::abs(double(p->viewport.Width)/p->viewport.Height-double(width)/height)>.01)return false;
+    if(p->openedDevice.Get())return true; // already imported: Open reuses the opened images
+    auto shareable=[](ID3D11Texture2D* t){
+        if(!t)return false;
+        D3D11_TEXTURE2D_DESC td{};t->GetDesc(&td);
+        ComPtr<IDXGIResource1> shared;
+        return (td.MiscFlags&D3D11_RESOURCE_MISC_SHARED_NTHANDLE) && SUCCEEDED(t->QueryInterface(IID_PPV_ARGS(&shared)));};
+    return shareable(p->hdr.Get()) && shareable(p->reference.Get());
+}
 // DX11 retains resources referenced by its queued commands. DX12 consumers additionally
 // own the slot and install a completion-plus-recording-retirement probe BEFORE recording.
 inline void CollectLocked(Data& s,bool keepWarm,ULONGLONG now) {

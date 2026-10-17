@@ -94,6 +94,14 @@ struct ISceneHdr
     // path converts (a reconstructed display image published this frame wins). Empty when scene HDR is not requested
     // or no scene matches (was FfxivSceneHdr::Open).
     virtual hdr::SceneInput Open(ID3D12Device* device, UINT width, UINT height, bool presentation) = 0;
+    // Side-effect-free twin of Open(.., presentation = true) for a caller that only needs to know whether the scene would
+    // own this frame (the HUD-less engine asks before the bridge's own Open): true exactly when Open(device, width,
+    // height, true) would currently return a scene. Touches no request/fallback counter, log line, reservation or cached
+    // import, so it never changes what Open reports later. It has no device argument: the clauses that compare against
+    // Open's device (the owner of a published reconstructed image, the device a capture was imported on) are presumed to
+    // hold (a bridge has one D3D12 device), and a capture that was not imported yet counts as importable when its shared
+    // images are shareable (an import that fails inside the driver cannot be predicted without doing it).
+    virtual bool WouldSupplyScene(UINT width, UINT height) = 0;
     // The reconstructed display image of this frame (was FfxivSceneHdr::PublishReconstructed).
     virtual void PublishReconstructed(hdr::SceneInput&& image) = 0;
     // End of the bridge's Present: forgets the frame's captures (was FfxivSceneHdr::EndFrame).
