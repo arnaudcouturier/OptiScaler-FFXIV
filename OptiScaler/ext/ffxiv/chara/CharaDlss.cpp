@@ -2,6 +2,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaCamera.h"
+#include "ext/ffxiv/chara/CharaDiag.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDlssGate.h"
@@ -26,6 +27,7 @@
 
 #include <array>
 #include <cstdio>
+#include <format>
 #include <atomic>
 #include <mutex>
 #include <string_view>
@@ -525,6 +527,27 @@ void RunSlot(int index, const DrawView& view)
     if (n % kEvaluationLogEvery == 1)
         LOG_INFO("CharaView DLSS: evaluations {} (slot {}, {}x{} -> {}x{})", n, index, w, h, w * ngx::kOutputScale,
                  h * ngx::kOutputScale);
+
+    if (diag::CaptureEnabled())
+    {
+        diag::Request request;
+        request.native = view.rtvTexture;
+        request.input = g.color.texture.Get();
+        request.dlss = g.output.texture.Get();
+        request.composed = g.composed.texture.Get();
+        request.depth = g.depth.texture.Get();
+        request.motion = g.motion.texture.Get();
+        request.camera = camera::Buffer();
+        request.width = w;
+        request.height = h;
+        request.jitterX = g_pass.jitter.x;
+        request.jitterY = g_pass.jitter.y;
+        diag::Capture(context, request, n, view.now);
+    }
+    if (diag::TraceEnabled())
+        diag::Trace(diag::TraceCategory::Guides, view.now,
+                    std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} reversedZ {} pass {}", index, w, h, g_pass.jitter.x,
+                                g_pass.jitter.y, in.reset, g_reversedZ, g_pass.counter));
 }
 
 void Finish(const DrawView& view)
@@ -553,6 +576,10 @@ void Finish(const DrawView& view)
     f.guides.cameraCaptured = g_pass.cameraCaptured;
 
     const FinishVerdict verdict = DecideFinish(f);
+    if (diag::TraceEnabled() && verdict != FinishVerdict::Proceed)
+        diag::Trace(diag::TraceCategory::Finish, view.now,
+                    std::format("finish verdict {} for pass {}x{} (slot {}, replayed {}, camera {})", static_cast<int>(verdict),
+                                g_pass.width, g_pass.height, index, g_pass.replayed, g_pass.cameraCaptured));
     switch (verdict)
     {
     case FinishVerdict::NoSlot: return;
@@ -656,6 +683,8 @@ bool Consume(const DrawView& view, DrawCall draw)
     bool handled = false;
     if (any)
     {
+        if (diag::TraceEnabled())
+            diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
         context->PSSetShaderResources(0, kSrvSlots, replaced);
         draw();
         context->PSSetShaderResources(0, kSrvSlots, original);
@@ -674,6 +703,21 @@ void Cleanup(uint64_t now, bool disabled)
 {
     if (g_context == nullptr)
         return;
+    diag::Pump(g_context, now);
+    if (diag::TraceEnabled())
+    {
+        static uint64_t lastSummary = 0;
+        if (now >= lastSummary + 2000)
+        {
+            lastSummary = now;
+            diag::Trace(diag::TraceCategory::Replay, now,
+                        std::format("replays {}, skipped: open query {}, UAV {}, stream-out {}, unknown shader {}, no target {}, own draw {}",
+                                    motion::ReplayCount(), motion::SkipCount(motion::Skip::OpenQuery),
+                                    motion::SkipCount(motion::Skip::UnorderedAccess), motion::SkipCount(motion::Skip::StreamOut),
+                                    motion::SkipCount(motion::Skip::UnknownShader), motion::SkipCount(motion::Skip::NoTarget),
+                                    motion::SkipCount(motion::Skip::OwnDraw)));
+        }
+    }
     g_slots.Cleanup(
         now, disabled,
         [](int i) {
@@ -840,6 +884,7 @@ void Detach()
     g_passesTried = false;
     motion::Release();
     camera::Release();
+    diag::Release();
     g_depthSrv.Reset();
     g_depthTexture.Reset();
     g_pass = PassData {};
