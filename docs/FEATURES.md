@@ -54,7 +54,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 
 **Seams.** nr: `EvalBefore`, `EvalAfter`, `PreSrScope`, `NormalizeDlssPresets`, `WrapNvapi`, `NeedsDlssgRuntime`, `AppendNgxSearchPaths`. restrack: `OnCommandListReset`, `WantsCommandListReset`, `NoteUav`, `NoteResourceCreated`, `WantsResourceCreateHooks`, `OnDeviceHooked`, `ReleaseQueueHook`, `OnFeatureRelease`. dx11bridge: `OnNgxInit`, `OnNgxShutdownBegin`. menu: `MergeBoxes`, `PollShortcuts`, `HandleShortcuts`, `KeybindRows`, `DrawOverlays`, `WantsFrame`, `ShaderTimeRows`. gpu: `ResetCommands`, `ExecuteCommands`.
 
-**Config.** `[DlssNr]` (79 keys): `Enabled`, `ToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the FFXIV module.
+**Config.** `[DlssNr]` (80 keys): `Enabled`, `DisableOnFocusLoss` (experimental, off by default: pauses NR while the game window is not focused), `ToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the FFXIV module.
 
 **Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off shortcut in the Keybinds list.
 
