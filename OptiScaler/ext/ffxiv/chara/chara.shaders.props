@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shaders of the character preview feature (CharaView). Headers are generated into $(IntDir)ext_gen\ (never committed).
+  chara_fxaa.hlsl holds two entry points compiled separately: VS (vs_5_0) and PS (ps_5_0).
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_fxaa.hlsl">
+      <Variable>Chara_Fxaa_VS_cso</Variable>
+      <Header>Chara_Fxaa_VS.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_fxaa.hlsl">
+      <Variable>Chara_Fxaa_PS_cso</Variable>
+      <Header>Chara_Fxaa_PS.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>
