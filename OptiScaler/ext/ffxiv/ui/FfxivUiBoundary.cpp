@@ -9,13 +9,19 @@
 #include "ext/ffxiv/ui/UiDiag.h"
 #include "ext/ffxiv/ui/UiSnapshot.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
+#include "ext/ffxiv/ui/UiLive.h"
 #include "ext/hudless/HudlessSource.h"
+#include "ext/hudless/HudlessState.h"
 #include "ext/reshade/ReShadeAddon.h"
+#include "ext/reshade/ReShadeBoundary.h"
 
 #include <State.h>
 
-// S10 package A (docs/HUDLESS.md section 10): wiring of the boundary detector core to the game. D1 is observation only:
-// Take() never delivers a frame, no draw, copy or Present is changed.
+#include <atomic>
+
+// S10 package A (docs/HUDLESS.md section 10): wiring of the boundary detector core to the game. With Diagnostics alone (D1) it is
+// observation only. With [HudLess] Mode on (Wanted) the live source (UiLive.h, package E) applies the ReShade presets in place at the R1
+// boundary and delivers the UI-free frame through Take().
 namespace ext::ffxiv::ui
 {
 namespace
@@ -89,37 +95,121 @@ ContextTable& Others()
     return *table;
 }
 
+// ---- S10 E: the live source (docs/HUDLESS.md section 16 and S10-E-LOG.md) -------------------------------------------------------
+// The lighting hook's un-hooked CopyResource trampoline, read at call time (it is assigned when the hooks are installed); our
+// snapshot copy must not reach OnCopy (FfxivLightingScan::ColorCopy / the scene-HDR alias state would take it for a game copy).
+void STDMETHODCALLTYPE SnapshotCopy(ID3D11DeviceContext* c, ID3D11Resource* dest, ID3D11Resource* source)
+{
+    if (auto* fn = ext::ffxiv::lighting::FfxivLightingCapture::copy)
+        fn(c, dest, source);
+    else
+        c->CopyResource(dest, source);
+}
+
+std::string EffectsDetail() { return ext::reshade::Stats().lastDetail; }
+
+std::atomic<live::LiveSource*> g_live { nullptr };
+
+live::LiveSource& Live()
+{
+    static live::LiveSource* source = []
+    {
+        live::Env env;
+        env.effects = &ext::reshade::ApplyPresetsInPlace; // returns NotEnabled by itself with [HudLess] ReShadePresets = off
+        env.copy = &SnapshotCopy;
+        env.effectsDetail = &EffectsDetail;
+        auto* s = new live::LiveSource(env); // never destroyed
+        g_live.store(s, std::memory_order_release);
+        return s;
+    }();
+    return *source;
+}
+
+void LogLines(const std::string& lines)
+{
+    size_t start = 0;
+    while (start < lines.size())
+    {
+        size_t end = lines.find('\n', start);
+        if (end == std::string::npos)
+            end = lines.size();
+        LOG_INFO("{}", lines.substr(start, end - start));
+        start = end + 1;
+    }
+}
+
 class UiBoundaryProvider final : public ext::hudless::IHudlessSource
 {
   public:
     bool Active() override { return Armed(); }
 
-    // D1 does not deliver frames (docs/HUDLESS.md section 12): armed means "observing".
+    // Armed by [HudLess] Mode (Wanted): the live source delivers the UI-free frame. Armed by Diagnostics alone (D1) it only
+    // observes: no frame is delivered and nothing is applied, copied or changed.
     ext::hudless::TakeResult Take(ext::hudless::FrameImage& out) override
     {
         out = {};
-        return Armed() ? ext::hudless::TakeResult::NotThisFrame : ext::hudless::TakeResult::NoSource;
+        if (!Armed())
+            return ext::hudless::TakeResult::NoSource;
+        if (!ext::hudless::Wanted())
+            return ext::hudless::TakeResult::NotThisFrame;
+        try
+        {
+            return Live().Take(out);
+        }
+        catch (...)
+        {
+            out = {};
+            return ext::hudless::TakeResult::NotThisFrame;
+        }
     }
 
     const char* LastReason() override
     {
-        return Armed() ? "diagnostic build: boundary observed, no frame delivered" : "boundary detector not armed";
+        if (!Armed())
+            return "boundary detector not armed";
+        if (!ext::hudless::Wanted())
+            return "diagnostic build: boundary observed, no frame delivered";
+        try
+        {
+            return Live().LastReason();
+        }
+        catch (...)
+        {
+            return "boundary detector failed";
+        }
     }
 
     // Bridge Present exit: closes the frame (EndFrame runs at every Present, armed or not).
     void EndFrame() override
     {
         if (!Armed())
+        {
+            ReleaseLive();
             return;
+        }
         try
         {
             FrameOutcome outcome = C().CompleteFrame();
             if (DiagnosticsOn())
                 diag::OnFrameComplete(C(), std::move(outcome), Others().Get());
+            if (ext::hudless::Wanted())
+            {
+                LogLines(Live().EndFrame()); // summary and state lines are written here, never from the draw path
+                ext::reshade::FrameEnded();
+            }
+            else
+                ReleaseLive();
         }
         catch (...)
         {
         }
+    }
+
+  private:
+    static void ReleaseLive()
+    {
+        if (auto* s = g_live.load(std::memory_order_acquire))
+            s->Release();
     }
 };
 
@@ -144,12 +234,32 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
         Core& core = C();
         const int64_t start = Qpc();
         const Core::DrawResult res = core.OnDraw(context);
+        const bool live = ext::hudless::Wanted();
         // S10 D0: the ReShade feasibility probe runs at the earliest candidate boundary (R3 moved), before that draw runs.
-        // One atomic load and a failed compare unless the user armed it from its menu card.
-        if (res.moved)
+        // One atomic load and a failed compare unless the user armed it from its menu card. Not while the live path is on: it
+        // calls render_effects itself and a second call in the same frame would apply the effects twice.
+        if (res.moved && !live)
             ext::reshade::ProbeAtBoundary(context);
         if (res.change != 0 && snapshot::Armed())
-            snapshot::OnCandidate(context, core, res); // before the candidate draw runs
+            snapshot::OnCandidate(context, core, res); // before the candidate draw runs (and before the live effects: D1 shows the raw boundary)
+
+        if (live && res.counted && (res.change & 1) != 0)
+        {
+            // S10 E: R1 only (R2/R3 are never acted on). R1 set by this draw = capture opportunity; R1 dropped by this draw = a later
+            // scene/post stage superseded it.
+            live::DrawEvent ev;
+            ev.r1Set = res.cand.r1 != 0 && res.cand.r1 == res.ordinal;
+            ev.r1Cleared = res.cand.r1 == 0;
+            ev.sawSceneStage = core.Tracker().Summary().sawSceneStage;
+            ev.bbWidth = core.BackbufferShape().width;
+            ev.bbHeight = core.BackbufferShape().height;
+            ev.frame = core.Frame();
+            if (ev.r1Set || ev.r1Cleared)
+            {
+                ext::core::BypassScope bypass; // ReShade's own draws and copies must not look like game draws to other hooks
+                Live().OnDraw(context, ev);
+            }
+        }
         core.AddHookTicks(Qpc() - start);
     }
     catch (...)
