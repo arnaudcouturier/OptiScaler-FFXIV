@@ -98,6 +98,17 @@ struct IBackend
     virtual CallOutcome RenderEffects(void* context, uint64_t runtime, const BoundaryInfo& boundary) = 0;
     virtual bool GetEffectsState(uint64_t runtime, bool& enabled) = 0;
     virtual bool SetEffectsState(uint64_t runtime, bool enabled) = 0;
+
+    // ---- S10 package E (live boundary, ReShadeBoundaryCore.h). Non-pure with inert defaults so the probe's fakes stay valid.
+    // Number of techniques of the runtime and how many are enabled (names are not read: cheap). False = unknown.
+    virtual bool CountTechniques(uint64_t runtime, uint32_t& total, uint32_t& enabled)
+    {
+        (void)runtime, (void)total, (void)enabled;
+        return false;
+    }
+    // Drops every reference Inspect() kept (render target views, the target resource). A reference held across Present makes
+    // the game's ResizeBuffers fail, so the live path calls this on every exit.
+    virtual void EndBoundary() {}
 };
 
 // True on the thread that is inside the probe's own render_effects call: the begin/finish events it fires belong to the

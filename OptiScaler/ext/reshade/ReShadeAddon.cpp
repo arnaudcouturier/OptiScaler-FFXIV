@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "Util.h"
 #include "ext/reshade/ReShadeAddon.h"
+#include "ext/reshade/ReShadeBoundary.h"
 #include "ext/reshade/ReShadeEvents.h"
 
 #include <atomic>
@@ -62,6 +63,8 @@ bool ProbeEnabled()
     return ext::Cfg().reshade.probe.value_or_default() || ext::Cfg().ui.diagnostics.value_or_default();
 }
 
+bool Registered() { return G().registered.load(std::memory_order_acquire); }
+
 AddonStatus Status()
 {
     auto& g = G();
@@ -114,6 +117,23 @@ void OnReshadeLoaded(HMODULE reshadeModule)
     if (result.status == RegisterStatus::Ok)
     {
         LOG_INFO("ReShade built-in add-on: registered (API {})", kApiVersion);
+
+        // S10 E: the runtime tracking the UI boundary needs to apply the presets in place (skipped with ReShadePresets = off).
+        try
+        {
+            const PresetsMode presets = ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default());
+            if (presets == PresetsMode::Off)
+                LOG_INFO("ReShade built-in add-on: [HudLess] ReShadePresets = off, no presets are applied at the UI boundary");
+            else if (InstallBoundaryTracking())
+                LOG_INFO("ReShade built-in add-on: tracking effect runtimes for the UI boundary (ReShadePresets = {})",
+                         PresetsModeName(presets));
+            else
+                LOG_WARN("ReShade built-in add-on: the runtime tracking for the UI boundary could not be installed");
+        }
+        catch (...)
+        {
+            LOG_WARN("ReShade built-in add-on: the runtime tracking for the UI boundary threw during setup");
+        }
 
         // Diagnostics only: subscribe to the runtime events; the report folder is created on its first line.
         if (ProbeEnabled())

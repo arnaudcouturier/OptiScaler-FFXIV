@@ -2,6 +2,8 @@
 
 #include <Config.h>
 
+#include <string>
+
 namespace ext
 {
 namespace config
@@ -18,6 +20,10 @@ class Binder;
 struct ReShadeConfig
 {
     CustomOptional<bool> probe { false };
+
+    // [HudLess] ReShadePresets (S10 package E): auto | on | off, see ext/reshade/ReShadeBoundary.h (PresetsMode). A string key; the
+    // default text is "auto", which is also what the ini value "auto" (= unset) reads as. Anything unknown counts as auto.
+    CustomOptional<std::string> presets { "auto" };
 
     void Bind(config::Binder& b);
 };

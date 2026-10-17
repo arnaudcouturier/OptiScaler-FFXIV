@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/reshade/ReShadeAddon.h"
+#include "ext/reshade/ReShadeBoundaryCore.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/reshade/ReShadeD3D11.h"
 #include "ext/reshade/ReShadeEvents.h"
@@ -584,6 +585,38 @@ class LiveBackend final : public probe::IBackend
         }
     }
 
+    // ---- S10 package E (live boundary)
+    bool CountTechniques(uint64_t runtime, uint32_t& total, uint32_t& enabled) override
+    {
+        total = enabled = 0;
+        try
+        {
+            auto* rt = reinterpret_cast<effect_runtime*>(runtime);
+            uint32_t t = 0, e = 0;
+            rt->enumerate_techniques(nullptr,
+                                     [&](effect_runtime* r, effect_technique technique)
+                                     {
+                                         ++t;
+                                         if (r->get_technique_state(technique))
+                                             ++e;
+                                     });
+            total = t;
+            enabled = e;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    void EndBoundary() override
+    {
+        _rtv.Reset();
+        _rtvSrgb.Reset();
+        _target.Reset();
+    }
+
   private:
     ComPtr<ID3D11RenderTargetView> _rtv;
     ComPtr<ID3D11RenderTargetView> _rtvSrgb;
@@ -664,7 +697,63 @@ void OnQueuePresent(command_queue* queue, swapchain*, const rect*, const rect*, 
     (void)queue;
 #endif
 }
+
+// ---- S10 package E: runtime tracking for the live boundary (no probe, no report) -------------------------------------------------
+bool BoundaryLive() { return !State::Instance().isShuttingDown; }
+
+void BoundaryInit(effect_runtime* runtime) noexcept
+{
+    if (BoundaryLive())
+        boundary::Instance().OnInitRuntime(Id(runtime));
+}
+void BoundaryDestroy(effect_runtime* runtime) noexcept
+{
+    if (BoundaryLive())
+        boundary::Instance().OnDestroyRuntime(Id(runtime));
+}
+void BoundaryReloaded(effect_runtime* runtime) noexcept
+{
+    if (BoundaryLive())
+        boundary::Instance().OnReloadedEffects(Id(runtime));
+}
+void BoundaryPresetPath(effect_runtime*, const char*) noexcept
+{
+    if (BoundaryLive())
+        boundary::Instance().OnTechniquesChanged();
+}
+// Fires BEFORE the change and returns true to veto it: this one never vetoes, it only marks the technique count dirty.
+bool BoundaryTechniqueState(effect_runtime*, effect_technique, bool) noexcept
+{
+    if (BoundaryLive())
+        boundary::Instance().OnTechniquesChanged();
+    return false;
+}
+
+std::atomic<bool> g_boundaryInstalled { false };
 } // namespace
+
+probe::IBackend* NewLiveBackend() { return new LiveBackend; }
+
+bool InstallBoundaryTracking()
+{
+    if (g_boundaryInstalled.exchange(true))
+        return true;
+    try
+    {
+        boundary::Instance(); // construct now (DllMain), not at the first draw
+        using ::reshade::addon_event;
+        ::reshade::register_event<addon_event::init_effect_runtime>(&BoundaryInit);
+        ::reshade::register_event<addon_event::destroy_effect_runtime>(&BoundaryDestroy);
+        ::reshade::register_event<addon_event::reshade_reloaded_effects>(&BoundaryReloaded);
+        ::reshade::register_event<addon_event::reshade_set_current_preset_path>(&BoundaryPresetPath);
+        ::reshade::register_event<addon_event::reshade_set_technique_state>(&BoundaryTechniqueState);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
 
 probe::Session* ProbeSession() { return g_session; }
 

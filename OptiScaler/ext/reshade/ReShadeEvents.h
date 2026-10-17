@@ -20,6 +20,13 @@ bool InstallProbe(const std::filesystem::path& baseFolder, const std::string& re
 // that opening it leaves a report that says so. Not for DllMain.
 void EnsureReportStarted();
 
+// S10 package E: subscribes the lightweight runtime tracking the live boundary needs (init/destroy/reloaded/preset path/technique
+// state), independent of the probe. ReShade must already have accepted the registration. Idempotent; false = failed.
+bool InstallBoundaryTracking();
+
+// A new live backend (own Inspect() state, separate from the probe's) for the live boundary. Heap-allocated, never destroyed.
+probe::IBackend* NewLiveBackend();
+
 // nullptr until InstallProbe succeeded. Heap-allocated, never destroyed.
 probe::Session* ProbeSession();
 probe::FileReport* ProbeReport();

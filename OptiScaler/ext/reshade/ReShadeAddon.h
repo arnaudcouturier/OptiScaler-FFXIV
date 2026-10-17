@@ -22,6 +22,9 @@ struct AddonStatus
 // Cheap, any thread.
 AddonStatus Status();
 
+// Registration accepted by ReShade (one atomic load; Status() also reads the config). Any thread.
+bool Registered();
+
 // Entry point of the invasive probe: package A's boundary detector calls this at its candidate boundary (immediate
 // context, before the boundary draw). One atomic load and a failed compare when the probe is not armed from the menu
 // card; never throws, never lets an access violation out. Safe to call unconditionally.
