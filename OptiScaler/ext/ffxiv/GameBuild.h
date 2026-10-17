@@ -116,12 +116,44 @@ struct CompanionBuild
     std::uint32_t layoutSlotEntrySize = 8;
 };
 
+// The character preview renderer's render-target table (ext/ffxiv/chara). The table is reached through a tiny accessor
+// function of the executable; the code pattern below finds it without an RVA, and the RVAs are the values of the
+// current build, kept as documentation and as a cross-check of the scan (docs/RECONSTRUCTION-NICKLE.md, CharaView).
+//
+// Accessor: mov rax,[rip+disp32] ; mov ecx,edx ; mov rax,[rax+rcx*8+0x2c8] ; ret
+// The four displacement bytes are not compared (mask 0). Exactly one hit in .text is required.
+struct CharaViewBuild
+{
+    std::array<std::uint8_t, 18> pattern {
+        0x48, 0x8b, 0x05, 0x00, 0x00, 0x00, 0x00, 0x8b, 0xca, 0x48, 0x8b, 0x84, 0xc8, 0xc8, 0x02, 0x00, 0x00, 0xc3
+    };
+    std::array<std::uint8_t, 18> patternMask { 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    std::uint32_t ripInstructionLength = 7; // the load is 7 bytes: global = match + 7 + disp32
+
+    std::uint32_t accessorRva = 0x26ab40;        // the accessor function (the pattern's single hit)
+    std::uint32_t managerPointerRva = 0x28f9490; // global holding the preview renderer's manager object
+
+    std::uint32_t managerBytes = 0x400;       // bytes of the manager that are read
+    std::uint32_t targetsOffset = 0x2c8;      // entries 0..12, 8 bytes each
+    std::uint32_t transparentOffset = 0x378;  // entries 13..17
+    std::uint32_t depthOffset0 = 0x360;       // entry 18
+    std::uint32_t depthOffset1 = 0x368;       // entry 19
+    std::uint32_t entryCount = 20;
+    std::uint32_t entryBytes = 0x70;          // bytes of each entry object that are read
+    std::uint32_t entryResourceOffset = 0x68; // native texture pointer
+    std::uint32_t entryWidthOffset = 0x40;    // u32
+    std::uint32_t entryHeightOffset = 0x44;   // u32
+    std::uint32_t maxExtent = 0x4000;         // entries with a width or height of 0 or above this are ignored
+    std::uint32_t maxTextBytes = 128u << 20;  // the .text scan is refused above this size
+};
+
 struct GameBuild
 {
     std::uint32_t timeDateStamp = 0x6ac3dc96;
     std::uint32_t sizeOfImage = 0x380a000;
     NativeQualityBuild nativeQuality {};
     CompanionBuild companion {};
+    CharaViewBuild charaView {};
 };
 
 inline constexpr GameBuild kCurrentBuild {};

@@ -155,6 +155,7 @@ void FfxivConfig::Bind(config::Binder& b)
 {
     b.Add("Companion", "HudReplacement", companionHudReplacement);
     b.Add("Companion", "HudInterpolation", companionHudInterpolation);
+    chara.Bind(b);
 }
 
 namespace ffxiv::ui
