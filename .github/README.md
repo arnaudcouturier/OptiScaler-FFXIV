@@ -11,7 +11,7 @@ An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler)
 | Feature | Status |
 |---|---|
 | DLSS Neural Rendering with pre-SR multipass | tested (RTX 4090) |
-| DLSS-G MFG unlock, RTX 40 | tested (RTX 4090) |
+| DLSS-G MFG unlock, RTX 40 | tested (RTX 4090) at 2x to 4x; 5x and 6x are experimental (one GPU hang seen at 6x) |
 | OptiHDR (HDR10 output) | tested (RTX 4090) |
 | RenoDX scene HDR | tested (RTX 4090) |
 | FFXIV native integration (render geometry, native quality, nameplates, companion) | tested (RTX 4090) |
