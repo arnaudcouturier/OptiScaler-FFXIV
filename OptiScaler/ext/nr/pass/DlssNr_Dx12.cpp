@@ -8,6 +8,7 @@
 #include "ext/nr/DlssNr.h"
 #include "ext/gpu/GpuLifetime.h"
 #include "ext/nr/amd/AmdBridge.h"
+#include "ext/nr/NrFocus.h"
 #include "ext/nr/NrHooks.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/gpu/Gpu.h"
@@ -1321,6 +1322,8 @@ void RecordBuiltPrimaryTuning(const ext::NrConfig& nr)
 // cost is a CPU-side lock on a path that already records command lists.
 std::recursive_mutex g_nrMutex;
 std::atomic_bool g_bridgeSuspended {false};
+// DisableOnFocusLoss: the pass is paused because the game window lost focus (read by the menu thread as well).
+std::atomic_bool g_focusPaused {false};
 
 // Runs the pass inside the same state envelope every other OptiScaler compute pass runs in.
 //
@@ -3166,6 +3169,7 @@ void ResumeAfterBridgeInit()
     LOG_INFO("DLSS-NR bridge shutdown: resumed after NGX initialization");
 }
 std::string DeferredDlssStatus() { return SynchronousDeferredDlssStatus(); }
+bool PausedByFocus() { return g_focusPaused.load(); }
 
 void RetryAfterFailure()
 {
@@ -3188,9 +3192,38 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const ext::NrConfig& nr = ext::Cfg().nr;
-    if(const auto collect=ext::nr::SceneHdr().collect)collect(nr.enabled.value_or_default() && SceneNrRequested());
+
+    // DisableOnFocusLoss: the same bypass as switching NR off, but without touching the user's setting. The gate
+    // is decided once per frame, on the before-upscale call, and the after-upscale call of that frame reuses it, so
+    // one frame never starts a deferred generation and then cancels it.
+    if (beforeUpscale)
+    {
+        const bool switchOn = nr.enabled.value_or_default() && nr.disableOnFocusLoss.value_or_default();
+        const bool paused = !ext::nr::FocusAllowsNr(switchOn);
+        if (paused != g_focusPaused.exchange(paused) && nr.enabled.value_or_default())
+        {
+            if (paused)
+            {
+                LOG_INFO("NR paused: window not focused");
+                g_lastGpuTime.reset();
+                g_lastNgxTime.reset();
+            }
+            else
+            {
+                LOG_INFO("NR resumed");
+                // The images the pass remembers belong to the moment focus was lost: start every pass from
+                // scratch, like a bridge re-initialisation does.
+                g_nr.reset = true;
+                for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
+                DeferredSr::Cancel();
+            }
+        }
+    }
+    const bool enabled = nr.enabled.value_or_default() && !g_focusPaused.load();
+
+    if(const auto collect=ext::nr::SceneHdr().collect)collect(enabled && SceneNrRequested());
     if(const auto update=ext::nr::SceneHdr().updateState)
-        update(nr.enabled.value_or_default(), nr.runBeforeSr.value_or_default() || nr.deferredDlss.value_or_default());
+        update(enabled, nr.runBeforeSr.value_or_default() || nr.deferredDlss.value_or_default());
     static unsigned lastPrecision=0;
     const unsigned precision=nr.precision.value_or_default();
     if(lastPrecision!=precision)
@@ -3199,7 +3232,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         DeferredSr::Cancel();
         lastPrecision = precision;
     }
-    if (nr.enabled.value_or_default() && cmdList && params)
+    if (enabled && cmdList && params)
     {
         Microsoft::WRL::ComPtr<ID3D12Device> device;
         if (SUCCEEDED(cmdList->GetDevice(IID_PPV_ARGS(&device))))
@@ -3219,7 +3252,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         }
     }
     DlssNrNative::SetPrecision(precision);
-    if (!nr.enabled.value_or_default() || !nr.deferredDlss.value_or_default() || rayReconstruction)
+    if (!enabled || !nr.deferredDlss.value_or_default() || rayReconstruction)
         DeferredSr::Cancel();
     else
     {
@@ -3236,7 +3269,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
 
-    if (!nr.enabled.value_or_default())
+    if (!enabled)
     {
         // Features remain allocated across the toggle, but their last image may
         // now belong to another camera/scene. Restart only when they run again.
@@ -3245,7 +3278,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             g_nr.reset = true;
             for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
         }
-        ReportSkipOnce("it is switched off");
+        ReportSkipOnce(g_focusPaused.load() ? "the game window is not focused" : "it is switched off");
         return;
     }
 

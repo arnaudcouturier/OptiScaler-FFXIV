@@ -115,6 +115,8 @@ std::string SpatialStatus();
 void CurrentModelSize(unsigned int& width, unsigned int& height);
 // Private residual-upscaler status; separate from the NR model's own running status/time.
 std::string DeferredDlssStatus();
+// True while DisableOnFocusLoss has the pass paused because the game window is not focused or is minimised.
+bool PausedByFocus();
 
 // Why it is not, if it is not. Empty while it is running or has not been tried yet.
 const char* FailureReason();

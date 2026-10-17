@@ -53,7 +53,7 @@
 // arguments the present path already has, and the provider works out the
 // presentation time itself. A wall clock does the same job when the scheduler
 // cannot be reached; waiting on the provider's D3D12 fence as well was tried and
-// then removed, see 08-PACING.md §7.7 for the measurements that killed it.
+// then removed (the reason is in the fence note further down).
 
 #include <intrin.h>
 #include <atomic>
@@ -104,8 +104,8 @@ constexpr uint32_t BurstLimiterField = 0x28;
 // and **removed again**: `WaitForSingleObject` rounds a short timeout up to
 // the system timer tick, so every wait that expired overshot by ~7 ms, over
 // half of them expired, and the measured gap between generated frames ended
-// up 30-40% above the target the pacing was aiming for. The full numbers and
-// the reasoning are in 08-PACING.md §4.6 and §7.7.
+// up 30-40% above the target the pacing was aiming for (measured on the gap
+// between generated frames).
 //
 // The wall clock is now only the fallback, used when the scheduler below
 // cannot be reached. Its real frame period is measured across two frames
@@ -450,8 +450,8 @@ inline void ReportStats(int64_t multiplier)
     // present thread, so that throw unwinds straight out of the hook and the
     // pacing stops for the rest of the session - with nothing in the log to
     // say so, because the line that would have said it is the one throwing.
-    // Count the placeholders before touching this. check_reportstats_args.py
-    // in _analysis does it, and prints the pairing as compiled.
+    // Count the placeholders against the arguments, one by one, before touching
+    // this: each `{:.2f}` must land on a floating point value, never on a counter.
     LOG_INFO("XeFG pacing: {}X, real frame {:.2f} ms ({:.1f} fps), target {:.2f} ms/frame; "
              "gap {:.2f} avg / {:.2f} min / {:.2f} max ms over {} frames; "
              "scheduler {} calls, {} refused, {:.2f} ms avg inside; "

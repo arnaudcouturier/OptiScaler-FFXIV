@@ -66,7 +66,8 @@ void DrawFgUnlocks(ext::menu::Ctx& ctx)
     ext::menu::Tooltip("Ada unlock with targeted temporal correction (dashdogy / Dreamt / mavismmg). Save Settings and restart to enable or remove it."
                        "\nRequires a supported DLSSG runtime and Streamline 2.7.1+ for multiplier overrides."
                        "\nDo not combine with another MFG unlocker. Does not add FG to an unsupported game."
-                       "\nNot validated on RTX 40 hardware here; RTX 20/30/50 are left unchanged.");
+                       "\nVerified on an RTX 4090 at 2x to 4x. 5x and 6x are experimental; one GPU hang was seen at 6x."
+                       "\nRTX 20/30/50 are left unchanged.");
     if (adaUnlock)
     {
         const auto status = MfgUnlock::LastStatus();
