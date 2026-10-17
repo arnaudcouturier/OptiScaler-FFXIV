@@ -19,6 +19,9 @@ so on purpose, so that Nickle's users can move between the two builds.
 | F2 | The edit to the NR compute shader for the "Linear light" proxy (reproduced to the byte: the compiled shader is identical to the one in Nickle's build) | `OptiScaler/ext/nr/shaders/dlssnr.hlsl` |
 | F3 | NR HDR mapping mode "Linear light + composed" (`ReversibleMode = 5`) | `OptiScaler/ext/nr/` (config, menu, presets), `OptiScaler/ext/ini/DlssNr.ini` |
 | F4 | HDR PNG option "Include OptiScaler menu" (`ScreenshotMenu`) | `OptiScaler/ext/hdr/screenshot/`, `OptiScaler/ext/ini/HDR.ini` |
+| F5 | CharaView: isolated treatment of the 3D character preview (configuration, shader recognition, the preview renderer's target table with its guards, the spatial anti-aliasing path with optional 2x upscaling, the hooks and menu card; the isolated DLSS pass follows) | `OptiScaler/ext/ffxiv/chara/`, `OptiScaler/ext/ini/FFXIV.ini`, `OptiScaler/ext/ini/HDR.ini` |
+
+F5 deserves a plain note: it is the largest of these features and the only one that reads a structure of the game executable. It was reconstructed from the binary's behaviour and the shader source it embeds (read and described in words, not copied), then written fresh; the executable is read through a pattern scan and checks of this fork's own, stricter than the original's. The configuration keys, section name and visible menu texts are reproduced on purpose so ini files and menus match between the two builds.
 
 What was observed and how sure the reconstruction is: `docs/RECONSTRUCTION-NICKLE.md`.
 
