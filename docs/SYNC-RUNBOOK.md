@@ -63,20 +63,24 @@ git rebase --onto upstream/master $base HEAD
 
 Each time it stops:
 
-1. `git status` lists the conflicted files; `git diff --name-only --diff-filter=U`.
+1. `git status` lists the conflicted files; `git diff --name-only --diff-filter=U`. With `rerere.autoUpdate=true` a replayed resolution is staged for you (`Staged '<file>' using previous resolution`), so that command can print nothing even though files were conflicted: read the `Resolved` / `Staged` lines of the merge or rebase output instead, and check every replayed file.
 2. Resolve with the rules in section 5, `git add <file>`, `git rebase --continue`. `rerere` will say `Resolved ... using previous resolution` for a hunk it has seen.
 3. If the stopped commit is an `[UP]` commit and upstream has its own version of the same fix, `git rebase --skip` and write down which one (it goes into the commit message of the sync and into section (a) of the seam catalog). Expect the next commit that sits on top of the skipped one to conflict as well.
 4. If you lose track: `git rebase --abort` returns to the pre-rebase state. Aborted attempts leave unresolved entries behind in `.git/rr-cache` (a directory with a `preimage` and no `postimage`). They are harmless and `git rerere gc` prunes them after a while; if you want them gone now, delete exactly those directories and leave the ones that have a `postimage`.
 
-The merge alternative: `git switch -c sync-<sha8> main` then `git merge --no-ff upstream/master`, resolve, `git commit`.
+The merge alternative: `git switch -c sync-<sha8> main` then `git merge --no-ff upstream/master`, resolve, `git commit`. It was used for the first real sync (below): 6 conflicted files, one hunk each, no compile errors. It never rewrites published history, so no force-push is needed and the earlier tags stay ancestors.
+
+**Do not trust a replayed resolution blindly.** `rerere` replays whatever was recorded first, including a resolution that was later found wrong. For `OptiScaler/menu/menu_overlay_dx.cpp` the cached resolution dropped upstream's per-back-buffer menu fence; the correct result keeps upstream's fence next to the fork's submission ring (the menu blur writes a descriptor slot per back-buffer index, which the ring does not cover). After a merge or rebase has replayed it, compare that file against the last good result (`git show <known-good-commit>:OptiScaler/menu/menu_overlay_dx.cpp`) and fix it before committing. In general: review every replayed file against the catalog entry of its seam, and run `git rerere forget <file>` for a resolution you find wrong, so it is not replayed again.
 
 ## 4. Review
 
 ```powershell
 $new = 'upstream/master..HEAD'       # run on the sync branch
-git range-diff "$base..main" $new   # every fork commit should be '=' or have an explainable '!'
+git range-diff "$base..main" $new   # rebase only: every fork commit should be '=' or have an explainable '!'
 pwsh -File tools\footprint.ps1 -Rev HEAD   # same or smaller than before
 ```
+
+After a **merge**, `git range-diff` shows nothing useful (the commit ids are unchanged, so everything is `=`). Compare the per-file footprint listing before and after instead: the seam lines in upstream files must be identical to those on `main`.
 
 Then prove the seams are still in place:
 
@@ -140,7 +144,7 @@ pwsh -File tools\footprint.ps1                 # persistent surface, files touch
 pwsh -File tools\package.ps1 -Target <package folder>
 ```
 
-Expected: the build prints `[build] OK`. `tools\test.ps1` builds and runs every recipe under `tests\ext` and ends with `passed N, failed 0, manual M`. At `c3277532` the recipe list has 89 automatic tests (56 cpu, 33 warp; the warp tests use the Direct3D software adapter and need no GPU) and 7 manual ones, which are listed and never run; N should be 89 unless the sync added or removed recipes. These are list counts, not results of a run: treat `0 failed` as the criterion and the count as a sanity check, and write the real numbers into the sync commit message.
+Expected: the build prints `[build] OK`. `tools\test.ps1` builds and runs every recipe under `tests\ext` and ends with `passed N, failed 0, manual M`. The warp tests use the Direct3D software adapter and need no GPU; manual recipes are listed and never run. At the time of the first real sync (`main` `0d8264f2`) a run gave 108 passed, 0 failed, 7 manual (89 at `c3277532`, then the focus-gate test and the character-preview tests); N should equal the number on `main` unless the sync added or removed recipes, so run `tools\test.ps1` on `main` first and write that number down. These are list counts, not results of a run: treat `0 failed` as the criterion and the count as a sanity check, and write the real numbers into the sync commit message.
 
 If the shipped `OptiScaler.ini` changed upstream, check that `tools\package.ps1` still merges every fragment (`[package] [Section] merged` lines, one per fragment in `OptiScaler\ext\ini\`).
 
@@ -193,7 +197,7 @@ Use the freshly packaged build in a copy of the game folder (back up first; see 
 
 ## 10. Publish
 
-1. Update [UPSTREAM-BASE](UPSTREAM-BASE) to the new upstream sha, and the catalog for any seam that was added, removed or moved (a seam change and its catalog change belong in the same commit).
+1. Update [UPSTREAM-BASE](UPSTREAM-BASE) to the new upstream sha, and the catalog for any seam that was added, removed or moved (a seam change and its catalog change belong in the same commit). The sha also appears, as history or as a fallback, in `OptiScaler/ext/ext.props` (banner fallback used only when no tag can be read) and in the fallbacks of `tools/footprint.ps1`; those were deliberately left alone in the first real sync: update them only if you rely on the fallback.
 2. Tag with the convention `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, for example `ffxiv-2026.10.17-fd6c2870-rc1`: the date is the tag day, the sha8 is the upstream commit the stack sits on, `-rcN` marks a release candidate that has not been through the full play-test. An annotated tag: `git tag -a <tag> -m "<summary>"`.
 3. The packaging and the release steps are in [RELEASE.md](RELEASE.md). If GitHub Actions are enabled on the repository, enabling them also enabled upstream's six workflows, which are kept disabled one by one with `gh workflow disable` (exact procedure in RELEASE.md section 5). A sync can add a new upstream workflow file, and a new file starts active: before pushing, run `gh workflow list --all` and disable every workflow that is not one of the fork's own `ffxiv-*` drafts.
 4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag. This is the maintainer's step.
