@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Character preview DLSS helper shaders (ext\ffxiv\chara\shaders\chara_guides.hlsl). One source, four entry points, each
+  compiled by fxc -O3 into a header in $(IntDir)ext_gen\ (never committed). The constant-buffer layouts and register
+  slots in the .hlsl are mirrored by CharaGuides.cpp; change them together.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_guides.hlsl">
+      <Variable>CharaGuides_Vs_cso</Variable>
+      <Header>CharaGuides_Vs_Shader.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_guides.hlsl">
+      <Variable>CharaGuides_Copy_cso</Variable>
+      <Header>CharaGuides_Copy_Shader.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>Copy</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_guides.hlsl">
+      <Variable>CharaGuides_Guides_cso</Variable>
+      <Header>CharaGuides_Guides_Shader.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>Guides</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\chara_guides.hlsl">
+      <Variable>CharaGuides_Alpha_cso</Variable>
+      <Header>CharaGuides_Alpha_Shader.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>Alpha</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>
