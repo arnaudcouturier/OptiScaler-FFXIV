@@ -164,7 +164,9 @@ class Engine final : public IEngineHost, private FenceReader
     void SyncPasteOptions();
     void Finish();
     bool ProducePaste(Dx11wDx12SC& sc, Slot& slot, ID3D12Resource* finalImage, IFGFeature_Dx12* fg);
+    void NoteRefusal(const char* why);
 
+    std::vector<std::string> _refusals; // texts NoteRefusal already logged
     Core _core;
     SlotRing<kSlots> _ring;
     std::array<Slot, kSlots> _slots;
@@ -200,25 +202,51 @@ bool Engine::FrameGenActive()
     return fg != nullptr && fg->IsActive() && !fg->IsPaused() && Config::Instance()->IsFGEnabled();
 }
 
+// One log line per distinct refusal text (the texts are a handful of fixed strings): a refusal repeats every present and the
+// summary only counts the reasons, so the cause of a CaptureRejected is written once, the first time it happens.
+void Engine::NoteRefusal(const char* why)
+{
+    for (const auto& seen : _refusals)
+        if (seen == why)
+            return;
+    _refusals.emplace_back(why);
+    LOG_WARN("HudLess: the UI-free capture was refused: {}", why);
+}
+
 Reason Engine::CheckCapture(const FrameImage& image)
 {
     if (image.texture == nullptr)
+    {
+        NoteRefusal("the live source delivered no texture");
         return Reason::CaptureRejected;
+    }
 
     D3D11_TEXTURE2D_DESC desc {};
     image.texture->GetDesc(&desc); // the texture is the truth, not the FrameImage fields
     if (desc.SampleDesc.Count != 1 || desc.ArraySize != 1)
         return Reason::MsaaOrArray;
 
-    ComPtr<ID3D11Device> device;
-    image.texture->GetDevice(&device);
-    if (device.Get() != Access::Hudless::Dx11Device(*_sc))
-        return Reason::CaptureRejected;
-
     // The bridge copied this frame's backbuffer into its shared texture before the seam: size and format must match it.
     ID3D11Texture2D* backbuffer = Access::Hudless::SharedBackBuffer(*_sc, Access::Hudless::FakeIndex(*_sc));
     if (backbuffer == nullptr)
+    {
+        NoteRefusal("the bridge has no shared backbuffer copy for this frame");
         return Reason::CaptureRejected;
+    }
+
+    // Both textures name the device they live on. The bridge's own device pointer is not comparable with that: the game's
+    // device may be a wrapper (ReShade proxies it), while a texture always reports the native device it was created on. Two
+    // textures on one device is exactly what CopyResource needs.
+    ComPtr<ID3D11Device> imageDevice;
+    ComPtr<ID3D11Device> bridgeDevice;
+    image.texture->GetDevice(&imageDevice);
+    backbuffer->GetDevice(&bridgeDevice);
+    if (imageDevice == nullptr || imageDevice.Get() != bridgeDevice.Get())
+    {
+        NoteRefusal("the captured image and the bridge's backbuffer copy live on different D3D11 devices");
+        return Reason::CaptureRejected;
+    }
+
     D3D11_TEXTURE2D_DESC target {};
     backbuffer->GetDesc(&target);
 
@@ -233,12 +261,18 @@ Reason Engine::StageCapture(const FrameImage& image)
 {
     auto* context = Access::Hudless::Dx11Context(*_sc);
     if (context == nullptr || Access::Hudless::Dx11Device(*_sc) == nullptr || _device12 == nullptr)
+    {
+        NoteRefusal("the bridge has no D3D11 context or D3D12 device to stage the capture with");
         return Reason::CaptureRejected;
+    }
 
     if (_produceFence == nullptr)
     {
         if (FAILED(_device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_produceFence))))
+        {
+            NoteRefusal("the D3D12 producer fence could not be created");
             return Reason::CaptureRejected;
+        }
         PinFence(_produceFence.Get());
         _produceValue = 0;
     }
@@ -254,7 +288,10 @@ Reason Engine::StageCapture(const FrameImage& image)
         return Reason::SlotBusy;
 
     if (!EnsureSlot(static_cast<size_t>(slot), desc.Width, desc.Height, format))
+    {
+        NoteRefusal("the shared hud-less slot could not be created (see the error line above)");
         return Reason::CaptureRejected;
+    }
 
     // Same D3D11 immediate context, before the bridge signals its fence: one signal covers both copies.
     context->CopyResource(_slots[slot].shared.texture.Get(), image.texture.Get());
