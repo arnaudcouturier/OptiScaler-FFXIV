@@ -11,7 +11,7 @@
 // it, so nothing that is kept can wait on something that was dropped; and its output buffer is written only by its last kernel.
 // Anything that does not look like that turns the feature off for the session instead of guessing.
 //
-// This header is only the decision: which launch of an evaluation is dropped. It knows nothing about NvAPI, so tests/nr_vit_reuse_smoke.cpp
+// This header is only the decision: which launch of an evaluation is dropped. It knows nothing about NvAPI, so tests/ext/nr/nr_vit_reuse_smoke.cpp
 // exercises it on the host.
 
 #include <atomic>
