@@ -20,8 +20,8 @@
 #include <atomic>
 
 // S10 package A (docs/HUDLESS.md section 10): wiring of the boundary detector core to the game. With Diagnostics alone (D1) it is
-// observation only. With [HudLess] Mode on (Wanted) the live source (UiLive.h, package E) applies the ReShade presets in place at the R1
-// boundary and delivers the UI-free frame through Take().
+// observation only. With [HudLess] Mode on (Wanted) the live source (UiLive.h, package E) applies the ReShade presets in place at the R1b
+// boundary (first UI draw into the backbuffer after the last scene stage) and delivers the UI-free frame through Take().
 namespace ext::ffxiv::ui
 {
 namespace
@@ -190,11 +190,12 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
         try
         {
             FrameOutcome outcome = C().CompleteFrame();
+            const live::FrameNote note = live::NoteOf(outcome); // before the outcome is moved into the D1 recorder
             if (DiagnosticsOn())
                 diag::OnFrameComplete(C(), std::move(outcome), Others().Get());
             if (ext::hudless::Wanted())
             {
-                LogLines(Live().EndFrame()); // summary and state lines are written here, never from the draw path
+                LogLines(Live().EndFrame(note)); // summary and state lines are written here, never from the draw path
                 ext::reshade::FrameEnded();
             }
             else
@@ -243,18 +244,13 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
         if (res.change != 0 && snapshot::Armed())
             snapshot::OnCandidate(context, core, res); // before the candidate draw runs (and before the live effects: D1 shows the raw boundary)
 
-        if (live && res.counted && (res.change & 1) != 0)
+        if (live && res.r1bChanged)
         {
-            // S10 E: R1 only (R2/R3 are never acted on). R1 set by this draw = capture opportunity; R1 dropped by this draw = a later
-            // scene/post stage superseded it.
-            live::DrawEvent ev;
-            ev.r1Set = res.cand.r1 != 0 && res.cand.r1 == res.ordinal;
-            ev.r1Cleared = res.cand.r1 == 0;
-            ev.sawSceneStage = core.Tracker().Summary().sawSceneStage;
-            ev.bbWidth = core.BackbufferShape().width;
-            ev.bbHeight = core.BackbufferShape().height;
-            ev.frame = core.Frame();
-            if (ev.r1Set || ev.r1Cleared)
+            // S10 E2: R1b only (R1/R2/R3 are tracked for D1 but never acted on). R1b set by this draw = the first UI draw into the
+            // backbuffer after the last scene stage = capture opportunity (UI draws into other render targets, e.g. the character
+            // preview, are skipped); R1b dropped by this draw = a later scene/post stage superseded it.
+            const live::DrawEvent ev = live::EventOf(core, res);
+            if (ev.r1bSet || ev.r1bCleared)
             {
                 ext::core::BypassScope bypass; // ReShade's own draws and copies must not look like game draws to other hooks
                 Live().OnDraw(context, ev);

@@ -1,4 +1,4 @@
-// S10-E: the live source's decisions without a GPU: when it acts (R1 only, scene stage seen, engine asked in the previous
+// S10-E / E2: the live source's decisions without a GPU: when it acts (R1b only, scene stage seen, engine asked in the previous
 // Present, once per frame), what the render target guard accepts (size, format, sample count, array/mips, backbuffer known),
 // the arming rule driven by Take(), the reason texts the engine shows, and the log lines (state changes, 600-frame summary).
 #define NOMINMAX
@@ -29,10 +29,10 @@ D3D11_TEXTURE2D_DESC Desc(UINT w, UINT h, DXGI_FORMAT f)
 void Acts()
 {
     FrameFacts f;
-    f.armed = f.r1JustSet = f.sawSceneStage = true;
+    f.armed = f.r1bJustSet = f.sawSceneStage = true;
     CHECK(ShouldAct(f));
     { auto g = f; g.armed = false; CHECK(!ShouldAct(g)); }          // the engine did not ask in the previous Present
-    { auto g = f; g.r1JustSet = false; CHECK(!ShouldAct(g)); }     // not the R1 candidate
+    { auto g = f; g.r1bJustSet = false; CHECK(!ShouldAct(g)); }    // not the R1b candidate
     { auto g = f; g.sawSceneStage = false; CHECK(!ShouldAct(g)); } // menu / loading frame
     { auto g = f; g.handled = true; CHECK(!ShouldAct(g)); }        // once per frame
 }
@@ -43,7 +43,8 @@ void Guard()
     CHECK(CheckTarget(capture::Result::Ok, ok, 3840, 2160) == Reason::None);
     CHECK(CheckTarget(capture::Result::Ok, Desc(3840, 2160, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), 3840, 2160) == Reason::None);
     CHECK(CheckTarget(capture::Result::Ok, Desc(3840, 2160, DXGI_FORMAT_R8G8B8A8_TYPELESS), 3840, 2160) == Reason::None);
-    // the 103 Session 1 frames: character previews
+    // the 103 Session 1 frames: character previews. Since S10-E2 they never reach the guard (the anchor is a UI draw into the
+    // backbuffer, so UI draws into a preview target are skipped); the guard still tells them apart.
     CHECK(CheckTarget(capture::Result::Ok, Desc(352, 352, DXGI_FORMAT_B8G8R8A8_UNORM), 3840, 2160) == Reason::SizeMismatch);
     CHECK(CheckTarget(capture::Result::Ok, Desc(1024, 1024, DXGI_FORMAT_B8G8R8A8_UNORM), 3840, 2160) == Reason::SizeMismatch);
     CHECK(CheckTarget(capture::Result::Ok, Desc(3840, 2160, DXGI_FORMAT_B8G8R8A8_UNORM), 3840, 2160) == Reason::FormatUnsupported);
@@ -88,7 +89,7 @@ void Arming()
     CHECK(s.GetStats().frames == 1);
     CHECK(s.GetStats().noBoundary == 1);
 
-    // a frame without an R1 event: the engine sees "no boundary", the frame is counted
+    // a frame without an R1b event: the engine sees "no boundary", the frame is counted
     CHECK(s.Take(img) == TakeResult::NotThisFrame);
     s.EndFrame();
     CHECK(s.Armed());
@@ -97,6 +98,81 @@ void Arming()
     s.EndFrame();
     CHECK(s.GetStats().noBoundary == 2);
     CHECK(s.GetStats().takes == 3);
+}
+
+// The hook glue: Core::DrawResult -> DrawEvent (the same function the game hook calls).
+void Events()
+{
+    Core core;
+    Core::DrawResult res;
+    res.counted = true;
+    res.ordinal = 40;
+
+    // nothing changed for R1b with this draw (the common case): no event
+    CHECK(!EventOf(core, res).r1bSet && !EventOf(core, res).r1bCleared);
+
+    // R1b set by this very draw
+    res.r1bChanged = true;
+    res.r1b = 40;
+    {
+        const DrawEvent ev = EventOf(core, res);
+        CHECK(ev.r1bSet && !ev.r1bCleared);
+        CHECK_EQ(ev.frame, core.Frame());
+        CHECK(!ev.sawSceneStage); // no draw went through this Core: the tracker has seen no scene stage
+    }
+
+    // R1b dropped by this draw (a later scene/post stage)
+    res.r1b = 0;
+    {
+        const DrawEvent ev = EventOf(core, res);
+        CHECK(!ev.r1bSet && ev.r1bCleared);
+    }
+
+    // R1b changed but the candidate is another draw (cannot happen with the tracker; the mapping must still not claim "set here")
+    res.r1b = 12;
+    {
+        const DrawEvent ev = EventOf(core, res);
+        CHECK(!ev.r1bSet && !ev.r1bCleared);
+    }
+
+    // a draw the core ignored (other thread, before the first Present): no event even if the flags are set
+    res.counted = false;
+    res.r1b = 40;
+    {
+        const DrawEvent ev = EventOf(core, res);
+        CHECK(!ev.r1bSet && !ev.r1bCleared);
+    }
+}
+
+// The end-of-frame note: which counter an acting frame without a capture lands in, and the "anchor after off-screen draws" count.
+void Notes()
+{
+    LiveSource s(Env {});
+    FrameImage img;
+    s.Take(img);
+    s.EndFrame(); // armed from now on while Take() keeps being called
+
+    auto frame = [&](FrameNote n)
+    {
+        s.Take(img);
+        s.EndFrame(n);
+    };
+    frame({ true, 0, 0 });    // a scene frame without any UI draw (cutscene): no boundary
+    frame({ false, 5, 5 });   // a menu frame (no scene stage): no boundary, whatever the UI did
+    frame({ true, 9, 0 });    // UI draws after the last scene stage, all into other render targets (preview only)
+    frame({ true, 9, 0 });
+    frame({ true, 9, 15 });   // the preview came first, the HUD on the backbuffer later (anchor after off-screen UI draws) ...
+    frame({ true, 9, 9 });    // ... and the HUD first
+    const auto st = s.GetStats();
+    CHECK_EQ(st.frames, 6u);
+    CHECK_EQ(st.noBoundary, 4u);        // the first two, plus the last two (they had an R1b, but no event reached this source)
+    CHECK_EQ(st.offscreenOnly, 2u);
+    CHECK_EQ(st.anchorLater, 1u);
+    CHECK_EQ(st.rejected, 0u);          // skipped preview draws are never rejections
+    const auto summary = s.Summary();
+    CHECK(summary.find("UI only off the backbuffer 2") != std::string::npos);
+    CHECK(summary.find("anchor after off-screen UI draws 1") != std::string::npos);
+    CHECK(summary.find("rejected 0") != std::string::npos);
 }
 
 void Lines()
@@ -134,6 +210,8 @@ int main()
     Acts();
     Guard();
     Arming();
+    Events();
+    Notes();
     Lines();
     return Finish("ui_live_decide");
 }

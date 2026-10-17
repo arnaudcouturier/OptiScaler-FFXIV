@@ -1,4 +1,4 @@
-// S10-E: WARP D3D11 proof of the ORDER of the live boundary capture (docs/HUDLESS.md section 16):
+// S10-E (anchor R1b since S10-E2, see ui_live_anchor_warp.cpp): WARP D3D11 proof of the ORDER of the live boundary capture (docs/HUDLESS.md section 16):
 //   effects (a fake that rewrites the render target, standing in for ReShade's render_effects) run BEFORE the snapshot copy, so the
 //   snapshot holds the modified pixels, and the later UI draw is not in it;
 // plus the side-effect rules: a rejected target runs neither the effects nor the copy, a failed effects call delivers no frame, the
@@ -158,10 +158,10 @@ Env MakeEnv()
     return e;
 }
 
-DrawEvent R1(uint64_t frame, UINT bbW = 128, UINT bbH = 72, bool scene = true)
+DrawEvent R1b(uint64_t frame, UINT bbW = 128, UINT bbH = 72, bool scene = true)
 {
     DrawEvent e;
-    e.r1Set = true;
+    e.r1bSet = true;
     e.sawSceneStage = scene;
     e.bbWidth = bbW;
     e.bbHeight = bbH;
@@ -196,22 +196,22 @@ void Run()
     // ---- the engine has not asked yet: nothing happens, the draws are untouched -----------------------------------------------
     gpu.Bind(bbRtv.Get(), 128, 72);
     ctx->ClearRenderTargetView(bbRtv.Get(), green);
-    source.OnDraw(ctx, R1(1));
+    source.OnDraw(ctx, R1b(1));
     CHECK_EQ(g_fx.calls, 0);
     CHECK_EQ(g_fx.copies, 0);
     CHECK(Present(source, img) == TakeResult::NotThisFrame); // Take() arms the next frame
     CHECK(source.Armed());
 
-    // ---- frame 2: ORDER. scene (green) -> R1 boundary: effects (magenta) -> snapshot -> UI draw (blue, top-left corner) ----------
+    // ---- frame 2: ORDER. scene (green) -> R1b boundary: effects (magenta) -> snapshot -> UI draw (blue, top-left corner) ----------
     ctx->ClearRenderTargetView(bbRtv.Get(), green);
     D3D11_VIEWPORT corner { 0, 0, 32, 18, 0, 1 };
-    source.OnDraw(ctx, R1(2)); // before the boundary draw runs
+    source.OnDraw(ctx, R1b(2)); // before the boundary draw runs
     CHECK_EQ(g_fx.calls, 1);
     CHECK_EQ(g_fx.copies, 1);
     CHECK(g_fx.lastTarget == bb.Get());          // the effects got the very resource bound as render target 0
     ctx->RSSetViewports(1, &corner);
     ctx->Draw(3, 0);                             // the UI draw (the boundary draw itself)
-    source.OnDraw(ctx, R1(2));                   // a second R1 event in the same frame (e.g. after a supersession): nothing happens
+    source.OnDraw(ctx, R1b(2));                   // a second R1b event in the same frame (e.g. after a supersession): nothing happens
     CHECK_EQ(g_fx.calls, 1);                     // once per frame
     CHECK_EQ(g_fx.copies, 1);
 
@@ -238,13 +238,13 @@ void Run()
         CHECK_EQ(st.effects[size_t(ApplyResult::Applied)], 1u);
     }
 
-    // ---- frame 3: a render target of another size: no effects, no copy, rejected with the guard text ------------------------------
+    // ---- frame 3: a render target of another size (the guard is the acceptance test of the R1b draw): no effects, no copy, rejected with the guard text ------------------------------
     {
         auto tiny = gpu.Target(64, 64, DXGI_FORMAT_B8G8R8A8_UNORM);
         auto tinyRtv = gpu.Rtv(tiny.Get());
         gpu.Bind(tinyRtv.Get(), 64, 64);
         const int calls = g_fx.calls, copies = g_fx.copies;
-        source.OnDraw(ctx, R1(3));
+        source.OnDraw(ctx, R1b(3));
         CHECK_EQ(g_fx.calls, calls);
         CHECK_EQ(g_fx.copies, copies);
         CHECK(source.Take(img) == TakeResult::Rejected);
@@ -262,7 +262,7 @@ void Run()
             auto msaaRtv = gpu.Rtv(msaa.Get());
             gpu.Bind(msaaRtv.Get(), 128, 72);
             const int calls = g_fx.calls;
-            source.OnDraw(ctx, R1(4));
+            source.OnDraw(ctx, R1b(4));
             CHECK_EQ(g_fx.calls, calls);
             CHECK(source.Take(img) == TakeResult::Rejected);
             source.EndFrame();
@@ -272,18 +272,18 @@ void Run()
             Present(source, img);
         ctx->OMSetRenderTargets(0, nullptr, nullptr);
         const int calls = g_fx.calls;
-        source.OnDraw(ctx, R1(5));
+        source.OnDraw(ctx, R1b(5));
         CHECK_EQ(g_fx.calls, calls);
         CHECK(source.Take(img) == TakeResult::Rejected);
         source.EndFrame();
         CHECK_EQ(source.GetStats().rejectedBy[size_t(Reason::NoRenderTarget)], 1u);
     }
 
-    // ---- menu-only frame: the R1 event without a scene stage is ignored (no verdict, nothing applied) -------------------------------
+    // ---- menu-only frame: the R1b event without a scene stage is ignored (no verdict, nothing applied) -------------------------------
     gpu.Bind(bbRtv.Get(), 128, 72);
     {
         const int calls = g_fx.calls, copies = g_fx.copies;
-        source.OnDraw(ctx, R1(6, 128, 72, /*scene=*/false));
+        source.OnDraw(ctx, R1b(6, 128, 72, /*scene=*/false));
         CHECK_EQ(g_fx.calls, calls);
         CHECK_EQ(g_fx.copies, copies);
         CHECK(source.Take(img) == TakeResult::NotThisFrame);
@@ -296,7 +296,7 @@ void Run()
         g_fx.result = ApplyResult::Failed;
         const int calls = g_fx.calls, copies = g_fx.copies;
         ctx->ClearRenderTargetView(bbRtv.Get(), green);
-        source.OnDraw(ctx, R1(7));
+        source.OnDraw(ctx, R1b(7));
         CHECK_EQ(g_fx.calls, calls + 1);
         CHECK_EQ(g_fx.copies, copies); // no snapshot of a frame whose effects failed
         CHECK(source.Take(img) == TakeResult::Rejected);
@@ -311,7 +311,7 @@ void Run()
     {
         g_fx.result = r;
         ctx->ClearRenderTargetView(bbRtv.Get(), green);
-        source.OnDraw(ctx, R1(8));
+        source.OnDraw(ctx, R1b(8));
         CHECK(source.Take(img) == TakeResult::Ok);
         UINT p = 0;
         const auto s = gpu.Read(img.texture.Get(), p);
@@ -324,12 +324,12 @@ void Run()
     {
         const int calls = g_fx.calls;
         ctx->ClearRenderTargetView(bbRtv.Get(), green);
-        source.OnDraw(ctx, R1(9));
+        source.OnDraw(ctx, R1b(9));
         CHECK_EQ(g_fx.calls, calls + 1);
         DrawEvent cleared;
-        cleared.r1Cleared = true;
-        source.OnDraw(ctx, cleared);   // a later scene/post stage dropped the R1 candidate
-        source.OnDraw(ctx, R1(9));     // ... and a new R1 appears
+        cleared.r1bCleared = true;
+        source.OnDraw(ctx, cleared);   // a later scene/post stage dropped the R1b candidate
+        source.OnDraw(ctx, R1b(9));     // ... and a new R1b appears
         CHECK_EQ(g_fx.calls, calls + 1); // never a second render_effects in a frame
         CHECK(source.Take(img) == TakeResult::Rejected);
         CHECK(std::string(source.LastReason()) == "boundary moved after the capture");
@@ -343,11 +343,11 @@ void Run()
         CHECK(!source.Armed());
         const int calls = g_fx.calls, copies = g_fx.copies;
         ctx->ClearRenderTargetView(bbRtv.Get(), green);
-        source.OnDraw(ctx, R1(10));
+        source.OnDraw(ctx, R1b(10));
         CHECK_EQ(g_fx.calls, calls);
         CHECK_EQ(g_fx.copies, copies);
         CHECK(Present(source, img) == TakeResult::NotThisFrame); // asking again re-arms, one frame later
-        source.OnDraw(ctx, R1(11));
+        source.OnDraw(ctx, R1b(11));
         CHECK_EQ(g_fx.calls, calls + 1);
         source.EndFrame();
     }
@@ -359,7 +359,7 @@ void Run()
         gpu.Bind(largeRtv.Get(), 256, 144);
         source.Take(img);
         source.EndFrame(); // armed
-        source.OnDraw(ctx, R1(12, 256, 144));
+        source.OnDraw(ctx, R1b(12, 256, 144));
         CHECK(source.Take(img) == TakeResult::Ok);
         CHECK_EQ(img.width, 256u);
         CHECK_EQ(img.height, 144u);

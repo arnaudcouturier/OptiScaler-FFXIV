@@ -1,5 +1,5 @@
 #pragma once
-// S10 package E: the LIVE half of the FFXIV boundary source (docs/HUDLESS.md sections 4.1, 10, 16): at the R1 boundary draw it
+// S10 package E: the LIVE half of the FFXIV boundary source (docs/HUDLESS.md sections 4.1, 10, 16): at the R1b boundary draw it
 // (1) checks the bound render target, (2) applies the ReShade presets in place, (3) snapshots the target into one reused
 // texture, and later hands that texture to the engine through IHudlessSource::Take.
 //
@@ -8,17 +8,21 @@
 // the lighting hook's un-hooked CopyResource trampoline).
 //
 // Rules (all decided in S10-E-LOG.md):
-//  * R1 only: the first UI-tagged draw after the last scene/post stage. R2/R3 never act.
+//  * R1b only (S10 E2): the first UI-tagged draw after the last scene/post stage whose render target IS the swapchain backbuffer
+//    (UiBoundaryRules.h). UI draws into other render targets before it (the character preview, 103 of 24,000 frames in Session 1)
+//    are ignored, not rejected: rejecting them made ReShade's own pass filter the HUD on those frames and skipped it on the others
+//    (visible flicker). No such draw in the frame = NotThisFrame. R1/R2/R3 never act.
 //  * Acts only if the engine asked for a frame in the PREVIOUS Present (Take() was called): frame generation off, an unsupported
 //    provider, the debug tint or the coverage guard make the engine skip Take(); then nothing is applied or copied.
 //  * Acts only on frames that showed a scene stage (menu / loading frames have no UI-free image).
-//  * Once per frame. A rejected frame has NO side effects when the guard fails; a frame whose R1 candidate is superseded after the
+//  * Once per frame. A rejected frame has NO side effects when the guard fails; a frame whose R1b candidate is superseded after the
 //    capture is rejected (the effects already ran: Session 1 never saw this, 0 in 24,000 frames).
 //  * Order inside a capture: snapshot texture ensured -> effects -> copy, so the snapshot contains the preset-processed target
 //    and nothing the later (UI) draws write.
 // Threading: OnDraw on the render thread, Take/EndFrame on the Present thread; one mutex (held across the effects call: it runs
 // once per frame).
 
+#include "ext/ffxiv/ui/UiBoundaryCore.h"
 #include "ext/ffxiv/ui/UiCapture.h"
 #include "ext/hudless/HudlessSource.h"
 #include "ext/reshade/ReShadeBoundary.h"
@@ -88,11 +92,11 @@ inline bool IsGuardReason(Reason r) { return r >= Reason::NoRenderTarget && r <=
 struct FrameFacts
 {
     bool armed = false;         // the engine called Take() in the previous Present
-    bool r1JustSet = false;     // this draw is the R1 candidate (set by this draw)
+    bool r1bJustSet = false;    // this draw is the R1b candidate (set by this draw)
     bool sawSceneStage = false; // a scene/post stage draw came before it in this frame
     bool handled = false;       // this frame already has a verdict (captured or rejected)
 };
-inline bool ShouldAct(const FrameFacts& f) { return f.armed && f.r1JustSet && f.sawSceneStage && !f.handled; }
+inline bool ShouldAct(const FrameFacts& f) { return f.armed && f.r1bJustSet && f.sawSceneStage && !f.handled; }
 
 // RGBA8 family the engine can use (HudlessEngine.cpp TypedFormat maps typeless and sRGB to UNORM).
 inline bool IsRgba8(DXGI_FORMAT f)
@@ -132,15 +136,47 @@ struct Env
     std::string (*effectsDetail)() = nullptr; // why the last effects call was not Applied (composes log lines only)
 };
 
-// One R1 event of the draw hook.
+// One R1b event of the draw hook.
 struct DrawEvent
 {
-    bool r1Set = false;       // this draw became the R1 candidate
-    bool r1Cleared = false;   // this draw dropped the R1 candidate (a later scene/post stage superseded it)
+    bool r1bSet = false;      // this draw became the R1b candidate (first UI draw into the backbuffer since the last scene stage)
+    bool r1bCleared = false;  // this draw dropped the R1b candidate (a later scene/post stage superseded it)
     bool sawSceneStage = false;
     uint32_t bbWidth = 0, bbHeight = 0; // swapchain backbuffer of this frame (0 = unknown)
     uint64_t frame = 0;
 };
+
+// The hook glue, shared with the tests: what the boundary core's answer for one draw means to the live source. Called after
+// Core::OnDraw for the draw (the draw itself has not run yet). Both flags false = nothing to do (the common case).
+inline DrawEvent EventOf(const Core& core, const Core::DrawResult& res)
+{
+    DrawEvent ev;
+    if (!res.counted || !res.r1bChanged)
+        return ev;
+    ev.r1bSet = res.r1b != 0 && res.r1b == res.ordinal;
+    ev.r1bCleared = res.r1b == 0;
+    ev.sawSceneStage = core.Tracker().Summary().sawSceneStage;
+    ev.bbWidth = core.BackbufferShape().width;
+    ev.bbHeight = core.BackbufferShape().height;
+    ev.frame = core.Frame();
+    return ev;
+}
+
+// What the frame looked like at the end (Present exit), for the counters only.
+struct FrameNote
+{
+    bool sawSceneStage = false;
+    uint32_t r1 = 0;  // first UI draw after the last scene stage (any render target); 0 = none
+    uint32_t r1b = 0; // first UI draw into the backbuffer after the last scene stage; 0 = none
+};
+inline FrameNote NoteOf(const FrameOutcome& outcome)
+{
+    FrameNote n;
+    n.sawSceneStage = outcome.record.summary.sawSceneStage;
+    n.r1 = outcome.record.candidates.r1;
+    n.r1b = outcome.r1b;
+    return n;
+}
 
 struct Stats
 {
@@ -148,7 +184,9 @@ struct Stats
     uint64_t captured = 0;     // snapshots made
     uint64_t delivered = 0;    // Take() returned Ok
     uint64_t unused = 0;       // captured but the engine did not call Take() in that Present
-    uint64_t noBoundary = 0;   // acting frames without an R1 event
+    uint64_t noBoundary = 0;   // acting frames without a UI draw after the last scene stage (or without a scene stage)
+    uint64_t offscreenOnly = 0; // acting frames whose UI draws after the last scene stage all went to other render targets
+    uint64_t anchorLater = 0;  // acting frames where R1b came after R1 (the old R1 rule would have hit a preview render target)
     uint64_t rejected = 0;
     std::array<uint64_t, kReasons> rejectedBy {};
     std::array<uint64_t, ext::reshade::kApplyResults> effects {};
@@ -167,7 +205,7 @@ class LiveSource
     void OnDraw(ID3D11DeviceContext* c, const DrawEvent& ev)
     {
         std::lock_guard lock(_mutex);
-        if (ev.r1Cleared && _captured)
+        if (ev.r1bCleared && _captured)
         {
             // The effects and the copy already happened at the earlier candidate: this frame cannot be used.
             _captured = false;
@@ -176,7 +214,7 @@ class LiveSource
         }
         FrameFacts f;
         f.armed = _armed;
-        f.r1JustSet = ev.r1Set;
+        f.r1bJustSet = ev.r1bSet;
         f.sawSceneStage = ev.sawSceneStage;
         f.handled = _handled;
         if (!ShouldAct(f))
@@ -260,8 +298,8 @@ class LiveSource
     }
 
     // Bridge Present exit. Accounts the frame, forgets it, arms the next one iff Take() ran in this Present. Returns the log lines
-    // that are due ("" = none, lines separated by '\n').
-    std::string EndFrame()
+    // that are due ("" = none, lines separated by '\n'). `note` = how the frame looked (counters only).
+    std::string EndFrame(const FrameNote& note = {})
     {
         std::lock_guard lock(_mutex);
         std::string lines;
@@ -273,7 +311,15 @@ class LiveSource
             if (_captured && !_consumed)
                 ++_stats.unused;
             if (!_hadEvent && !_handled)
-                ++_stats.noBoundary;
+            {
+                // No R1b event acted: either no UI draw after the last scene stage, or all of them went to other render targets.
+                if (note.sawSceneStage && note.r1 != 0 && note.r1b == 0)
+                    ++_stats.offscreenOnly;
+                else
+                    ++_stats.noBoundary;
+            }
+            if (note.sawSceneStage && note.r1b != 0 && note.r1b != note.r1)
+                ++_stats.anchorLater;
         }
 
         const bool wasArmed = _armed;
@@ -377,7 +423,8 @@ class LiveSource
         std::string line = "FFXIV UI boundary: " + std::to_string(_stats.frames) + " frames: captured " + std::to_string(_stats.captured) +
                            " (delivered " + std::to_string(_stats.delivered) + ", unused " + std::to_string(_stats.unused) + "), rejected " +
                            std::to_string(_stats.rejected) + (reasons.empty() ? "" : " (" + reasons + ")") + ", no boundary " +
-                           std::to_string(_stats.noBoundary) + "; ReShade presets: applied " +
+                           std::to_string(_stats.noBoundary) + ", UI only off the backbuffer " + std::to_string(_stats.offscreenOnly) +
+                           ", anchor after off-screen UI draws " + std::to_string(_stats.anchorLater) + "; ReShade presets: applied " +
                            std::to_string(e[static_cast<size_t>(ext::reshade::ApplyResult::Applied)]) + ", nothing to apply " +
                            std::to_string(e[static_cast<size_t>(ext::reshade::ApplyResult::NothingToApply)]) + ", failed " +
                            std::to_string(e[static_cast<size_t>(ext::reshade::ApplyResult::Failed)]) + ", other " +
