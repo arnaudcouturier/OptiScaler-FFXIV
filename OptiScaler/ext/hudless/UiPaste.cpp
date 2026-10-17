@@ -76,6 +76,7 @@ struct Image
     UINT64 width = 0;
     UINT height = 0;
     bool coveragePending = false; // the counter of the newest write was not read back yet
+    uint64_t ordinal = 0;         // PasteStatus::produced right after this image was built (PasteStatus::coverageSequence)
 };
 
 struct Retired
@@ -224,6 +225,7 @@ void RetireAllLocked(Core& c)
     }
     c.ring.Reset();
     c.status.coverage = -1.f;
+    c.status.coverageSequence = 0;
     c.coverageFrame = 0;
 }
 
@@ -253,6 +255,7 @@ void HarvestCoverageLocked(Core& c, const Done& done)
         {
             const double pixels = static_cast<double>(image->width) * image->height;
             c.status.coverage = static_cast<float>(std::min(1.0, flagged / pixels));
+            c.status.coverageSequence = image->ordinal;
             c.coverageFrame = slot.frame;
         }
     }
@@ -301,6 +304,7 @@ void ParkLocked(Core& c)
     c.height = 0;
     c.wantedFormat = c.imageFormat = DXGI_FORMAT_UNKNOWN;
     c.status.coverage = -1.f;
+    c.status.coverageSequence = 0;
     c.coverageFrame = 0;
 }
 
@@ -810,6 +814,7 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
         }
         c.ring.EndWrite(target, value, NowMs());
         image.coveragePending = true;
+        image.ordinal = c.status.produced + 1;
         if (c.status.produced++ == 0 && !c.loggedFirstImage)
         {
             c.loggedFirstImage = true;

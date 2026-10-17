@@ -161,6 +161,7 @@ void SafeBeforeInit(Rig& rig)
     EXPECT(!UiPaste::Ready(nullptr, 0, 0), "Ready with nulls");
     const auto s = UiPaste::Snapshot();
     EXPECT(s.produced == 0 && s.pasted == 0 && s.coverage < 0.f, "empty snapshot (coverage %f)", s.coverage);
+    EXPECT(s.coverageSequence == 0, "empty snapshot has no coverage sequence (%llu)", (unsigned long long) s.coverageSequence);
     UiPaste::Paste(nullptr, nullptr);
     UiPaste::Paste(nullptr, rig.queue.Get());
     FakeSwapChain fake;
@@ -207,6 +208,8 @@ void BasicBlock(Rig& rig)
            (unsigned long long) status.produced, (unsigned long long) status.pasted, (unsigned long long) status.skipped);
     EXPECT(std::abs(status.coverage - 36.0f / float(w * h)) < 1e-6f, "coverage %f, expected %f", status.coverage,
            36.0f / float(w * h));
+    EXPECT(status.coverageSequence == 1, "the first readback belongs to the first image (sequence %llu)",
+           (unsigned long long) status.coverageSequence);
 
     // the backbuffer reference is returned (ResizeBuffers would fail otherwise)
     {
@@ -231,6 +234,25 @@ void BasicBlock(Rig& rig)
     }
     EXPECT(ui_test::CountInfo("UI paste: producer ready") == 1 && ui_test::CountInfo("UI paste: first") == 2,
            "nothing is logged per frame");
+
+    // one fresh readback per image: the sequence follows the ordinal of the produced image, strictly increasing
+    {
+        const auto now = UiPaste::Snapshot();
+        EXPECT(now.produced == 4 && now.coverageSequence == 4, "sequence %llu follows produced %llu after four images",
+               (unsigned long long) now.coverageSequence, (unsigned long long) now.produced);
+        UiPaste::Release();
+        const auto released = UiPaste::Snapshot();
+        EXPECT(released.coverage < 0.f && released.coverageSequence == 0,
+               "Release makes the coverage unknown again (coverage %f, sequence %llu)", released.coverage,
+               (unsigned long long) released.coverageSequence);
+        EXPECT(released.produced == 4, "the produced ordinal keeps counting through Release");
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, 1));
+        const auto again = UiPaste::Snapshot();
+        EXPECT(again.produced == 5 && again.coverageSequence == 5 && again.coverage >= 0.f,
+               "the ordinal of the first image after Release is 5, never reused (sequence %llu)",
+               (unsigned long long) again.coverageSequence);
+    }
     UiPaste::Release();
 }
 
@@ -645,10 +667,14 @@ void RingAndFences(Rig& rig)
         UiPaste::Paste(&bridge.swapChain, rig.queue.Get());
         EXPECT(UiPaste::Snapshot().skipped == before.skipped + 1, "a Paste with nothing completed is a counted skip");
         EXPECT(UiPaste::Snapshot().coverage < 0.f, "coverage unknown until a readback completes");
+        EXPECT(UiPaste::Snapshot().coverageSequence == 0, "no coverage sequence until a readback completes");
         gate->Signal(1);
         rig.WaitIdle();
         EXPECT(UiPaste::Ready(rig.device.Get(), w, h), "ready once the writes completed");
         EXPECT(std::abs(UiPaste::Snapshot().coverage - 16.0f / float(w * h)) < 1e-6f, "coverage from the completed readback");
+        EXPECT(UiPaste::Snapshot().coverageSequence == UiPaste::Snapshot().produced,
+               "the readback of the newest image wins (sequence %llu, produced %llu)",
+               (unsigned long long) UiPaste::Snapshot().coverageSequence, (unsigned long long) UiPaste::Snapshot().produced);
         UiPaste::Release();
     }
     // (2) a paste still pending on the presenting queue pins its image: later frames cannot overwrite it, and Release

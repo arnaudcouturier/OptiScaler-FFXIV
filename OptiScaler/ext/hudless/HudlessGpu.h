@@ -28,6 +28,11 @@ struct PasteStatus
     uint64_t pasted = 0;   // output presents (real or generated) the UI was drawn on
     uint64_t skipped = 0;  // output presents left untouched although frame generation was active
     float coverage = -1.f; // share of pixels flagged as UI in the newest completed readback (0..1), < 0 = unknown yet
+    // Ordinal of the paste image `coverage` was read back from: the value `produced` had right after that image was
+    // built (1-based, cumulative, never reused). 0 until the first readback completes (and again after Release / a size
+    // or device change, together with coverage = -1). A reader tells a fresh readback from a stale one by comparing it
+    // with the value it saw last; `produced - coverageSequence` is how far the readback lags behind the producer.
+    uint64_t coverageSequence = 0;
     char lastMessage[160] = {};
 };
 
