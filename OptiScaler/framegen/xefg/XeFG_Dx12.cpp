@@ -1039,6 +1039,8 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     {
         LOG_DEBUG("!FGEnabled");
         Deactivate();
+        ReleaseResourceCopies();
+        _depthInvert.reset();
 
         state.clearCapturedHudlesses = true;
         Hudfix_Dx12::ResetCounters();
@@ -1089,6 +1091,8 @@ void XeFG_Dx12::ReleaseObjects()
     _mvFlip.reset();
     _depthFlip.reset();
     _depthInvert.reset();
+
+    ReleaseResourceCopies();
 }
 
 void XeFG_Dx12::CreateObjects(ID3D12Device* InDevice)
