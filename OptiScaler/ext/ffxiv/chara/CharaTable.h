@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include <windows.h>
 
@@ -330,7 +331,7 @@ struct Resolution
     uintptr_t managerPointerAddress = 0; // address of the global that holds the manager
     uint32_t accessorRva = 0;
     uint32_t managerPointerRva = 0;
-    const char* reason = ""; // why Inert; static text
+    std::string reason; // why Inert
 };
 
 // Verifies the build and the accessor once (a PE check, a read-only scan of the executable's .text, a cross-check with the

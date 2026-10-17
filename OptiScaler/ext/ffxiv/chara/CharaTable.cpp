@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <format>
 #include <mutex>
 #include <vector>
 
@@ -16,12 +17,13 @@ namespace
 constexpr size_t kHeaderBytes = 0x1000;
 constexpr size_t kScanChunk = 1u << 20;
 
-Resolution Inert(const char* reason)
+// The feature is off for this session; this writes the one log line about it.
+Resolution Inert(std::string reason)
 {
     Resolution r;
     r.state = AccessorState::Inert;
-    r.reason = reason;
     LOG_WARN("FFXIV character preview: switched off for this session ({})", reason);
+    r.reason = std::move(reason);
     return r;
 }
 
@@ -54,10 +56,8 @@ Resolution DoResolve()
     if (unreadable)
         return Inert("the executable code could not be read for the accessor scan");
     if (scan.hits != 1)
-    {
-        LOG_WARN("FFXIV character preview: accessor pattern found {} times in .text (needs exactly one)", scan.hits);
-        return Inert("the preview accessor was not found exactly once");
-    }
+        return Inert(std::format("the preview accessor pattern was found {} times in the executable (exactly one is needed)",
+                                 scan.hits));
 
     const uint32_t matchRva = text.rva + static_cast<uint32_t>(scan.firstOffset);
     int32_t disp = 0;
@@ -72,9 +72,9 @@ Resolution DoResolve()
     // documentation or the scan is wrong: stay off rather than guess.
     if (matchRva != cv.accessorRva || static_cast<uint32_t>(globalRva) != cv.managerPointerRva)
     {
-        LOG_WARN("FFXIV character preview: accessor at RVA {:#x}, manager pointer at RVA {:#x}; documented {:#x} and {:#x}",
-                 matchRva, static_cast<uint64_t>(globalRva), cv.accessorRva, cv.managerPointerRva);
-        return Inert("the accessor does not sit where the matched build documents it");
+        return Inert(std::format("the accessor is at RVA {:#x} and the manager pointer at RVA {:#x}, the matched build documents "
+                                 "{:#x} and {:#x}",
+                                 matchRva, static_cast<uint64_t>(globalRva), cv.accessorRva, cv.managerPointerRva));
     }
 
     Resolution r;
@@ -132,7 +132,7 @@ const char* InertReason()
     // Never starts the (one-time) executable scan: the menu asks this while the feature is off.
     if (!g_resolved.load(std::memory_order_acquire))
         return "";
-    return g_resolution.state == AccessorState::Inert ? g_resolution.reason : "";
+    return g_resolution.state == AccessorState::Inert ? g_resolution.reason.c_str() : "";
 }
 
 const Snapshot& Current(uint64_t nowMs)

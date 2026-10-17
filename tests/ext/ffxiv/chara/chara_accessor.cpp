@@ -21,8 +21,9 @@ int main()
     const Resolution& r = Resolve();
     CHECK(r.state == AccessorState::Inert);
     CHECK(r.managerPointerAddress == 0);
-    CHECK(!std::string(r.reason).empty());
+    CHECK(!r.reason.empty());
     CHECK(std::string(InertReason()) == r.reason);
+    CHECK(g_testLastLog.find(r.reason) != std::string::npos);
 
     // exactly one log line for the failure, however often it is asked
     CHECK(g_testLogLines == 1);
