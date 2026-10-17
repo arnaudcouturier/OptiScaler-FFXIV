@@ -204,6 +204,7 @@ INSTALL
      (OptiScaler.log is then written next to winmm.dll).
 
 SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart the game after changing most of them)
+  (the combination used in the maintainer's tested setup; in the menu or the ini)
   DLSS upscaling on the DirectX 11 game:   [Upscalers] Dx11Upscaler=dlss_12
   Neural Rendering (needs nvngx_dlssnr.dll): [DlssNr] Enabled=true
   Frame generation (needs DLSS-G files):   [FrameGen] Enabled=true, FGInput=upscaler, FGOutput=dlssg
@@ -244,7 +245,7 @@ Credits (details in Licenses\ATTRIBUTION.md):
   * ReShade API headers (BSD-3-Clause OR MIT), used unmodified for the built-in add-on. Licenses\ReShade_ATTRIBUTION.txt.
 
 Third-party binaries in OptiScaler\ and their licences:
-$(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { $n = Split-Path $_.Dest -Leaf; $tp = $thirdParty | Where-Object { $n -match $_.Pattern } | Select-Object -First 1; "  {0,-48} Licenses\{1}" -f $_.Dest, $tp.Licence }) -join "`n")
+$(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { $n = Split-Path $_.Dest -Leaf; $tp = $thirdParty | Where-Object { $n -match $_.Pattern } | Select-Object -First 1; "  {0,-48} Licenses\{1}{2}" -f $_.Dest, $tp.Licence, $(if ($tp.Names) { '' } else { '  (that licence file does not name this library; the same Intel SDK licence is assumed to cover it)' }) }) -join "`n")
 
 NVIDIA files (nvngx_dlss*.dll, Streamline) are not part of this archive; they remain under NVIDIA's own terms.
 "@

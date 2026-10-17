@@ -32,7 +32,7 @@ git diff --name-only $base main | Where-Object { $_ -notmatch $fork } | Sort-Obj
 Compare-Object (Get-Content $env:TEMP\up.txt) (Get-Content $env:TEMP\fork.txt) -IncludeEqual -ExcludeDifferent | ForEach-Object InputObject
 ```
 
-Compare the result with the hot-spot list in section 6. A file that upstream changed and that is not on the list is not a seam host and needs only a build.
+Also look at `git diff --name-only $base upstream/master -- .github/workflows`: a workflow file that upstream adds starts out active as soon as GitHub Actions are enabled on this repository (see section 10). Compare the overlap result with the hot-spot list in section 6. A file that upstream changed and that is not on the list is not a seam host and needs only a build.
 
 ## 2. Choose the strategy
 
@@ -140,7 +140,7 @@ pwsh -File tools\footprint.ps1                 # persistent surface, files touch
 pwsh -File tools\package.ps1 -Target <package folder>
 ```
 
-Expected: the build prints `[build] OK`. `tools\test.ps1` builds and runs every recipe under `tests\ext` and ends with `passed N, failed 0, manual M`. At `c3277532` the recipe list has 89 automatic tests (56 cpu, 33 warp; the warp tests use the Direct3D software adapter and need no GPU) and 7 manual ones, which are listed and never run; N should be 89 unless the sync added or removed recipes. These are list counts: the full suite was last run before the HUD-less and composition work, so treat `0 failed` as the criterion and the count as a sanity check, and write the real numbers into the sync commit message.
+Expected: the build prints `[build] OK`. `tools\test.ps1` builds and runs every recipe under `tests\ext` and ends with `passed N, failed 0, manual M`. At `c3277532` the recipe list has 89 automatic tests (56 cpu, 33 warp; the warp tests use the Direct3D software adapter and need no GPU) and 7 manual ones, which are listed and never run; N should be 89 unless the sync added or removed recipes. These are list counts, not results of a run: treat `0 failed` as the criterion and the count as a sanity check, and write the real numbers into the sync commit message.
 
 If the shipped `OptiScaler.ini` changed upstream, check that `tools\package.ps1` still merges every fragment (`[package] [Section] merged` lines, one per fragment in `OptiScaler\ext\ini\`).
 
@@ -195,7 +195,7 @@ Use the freshly packaged build in a copy of the game folder (back up first; see 
 
 1. Update [UPSTREAM-BASE](UPSTREAM-BASE) to the new upstream sha, and the catalog for any seam that was added, removed or moved (a seam change and its catalog change belong in the same commit).
 2. Tag with the convention `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, for example `ffxiv-2026.10.17-fd6c2870-rc1`: the date is the tag day, the sha8 is the upstream commit the stack sits on, `-rcN` marks a release candidate that has not been through the full play-test. An annotated tag: `git tag -a <tag> -m "<summary>"`.
-3. The packaging and the release steps are in [RELEASE.md](RELEASE.md).
+3. The packaging and the release steps are in [RELEASE.md](RELEASE.md). If GitHub Actions are enabled on the repository, enabling them also enabled upstream's six workflows, which are kept disabled one by one with `gh workflow disable` (exact procedure in RELEASE.md section 5). A sync can add a new upstream workflow file, and a new file starts active: before pushing, run `gh workflow list --all` and disable every workflow that is not one of the fork's own `ffxiv-*` drafts.
 4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag. This is the maintainer's step.
 
 ## 11. Rollback

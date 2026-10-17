@@ -9,7 +9,7 @@ Nothing in this document needs the game's source. Everything is recovered from t
 All game-build-dependent values are in one file, `OptiScaler/ext/ffxiv/GameBuild.h`; `GameBuild.cpp` has the matching code. There are three layers.
 
 1. **Image identity.** `GameBuild` holds the PE `TimeDateStamp` and `SizeOfImage` of the supported executable. `MatchBuild()` compares them with the running process; `MatchCurrentProcess()` reads the running executable's own headers and calls it. `ext::game::Current()` (`OptiScaler/ext/game/Game.cpp`) does the same walk once at start-up. A mismatch means every game-module pointer stays null and every FFXIV feature stays off (section 6). This layer is silent: the only sign is that the log line `Matched supported FFXIV build for game-module seams` is missing.
-2. **Byte guards.** Before any hook is installed, the code reads the bytes at each hook target and compares them with the expected prologue (`settingsInstructions`, `querySizeInstructions`, `rendererUpdateInstructions`, `resizeCallbacksInstructions`, `batchInstructions`, `enqueueInstructions`, `bindStateInstructions` in `GameBuild.h`). Any difference logs a warning and installs nothing (fail closed). The guards are what catch a patch that keeps the image size by chance, or a function that moved by a few bytes.
+2. **Byte guards.** Before any hook is installed, the code reads the bytes at each hook target and compares them with the expected prologue (`settingsInstructions`, `querySizeInstructions`, `rendererUpdateInstructions`, `resizeCallbacksInstructions`, `batchInstructions`, `enqueueInstructions`, `bindStateInstructions` in `GameBuild.h`). Any difference logs a warning and installs nothing (fail closed). These checks sit behind layer 1: the code that reads the bytes is only reached when the image identity matched, so on a patched executable (new timestamp) none of these warnings can appear. The guards are what catch a patch that keeps the image size by chance, or a function that moved by a few bytes.
 3. **Plausibility checks at run time.** Pointer reads are bounds-checked and structures are range-checked (queue sizes, counts); a failed read makes that frame fall back to the native path. The one pointer that has no byte guard, the nameplate module global, is logged once at start-up so you can see whether the chain resolves (section 4).
 
 **Fail open.** In every case the game keeps running with the fork's FFXIV features disabled, as if the fork were plain OptiScaler: no crash, no hook, no memory read outside the guarded paths. The disk hash of the executable is not checked at run time; the identity is the PE header plus the byte guards.
@@ -155,11 +155,11 @@ Then exercise each feature once: change the in-game DLSS quality setting and che
 
 ## 6. What happens on a build that does not match
 
-`ext::game::Current()` stays all-null, silently. Each feature then does the following (from the places that test the game-module pointers under `OptiScaler/ext/`):
+`ext::game::Current()` stays all-null, and the whole case is **silent**: no warning is logged, because every installer (the native-quality hooks, the lighting hooks, the Companion hooks) is reached only through a game-module pointer or the device-hook seam that tests one. The only visible sign is the missing `Matched supported FFXIV build for game-module seams` line. Each feature then does the following (from the places that test the game-module pointers under `OptiScaler/ext/`):
 
 | Feature | On an unknown build |
 |---|---|
-| Native quality hooks, DLAA gate | not installed; log warning (`unsupported executable instructions` or `instruction mismatch`) |
+| Native quality hooks, DLAA gate | not installed (`EnsureHooks` is only called through the `quality` pointer); no log line |
 | `ForcePerfQuality` | **still applies** (the seam is not game-gated), but without the DLAA gate and without the geometry correction; the render size may then be wrong for this game |
 | Render geometry and sub-rectangle correction | off (`geometry` is null) |
 | Forced-quality colour scaling | off |
@@ -167,16 +167,16 @@ Then exercise each feature once: change the in-game DLSS quality setting and che
 | Frame-marker pacing, FG guide matching | off (`fgMarkers` is null); XeFG and DLSS-G use upstream's frame timing |
 | OptiHDR output (`[HDR] FfxivHDR`) and its menu card | off: the request returns false when `hdr` is null; also no scene HDR |
 | HUD-less engine | no source (`hudless` is null); the mode has no effect |
-| Companion / nameplates | log warning `unsupported executable; no batch hooks installed` |
+| Companion / nameplates | not installed (`Install` is only called when `hdr` is set); no log line. The `unsupported executable` warning belongs to a different case: an executable that is gated in but fails the match inside the installer, which the current call path does not produce |
 | Isolated NGX shutdown and the bridge's FFXIV-specific NR behaviour | upstream's default behaviour |
 | DLSS-G, XeFG, NR core, OptiScaler itself | work as in plain OptiScaler |
 
-So after a patch that is not yet followed, the game still runs with the fork's generic features; the FFXIV-specific ones are off and the log says which.
+So after a patch that is not yet followed, the game still runs with the fork's generic features; the FFXIV-specific ones are off and the log does not say which: look for the missing `Matched` line.
 
 ## 7. Checklist
 
 1. Patch released; install it, keep a copy of the previous executable.
-2. Run the game with the existing fork build; read the log (section 5). If every line is as expected the patch did not change the guarded code and `GameBuild.h` needs only the new `TimeDateStamp`/`SizeOfImage`.
+2. Check the new executable offline against the existing guards: run `scan.ps1` (section 4.2) with the exact guard bytes from `GameBuild.h`, without wildcards, and compare each hit with the RVA in `GameBuild.h`. Running the old fork build on the new executable cannot tell you this, because the new timestamp stops it before any byte guard is reached. If every guard is found at its old RVA, only `TimeDateStamp` and `SizeOfImage` need editing (the three globals loaded by the guards, `settingsPointerRva`, `managerPointerRva` and the stack cookie, are then unchanged as well; `devicePointerRva`, the nameplate module global and the slot table are not covered by a guard, so confirm those with the in-game log of section 5). If a guard is missing or sits elsewhere, re-derive it (section 4).
 3. If a guard warning appears, find the function again (section 4), edit `GameBuild.h`, build, test, play (section 5).
 4. Check the shader fingerprint tables if the lighting scan, scene HDR, HUD-less boundary or nameplate replay stay off although the addresses were accepted.
 5. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, the evidence for each moved RVA, and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
