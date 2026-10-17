@@ -1,8 +1,6 @@
 # HUD-less engine (S10): design
 
-Status: **draft for the user's approval (W6-0), 2026-10-16.** Nothing here is implemented yet except the two contract headers (`OptiScaler/ext/hudless/HudlessSource.h`, `HudlessGpu.h`) and the `Game::hudless` pointer. Plan, decisions and waves: workspace `S10-PLAN.md`. Seam IDs P0-P8 come from `phase3-ledger/U5-dx11bridge-shaders-menu.md`.
-
-Statements marked **(inferred)** come from reading code and have not been run; the diagnostic build D1 (section 12) exists to turn them into facts.
+Status: **implemented, opt-in (`[HudLess] Mode = off` by default), tested in game on 2026-10-17; see sections 15 and 15a for what was verified and the known limits.** Statements marked **(inferred)** below come from reading code before the diagnostic sessions; section 15 records what those sessions found.
 
 ## 1. Goal and decisions
 
@@ -252,27 +250,33 @@ Menu card "HUD-less diagnostics": run folder path, counters, the snapshot button
 | WARP D3D11 draw-capture harness (extends `tests/ext/hdr/hdr_preview.cpp`'s pattern): boundary copy equals the render target at that draw | warp | A |
 | Diag file formats (round-trip of `shaders.csv`, `frames.txt`) | cpu | A |
 
-## 14. Work packages (wave W6-A, parallel, Sonnet 5.5 xhigh, worktrees from `s10`)
+## 14. Implementation map
 
-| Package | Owns | Must not touch | Depends on |
-|---|---|---|---|
-| **A** `FfxivUiBoundary v0` + D1 | `ext/ffxiv/ui/**` (incl. `UiConfig`), `tests/ext/ffxiv/ui/**`, the three hook lines in `FfxivLightingCapture.h`, `Game.cpp` assignment, `PresentScope` in `ext/hdr/BridgeHdr.cpp` (probe at entry, `EndFrame()` at exit) | the bridge files, `ext/hudless/**` (reads `HudlessSource.h`, `HudlessState.h`) | `HudlessSource.h`, `HudlessState.h` (committed) |
-| **B** engine core | `ext/hudless/{Engine,Config,Menu}*`, `adapters/*`, bridge seams + `wrapped_swapchain.cpp` BeforeOverlay, `IFGFeature.cpp` predictor, `ext/ini/HudLess.ini`, `ext/Seams.*`, deletion of `ext/fg/HudlessLink.*`, catalog rows | shaders, `UiPaste.cpp`, `UiImage.cpp`, `ext/ffxiv/ui/**` | both headers; codes against `HudlessGpu.h` with a stub implementation behind a test flag so it builds before C lands |
-| **C** mask + paste | `ext/hudless/{UiImage,UiPaste}.cpp`, `shaders/**`, `hudless.shaders.props`, WARP tests | engine, bridge, FFXIV | `HudlessGpu.h` (committed) |
+| Area | Where |
+|---|---|
+| FFXIV boundary detector, diagnostics (`[HudLess] Diagnostics`), live source | `ext/ffxiv/ui/**`, three hook lines in `ext/ffxiv/lighting/FfxivLightingCapture.h`, `PresentScope` in `ext/hdr/BridgeHdr.cpp` |
+| Engine: state machine, slot ring, seams, DLSS-G adapter, menu card, config | `ext/hudless/{HudlessEngine,HudlessCore,HudlessLogic,HudlessConfig,HudlessMenu}*`, `ext/hudless/adapters/*`, `ext/ini/HudLess.ini`, `ext/Seams.*` |
+| Mask and paste GPU work | `ext/hudless/{UiImage,UiPaste}.cpp`, `ext/hudless/shaders/**` |
+| ReShade add-on and boundary apply | `ext/reshade/**` (API headers vendored in `ext/reshade/third_party/reshade`, see its README) |
 
-Rules as in W5 (`BRIEF-w5-common.md`): every commit builds through `build-locked.ps1`, `tools\test.ps1` stays green (baseline 60 / 0 / 7 plus new tests), no push / tag / game installs, usage self-stop at 88 %, one log file per agent, report format unchanged. Contract-header changes go through the orchestrator, never silently.
+Every fork piece lives under `ext/`; the upstream-file edits are the seams listed in `docs/SEAMS.md`.
 
-Done when (wave A): each branch builds at every commit, its tests pass, upstream-file edits stay within the section 4.3 budget, and D1 (A alone on top of `w5` + the headers) is packaged for Session 1.
+## 15. What the diagnostic sessions answered
 
-## 15. What the diagnostics must answer (and what happens if the answer is bad)
+1. ReShade runs outermost on the game's D3D11 swapchain, before the bridge copy (section 16).
+2. The boundary rule that works is R1b: the first UI-tagged draw after the last scene stage whose render target is the full-size RGBA8 backbuffer. UI draws into other targets (the character preview) are ignored, not rejected. R2 and R3 never fire and are not used.
+3. UI shaders are stamped at creation whether or not the detector is armed, so a Mode switched on after the game loaded still finds the boundary.
+4. Dalamud overlays are drawn into the frame before the bridge copy, so they count as UI.
+5. The hook costs about 0.16 ms per frame in a city scene.
+6. `render_effects` applied in place at the boundary works and restores state; ReShade's own end-of-frame pass is then skipped for that frame.
 
-1. Where ReShade runs (outer / inner / on the FG chain) -> `S10-PLAN.md` section 2b table.
-2. Whether R1, R2 or R3 gives a boundary that matches the UI-hidden frame in every scene.
-3. How many UI shaders are created before the hook (untaggable) and what fraction of UI draws they account for; if large, the hook has to install earlier or R2 becomes the rule.
-4. Whether Dalamud overlays draw before or after the boundary / the bridge copy.
-5. Hook cost per frame in a city scene.
-6. Whether deferred contexts are used.
-7. Whether the RT at the boundary is the backbuffer (else the capture source or the ring assumption changes).
+## 15a. Status and known limits
+
+- Opt-in: `[HudLess] Mode = off` by default. Tested in SDR with DLSS-G 2x to 4x on an RTX 4090: the engine stays Active on 96 to 100 % of presents in normal scenes and falls back (by design) on title screens, loading screens and fades. The maintainer saw no visible difference against Mode off, so treat the benefit as unproven.
+- HDR output with `ui_free` is untested. FSR-FG and XeFG only receive tags and are untested.
+- One GPU hang (`DXGI_ERROR_DEVICE_HUNG`) happened shortly after the Mode was switched off, on and off again within about seven seconds, at 6x frame generation (the experimental RTX 40 MFG unlock). The same switching at 2x to 4x ran 24 times without a problem. The cause was not isolated.
+- The capture is refused, with a one-line reason in `OptiScaler.log` (`HudLess: the UI-free capture was refused: ...`), if the capture and the bridge copy differ in device, size or format.
+
 
 ## 16. ReShade integration (built-in add-on; decided 2026-10-16)
 
