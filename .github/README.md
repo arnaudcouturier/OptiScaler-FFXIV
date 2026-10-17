@@ -17,6 +17,7 @@ An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler)
 | FFXIV native integration (render geometry, native quality, nameplates, companion) | tested (RTX 4090) |
 | HUD-less frame generation (UI-free image, HUD pasted back; ReShade presets via a built-in add-on) | opt-in, off by default; tested in SDR with DLSS-G 2x-4x (RTX 4090), no visible gain reported; HDR untested; one GPU hang at the experimental 6x MFG |
 | Recovered from Nickle's build: NR shader edit, "Linear light + composed" HDR mapping, HDR PNG with menu | untested in game (credit: [docs/ATTRIBUTION.md](../docs/ATTRIBUTION.md)) |
+| Character preview DLSS and spatial AA (CharaView, reconstructed from Nickle's build) | opt-in, off by default; untested in game |
 | NR ViT capture (`[DlssNr] VitCapture`) | diagnostic only, off by default |
 | AMD HIP pre-SR | untested / community |
 | XeFG / XeMFG | untested / community |

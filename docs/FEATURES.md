@@ -35,6 +35,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 | FFXIV lighting scan | runs inside the tested NR path | [FFXIV module](#ffxiv-module) |
 | FFXIV companion / nameplates | tested | [FFXIV module](#ffxiv-module) |
 | FFXIV composition swapchain hook | untested on its own | [FFXIV module](#ffxiv-module) |
+| Character preview DLSS and spatial AA (CharaView) | opt-in, off by default; untested in game | [CharaView](#character-preview-charaview) |
 | Recovered items F2, F3, F4 | untested | [Recovered items](#items-recovered-from-nickles-build) |
 
 ## DLSS Neural Rendering (NR)
@@ -188,6 +189,22 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 
 **HUD-less boundary detector.** See [HUD-less](#hud-less-frame-generation): `ext/ffxiv/ui/`.
 
+## Character preview (CharaView)
+
+**What it does.** The game draws the 3D character preview (character, equipment and glamour windows) in a small separate render. CharaView gives that render its own isolated DLSS Super Resolution pass with 2x output (jittered rasterisation, replayed G-buffer draws for signed motion vectors, depth and camera guides, native alpha composed back), and offers an optional FXAA-style spatial anti-aliasing pass with 2x upscaling for the equipment preview. It was reconstructed from an unpublished build by Nickle and written fresh; credit and method: [ATTRIBUTION.md](ATTRIBUTION.md) and [RECONSTRUCTION-NICKLE.md](RECONSTRUCTION-NICKLE.md).
+
+**Status.** Off by default and untested in game. Not implemented, as in the build it was reconstructed from: NR and frame generation for previews, portrait windows (it is not known which windows reach this renderer), and deferred contexts (those draws stay native).
+
+**Where.** `OptiScaler/ext/ffxiv/chara/` (with `shaders/`), hooks inside `ext/ffxiv/lighting/FfxivLightingCapture.h`, the per-frame callback through `dx11bridge::AfterSharedCopy` in `ext/Seams.cpp`, the game build entry in `ext/ffxiv/GameBuild.h`, ini fragments `ext/ini/FFXIV.ini` and `ext/ini/HDR.ini`.
+
+**Seams.** None in upstream files.
+
+**Config.** `[FFXIV] PreviewDLSS` (false), `PreviewAA` (false), `PreviewUpscale` (true, only meaningful with the AA), `PreviewGuideCapture` (false; writes capped diagnostic dumps to `OptiScaler\PreviewDLSSDiagnostics\`), `[HDR] PreviewNRTrace` (false; trace log lines only).
+
+**Menu.** Card "Character preview" in the Upscaling tab, with the counters and status lines.
+
+**Safety.** It fails open: any doubt leaves the native image. It reads the game's `.text` once, read-only, for an 18-byte code pattern that must match exactly once at the documented addresses; otherwise the feature switches itself off for the session with one log line. The DLSS pass uses the driver's real D3D11 NGX and latches off for the session if feature creation fails. Known limit: switching `PreviewDLSS` off at run time frees the preview GPU objects only at the next game start (a few tens of MB).
+
 ## Items recovered from Nickle's build
 
 Three behaviours were reconstructed by static analysis of an unpublished build by Nickle and re-implemented; none of Nickle's source is used. Credit and method: [ATTRIBUTION.md](ATTRIBUTION.md); confidence of each reconstruction: [RECONSTRUCTION-NICKLE.md](RECONSTRUCTION-NICKLE.md). Status of all three: untested in game.
@@ -198,7 +215,7 @@ Three behaviours were reconstructed by static analysis of an unpublished build b
 | F3 | NR HDR mapping "Linear light + composed" | `ext/nr/` (config, menu, presets), `ext/ini/DlssNr.ini` | `[DlssNr] ReversibleMode = 5` | `dlss_nr` |
 | F4 | HDR PNG "Include OptiScaler menu" | `ext/hdr/screenshot/` (`MenuCapture.h`), `ext/ini/HDR.ini` | `[HDR] ScreenshotMenu` | `ffxiv_hdr` |
 
-Seams: none added by F2 or F3; F4 uses the existing `dx11bridge::PrepareScreenshot` (it returns early while a menu capture is wanted) and `hdr::OverlayScope`. One further item from that build, a separate DLSS for the character preview window, has not been reconstructed.
+Seams: none added by F2 or F3; F4 uses the existing `dx11bridge::PrepareScreenshot` (it returns early while a menu capture is wanted) and `hdr::OverlayScope`. The fourth item from that build, a separate DLSS for the character preview window, is described in [Character preview](#character-preview-charaview).
 
 ## Footprint
 
