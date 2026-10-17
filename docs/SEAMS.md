@@ -121,7 +121,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 | `IRenderGeometry` | `ResolveRenderExtent(unsigned int paramW, unsigned int paramH, unsigned int& w, unsigned int& h)` (S7 C2/C3, corrected from the initial `Extent&` placeholder), `ColorIsDisplayAllocation(unsigned int renderWidth, unsigned int renderHeight, uint64_t allocWidth, unsigned int allocHeight, unsigned int subrectWidth, unsigned int subrectHeight)` (S7 C4, corrected from the initial zero-arg placeholder) | C2, C3, C4 |
 | `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached), `Request(int preset)` | C1, C5 |
 | `ISceneLighting` | `OnUpscaleBoundary`, `ConsumeHistoryReset` | B6, A3 |
-| `ISceneHdr` | `Open`, `PublishReconstructed`, `EndFrame` | C10 |
+| `ISceneHdr` | `Open`, `WouldSupplyScene`, `PublishReconstructed`, `EndFrame` | C10 |
 | `IFgMarkers` | `PresentationGuideDelay`, `OnUpscale`, `BeforePresent`, `NextFrame` | B5, D2, C5 |
 | `INgxLifecycle` | `IsolatesShutdown` | C6 |
 

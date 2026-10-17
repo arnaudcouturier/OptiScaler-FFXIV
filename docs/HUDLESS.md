@@ -216,6 +216,7 @@ SteadyTiming = false       ; advanced: paste the UI of one real frame behind (st
 CoverageGuard = 0.60       ; advanced: fall back when more than this share of pixels is flagged (0 = off)
 ShowDetectedUi = false     ; debug tint on the pasted area
 Diagnostics = false        ; D1 / diagnostic builds only (bound by A's UiConfig, the rest by B's HudlessConfig)
+ReShadePresets = auto      ; auto | on | off: apply the user's ReShade presets in place at the UI boundary (S10 E); auto = a ReShade runtime exists and >= 1 technique is enabled
 ```
 
 Menu card "HUD-less (UI-free frame generation)": status line (state, reason, counters), mode combo, an "Advanced" fold with the tuning keys, "Show detected UI". Changing Mode to/from `recomposition` shows "applies after a game restart". The old `[FrameGen] ExternalUI*` / `ExternalHudless` keys are not read or written.
