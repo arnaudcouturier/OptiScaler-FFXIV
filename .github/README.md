@@ -2,7 +2,7 @@
 
 Unofficial fork of OptiScaler (tracking nightly), not affiliated with the OptiScaler team.
 
-> **Status (October 2026): release candidate.** The feature stack is ported onto OptiScaler nightly `fd6c2870`. Tag `ffxiv-2026.10.17-fd6c2870-rc1` is the first tagged build that launches and plays; there are no packaged binaries yet. The older tag `ffxiv-ref-equiv-fd6c2870` does not launch (two startup bugs fixed after it) and is superseded by the rc tag.
+> **Status (October 2026): release candidate.** The feature stack is ported onto OptiScaler nightly `d9b62110`. Tag `ffxiv-2026.10.17-fd6c2870-rc1` (built on the earlier nightly `fd6c2870`) is the first tagged build that launches and plays; there are no packaged binaries yet. The older tag `ffxiv-ref-equiv-fd6c2870` does not launch (two startup bugs fixed after it) and is superseded by the rc tag.
 
 An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler). It adds DLSS Neural Rendering with pre-SR multipass, DLSS-G multi frame generation unlocks for RTX 30/40, XeFG/XeMFG, OptiHDR, RenoDX scene HDR and a native FFXIV integration. All fork code lives under `OptiScaler/ext/`, so upstream files carry only small, listed seams (see [docs/SEAMS.md](../docs/SEAMS.md)). The upstream README is [README.md](../README.md).
 
