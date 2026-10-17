@@ -314,3 +314,37 @@ output size, sRGB views, the game's pipeline state restored, the swapped `t0` se
 5. A game patch: the log must show exactly one line `FFXIV character preview: switched off for this session (...)` with the
    reason (preceded by a more detailed warning when the scan itself failed), the menu card says the same, and the preview stays
    native.
+
+### F5 DLSS core: isolated DLSS for the preview (`PreviewDLSS`)
+
+Source files: `ext/ffxiv/chara/CharaDlss*.{h,cpp}` (gate, slots, finish step, NGX composition), `CharaMotion*`, `CharaCamera*`,
+`CharaGuides.*` with `shaders/chara_guides.hlsl`, `CharaDiag*`. Written from the behaviour specification only; the shader is
+described there in words and formulas and was written fresh. Nickle is credited as for the rest of CharaView.
+
+What it does, per preview render:
+
+1. A UI draw that samples a preview output within 250 ms of its finisher claims a slot (up to 16). Only then is the preview
+   jittered, replayed and upscaled, and the very first evaluation of a slot is not jittered.
+2. Depth prepass and G-buffer draws run with the viewport shifted by a Halton (2, 3) jitter over 16 phases. The opaque
+   G-buffer draws are replayed once into a private RGBA16F target with render target 3 only and depth writes off, which keeps the
+   signed motion that the game's 8-bit target cannot hold. The replay is skipped while an occlusion or statistics query is
+   open, with unordered access views or stream-out targets bound, on multisampled or non-opaque targets, and for pixel
+   shaders that are neither tagged nor of the exact G-buffer shape.
+3. The pixel-shader constant buffer 2 of the first G-buffer draw (59 vectors) is copied; the helper pass subtracts its last
+   vector's zw from the motion, maps non-finite values to zero and clamps to +-2. Depth is read through a 24-bit view.
+4. After the finisher the native image becomes the colour input, an NGX super resolution feature (render size W x H, output
+   2W x 2H, MaxPerf, flags 0x42 or 0x4A with a reversed depth buffer, motion at render resolution, automatic exposure) is
+   evaluated through the driver's D3D11 NGX entry points, and the native alpha is read back at `uv + jitter / size` into an
+   RGBA8 image. UI draws that sample the preview get that image for the one draw.
+5. All helper passes and the upscaler run inside a private device context state; the game's state is swapped back.
+6. Every failure keeps the native image: a slot failure is counted and sticks, a feature creation failure ends the path for
+   the session, and a latched path releases its slots (after the GPU finished with them) before it goes quiet.
+
+Differences from Nickle's build: the diagnostics are off by default and capped (12 files, 100 MiB, `PreviewGuideCapture`);
+the finish step also waits for the camera copy; the copy-chain trigger is not implemented (the dispatcher treats a UI draw that
+samples a table entry as the consumer); the NGX coverage counters of the exported shim are not reproduced (no seam without
+touching the upstream shim).
+
+Not established: whether the game's NGX device is the immediate context's device under the DX11-on-DX12 bridge, whether a
+D3D11 feature can be created while the bridge's own feature exists, the meaning and sign of the camera offset (the log prints
+it with `PreviewGuideCapture`), and the window coverage (portraits).
