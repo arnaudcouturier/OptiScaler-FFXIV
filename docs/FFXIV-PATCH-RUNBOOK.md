@@ -142,7 +142,7 @@ Struct offsets (the `+0x...` rows) rarely change in a patch, but they are not gu
 
 ## 5. Verifying a candidate in game
 
-Use a copy of the game folder and the fork build with the edited `GameBuild.h`. Start the game and read `OptiScaler.log`. A correct build shows, in this order:
+Use a copy of the game folder and the fork build with the edited `GameBuild.h`. Set `[Log] LogToFile = true` in `OptiScaler.ini` (the default is no log file), start the game and read `OptiScaler.log`. A correct build shows, in this order:
 
 - `Matched supported FFXIV build for game-module seams`
 - no `FFXIV probe: unsupported executable instructions; settings read disabled`

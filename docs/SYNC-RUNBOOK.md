@@ -181,7 +181,7 @@ Commits 13 to 29 and the steps between applied cleanly. Each step took under a s
 
 ## 9. In-game smoke test
 
-Use the freshly packaged build in a copy of the game folder (back up first; see [RELEASE.md](RELEASE.md)). Check `OptiScaler.log` after each step for warnings.
+Use the freshly packaged build in a copy of the game folder (back up first; see [RELEASE.md](RELEASE.md)). Set `[Log] LogToFile = true` first (the default is no log file) and check `OptiScaler.log` after each step for warnings.
 
 1. **Launch.** The game reaches the title screen and a character in the world. In the log: the version banner names the fork tag and the upstream sha, and `Matched supported FFXIV build for game-module seams` appears (if it does not, see [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md)).
 2. **DLSS-NR on.** Enable it in the `dlss_nr` card; the picture changes, no black or corrupted frame, no error lines. Toggle off and on once.
