@@ -109,9 +109,12 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         {
             if (SUCCEEDED((*out)->SetPrivateData(tag,sizeof(id),&id))) ++created[id-1];
         }
-    if (SUCCEEDED(hr) && out && *out && code && size>=32 && !std::memcmp(code,"DXBC",4))
-        ext::hdr::FfxivSceneHdr::Tag(*out,Crc(code,size));
-    if (ext::ffxiv::ui::Armed() && SUCCEEDED(hr) && out && *out) ext::ffxiv::ui::TagShader(*out,code,size); // ext: S10 A (UI shader registry; one atomic test while disarmed)
+    if (SUCCEEDED(hr) && out && *out && code && size>=32 && size<=0xFFFFFFFFull && !std::memcmp(code,"DXBC",4))
+    {
+        const UINT crc=Crc(code,size); // hashed once: the scene-stage tag and the UI boundary stamp share it
+        ext::hdr::FfxivSceneHdr::Tag(*out,crc);
+        ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
+    }
     return hr;
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)

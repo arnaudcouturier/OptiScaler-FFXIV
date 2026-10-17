@@ -7,6 +7,7 @@
 #include "ext/ffxiv/ui/UiConfig.h"
 
 #include <cstddef>
+#include <cstdint>
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
@@ -25,8 +26,10 @@ ext::hudless::IHudlessSource& Provider();
 // lighting hooks latched onto. Never throws.
 void OnDraw(ID3D11DeviceContext* context, bool latched);
 
-// Pixel shader creation hook (FfxivLightingCapture::CreateShader): registers and stamps the shader. Never throws.
-void TagShader(ID3D11PixelShader* shader, const void* code, size_t size);
+// Pixel shader creation hook (FfxivLightingCapture::CreateShader), called for every DXBC pixel shader with the CRC32 of its bytecode
+// (computed once by the hook). Stamps the catalog stages ALWAYS (a Mode switched on later needs them), and runs the D1 registry only
+// while Armed(). Never throws; does nothing unless the game module is a matched FFXIV build.
+void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t bytes);
 
 // Present entry (ext::dx11bridge::PresentScope constructor): refreshes the arming cache, runs the per-frame bookkeeping.
 void OnPresentBegin();

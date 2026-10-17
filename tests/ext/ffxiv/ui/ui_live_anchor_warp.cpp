@@ -402,6 +402,109 @@ void Run()
         CHECK(h.Present() == TakeResult::NotThisFrame);
     }
 
+    // ---- S10 E3: LATE ARMING ---------------------------------------------------------------------------------------------------------
+    // The Session 2 failure: [HudLess] Mode was off when the game created its shaders and was switched on later in the menu. Every
+    // shader below is created while the detector is NOT armed, through the shipped creation decision (Core::ShaderCreated with
+    // registry = false, which is what the hook passes for Armed() == false); core->TagShader (the armed registry) is NEVER called for
+    // them. Scene stage AND UI shader are stamped this way, because the core takes both stages only from the stamp (a UI-only fix
+    // would leave sawSceneStage false and the frame is never acted on).
+    {
+        auto* lateCore = new Core;
+        lateCore->SetBackbufferProvider(&BackbufferOf);
+        auto lateScene = gpu.Ps(0, 1, 0);  // tonemap stage, green
+        auto lateUi = gpu.Ps(0, 0, 1);     // UI, blue
+        auto latePlain = gpu.Ps(1, 1, 0);  // not in the catalog (an ordinary game shader), yellow
+        auto unseenScene = gpu.Ps(0, 1, 0); // never went through the creation hook (what the old gate produced)
+        auto unseenUi = gpu.Ps(0, 0, 1);
+        CHECK(lateScene && lateUi && latePlain && unseenScene && unseenUi);
+        lateCore->ShaderCreated(lateScene.Get(), 0x85E777EFu, 1512, false);
+        lateCore->ShaderCreated(lateUi.Get(), 3865947726u, 2048, false);
+        lateCore->ShaderCreated(latePlain.Get(), 0x12345678u, 300, false);
+        CHECK_EQ(lateCore->ShaderRows().size(), 0u); // nothing registered: D1 bookkeeping stays behind Armed()
+        CHECK_EQ(lateCore->Stats().shadersCreatedAfterHook, 0u);
+
+        // Disarmed frames: the hook does not call the core at all. Draws run, nothing is tracked.
+        for (int frame = 0; frame < 3; ++frame)
+        {
+            gpu.Bind(bbRtv.Get(), full);
+            ctx->ClearRenderTargetView(bbRtv.Get(), black);
+            ctx->PSSetShader(lateScene.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+            gpu.Bind(bbRtv.Get(), corner);
+            ctx->PSSetShader(lateUi.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+        }
+        CHECK_EQ(lateCore->Stats().gameDraws, 0u);
+
+        LiveSource lateSource(env);
+        Harness hl { gpu, *lateCore, lateSource, lateScene, lateUi, {} };
+
+        // The arming Present (RefreshArmed ran, the engine calls Take for the first time): arms the live source for the next frame.
+        CHECK(hl.Present() == TakeResult::NotThisFrame);
+        CHECK(lateSource.Armed());
+
+        // The old failure, kept as a control: shaders that never passed through the creation hook are unknown, so there is no stage,
+        // no R1b, no scene stage and nothing to act on.
+        {
+            const int calls = g_fx.calls;
+            gpu.Bind(bbRtv.Get(), full);
+            ctx->ClearRenderTargetView(bbRtv.Get(), black);
+            hl.Draw(unseenScene.Get());
+            gpu.Bind(bbRtv.Get(), corner);
+            const auto res = hl.Draw(unseenUi.Get());
+            CHECK_EQ(res.stage, kStageUnknown);
+            CHECK_EQ(res.r1b, 0u);
+            FrameOutcome o;
+            CHECK(hl.Present(&o) == TakeResult::NotThisFrame);
+            CHECK(!o.record.summary.sawSceneStage);
+            CHECK_EQ(g_fx.calls, calls);
+        }
+
+        // The stamped frame: the scene stage, an ordinary shader, then the first UI draw into the backbuffer.
+        {
+            const int calls = g_fx.calls, copies = g_fx.copies;
+            gpu.Bind(bbRtv.Get(), full);
+            ctx->ClearRenderTargetView(bbRtv.Get(), black);
+            const auto scene = hl.Draw(lateScene.Get());      // ordinal 1
+            CHECK_EQ(scene.stage, 1);
+            const auto plain = hl.Draw(latePlain.Get());      // ordinal 2: outside the catalog, created disarmed, unknown at its first draw
+            CHECK_EQ(plain.stage, kStageUnknown);
+            gpu.Bind(bbRtv.Get(), corner);
+            const auto hud = hl.Draw(lateUi.Get());           // ordinal 3
+            CHECK_EQ(hud.stage, kUiStage);
+            CHECK_EQ(hud.r1b, 3u);
+            CHECK(hud.r1bChanged);
+            CHECK_EQ(g_fx.calls, calls + 1);                  // effects ran at the anchor, once ...
+            CHECK_EQ(g_fx.copies, copies + 1);                // ... and the copy followed
+            hl.Draw(lateUi.Get());                            // later HUD draws change nothing
+            CHECK_EQ(g_fx.calls, calls + 1);
+
+            UINT pitch = 0, snapPitch = 0;
+            const auto backbuffer = gpu.Read(bb.Get(), pitch);
+            FrameOutcome o;
+            CHECK(hl.Present(&o) == TakeResult::Ok);
+            CHECK(o.record.summary.sawSceneStage);
+            CHECK_EQ(o.r1b, 3u);
+            CHECK_EQ(o.record.summary.unknownDraws, 1u);      // only the ordinary shader
+            CHECK_EQ(lateCore->PreHookShaders(), 3u);         // the two control shaders and the ordinary one (known consequence)
+            CHECK(hl.img.texture != nullptr);
+            if (hl.img.texture)
+            {
+                const auto snap = gpu.Read(hl.img.texture.Get(), snapPitch);
+                CHECK(Is(At(snap, snapPitch, 100, 60), 255, 0, 255)); // effects colour, over the scene
+                CHECK(Is(At(snap, snapPitch, 5, 5), 255, 0, 255));    // no HUD in the snapshot
+                CHECK(Is(At(backbuffer, pitch, 5, 5), 0, 0, 255));    // the HUD is in the backbuffer
+            }
+            const auto st = lateSource.GetStats();
+            CHECK_EQ(st.captured, 1u);
+            CHECK_EQ(st.delivered, 1u);
+            CHECK_EQ(st.rejected, 0u);
+        }
+        // The D1 registry was never used on this path; the stage records are shared, not per shader.
+        CHECK_EQ(lateCore->ShaderRows().size(), 3u); // only the three pre-hook placeholders created at the first draw
+        lateSource.Release();
+    }
+
     source.Release();
     ctx->OMSetRenderTargets(0, nullptr, nullptr);
 }

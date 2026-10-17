@@ -2,7 +2,6 @@
 
 #include "ext/ffxiv/ui/FfxivUiBoundary.h"
 
-#include "ext/core/Crc32.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
@@ -10,6 +9,7 @@
 #include "ext/ffxiv/ui/UiSnapshot.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 #include "ext/ffxiv/ui/UiLive.h"
+#include "ext/game/Game.h"
 #include "ext/hudless/HudlessSource.h"
 #include "ext/hudless/HudlessState.h"
 #include "ext/reshade/ReShadeAddon.h"
@@ -263,14 +263,16 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
     }
 }
 
-void TagShader(ID3D11PixelShader* shader, const void* code, size_t size)
+void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t bytes)
 {
-    if (!Armed() || shader == nullptr || code == nullptr || size == 0 || size > 0xFFFFFFFFull)
+    // S10 E3: independent of Armed() / Wanted() / Diagnostics. The catalog stages must be stamped at creation (bytecode is not kept),
+    // or a Mode switched on after the game loaded sees no stage at all. Only the D1 registry stays behind Armed().
+    if (shader == nullptr || ext::game::Current().hudless == nullptr)
         return;
 
     try
     {
-        C().TagShader(shader, ext::core::Crc32(code, size), static_cast<uint32_t>(size));
+        C().ShaderCreated(shader, crc, bytes, Armed());
     }
     catch (...)
     {

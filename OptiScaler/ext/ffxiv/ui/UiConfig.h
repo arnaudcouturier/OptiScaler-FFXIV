@@ -4,9 +4,13 @@
 //
 // Armed() = Diagnostics || ext::hudless::Wanted(). It sits on the draw hook, so it is ONE relaxed atomic load of a cached
 // state. The cache is unsettled (0) until the first Armed() call, which evaluates the live config once and settles it (the
-// hooks that call it are installed after the config is loaded; the very first shader creations precede any Present and must
-// already be stamped, so the first Present cannot be the settling point). A bridge Present refreshes it every time, so a
-// Mode change from the menu takes effect at the next Present.
+// hooks that call it are installed after the config is loaded; the very first shader creations precede any Present, so the first
+// Present cannot be the settling point). A bridge Present refreshes it every time, so a Mode change from the menu takes effect
+// at the next Present.
+//
+// Armed() gates only the draw-time tracking and the D1 shader registry. The catalog stage stamps of the pixel shaders are written at
+// creation whatever Armed() says (S10 E3: bytecode is not kept, so a shader created unstamped could never be classified when the
+// Mode is switched on later); see Core::ShaderCreated.
 
 #include <Config.h>
 

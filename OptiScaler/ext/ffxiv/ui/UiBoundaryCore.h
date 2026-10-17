@@ -118,6 +118,13 @@ class Core
         _freq = f.QuadPart > 0 ? f.QuadPart : 1;
         _lines.reserve(96);
         _presentLines.reserve(16);
+        // The per-stage records of the always-on creation stamp (StampStage): one per catalog stage, never per shader.
+        for (uint8_t stage = 1; stage <= kUiStage; ++stage)
+        {
+            ShaderRec& r = _stageRecs[stage];
+            r.stage = stage;
+            r.ui = stage == kUiStage;
+        }
     }
 
     // ---- wiring ---------------------------------------------------------------------------------------------------
@@ -125,6 +132,42 @@ class Core
     void SetBackbufferProvider(BackbufferFn fn) { _bbFn = fn; }
 
     // ---- shader creation (any thread) ----------------------------------------------------------------------------
+    // S10 E3: the creation hook, called for EVERY successfully created pixel shader of a matched FFXIV build, whether or not the
+    // detector is armed (a Mode switched on after the game loaded must find the stages already stamped: bytecode is not kept, so a
+    // shader created unstamped can never be classified later). `registry` = the detector is armed: the D1 bookkeeping (per-program
+    // record, counters) runs on top of the stamp. Cost without it: one atomic add, a constexpr CRC lookup and, for the dozen catalog
+    // programs only, one SetPrivateData of 8 bytes; no lock, no allocation, no log.
+    void ShaderCreated(ID3D11PixelShader* ps, uint32_t crc, uint32_t bytes, bool registry)
+    {
+        StampStage(ps, crc);
+        if (registry)
+            TagShader(ps, crc, bytes);
+    }
+
+    // Stamps a catalog program (scene stage 1..5, UI set) with its shared stage record; other programs stay unstamped. Any thread.
+    // Always bumps the cache epoch: a new object may reuse the address of a freed one that Lookup cached.
+    void StampStage(ID3D11PixelShader* ps, uint32_t crc)
+    {
+        const uint8_t stage = StageOfCrc(crc);
+        if (stage >= 1 && stage <= kUiStage)
+        {
+            ShaderRec* rec = &_stageRecs[stage];
+            ps->SetPrivateData(kStamp, sizeof rec, &rec);
+        }
+        _epoch.fetch_add(1, std::memory_order_release);
+    }
+
+    // What Lookup reads from a shader object (the draw-time tracker and the tests use this one function). Null = unstamped.
+    static ShaderRec* ReadStamp(ID3D11PixelShader* ps)
+    {
+        ShaderRec* rec = nullptr;
+        UINT size = sizeof rec;
+        if (FAILED(ps->GetPrivateData(kStamp, &size, &rec)) || size != sizeof rec)
+            return nullptr;
+        return rec;
+    }
+    uint32_t Epoch() const { return _epoch.load(std::memory_order_acquire); }
+
     // Registers the program (key = CRC) and stamps the shader object with a pointer to its record.
     void TagShader(ID3D11PixelShader* ps, uint32_t crc, uint32_t bytes)
     {
@@ -404,10 +447,7 @@ class Core
         if (slot.ps == ps && slot.epoch == epoch)
             return slot.rec;
 
-        ShaderRec* rec = nullptr;
-        UINT size = sizeof rec;
-        if (FAILED(ps->GetPrivateData(kStamp, &size, &rec)) || size != sizeof rec)
-            rec = nullptr;
+        ShaderRec* rec = ReadStamp(ps);
         if (!rec)
             rec = PreHookRec(ps);
         else if (!rec->checked)
@@ -615,6 +655,7 @@ class Core
     std::array<CacheSlot, kCache> _cache {};
     std::unordered_map<const void*, ShaderRec*> _pre;
     uint32_t _preCount = 0;
+    ShaderRec _stageRecs[kUiStage + 1]; // [1..kUiStage]: the always-on stamp's shared records (not in _all / _byCrc)
 
     // per-frame state (render thread)
     uint64_t _frame = 1;
