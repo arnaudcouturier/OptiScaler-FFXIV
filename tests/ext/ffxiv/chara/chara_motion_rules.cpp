@@ -1,6 +1,7 @@
 #include "check.h"
 #include "ext/ffxiv/chara/CharaMotionRules.h"
 
+#include <memory>
 #include <string>
 
 using namespace ext::ffxiv::chara;
@@ -151,6 +152,41 @@ void TestDepth()
 
 void TestDepthCache()
 {
+    // A reference-counted value (the real cache holds ComPtr) survives the insert.
+    {
+        DepthStateCache<std::shared_ptr<int>, 2> shared;
+        D3D11_DEPTH_STENCIL_DESC d {};
+        std::shared_ptr<int> original = std::make_shared<int>(7);
+        std::shared_ptr<int>* stored = shared.Insert(0x40, d, original);
+        CHECK(stored != nullptr && *stored == original && original.use_count() == 2);
+        CHECK(shared.Find(0x40, d) != nullptr && *shared.Find(0x40, d) == original);
+    }
+
+    // ComPtr overloads operator& (it releases the pointer): the cache must never take the address of a value with it.
+    {
+        struct Guarded
+        {
+            int* released = nullptr;
+            int payload = 0;
+            Guarded* operator&()
+            {
+                if (released != nullptr)
+                    ++*released;
+                return this;
+            }
+        };
+        int releases = 0;
+        DepthStateCache<Guarded, 2> guarded;
+        D3D11_DEPTH_STENCIL_DESC d {};
+        Guarded g;
+        g.released = &releases;
+        g.payload = 5;
+        Guarded* stored = guarded.Insert(0x50, d, g);
+        CHECK(stored != nullptr && stored->payload == 5);
+        CHECK(guarded.Find(0x50, d) != nullptr);
+        CHECK(releases == 0);
+    }
+
     DepthStateCache<int, 2> cache;
     D3D11_DEPTH_STENCIL_DESC a {};
     a.DepthEnable = TRUE;

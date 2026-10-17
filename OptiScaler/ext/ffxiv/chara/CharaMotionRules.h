@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <d3d11.h>
+#include <memory>
 #include <unordered_set>
 
 #include "ext/ffxiv/chara/CharaDecision.h"
@@ -178,7 +179,7 @@ template <class Value, size_t N> class DepthStateCache
         for (auto& e : _entries)
         {
             if (e.key == key && SameDepthDesc(e.source, source))
-                return &e.value;
+                return std::addressof(e.value); // not &: ComPtr overloads operator& and releases
         }
         return nullptr;
     }
@@ -192,7 +193,7 @@ template <class Value, size_t N> class DepthStateCache
             {
                 e.source = source;
                 e.value = std::move(value);
-                return &e.value;
+                return std::addressof(e.value); // not &: ComPtr overloads operator& and releases
             }
         }
         for (auto& e : _entries)
@@ -202,7 +203,7 @@ template <class Value, size_t N> class DepthStateCache
                 e.key = key;
                 e.source = source;
                 e.value = std::move(value);
-                return &e.value;
+                return std::addressof(e.value); // not &: ComPtr overloads operator& and releases
             }
         }
         return nullptr;
