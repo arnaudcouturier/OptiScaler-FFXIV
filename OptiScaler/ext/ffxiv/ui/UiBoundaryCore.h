@@ -76,12 +76,17 @@ struct Counters
     uint64_t framesUiBeforeScene = 0, framesWithUnknown = 0, framesSuperseded = 0;
     uint64_t rtAt[4][4] {}; // [rule 1..3][RtKind]
     uint64_t renderThreadChanges = 0;
+    // R1b (the live anchor: first UI draw into the backbuffer after the last scene stage)
+    uint64_t framesR1b = 0;        // frames that have one
+    uint64_t framesR1bLater = 0;   // ... and it is later than R1 (UI draws into another render target came first)
+    uint64_t framesUiNoR1b = 0;    // scene frames with UI draws after the last scene stage but none into the backbuffer
 };
 
 struct FrameOutcome
 {
     dfmt::FrameRecord record;
     double hookUs = 0;     // microseconds spent inside the draw hook this frame
+    uint32_t r1b = 0;        // S10 E2: the frame's final R1b ordinal (0 = none); not part of the frames.txt record
     bool listWorthy = false; // anomaly flag for the logger (reason text in record.reason is set by the caller)
     const char* anomaly = ""; // "", or a short reason without spaces
 };
@@ -101,6 +106,9 @@ class Core
         bool counted = false;   // false: the draw was ignored (other thread, before the first Present)
         uint8_t change = 0;     // candidates this draw changed: bit 0 = R1, bit 1 = R2 (see BoundaryTracker::LastChange)
         Candidates cand {};     // the candidates after this draw
+        // S10 E2: R1b, the live anchor (first UI draw into the backbuffer after the last scene stage; UiBoundaryRules.h)
+        uint32_t r1b = 0;       // ordinal of the R1b candidate after this draw (0 = none)
+        bool r1bChanged = false; // this draw set, moved or cleared it (the draw has not run yet)
     };
 
     Core()
@@ -208,6 +216,8 @@ class Core
         res.moved = _tracker.OnDraw({ stage, rt.kind == dfmt::RtKind::Backbuffer });
         res.change = _tracker.LastChange();
         res.cand = _tracker.Current();
+        res.r1b = _tracker.R1b();
+        res.r1bChanged = _tracker.R1bChanged();
         List(ordinal, stage, looked ? rt : RtInfo {});
         return res;
     }
@@ -247,6 +257,7 @@ class Core
         }
 
         o.hookUs = double(_hookTicks) * 1e6 / double(_freq);
+        o.r1b = _tracker.R1b();
         Account(r, o);
 
         // reset for the next frame
@@ -537,6 +548,14 @@ class Core
         }
         if (s.sawSceneStage && !c.r3)
             ++_cnt.framesNone;
+        if (o.r1b != 0)
+        {
+            ++_cnt.framesR1b;
+            if (o.r1b != c.r1)
+                ++_cnt.framesR1bLater;
+        }
+        else if (s.sawSceneStage && c.r1 != 0)
+            ++_cnt.framesUiNoR1b;
         if (s.uiBeforeLastScene)
             ++_cnt.framesUiBeforeScene;
         if (s.unknownDraws)

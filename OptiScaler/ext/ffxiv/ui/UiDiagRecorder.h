@@ -195,6 +195,10 @@ class Recorder
                  (unsigned long long) c.framesSame, (unsigned long long) c.framesR1First, (unsigned long long) c.framesR2First,
                  (unsigned long long) c.framesNone, (unsigned long long) c.framesUiBeforeScene,
                  (unsigned long long) c.framesWithUnknown, (unsigned long long) c.framesSuperseded);
+        // R1b = the live anchor: the first UI draw into the backbuffer after the last scene stage (UI draws into other render
+        // targets, e.g. the character preview, are skipped). r1b_later_than_r1 = frames where R1 sat on another render target.
+        t += Fmt("r1b=%llu r1b_later_than_r1=%llu scene_ui_but_no_r1b=%llu\n", (unsigned long long) c.framesR1b,
+                 (unsigned long long) c.framesR1bLater, (unsigned long long) c.framesUiNoR1b);
         t += "# render target bound at the candidate draw, per rule (counts of frames whose candidate draw was listed):\n";
         for (int rule = 1; rule <= 3; ++rule)
             t += Fmt("R%d  BB=%llu BBLIKE=%llu OTHER=%llu NONE=%llu\n", rule, (unsigned long long) c.rtAt[rule][1],

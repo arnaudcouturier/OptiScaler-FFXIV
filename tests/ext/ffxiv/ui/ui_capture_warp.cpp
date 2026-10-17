@@ -189,6 +189,8 @@ void Run()
     CHECK_EQ(ui.cand.r1, 5u);
     CHECK_EQ(ui.cand.r2, 5u);
     CHECK_EQ(ui.cand.r3, 5u);
+    CHECK_EQ(ui.r1b, 5u);            // S10 E2: the first UI draw into the backbuffer (pointer identity) is also the live anchor
+    CHECK(ui.r1bChanged);
 
     UINT refPitch = 0;
     const auto reference = gpu.Read(bb.Get(), refPitch); // what the render target holds right now, before the UI draw
@@ -245,6 +247,10 @@ void Run()
     CHECK_EQ(core->Stats().otherThreadDraws, 2u);
     CHECK_EQ(rec.candidates.r1, 5u);
     CHECK_EQ(rec.candidates.r2, 5u);
+    CHECK_EQ(outcome.r1b, 5u);
+    CHECK_EQ(core->Stats().framesR1b, 1u);
+    CHECK_EQ(core->Stats().framesR1bLater, 0u);
+    CHECK_EQ(core->Stats().framesUiNoR1b, 0u);
     CHECK_EQ(rec.summary.unknownDraws, 1u);   // the shader created before the hook
     CHECK_EQ(core->PreHookShaders(), 1u);
     // listed draws carry their final flags and render target class
@@ -290,8 +296,13 @@ void Run()
     CHECK_EQ(later.cand.r1, 0u);
     CHECK_EQ(later.change & 1, 1);              // cleared: the consumer must not capture at a draw whose cand.r1 differs
     CHECK(later.cand.r1 != later.ordinal);
+    CHECK_EQ(early.r1b, 1u);                    // S10 E2: R1b follows R1 here (UI draw into the backbuffer) ...
+    CHECK(early.r1bChanged);
+    CHECK_EQ(later.r1b, 0u);                    // ... and is cleared by the same scene stage draw
+    CHECK(later.r1bChanged);
     core->FreezeFrame();
     const auto frame2 = core->CompleteFrame();
+    CHECK_EQ(frame2.r1b, 0u);
     CHECK_EQ(frame2.record.frame, 2u);
     CHECK_EQ(frame2.record.summary.r1Supersessions, 1u);
     CHECK_EQ(frame2.record.summary.uiBeforeLastScene, 1u);

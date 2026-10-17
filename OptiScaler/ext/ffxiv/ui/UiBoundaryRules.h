@@ -11,6 +11,11 @@
 //                        `r2any` is the same draw without the render-target condition (the other reading of the sentence
 //                        in the design doc), kept so the analysis can compare both readings.
 //   R3 (union):          whichever of R1 / R2 comes first, i.e. the smaller ordinal of the two that are valid.
+//   R1b (live anchor, S10 E2): the first UI-tagged draw after the last scene/post stage (1..5) draw whose render target IS the
+//                        swapchain backbuffer. UI draws into other render targets (the character preview: 352x352 / 1024x1024
+//                        B8G8R8A8, drawn before the HUD) are skipped, not rejected. R1b == R1 when the first UI draw is on the
+//                        backbuffer, later otherwise, 0 when no UI draw reaches the backbuffer. Kept apart from `Candidates` and
+//                        from LastChange() on purpose (frames.txt and the D1 tests are keyed on R1 / R2 / R3).
 //
 // "After the last X" is only known at the end of the frame. The tracker is ONLINE: a candidate is (re)assigned as draws
 // arrive and cleared when a later stage draw supersedes it, so a capture taken at a candidate must be repeated if the
@@ -77,6 +82,7 @@ class BoundaryTracker
         const uint32_t beforeR3 = _c.r3;
         const uint32_t beforeR1 = _c.r1;
         const uint32_t beforeR2 = _c.r2;
+        const uint32_t beforeR1b = _r1b;
 
         const bool scene = d.stage >= 1 && d.stage <= 5;
         const bool ui = d.stage == kUiStage;
@@ -94,6 +100,7 @@ class BoundaryTracker
             if (_c.r1 != 0)
                 ++_s.r1Supersessions;
             _c.r1 = 0;
+            _r1b = 0;
         }
         else if (ui)
         {
@@ -102,6 +109,8 @@ class BoundaryTracker
                 _s.firstUi = ordinal;
             if (_c.r1 == 0)
                 _c.r1 = ordinal;
+            if (_r1b == 0 && d.rtBackbuffer)
+                _r1b = ordinal;
         }
 
         if (d.stage == 5)
@@ -125,6 +134,7 @@ class BoundaryTracker
 
         _c.r3 = Min(_c.r1, _c.r2);
         _change = static_cast<uint8_t>((_c.r1 != beforeR1 ? 1 : 0) | (_c.r2 != beforeR2 ? 2 : 0));
+        _r1bChanged = _r1b != beforeR1b;
         if (_c.r3 != beforeR3)
         {
             ++_s.candidateMoves;
@@ -138,6 +148,11 @@ class BoundaryTracker
     uint8_t LastChange() const { return _change; }
     const FrameSummary& Summary() const { return _s; }
 
+    // R1b (see the header): ordinal of the candidate after the last OnDraw (0 = none) and whether that draw set, moved or
+    // cleared it (a scene/post stage draw clears it). A capture taken at R1b is stale once it is cleared.
+    uint32_t R1b() const { return _r1b; }
+    bool R1bChanged() const { return _r1bChanged; }
+
   private:
     static uint32_t Min(uint32_t a, uint32_t b) { return a == 0 ? b : (b == 0 ? a : (a < b ? a : b)); }
 
@@ -145,6 +160,8 @@ class BoundaryTracker
     FrameSummary _s {};
     bool _sawStage5 = false;
     uint8_t _change = 0;
+    uint32_t _r1b = 0;
+    bool _r1bChanged = false;
 };
 
 // The same candidates computed from the complete list of a frame's draws (the definition the online tracker implements).
@@ -182,5 +199,19 @@ inline Candidates Retrospective(std::span<const DrawIn> draws)
 
     c.r3 = c.r1 == 0 ? c.r2 : (c.r2 == 0 ? c.r1 : (c.r1 < c.r2 ? c.r1 : c.r2));
     return c;
+}
+
+// R1b computed from the complete list of a frame's draws (the definition the online tracker implements): the first UI draw into
+// the backbuffer after the last scene/post stage draw; 0 = none.
+inline uint32_t RetrospectiveR1b(std::span<const DrawIn> draws)
+{
+    size_t lastScene = 0; // 1-based position, 0 = none
+    for (size_t i = 0; i < draws.size(); ++i)
+        if (draws[i].stage >= 1 && draws[i].stage <= 5)
+            lastScene = i + 1;
+    for (size_t i = lastScene; i < draws.size(); ++i)
+        if (draws[i].stage == kUiStage && draws[i].rtBackbuffer)
+            return static_cast<uint32_t>(i + 1);
+    return 0;
 }
 } // namespace ext::ffxiv::ui

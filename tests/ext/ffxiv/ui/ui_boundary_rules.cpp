@@ -43,6 +43,7 @@ struct Run
     BoundaryTracker t;
     int moves = 0;
     Candidates retro;
+    uint32_t retroR1b = 0;
 };
 
 Run Play(const Seq& s)
@@ -52,6 +53,8 @@ Run Play(const Seq& s)
         if (r.t.OnDraw(d))
             ++r.moves;
     r.retro = Retrospective(s.d);
+    r.retroR1b = RetrospectiveR1b(s.d);
+    CHECK_EQ(r.t.R1b(), r.retroR1b); // online equals retrospective on every hand written sequence too
     return r;
 }
 
@@ -265,6 +268,113 @@ void CaptureOpportunities()
     CHECK_EQ(t.Summary().candidateMoves, 3u);
 }
 
+// ---- R1b: the live anchor (S10 E2) -------------------------------------------------------------------------------------------
+void R1bIsR1WhenTheFirstUiDrawIsOnTheBackbuffer()
+{
+    // The 99.5% case of Session 1: the HUD starts on the backbuffer.
+    Seq s;
+    s.Untagged(10).Stage(1).Stage(2).Stage(4);
+    s.Untagged(10, false); // the scene resolve into the backbuffer is not tagged and is not a UI draw
+    const uint32_t first = s.Next();
+    s.Ui(5, true);
+    const auto r = Play(s);
+    CHECK_EQ(r.t.Current().r1, first);
+    CHECK_EQ(r.t.R1b(), first);
+}
+
+void R1bSkipsPreviewRenderTargets()
+{
+    // The 103 frames of Session 1: the character preview (352x352 B8G8R8A8, UI shaders) is drawn before the HUD. R1 sits on the
+    // preview, R1b on the first UI draw into the backbuffer.
+    Seq s;
+    s.Stage(1).Stage(2).Stage(4);
+    const uint32_t preview = s.Next();
+    s.Ui(9, false);
+    s.Untagged(6, false);
+    const uint32_t hud = s.Next();
+    s.Ui(7, true);
+    const auto r = Play(s);
+    CHECK_EQ(r.t.Current().r1, preview);
+    CHECK_EQ(r.t.R1b(), hud);
+    CHECK(r.t.R1b() > r.t.Current().r1);
+
+    // the preview can also come after the first HUD draw (frame 20300 of Session 1): R1b == R1, the later preview changes nothing
+    Seq t;
+    t.Stage(1).Stage(4);
+    const uint32_t first = t.Next();
+    t.Ui(2, true);
+    t.Ui(9, false);
+    t.Ui(5, true);
+    const auto q = Play(t);
+    CHECK_EQ(q.t.Current().r1, first);
+    CHECK_EQ(q.t.R1b(), first);
+}
+
+void R1bNeedsABackbufferUiDraw()
+{
+    // Only preview-target UI draws: R1 exists, R1b does not (the live source reports no boundary, not a rejection).
+    Seq s;
+    s.Stage(1).Stage(4).Ui(12, false);
+    const auto r = Play(s);
+    CHECK(r.t.Current().r1 != 0);
+    CHECK_EQ(r.t.R1b(), 0u);
+
+    // a backbuffer draw that is not UI-tagged is not an anchor
+    Seq u;
+    u.Stage(1).Stage(5, true).Untagged(3, true).Ui(2, false);
+    const auto v = Play(u);
+    CHECK_EQ(v.t.R1b(), 0u);
+
+    // pre-hook shaders (unknown stage) into the backbuffer are not UI draws either
+    Seq w;
+    w.Stage(1).Unknown(4, true);
+    CHECK_EQ(Play(w).t.R1b(), 0u);
+}
+
+void R1bResetsOnEverySceneStage()
+{
+    // A scene/post stage draw drops R1b like it drops R1; the anchor is the first backbuffer UI draw after the LAST one.
+    BoundaryTracker t;
+    t.OnDraw({ 1, false });
+    CHECK(!t.R1bChanged());
+    t.OnDraw({ kUiStage, false });
+    CHECK_EQ(t.R1b(), 0u);
+    CHECK(!t.R1bChanged());                 // a preview draw is not an event for R1b
+    t.OnDraw({ kUiStage, true });
+    CHECK_EQ(t.R1b(), 3u);
+    CHECK(t.R1bChanged());                  // set: the capture opportunity of the live source (the draw has not run yet)
+    t.OnDraw({ kUiStage, true });
+    CHECK_EQ(t.R1b(), 3u);
+    CHECK(!t.R1bChanged());                 // later HUD draws change nothing
+    t.OnDraw({ 3, false });
+    CHECK_EQ(t.R1b(), 0u);
+    CHECK(t.R1bChanged());                  // cleared: a capture taken at 3 is stale
+    t.OnDraw({ 3, false });
+    CHECK(!t.R1bChanged());                 // nothing to clear
+    t.OnDraw({ kUiStage, false });
+    t.OnDraw({ kUiStage, true });
+    CHECK_EQ(t.R1b(), 8u);                  // the new anchor, after the new last scene stage (draw 7 was a preview draw)
+    CHECK(t.R1bChanged());
+    // R1 / R2 / R3 and LastChange() are untouched by R1b (frames.txt and the D1 tests are keyed on them)
+    CHECK_EQ(t.Current().r1, 7u);
+    CHECK_EQ(t.LastChange(), 0);
+    t.Reset();
+    CHECK_EQ(t.R1b(), 0u);
+    CHECK(!t.R1bChanged());
+}
+
+void R1bMenuOnlyFrame()
+{
+    // the tracker has no policy about scene stages; the live source ignores R1b events of frames without a scene stage
+    Seq s;
+    s.Untagged(3, false);
+    const uint32_t ui = s.Next();
+    s.Ui(4, true);
+    const auto r = Play(s);
+    CHECK(!r.t.Summary().sawSceneStage);
+    CHECK_EQ(r.t.R1b(), ui);
+}
+
 // Deterministic generator for the property test.
 struct Lcg
 {
@@ -292,13 +402,21 @@ void OnlineEqualsRetrospective()
         for (const auto& d : s.d)
             t.OnDraw(d);
         const auto retro = Retrospective(s.d);
-        if (!(t.Current() == retro))
+        const uint32_t retroR1b = RetrospectiveR1b(s.d);
+        if (!(t.Current() == retro) || t.R1b() != retroR1b)
         {
-            std::printf("mismatch at iteration %d (len %u): online r1=%u r2=%u r2any=%u r3=%u, retro r1=%u r2=%u r2any=%u r3=%u\n",
-                        iter, len, t.Current().r1, t.Current().r2, t.Current().r2any, t.Current().r3, retro.r1, retro.r2,
-                        retro.r2any, retro.r3);
+            std::printf("mismatch at iteration %d (len %u): online r1=%u r2=%u r2any=%u r3=%u r1b=%u, retro r1=%u r2=%u r2any=%u r3=%u r1b=%u\n",
+                        iter, len, t.Current().r1, t.Current().r2, t.Current().r2any, t.Current().r3, t.R1b(), retro.r1, retro.r2,
+                        retro.r2any, retro.r3, retroR1b);
             CHECK(false);
             return;
+        }
+        // R1b is never earlier than R1 and is a UI draw into the backbuffer
+        CHECK(t.R1b() == 0 || (t.Current().r1 != 0 && t.R1b() >= t.Current().r1));
+        if (t.R1b() != 0)
+        {
+            CHECK(s.d[t.R1b() - 1].stage == kUiStage);
+            CHECK(s.d[t.R1b() - 1].rtBackbuffer);
         }
         CHECK_EQ(t.Summary().draws, len);
     }
@@ -319,6 +437,11 @@ int main()
     SceneStageAfterTheAnchor();
     WantsRenderTargetFollowsTheAnchor();
     CaptureOpportunities();
+    R1bIsR1WhenTheFirstUiDrawIsOnTheBackbuffer();
+    R1bSkipsPreviewRenderTargets();
+    R1bNeedsABackbufferUiDraw();
+    R1bResetsOnEverySceneStage();
+    R1bMenuOnlyFrame();
     OnlineEqualsRetrospective();
     return Finish("ui_boundary_rules");
 }
