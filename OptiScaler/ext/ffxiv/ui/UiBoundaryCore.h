@@ -277,6 +277,8 @@ class Core
     const dfmt::Rolling& PresentDrawsPerFrame() const { return _presentPerFrame; }
     const std::vector<RtEvent>& RtEvents() const { return _rtEvents; }
     uint64_t BackbufferWidth() const { return _bbShape.width; }
+    // S10 E: this frame's swapchain backbuffer (valid after the first counted draw of the frame; width 0 = unknown).
+    const dfmt::RtShape& BackbufferShape() const { return _bbShape; }
 
     // Snapshot of every shader record for shaders.csv (render thread: counters are single-writer).
     std::vector<dfmt::ShaderRow> ShaderRows()
@@ -352,6 +354,7 @@ class Core
         uint32_t epoch = 0;
     };
     static constexpr size_t kCache = 4096;
+    static constexpr size_t kMaxLines = 512; // listed draws per frame record, hard cap
 
     void EnsureBackbuffer()
     {
@@ -495,9 +498,11 @@ class Core
             ++_extraListed;
         }
 
-        if (list)
+        // Hard cap: the tracker only resets in CompleteFrame (bridge Present exit). With the feature armed by Wanted() and no bridge
+        // Present (frame generation off) the per-frame counters would never reset and the list would grow for ever (S10 E).
+        if (list && _lines.size() < kMaxLines)
             _lines.push_back({ ordinal, stage, rt.kind, rt.shape, false, false, false, false });
-        else if (tagged)
+        else if (tagged || list)
             ++_omitted;
     }
 
