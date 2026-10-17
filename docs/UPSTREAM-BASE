@@ -1,0 +1,4 @@
+# The upstream OptiScaler commit this fork is currently built on (full sha, one line).
+# Read by the upstream-watch workflow (.github/workflows/ffxiv-upstream-watch.yml) and by docs/SYNC-RUNBOOK.md.
+# Update it in the same commit that completes a sync. Lines starting with # are comments.
+fd6c2870ec420c74bd47a067a7a0b5ba2358e677
