@@ -1,0 +1,76 @@
+# DRAFT, inactive: GitHub Actions are disabled on this repository. Read docs/RELEASE.md section 5 before enabling them:
+# enabling Actions also enables upstream's six workflows, which must be disabled first.
+#
+# Builds the solution, runs the unit tests (the WARP tests need no GPU), reports the footprint and keeps the packaged build.
+name: ffxiv-ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '.github/README.md', '*.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['docs/**', '.github/README.md', '*.md']
+
+concurrency:
+  group: ffxiv-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Check out with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Fetch upstream (the footprint needs the base commit)
+        shell: pwsh
+        run: |
+          git remote add upstream https://github.com/optiscaler/OptiScaler.git
+          git fetch --no-tags upstream master
+
+      - name: Build
+        shell: pwsh
+        timeout-minutes: 60
+        run: pwsh -File tools\build.ps1
+
+      - name: Test
+        shell: pwsh
+        timeout-minutes: 30
+        run: pwsh -File tools\test.ps1
+
+      - name: Footprint
+        shell: pwsh
+        run: |
+          pwsh -File tools\footprint.ps1 | Tee-Object -FilePath footprint.txt
+          '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          Get-Content footprint.txt | Select-Object -Last 3 | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Package the build
+        shell: pwsh
+        run: pwsh -File tools\package.ps1 -Target "$env:RUNNER_TEMP\package"
+
+      - name: Upload the packaged build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-FFXIV-${{ github.sha }}
+          path: ${{ runner.temp }}\package
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload the build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.sha }}
+          path: build.log
+          retention-days: 7
+          if-no-files-found: ignore

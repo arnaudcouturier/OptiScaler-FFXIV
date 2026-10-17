@@ -1,0 +1,76 @@
+# DRAFT, inactive: GitHub Actions are disabled on this repository. Read docs/RELEASE.md section 5 before enabling them:
+# enabling Actions also enables upstream's six workflows, which must be disabled first.
+#
+# Once a week (and on demand) compares upstream OptiScaler master with the commit recorded in docs/UPSTREAM-BASE and opens
+# or updates ONE issue titled "Upstream moved: N commits". No other side effect: it does not close issues, create labels,
+# push, or touch any file. To act on the issue follow docs/SYNC-RUNBOOK.md.
+name: ffxiv-upstream-watch
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ffxiv-upstream-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: optiscaler/OptiScaler
+    steps:
+      - name: Check out (only to read docs/UPSTREAM-BASE)
+        uses: actions/checkout@v4
+
+      - name: Compare upstream master with the tracked base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(grep -vE '^[[:space:]]*(#|$)' docs/UPSTREAM-BASE | head -n 1 | tr -d '[:space:]')
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "docs/UPSTREAM-BASE does not hold a 40 character sha: '$base'" >&2
+            exit 1
+          fi
+          head_sha=$(gh api "repos/$UPSTREAM/commits/master" --jq .sha)
+          if [ "$head_sha" = "$base" ]; then
+            echo "Upstream master is still $base, nothing to report."
+            exit 0
+          fi
+          gh api "repos/$UPSTREAM/compare/${base}...master" > compare.json
+          status=$(jq -r .status compare.json)
+          ahead=$(jq -r .ahead_by compare.json)
+          if [ "$ahead" = "0" ]; then
+            echo "Upstream master ($head_sha) is not ahead of the base (status $status), nothing to report."
+            exit 0
+          fi
+          {
+            echo "Upstream OptiScaler \`master\` is **$ahead** commit(s) ahead of the commit this fork is built on."
+            echo
+            echo "- tracked base (\`docs/UPSTREAM-BASE\`): \`$base\`"
+            echo "- upstream master now: \`$head_sha\`"
+            echo "- compare status: \`$status\`"
+            echo "- compare: https://github.com/$UPSTREAM/compare/${base}...${head_sha}"
+            echo
+            echo "Latest commits (at most 30, oldest first):"
+            echo
+            jq -r '[.commits[] | "- `\(.sha[0:8])` \(.commit.message | split("\n")[0])"] | .[-30:] | .[]' compare.json
+            echo
+            echo "Next step: docs/SYNC-RUNBOOK.md. Updated by the ffxiv-upstream-watch workflow, edits to this body are overwritten."
+          } > body.md
+          title="Upstream moved: $ahead commits"
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'in:title "Upstream moved:"' --json number,title --limit 20 \
+            --jq '[.[] | select(.title | startswith("Upstream moved:"))] | sort_by(.number) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+            echo "Updated issue #$number"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi
