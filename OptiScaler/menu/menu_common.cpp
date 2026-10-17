@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "menu_common.h"
 #include "ext/Seams.h"
+#include "ext/upscaler/DlssDlls.h" // ext: S10 both DLSS DLLs (display only)
 #include <inputs/FG/XeFG_Inputs_Dx12.h>
 
 #include "input/input_system.h"
@@ -8111,6 +8112,8 @@ void MenuCommon::RenderStatusInfo(RenderMenuContext& ctx)
                      StrFmt("%s %d.%d.%d%s", currentFeature->ShortName().c_str(), currentFeature->Version().major,
                             currentFeature->Version().minor, currentFeature->Version().patch,
                             (currentFeature->IsWithDx12() && state.api != DX12) ? " w/Dx12" : ""));
+                for (const auto& row : ext::upscaler::DlssDllRows(currentFeature->ShortName())) // ext: S10 both DLSS DLLs (display only)
+                    pair(row.label.c_str(), row.value, row.dim);
                 pair("Render", StrFmt("%dx%d", currentFeature->RenderWidth(), currentFeature->RenderHeight()));
                 pair("Output", StrFmt("%dx%d (%.2fx)", currentFeature->TargetWidth(), currentFeature->TargetHeight(),
                                       (float) currentFeature->TargetWidth() / (float) currentFeature->RenderWidth()));
