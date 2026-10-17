@@ -599,7 +599,8 @@ void Engine::Pre(Dx11wDx12SC& sc)
     if (mode == Mode::UiFree)
     {
         const PasteStatus pasteStatus = UiPaste::Snapshot();
-        paste = { pasteStatus.produced, pasteStatus.pasted, pasteStatus.skipped, pasteStatus.coverage };
+        paste = { pasteStatus.produced, pasteStatus.pasted, pasteStatus.skipped, pasteStatus.coverage,
+                  pasteStatus.coverageSequence };
         SyncPasteOptions();
     }
 

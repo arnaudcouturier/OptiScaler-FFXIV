@@ -342,7 +342,10 @@ void TestSummary()
         host.stage = (i == 100) ? Reason::SlotBusy : Reason::None;
         host.source.result = (i == 300) ? TakeResult::NotThisFrame : TakeResult::Ok;
         if (i != 100 && i != 300)
+        {
             ++paste.produced;
+            paste.coverageSequence = paste.produced; // a readback of the newest image completed
+        }
         paste.pasted += 2;
         paste.coverage = 0.04f;
         if (i == 450)
@@ -379,20 +382,40 @@ void TestCoverage()
     for (uint64_t i = 1; i <= 140; ++i)
     {
         paste.produced = i;
+        paste.coverageSequence = i; // one new readback per present
         paste.coverage = 0.9f;
         reasons.push_back(Present(core, Mode::UiFree, paste).reason);
         if (trippedAt == 0 && reasons.back() == Reason::MaskCoverage)
             trippedAt = i;
     }
-    // 3 stale frames, then 5 samples over the limit: blocking from the 8th present, for 120 presents, then a retry
-    assert(trippedAt == 8);
-    for (uint64_t i = 8; i < 128; ++i)
+    // present 1 takes the baseline, then 5 fresh samples over the limit: blocking from present 6 for 120 presents
+    // (6..125), the retry is present 126, the next streak of 5 samples trips again at present 131
+    assert(trippedAt == 6);
+    for (uint64_t i = 6; i < 126; ++i)
         assert(reasons[i - 1] == Reason::MaskCoverage);
-    assert(reasons[127] == Reason::None); // present 128: the retry
-    assert(reasons[7 - 1] == Reason::None && reasons[0] == Reason::None);
+    for (uint64_t i = 1; i <= 5; ++i)
+        assert(reasons[i - 1] == Reason::None);
+    for (uint64_t i = 126; i <= 130; ++i)
+        assert(reasons[i - 1] == Reason::None); // present 126 is the retry
+    for (uint64_t i = 131; i <= 140; ++i)
+        assert(reasons[i - 1] == Reason::MaskCoverage);
     const Status s = core.Snapshot();
-    assert(s.coverageTripped || s.reasons[static_cast<size_t>(Reason::MaskCoverage)] >= 120);
-    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] >= 120);
+    assert(s.coverageTripped);
+    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] == 120 + 10);
+
+    // The same stale readback (coverage high, sequence frozen) never blocks, however many presents read it
+    FakeHost hostStale;
+    Core coreStale(hostStale);
+    PasteCounters stale;
+    stale.produced = 50;
+    stale.coverageSequence = 50;
+    stale.coverage = 0.99f;
+    for (int i = 1; i <= 60; ++i)
+    {
+        const Run r = Present(coreStale, Mode::UiFree, stale);
+        assert(r.staged && r.swapped && r.reason == Reason::None);
+    }
+    assert(coreStale.Snapshot().coverageUnknown);
 
     // Coverage "unknown": no readback ever completes. Never blocks, reads as unknown after 8 presents
     FakeHost host2;
@@ -405,6 +428,14 @@ void TestCoverage()
         assert(core2.Snapshot().coverageUnknown == (i >= CoverageGuard::kUnknownFrames));
     }
 
+    // A fresh readback ends "unknown"
+    PasteCounters one;
+    one.produced = 3;
+    one.coverageSequence = 3;
+    one.coverage = 0.1f;
+    Present(core2, Mode::UiFree, one);
+    assert(!core2.Snapshot().coverageUnknown);
+
     // Guard off (CoverageGuard = 0): any coverage is fine
     FakeHost host3;
     host3.limit = 0.f;
@@ -413,6 +444,7 @@ void TestCoverage()
     {
         PasteCounters p;
         p.produced = i;
+        p.coverageSequence = i;
         p.coverage = 1.0f;
         assert(Present(core3, Mode::UiFree, p).reason == Reason::None);
     }

@@ -124,54 +124,106 @@ void TestStateTracker()
 
 void TestCoverageGuard()
 {
-    // Trips after 5 consecutive frames over the limit; produced advances by one per frame
-    CoverageGuard g;
-    g.Configure(0.60f);
-    uint64_t frame = 0;
-    auto step = [&](float coverage) { ++frame; g.Update(frame, coverage, frame); };
-    for (int i = 0; i < 3; ++i)
-        step(0.9f); // the first kReadbackLag frames are stale data
-    assert(!g.Blocking());
+    // Driven by PasteStatus::coverageSequence: only a NEW sequence is a sample. The first update just takes the baseline
+    // (a readback that existed before the guard started is stale), so it is never a sample.
+    struct Rig
+    {
+        CoverageGuard g;
+        uint64_t frame = 0, seq = 0;
+        Rig() { g.Configure(0.60f); }
+        void Fresh(float coverage) { ++frame; g.Update(frame, coverage, ++seq); } // a new readback completed
+        void Stale(float coverage) { ++frame; g.Update(frame, coverage, seq); }   // the same readback read again
+    };
+
+    // Trips after 5 consecutive fresh samples over the limit
+    Rig a;
+    a.Fresh(0.9f); // baseline
     for (int i = 0; i < 4; ++i)
     {
-        step(0.9f);
-        assert(!g.Blocking());
+        a.Fresh(0.9f);
+        assert(!a.g.Blocking());
     }
-    step(0.9f); // 5th over-limit sample
-    assert(g.Blocking() && g.Trips() == 1);
-    const uint64_t trippedAt = frame;
+    a.Fresh(0.9f); // 5th sample over the limit
+    assert(a.g.Blocking() && a.g.Trips() == 1);
+    const uint64_t trippedAt = a.frame;
 
-    // A drop below the limit in between resets the count
-    CoverageGuard r;
-    r.Configure(0.60f);
-    uint64_t f2 = 0;
-    for (int i = 0; i < 3; ++i)
-        r.Update(++f2, 0.9f, f2);
-    for (int i = 0; i < 4; ++i)
-        r.Update(++f2, 0.9f, f2);
-    r.Update(++f2, 0.2f, f2);
-    for (int i = 0; i < 4; ++i)
-        r.Update(++f2, 0.9f, f2);
-    assert(!r.Blocking());
-
-    // Blocks for kRetryFrames, then retries; the old readbacks are stale until 3 new images were produced
+    // Blocks for kRetryFrames, then retries; the readbacks seen so far are stale until a newer sequence arrives
     for (int i = 1; i < CoverageGuard::kRetryFrames; ++i)
     {
-        step(0.9f);
-        assert(g.Blocking());
+        a.Stale(0.9f);
+        assert(a.g.Blocking());
     }
-    step(0.9f); // frame == trippedAt + 120
-    assert(frame == trippedAt + CoverageGuard::kRetryFrames);
-    assert(!g.Blocking());
-    for (int i = 0; i < 2 + 4; ++i)
+    a.Stale(0.9f);
+    assert(a.frame == trippedAt + CoverageGuard::kRetryFrames);
+    assert(!a.g.Blocking());
+    for (int i = 0; i < 30; ++i)
     {
-        step(0.9f); // 2 stale frames (the retry frame itself is the 3rd), then 4 samples over the limit
-        assert(!g.Blocking());
+        a.Stale(0.9f); // the old readback again and again: never counted, however often it is read
+        assert(!a.g.Blocking());
     }
-    step(0.9f);
-    assert(g.Blocking() && g.Trips() == 2);
+    assert(a.g.Unknown());
+    for (int i = 0; i < 4; ++i)
+    {
+        a.Fresh(0.9f);
+        assert(!a.g.Blocking());
+    }
+    assert(!a.g.Unknown());
+    a.Fresh(0.9f);
+    assert(a.g.Blocking() && a.g.Trips() == 2);
 
-    // Unknown never blocks and reads as unknown after kUnknownFrames
+    // A stale value never trips, however high: the same sequence read 30 times is not 30 samples
+    Rig s;
+    for (int i = 0; i < 31; ++i)
+    {
+        s.Stale(0.95f);
+        assert(!s.g.Blocking());
+    }
+
+    // A drop below the limit resets the streak
+    Rig r;
+    r.Fresh(0.9f);
+    for (int i = 0; i < 4; ++i)
+        r.Fresh(0.9f);
+    r.Fresh(0.2f);
+    for (int i = 0; i < 4; ++i)
+        r.Fresh(0.9f);
+    assert(!r.g.Blocking());
+    r.Fresh(0.9f);
+    assert(r.g.Blocking());
+
+    // Presents without a new readback (up to kUnknownFrames - 1) neither add to nor reset the streak
+    Rig gap;
+    gap.Fresh(0.9f);
+    for (int i = 0; i < 3; ++i)
+        gap.Fresh(0.9f);
+    for (int i = 0; i < CoverageGuard::kUnknownFrames - 1; ++i)
+        gap.Stale(0.9f);
+    assert(!gap.g.Unknown() && !gap.g.Blocking());
+    gap.Fresh(0.9f);
+    assert(!gap.g.Blocking());
+    gap.Fresh(0.9f); // 5th sample
+    assert(gap.g.Blocking());
+
+    // kUnknownFrames presents in a row without a new readback: unknown, and the streak does not survive it
+    Rig lost;
+    lost.Fresh(0.9f);
+    for (int i = 0; i < 4; ++i)
+        lost.Fresh(0.9f);
+    assert(!lost.g.Blocking()); // 4 samples so far
+    for (int i = 0; i < CoverageGuard::kUnknownFrames; ++i)
+        lost.Stale(0.9f);
+    assert(lost.g.Unknown());
+    lost.Fresh(0.9f);
+    assert(!lost.g.Unknown());
+    for (int i = 0; i < 3; ++i)
+    {
+        lost.Fresh(0.9f);
+        assert(!lost.g.Blocking());
+    }
+    lost.Fresh(0.9f);
+    assert(lost.g.Blocking());
+
+    // Coverage < 0 (nothing completed yet) never blocks and reads as unknown after kUnknownFrames
     CoverageGuard u;
     u.Configure(0.60f);
     for (uint64_t i = 1; i <= 20; ++i)
@@ -182,6 +234,25 @@ void TestCoverageGuard()
     }
     u.Update(21, 0.1f, 100); // a readback completes
     assert(!u.Unknown());
+
+    // A producer that never stamps the sequence (0) is "unknown", whatever the coverage says: fail open
+    CoverageGuard unstamped;
+    unstamped.Configure(0.60f);
+    for (uint64_t i = 1; i <= 30; ++i)
+    {
+        unstamped.Update(i, 0.99f, 0);
+        assert(!unstamped.Blocking());
+    }
+    assert(unstamped.Unknown());
+
+    // A readback that was there before the guard started (mode switched on later) is not a sample
+    CoverageGuard late;
+    late.Configure(0.60f);
+    for (uint64_t i = 1; i <= 10; ++i)
+    {
+        late.Update(i, 0.9f, 500);
+        assert(!late.Blocking());
+    }
 
     // Off
     CoverageGuard off;

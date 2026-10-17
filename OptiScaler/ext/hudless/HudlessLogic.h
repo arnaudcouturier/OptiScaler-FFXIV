@@ -298,16 +298,24 @@ class StateTracker
 
 // ---- Mask coverage guard (docs/HUDLESS.md section 5) --------------------------------------------------------------
 // Black/white fades, and presets that change pixels before the capture, make the mask cover most of the screen. The
-// guard falls back after kTripFrames consecutive frames over the limit and retries after kRetryFrames. Coverage < 0 is
-// "unknown" (no readback completed) and never blocks; kUnknownFrames of it in a row reads as "unknown" for the log.
-// After a retry the old readbacks are stale, so samples are ignored until kReadbackLag new paste images were produced.
+// guard falls back after kTripFrames consecutive readbacks over the limit and retries after kRetryFrames.
+//
+// It is driven by PasteStatus::coverageSequence, the ordinal of the paste image the published coverage was read back
+// from, so it can tell a FRESH readback from the same stale value read again:
+//   - only a new sequence counts as a sample (one per completed readback, which is one per real frame while the producer
+//     keeps up); a present without a new sequence neither adds to nor resets the over-limit streak;
+//   - "unknown" = kUnknownFrames presents in a row without a new sequence (nothing completed a readback, or the producer
+//     stopped producing): it never blocks, and the over-limit streak does not survive it;
+//   - after a retry the sequence seen at that moment is stale (the frames in between were not produced): samples count
+//     again only once a newer sequence arrives. The same baseline is taken when the guard starts, so a readback left over
+//     from an earlier session of the mode is not counted.
+// Coverage < 0 or sequence 0 is "unknown yet" and is never a sample.
 class CoverageGuard
 {
   public:
     static constexpr int kTripFrames = 5;
     static constexpr int kRetryFrames = 120;
     static constexpr int kUnknownFrames = 8;
-    static constexpr uint64_t kReadbackLag = 3;
 
     // limit 0 = guard off
     void Configure(float limit)
@@ -323,20 +331,20 @@ class CoverageGuard
         _unknownRun = 0;
         _tripped = false;
         _trippedAt = 0;
-        _baseProduced = 0;
+        _seenSequence = 0;
         _baseSet = false;
     }
 
-    // Once per armed present, before the decision. `frame` counts armed presents, `produced` is
-    // PasteStatus::produced, `coverage` the newest completed readback (0..1, < 0 unknown).
-    void Update(uint64_t frame, float coverage, uint64_t produced)
+    // Once per armed present, before the decision. `frame` counts armed presents, `coverage` is
+    // PasteStatus::coverage (0..1, < 0 unknown), `coverageSequence` PasteStatus::coverageSequence.
+    void Update(uint64_t frame, float coverage, uint64_t coverageSequence)
     {
         if (_limit <= 0.f)
             return;
 
         if (!_baseSet)
         {
-            _baseProduced = produced;
+            _seenSequence = coverageSequence; // whatever was read back before the guard started is stale
             _baseSet = true;
         }
 
@@ -347,17 +355,19 @@ class CoverageGuard
                 _tripped = false;
                 _over = 0;
                 _unknownRun = 0;
-                _baseProduced = produced; // readbacks before the retry are stale
+                _seenSequence = coverageSequence; // readbacks before the retry are stale
             }
             return;
         }
 
-        if (coverage < 0.f || produced < _baseProduced + kReadbackLag)
+        if (coverage < 0.f || coverageSequence == 0 || coverageSequence == _seenSequence)
         {
-            ++_unknownRun;
+            if (++_unknownRun >= kUnknownFrames)
+                _over = 0;
             return;
         }
 
+        _seenSequence = coverageSequence;
         _unknownRun = 0;
         if (coverage > _limit)
         {
@@ -386,7 +396,7 @@ class CoverageGuard
     bool _tripped = false;
     bool _baseSet = false;
     uint64_t _trippedAt = 0;
-    uint64_t _baseProduced = 0;
+    uint64_t _seenSequence = 0;
 };
 
 // ---- Slot ring with reader fences (docs/HUDLESS.md section 6) --------------------------------------------------------

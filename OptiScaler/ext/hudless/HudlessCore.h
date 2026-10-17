@@ -22,7 +22,8 @@ struct PasteCounters
     uint64_t produced = 0;
     uint64_t pasted = 0;
     uint64_t skipped = 0;
-    float coverage = -1.f; // newest completed readback, < 0 unknown
+    float coverage = -1.f;         // newest completed readback, < 0 unknown
+    uint64_t coverageSequence = 0; // ordinal of the paste image that readback belongs to (0 = none yet)
 };
 
 struct IEngineHost
@@ -128,10 +129,10 @@ class Core
         if (mode == Mode::UiFree)
         {
             _guard.Configure(_host.CoverageLimit());
-            _guard.Update(_presents, paste.coverage, paste.produced);
-            if (paste.coverage >= 0.f && paste.produced != _lastSampledProduced)
+            _guard.Update(_presents, paste.coverage, paste.coverageSequence);
+            if (paste.coverage >= 0.f && paste.coverageSequence != 0 && paste.coverageSequence != _lastSampledSequence)
             {
-                _lastSampledProduced = paste.produced;
+                _lastSampledSequence = paste.coverageSequence;
                 _window.coverageSum += static_cast<double>(paste.coverage);
                 ++_window.coverageSamples;
                 _window.coverageMax = std::max(_window.coverageMax, paste.coverage);
@@ -317,7 +318,7 @@ class Core
     uint64_t _presents = 0;
     uint64_t _captured = 0;
     uint64_t _sinceSummary = 0;
-    uint64_t _lastSampledProduced = UINT64_MAX;
+    uint64_t _lastSampledSequence = 0;
     Mode _mode = Mode::Off;
     Mode _lastMode = Mode::Off;
     Phase _shownPhase = Phase::Off;
