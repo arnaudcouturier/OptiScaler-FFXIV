@@ -305,6 +305,7 @@ void OnQueryBegin(ID3D11Asynchronous* query)
 void OnQueryEnd(ID3D11Asynchronous* query) { g_queries.End(reinterpret_cast<uintptr_t>(query)); }
 void OnFrameEnd() { g_queries.OnFrameEnd(); }
 void MarkQueriesBlind() { g_queries.MarkBlind(); }
+void OnMaintain(uint64_t nowMs) { g_queries.Maintain(nowMs); }
 
 uint64_t ReplayCount() { return g_replays.load(std::memory_order_relaxed); }
 uint64_t SkipCount(Skip reason) { return g_skips[static_cast<size_t>(reason)].load(std::memory_order_relaxed); }

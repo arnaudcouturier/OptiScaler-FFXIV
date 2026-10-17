@@ -41,7 +41,8 @@ bool BoundDepthIsReversed(ID3D11DeviceContext* context);
 void OnQueryBegin(ID3D11Asynchronous* query);
 void OnQueryEnd(ID3D11Asynchronous* query);
 void OnFrameEnd();
-void MarkQueriesBlind(); // the module (re)started: queries opened before it are unknown until the next frame end
+void MarkQueriesBlind(); // the module (re)started: queries opened before it are unknown until the next frame end or 100 ms of maintenance
+void OnMaintain(uint64_t nowMs);
 
 uint64_t ReplayCount();
 uint64_t SkipCount(Skip reason);

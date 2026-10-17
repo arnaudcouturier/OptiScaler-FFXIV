@@ -70,7 +70,7 @@ constexpr const char* ReasonText(Availability a)
     return "";
 }
 
-// True when `a` is worth one log line (a state the user can act on or that explains a missing effect).
+// True when `a` is worth one log line (a state that explains a missing effect).
 constexpr bool WorthLogging(Availability a) { return a != Availability::Available && a != Availability::ConfigOff; }
 
 // Logs a reason when it changes, at most `kMaxReasonLines` times in total (a flapping NGX state must not flood the log).

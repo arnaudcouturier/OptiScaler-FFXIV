@@ -245,6 +245,21 @@ void TestQueries()
     CHECK(s.Count() == 1 && !s.ReplayAllowed());
     s.Clear(); // the module restarted
     CHECK(s.Count() == 0 && s.Blind() && !s.ReplayAllowed());
+
+    // Without a frame callback the gate lifts after 100 ms of maintenance calls.
+    s.Maintain(5000); // starts the clock
+    CHECK(s.Blind());
+    s.Maintain(5099);
+    CHECK(s.Blind());
+    s.Maintain(5100);
+    CHECK(!s.Blind() && s.ReplayAllowed());
+    s.Begin(0x600, true);
+    s.MarkBlind(); // the module restarted: the clock starts again
+    s.Maintain(9000);
+    s.Maintain(9050);
+    CHECK(s.Blind());
+    s.OnFrameEnd(); // a frame callback lifts it at once
+    CHECK(!s.Blind());
 }
 } // namespace
 

@@ -454,6 +454,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
 
 void RunSlot(int index, const DrawView& view)
 {
+    ReplayScope own; // the upscaler may copy or clear on this context: the hooks must not treat that as the game's work
     ID3D11DeviceContext* context = view.context;
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     SlotState& s = g_slots.Slot(index);
@@ -554,9 +555,13 @@ void Finish(const DrawView& view)
     const FinishVerdict verdict = DecideFinish(f);
     switch (verdict)
     {
+    case FinishVerdict::NoSlot: return;
     case FinishVerdict::TooLarge:
-    case FinishVerdict::NoSlot:
-    case FinishVerdict::Stale: return;
+    case FinishVerdict::Stale:
+        // The native image was just written and this render is not evaluated: the UI must not keep an older composed image.
+        if (index != kNoSlot)
+            g_slots.ClearEvaluated(index);
+        return;
     case FinishVerdict::Failed: CountFallback(); return;
     case FinishVerdict::WaitingForMotion:
     case FinishVerdict::WaitingForDepth:
@@ -763,6 +768,13 @@ bool Around(const DrawView& view, DrawCall draw)
         draw(); // the native image first
         if (!view.finisherAccepted)
         {
+            // The native image of this render was written but will not be upscaled: stop showing the older composed one.
+            if (view.rtvTexture != nullptr)
+            {
+                const int rejected = g_slots.Find(reinterpret_cast<uintptr_t>(view.rtvTexture));
+                if (rejected != kNoSlot)
+                    g_slots.ClearEvaluated(rejected);
+            }
             if (g_pass.live)
                 CountFallback();
             return true;
@@ -812,6 +824,7 @@ void OnFrameEnd()
 
 void Maintain(uint64_t nowMs)
 {
+    motion::OnMaintain(nowMs); // lifts the open-query gate when no frame callback exists
     const bool disabled = g_latched.load(std::memory_order_relaxed) || !ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
     Cleanup(nowMs, disabled);
 }
@@ -849,6 +862,9 @@ Counters GetCounters()
 
 const char* StatusNote()
 {
+    // The gate is only refreshed while the dispatcher asks: with the feature off there is nothing to say.
+    if (!ext::Cfg().ffxiv.chara.previewDlss.value_or_default())
+        return "";
     if (g_latched.load(std::memory_order_relaxed))
         return ReasonText(Availability::Latched);
     const auto a = static_cast<Availability>(g_availability.load(std::memory_order_relaxed));

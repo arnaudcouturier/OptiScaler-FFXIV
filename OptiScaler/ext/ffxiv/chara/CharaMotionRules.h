@@ -250,17 +250,36 @@ class OpenQuerySet
     bool Blind() const { return _blind; }
     bool ReplayAllowed() const { return !_blind && _open.empty(); }
 
-    void MarkBlind() { _blind = true; }
+    void MarkBlind()
+    {
+        _blind = true;
+        _blindSince = 0;
+    }
     void OnFrameEnd() { _blind = false; }
+
+    // Without a frame callback the gate would never lift: queries opened before the module started do not stay open for
+    // long, so it lifts after `kBlindMs` of maintenance calls.
+    static constexpr uint64_t kBlindMs = 100;
+    void Maintain(uint64_t now)
+    {
+        if (!_blind)
+            return;
+        if (_blindSince == 0)
+            _blindSince = now;
+        else if (now >= _blindSince && now - _blindSince >= kBlindMs)
+            _blind = false;
+    }
 
     void Clear()
     {
         _open.clear();
         _blind = true;
+        _blindSince = 0;
     }
 
   private:
     std::unordered_set<uintptr_t> _open;
     bool _blind = true;
+    uint64_t _blindSince = 0; // 0 = not started yet
 };
 } // namespace ext::ffxiv::chara::motion
