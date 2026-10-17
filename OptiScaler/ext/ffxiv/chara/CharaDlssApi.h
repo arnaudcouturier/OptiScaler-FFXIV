@@ -9,7 +9,8 @@
 //    the dispatcher classified it (view.kind) and before anything else ran. Draws that are certainly not preview draws (no
 //    role on the pixel shader and neither render target nor depth texture in the table) are not offered; the rest are,
 //    also when view.kind is Ignore. It returns true when it ran the draw (it called
-//    `draw` exactly once); false makes the dispatcher call `draw` itself. It must never leave pipeline state changed.
+//    `draw` natively once, plus at most one replay of the same draw under ReplayScope: the callable is the bare original
+//    call); false makes the dispatcher call `draw` itself. It must never leave pipeline state changed.
 //  * The pass bookkeeping (view.pass) belongs to the dispatcher: the pass starts at the first accepted geometry draw
 //    (view.passStarted is true for exactly that draw) and ends at a rejected finisher or at the end of the frame.
 //    For a finisher, view.finisherAccepted is the verdict of the finisher check, evaluated before the draw from the state

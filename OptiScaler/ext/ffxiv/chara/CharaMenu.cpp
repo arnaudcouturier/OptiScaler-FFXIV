@@ -3,6 +3,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
+#include "ext/ffxiv/chara/CharaDiag.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
@@ -33,6 +34,9 @@ void DrawCharaCard(ext::menu::Ctx&)
                 (unsigned long long) counters.evaluations, (unsigned long long) counters.fallbacks);
     if (const char* note = dlss::StatusNote(); note != nullptr && note[0] != '\0')
         ImGui::TextDisabled("%s", note);
+    if (cfg.previewGuideCapture.value_or_default())
+        ImGui::Text("Preview diagnostics: %u files, %llu bytes", ext::ffxiv::chara::diag::FilesWritten(),
+                    (unsigned long long) ext::ffxiv::chara::diag::BytesWritten());
 
     ImGui::BeginDisabled(dlss);
     bool aa = cfg.previewAA.value_or_default();
