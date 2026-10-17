@@ -159,7 +159,7 @@ A real dry-run on a throwaway worktree of `main` (`c3277532`), nothing built, no
 | `upscalers/IFeature_Dx12.cpp` | the same include collision | yes | keep both |
 | `inputs/NVNGX_DLSS_Vk.cpp` | the `ext::nr::VkEvalBefore` call against upstream's new read of the output parameter | yes (`nr`) | keep both, upstream's read first |
 | `menu/menu_common.cpp` | upstream's `NameWithVersion()` line against the fork's version line plus its extra-rows loop | yes (`menu`, 16 lines) | upstream's line, fork loop re-added |
-| `menu/menu_overlay_dx.cpp` | upstream added its own per-allocator completion fence for the menu command lists, in the same lines as the fork's `[UP]` overlay fence ring | yes (`[UP]` plus the HDR menu layer) | **not resolved, needs a decision**: the two solve the same problem; most likely drop or reduce the `[UP]` ring and re-place the HDR menu-layer seam on top of upstream's fence |
+| `menu/menu_overlay_dx.cpp` | upstream added its own per-allocator completion fence for the menu command lists, in the same lines as the fork's `[UP]` overlay fence ring | yes (`[UP]` plus the HDR menu layer) | **not resolved, needs a decision**: the two solve the same problem. Either drop or reduce the `[UP]` ring and re-place the HDR menu-layer seam on top of upstream's fence, or keep both if the ring's extra coverage (it also rings the ImGui upload buffers, which upstream's fence does not) is still wanted. Test the menu in SDR and HDR either way |
 
 The five mechanical resolutions took one small script. After them the number of seam lines in upstream files was 266 in 51 files, identical to `main`, so no seam was lost textually.
 
