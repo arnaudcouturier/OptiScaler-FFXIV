@@ -33,6 +33,9 @@ struct NrConfig
     CustomOptional<bool> residualFgApproxCamera { false };
     // Toggles the pass in game. Unbound by default.
     CustomOptional<int> toggleKey { UnboundKey };
+    // Experimental: pause the NR pass while the game window is not the foreground window or is minimised (the plain
+    // upscaler output is shown), resume when focus returns. Does not change `enabled`. Decision logic: NrFocusGate.h.
+    CustomOptional<bool> disableOnFocusLoss { false };
     // How much of the model's edit reaches the frame (luminance part).
     CustomOptional<float> transferStrength { 1.0f };
     // How much of the model's colour shift reaches the frame.

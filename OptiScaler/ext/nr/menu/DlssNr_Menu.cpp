@@ -155,6 +155,11 @@ void RenderMenu(float menuResScale)
 
         HelpMarker("Enhance lighting and material appearance with the NR model. Placement selects before or after upscaling.\nRequires nvngx_dlssnr.dll plus the included nvngx.dll_dlssnr.dll helper.");
 
+        bool disableOnFocusLoss = nr.disableOnFocusLoss.value_or_default();
+        if (ImGui::Checkbox("Pause NR while the game is not focused (experimental)", &disableOnFocusLoss))
+            nr.disableOnFocusLoss = disableOnFocusLoss;
+        HelpMarker("Experimental, off by default. Pauses NR while the game window is not focused; the plain DLSS path is shown instead.\nPauses after 1 second without focus (at once when minimised) and resumes 0.25 seconds after focus returns. Applies live. Save Settings to keep your choice.");
+
         bool beforeSr = nr.runBeforeSr.value_or_default();
         const bool deferredActive = nr.deferredDlss.value_or_default();
         if (deferredActive)
@@ -264,6 +269,10 @@ void RenderMenu(float menuResScale)
         if (!enabled)
         {
             ImGui::TextDisabled("NR off.");
+        }
+        else if (DlssNr::PausedByFocus())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "NR paused: window not focused");
         }
         else if (!amdStatus.empty())
         {
