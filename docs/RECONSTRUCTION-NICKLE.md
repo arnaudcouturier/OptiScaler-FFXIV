@@ -305,6 +305,9 @@ output size, sRGB views, the game's pipeline state restored, the swapped `t0` se
    (written when the shader is created, so first), then the accessor line (`CharaView native lookup: verified accessor
    available true ...`) at the first draw after the option is on, `shaders tagged so far: ...`, the table lines (576 x 960 entries once a preview exists), `preview render activity started`, draw signature lines,
    `native equipment output matched` and `spatial AA: 576x960 -> 1152x1920, processed draws 1`.
+   If the table lines show 576 x 960 entries but no activity line ever appears while a preview is open, the comparison of the
+   table's texture pointer with the D3D11 texture does not match in this build (the entry's `+0x68` value is assumed to be the
+   native texture pointer); send the log.
 2. The equipment image should look smoother on diagonal edges and not zoomed or cropped; transparent edges stay as they were.
 3. Close and reopen the window: `preview render activity ended` / `started` lines; no device-removed or flicker.
 4. `PreviewUpscale=false`: same image at 1x.

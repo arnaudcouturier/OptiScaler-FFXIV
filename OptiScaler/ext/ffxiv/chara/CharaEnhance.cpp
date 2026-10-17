@@ -14,7 +14,12 @@ namespace
 {
 constexpr UINT kMaxOutput = 4096;
 
-FxaaPass g_pass;
+// Never destroyed: the process may unload this module under the loader lock, where releasing D3D objects is not safe.
+FxaaPass& Pass()
+{
+    static auto* pass = new FxaaPass;
+    return *pass;
+}
 
 void DrawTriangle(ID3D11DeviceContext* context) { DrawFullscreenTriangle(context); }
 
@@ -99,14 +104,14 @@ bool Around(const DrawView& view, DrawCall draw)
     }
 
     ID3D11ShaderResourceView* filtered = nullptr;
-    if (!g_pass.Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle) || filtered == nullptr)
+    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle) || filtered == nullptr)
     {
         ++g_stats.aaSkipped;
         if (!g_loggedFailure)
         {
             g_loggedFailure = true;
             LOG_WARN("CharaView: spatial AA could not run ({}); native preview retained",
-                     g_pass.Failure() != nullptr ? g_pass.Failure() : "output texture not available");
+                     Pass().Failure() != nullptr ? Pass().Failure() : "output texture not available");
         }
         return false;
     }
@@ -116,14 +121,14 @@ bool Around(const DrawView& view, DrawCall draw)
 
     const uint64_t n = ++g_stats.aaProcessed;
     if (n == 1 || n % 600 == 0)
-        LOG_INFO("CharaView spatial AA: {}x{} -> {}x{}, processed draws {}", desc.Width, desc.Height, g_pass.OutputWidth(),
-                 g_pass.OutputHeight(), n);
+        LOG_INFO("CharaView spatial AA: {}x{} -> {}x{}, processed draws {}", desc.Width, desc.Height, Pass().OutputWidth(),
+                 Pass().OutputHeight(), n);
     return true;
 }
 
 void Detach()
 {
-    g_pass.Reset();
+    Pass().Reset();
     g_loggedFailure = false;
 }
 } // namespace ext::ffxiv::chara::enhance
