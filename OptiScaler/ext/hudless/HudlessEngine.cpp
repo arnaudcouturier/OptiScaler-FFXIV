@@ -164,7 +164,7 @@ class Engine final : public IEngineHost, private FenceReader
     void SyncPasteOptions();
     void Finish();
     bool ProducePaste(Dx11wDx12SC& sc, Slot& slot, ID3D12Resource* finalImage, IFGFeature_Dx12* fg);
-    void NoteRefusal(const char* why);
+    void NoteRefusal(const std::string& why);
 
     std::vector<std::string> _refusals; // texts NoteRefusal already logged
     Core _core;
@@ -204,12 +204,14 @@ bool Engine::FrameGenActive()
 
 // One log line per distinct refusal text (the texts are a handful of fixed strings): a refusal repeats every present and the
 // summary only counts the reasons, so the cause of a CaptureRejected is written once, the first time it happens.
-void Engine::NoteRefusal(const char* why)
+void Engine::NoteRefusal(const std::string& why)
 {
     for (const auto& seen : _refusals)
         if (seen == why)
             return;
-    _refusals.emplace_back(why);
+    if (_refusals.size() >= 16) // numbers in the text could otherwise grow the list on every resize
+        return;
+    _refusals.push_back(why);
     LOG_WARN("HudLess: the UI-free capture was refused: {}", why);
 }
 
@@ -251,9 +253,17 @@ Reason Engine::CheckCapture(const FrameImage& image)
     backbuffer->GetDesc(&target);
 
     if (desc.Width != target.Width || desc.Height != target.Height)
+    {
+        NoteRefusal(std::format("size mismatch: capture {}x{}, bridge backbuffer copy {}x{}", desc.Width, desc.Height,
+                                target.Width, target.Height));
         return Reason::SizeMismatch;
+    }
     if (TypedFormat(desc.Format) != TypedFormat(target.Format))
+    {
+        NoteRefusal(std::format("format mismatch: capture format {}, bridge backbuffer copy format {}",
+                                static_cast<UINT>(desc.Format), static_cast<UINT>(target.Format)));
         return Reason::FormatUnsupported;
+    }
     return Reason::None;
 }
 
@@ -654,16 +664,21 @@ void Engine::SwapBase(Dx11wDx12SC& sc, ID3D12Resource*& source, D3D12_RESOURCE_S
     DXGI_SWAP_CHAIN_DESC1 desc {};
     if (IDXGISwapChain4* chain = Access::Hudless::FgSwapChain(sc); chain == nullptr || FAILED(chain->GetDesc1(&desc)))
     {
+        NoteRefusal("the frame generation swapchain is missing or could not be described");
         _core.Reject(Reason::CaptureRejected);
         return;
     }
     if (desc.Width != slot.width || desc.Height != slot.height)
     {
+        NoteRefusal(std::format("base swap: size mismatch: hud-less slot {}x{}, frame generation swapchain {}x{}", slot.width,
+                                slot.height, desc.Width, desc.Height));
         _core.Reject(Reason::SizeMismatch);
         return;
     }
     if (!HdrOutput() && TypedFormat(desc.Format) != slot.format)
     {
+        NoteRefusal(std::format("base swap: format mismatch: hud-less slot format {}, frame generation swapchain format {}",
+                                static_cast<UINT>(slot.format), static_cast<UINT>(TypedFormat(desc.Format))));
         _core.Reject(Reason::FormatUnsupported);
         return;
     }
