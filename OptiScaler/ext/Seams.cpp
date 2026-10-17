@@ -7,6 +7,7 @@
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/companion/Companion.h"
 #include "ext/ffxiv/companion/CompanionCallbackMap.h"
+#include "ext/ffxiv/chara/CharaDispatch.h"
 
 #include <atomic>
 
@@ -90,6 +91,10 @@ void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
 {
     if (game::Current().hdr != nullptr)
         ext::ffxiv::companion::AfterSharedCopy(context, target);
+
+    // Once per presented frame: the character preview feature only counts frames here (the draw thread consumes it).
+    if (game::Current().lighting != nullptr)
+        ext::ffxiv::chara::OnFrameEnd();
 }
 } // namespace ext::dx11bridge
 

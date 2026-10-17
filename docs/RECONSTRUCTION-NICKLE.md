@@ -199,3 +199,152 @@ existing clean capture is used unchanged.
 4. Frame generation on (DLSS-G / XeFG): still exactly one file per key press, no hitch, no device-removed in `OptiScaler.log`.
 5. Does the screenshot key fire while the menu is open? (The key is polled in the menu's shortcut pass; if it does not fire with the menu up, the menu capture cannot be triggered by the key. That limitation would be shared with Nickle's build.)
 6. `OverlayMenu=false`: the menu cannot be open, so the capture is the clean one.
+
+---
+
+## F5 - CharaView: isolated treatment of the 3D character preview
+
+CharaView is the feature of Nickle's build that gives the game's 3D character preview (the off-screen scene shown in the
+character, equipment and glamour windows) its own handling: an isolated DLSS Super Resolution pass with 2x output, and an
+optional spatial anti-aliasing pass on the equipment image. It is off by default and fails open in Nickle's build (any doubt
+leaves the native draw untouched), and it is reproduced that way here.
+
+**Status of this repo.** Reconstructed so far: everything the feature stands on (configuration, shader recognition, the
+preview renderer's target table with its guards, the draw classifier, the slot bookkeeping, the jitter sequence, the hook
+layer, the menu card and an identification log) and the **spatial anti-aliasing path with the optional 2x preview upscaling**.
+The isolated DLSS pass itself is **not** part of this revision: its menu checkbox and counters exist and stay inert, the
+interface it will plug into is fixed (`ext/ffxiv/chara/CharaDlssApi.h`) and the menu says "DLSS core: not in this build yet."
+The evidence for the DLSS path is kept below because the classifier, the slot rules and the jitter were written from it.
+
+Confidence: **high** on the data flow, configuration, menu, shader recognition and the AA filter; **medium** on what each
+engine entity is (the names "finisher" and "equipment display" are inferred from structure, the engine names nothing at this
+level); **low** on which windows reach the preview renderer (needs one session in the game).
+
+Labels: **[O]** observed in the binary, **[I]** inferred from observed facts, **[U]** unknown. Addresses are Ghidra virtual
+addresses of Nickle's `winmm.dll` (image base `0x180000000`) unless marked `exe RVA`.
+
+### Evidence
+
+| Observation | Where |
+|---|---|
+| Nothing of CharaView exists in the baseline build: the strings `FfxivPreviewDLSS`, `CharaView`, `PreviewAA`, `Camera[59]`, `Character preview (experimental)` have 0 hits there and 13 / 27 / 1 / 1 / 1 in Nickle's build **[O]** | string search of both DLLs |
+| Five new configuration keys, all `CustomOptional<bool>`: `[FFXIV] PreviewDLSS` (false), `PreviewAA` (false), `PreviewUpscale` (**true**), `PreviewGuideCapture` (false), `[HDR] PreviewNRTrace` (false). `[FFXIV]` is a new section **[O]** | key strings `0x1818d13c8..0x1818d1418`, load `0x1801fe521..0x1801fe6cb`, defaults `0x1801f2d1a..0x1801f2d53` (`mov dl,1` at `0x1801f2d45` for `PreviewUpscale`) |
+| Menu: a collapsible header `Character preview (experimental)` inside the NR card, checkbox `Preview DLSS (2x output, experimental)`, counter line `DLSS previews: %u active; %llu evaluations; %llu fallbacks`, two checkboxes `Preview spatial AA` and `2x preview upscaling` (disabled while DLSS is on), a wrapped note, and for AA the status lines `Processed preview draws: %llu`, `Native preview retained: deferred rendering needs a separate integration path.`, `Waiting for the native equipment preview texture.`, `Waiting for the equipment preview display shader.`. No tooltips, no reset buttons **[O]** | strings `0x1818fae00..0x1818faf78`, `0x1818fabf0..0x1818faba0`; code `0x1803510c6..0x180351346` (inside the NR menu function `0x180350f10`) |
+| The preview renderer is reached through **one** structure of the game executable: a 20-entry table of render targets. The table is found by a read-only scan of the running executable's `.text` for the 18-byte accessor `48 8B 05 ?? ?? ?? ?? 8B CA 48 8B 84 C8 C8 02 00 00 C3`; exactly one match is required, there is no RVA and no PE stamp check in Nickle's code **[O]**. In the current game executable the pattern exists exactly once (exe RVA `0x26AB40`) and the global it loads is exe RVA `0x28F9490` **[O]** (a read-only byte scan of the executable, nothing was run) | accessor reader `0x18022e460` (cache), scan `0x18022ddc0`, read `0x18022e160` |
+| Table layout: entry `i` is a pointer at manager `+0x2C8 + 8i` for `i` in 0..12, `+0x378 + 8(i-13)` for 13..17, `+0x360` (18) and `+0x368` (19); 0x400 bytes of the manager are read, then 0x70 bytes of each entry object: native texture pointer at `+0x68`, width (u32) at `+0x40`, height (u32) at `+0x44`. An entry with a width or height of 0 or above 0x4000 is zeroed. Meaning: 0-7 output images, 8-12 G-buffer, 13-17 transparent G-buffer, 18-19 depth candidates **[O]**; all targets are 576 x 960 in the current executable's initialiser (exe RVA `0x2D51E0`) **[O]**, entries 16 and 17 stay null **[I]** | exe constructor `0x2D4DE0`, factory `0x224870`; `companion.resourceWrapperOffset = 0x68` is the same engine wrapper offset **[I]** |
+| A texture matches an entry only if pointer **and** both sizes match; the table is re-read at most every 100 ms; an all-null table matches nothing **[O]** | `0x18022e160` |
+| Shaders are recognised by the CRC-32 of the DXBC at `CreatePixelShader`: seven geometry (G-buffer) pixel shaders, one "finisher" (`0xFDB2F4FC`), one "equipment display" (`0x7B40E31A`) **[O]**; the UI set that shows preview images is the one the HDR preview mask already uses **[O]** | `0x1802345f0` |
+| Spatial AA runs only when DLSS is off, only on `Draw`, only for the equipment display shader whose `t0` is table entry 0; the output is a private RGBA8 texture 1x or 2x the source, the draw runs with `t0` swapped and `t0` is restored afterwards; deferred contexts are counted and left native **[O]** | `0x1802404d0`, `0x1802308a0`, init `0x1802304b0` |
+| The AA filter is a luma-based, alpha-preserving edge filter in the style of FXAA 3.11 (one source texture, one bilinear clamp sampler, no constant buffer); texel size from the **source** dimensions also when the output is 2x **[O]** | HLSL string at file offset `0x18d7b50` (read and described in words, not copied) |
+| DLSS path: per preview texture an NGX feature (render size N x M, output 2N x 2M, MaxPerf, flags `0x42` plus `0x8` when the depth is reversed), 16-phase Halton (2,3) jitter applied as a viewport shift to the depth-prepass and G-buffer draws, a replay of the G-buffer draws into a private RGBA16F target for signed motion, a copy of the pass camera constant buffer (59 float4, only element 58's `.zw` is read), a guides pass, the real NGX evaluate, an alpha re-composition from the native alpha, and an SRV swap for the UI draws; slots expire after 2000 ms, recent entries after 250 ms **[O]** | draw hook `0x1803b5400`, finish `0x1803b46c0`, replay `0x1803b7200`, camera `0x1803b2880` |
+
+### What the repo does (`OptiScaler/ext/ffxiv/chara/`, zero upstream-file lines)
+
+* `CharaConfig.h`, `ext/ini/FFXIV.ini`, one append to `ext/ini/HDR.ini`: the five keys with Nickle's names, sections and defaults.
+* `CharaTags.h`: the CRC lists; the roles of a shader are one bit mask in one private-data value (Nickle uses one GUID per
+  role; the same recognition, fewer calls per draw).
+* `CharaTable.{h,cpp}`: the pattern scan (a pure function over a byte span, tested with 0, 1 and 2 hits, hits that straddle
+  read windows and RIP-displacement decoding), the PE section lookup, the manager parse with the zeroing rules, the lookup
+  and the 100 ms cache. The accessor is trusted only if **all** of these hold: the process matches the build described in
+  `ext/ffxiv/GameBuild.h` (`MatchCurrentProcess()`); the scan finds the pattern exactly once; the hit and the global it loads
+  equal the documented RVAs. Otherwise the feature switches itself off for the session with one log line (never written to
+  the config). A null manager pointer or an all-null table is not a failure: it is re-read until the renderer exists.
+* `CharaDecision.h`, `CharaSlots.h`, `CharaJitter.h`: the draw classifier (prepass, G-buffer, finisher, consumer), the slot and
+  recent-list rules with an injected clock, the Halton jitter. All pure, all tested.
+* `CharaDispatch.{h,cpp}`: the dispatcher the lighting capture calls around every draw (`PreviewDLSS ? DLSS : PreviewAA ?
+  spatial AA : native`), its own re-entrancy flags, a replay marker for the HDR replays of the same draw, forwarders for copies,
+  `ClearRenderTargetView`, `Begin`/`End` and `CreateVertexShader`, and the frame callback.
+* `CharaEnhance.{h,cpp}`, `CharaEnhancePass.{h,cpp}`, `shaders/chara_fxaa.hlsl`: the spatial AA, written fresh from the
+  observed behaviour. The pass runs inside a private device-context state so the game's pipeline state is untouched; the
+  filtered image is bound as `t0` for the one draw and the game's `t0` is bound again afterwards.
+* `CharaIdentify.{h,cpp}`: log lines that work with `PreviewAA` alone: the table at the first draw and at the first preview
+  activity, activity start and end with counts per draw kind, one line per distinct draw signature (kind, API, target entry
+  and size, depth entry, sampled preview entry, shader roles). A signature is **not** a window name: the game gives no window
+  identity at this level.
+* `CharaMenu.cpp`: the card, with Nickle's visible strings verbatim.
+* `CharaDlssApi.h` + `CharaDlssStub.cpp`: the fixed interface of the DLSS path and its inert placeholder.
+* Hooks and the frame callback attach in fork-owned files only: `ext/ffxiv/lighting/FfxivLightingCapture.h` (same Detours
+  transaction as the existing hooks) and the `ext::dx11bridge::AfterSharedCopy` dispatcher in `ext/Seams.cpp`.
+
+### Differences from Nickle's build (deliberate)
+
+* The diagnostics that write files are not reproduced as they were: Nickle's build writes six texture dumps (about 35 MB per
+  phase) into the game folder after **every** successful DLSS evaluation, behind no configuration key. When the DLSS path
+  arrives this behaviour will sit behind a diagnostics key that defaults to off.
+* HDR replays of a draw (the HDR preview mask, the scene replays) go through the draw lambda the preview layer wraps; here
+  they are marked and skipped, so a replay is neither counted nor filtered twice. The HDR UI-mask replay of a UI draw
+  therefore sees the native image, not the filtered one; the mask is built from alpha, which the filter never changes.
+* A UI draw only counts as a consumer when it samples a preview image (Nickle lets every UI-set draw reach the consumer
+  branch and decides there).
+* The check of the executable is stricter than Nickle's (build match, single pattern hit and the documented RVAs together).
+
+### Tests (`tests/ext/ffxiv/chara/`)
+
+`chara_table` (scan, PE sections, manager parse, zeroing, cache), `chara_decision` (classifier rules and an exhaustive
+combination check), `chara_slots`, `chara_jitter` (exact Halton values), `chara_tags` (lists, no overlap, role bits, private
+data on a fake shader), `chara_config` (defaults, ini round trip, ini fragments carry the keys), `chara_accessor` (fail-open:
+in a process that is not the matched build the feature goes inert with one log line and reads nothing), `chara_fxaa` (class
+`warp`: the real shader through the real pass: alpha rule, flat early-out and the contrast threshold, edge smoothing, 2x
+output size, sRGB views, the game's pipeline state restored, the swapped `t0` seen by the draw and restored) and
+`chara_enhance` (class `warp`: the real integration with a fake table, including every case that must stay native).
+
+### Unknown / not established
+
+* Which windows use the preview renderer (character, equipment, glamour, portrait editor, adventurer plate) and which of the
+  recognised shaders belong to which window **[U]**. Nickle's own notes list portraits as still to do.
+* The meaning and sign of `Camera[58].zw`, the exact encoding of the game's motion output and whether the engine's depth is
+  conventional or reversed **[U]** (the DLSS path decides the depth convention at run time).
+* What the global "disabled" byte at OptiScaler state `+0x930` is **[U]**; it is not used here.
+* Whether the equipment display shader fetches texels with `Load` instead of `Sample` **[U]**: with the 2x output a shader that
+  uses integer texel coordinates would show only a quarter of the image. `PreviewUpscale=false` is the switch if the equipment
+  preview looks zoomed.
+
+### What to verify in the game
+
+1. `PreviewAA=true`, open a character window with an equipment preview: `OptiScaler.log` should contain `equipment display shader tagged`
+   (written when the shader is created, so first), then the accessor line (`CharaView native lookup: verified accessor
+   available true ...`) at the first draw after the option is on, `shaders tagged so far: ...`, the table lines (576 x 960 entries once a preview exists), `preview render activity started`, draw signature lines,
+   `native equipment output matched` and `spatial AA: 576x960 -> 1152x1920, processed draws 1`.
+   If the table lines show 576 x 960 entries but no activity line ever appears while a preview is open, the comparison of the
+   table's texture pointer with the D3D11 texture does not match in this build (the entry's `+0x68` value is assumed to be the
+   native texture pointer); send the log.
+2. The equipment image should look smoother on diagonal edges and not zoomed or cropped; transparent edges stay as they were.
+3. Close and reopen the window: `preview render activity ended` / `started` lines; no device-removed or flicker.
+4. `PreviewUpscale=false`: same image at 1x.
+5. A game patch: the log must show exactly one line `FFXIV character preview: switched off for this session (...)` with the
+   reason (preceded by a more detailed warning when the scan itself failed), the menu card says the same, and the preview stays
+   native.
+
+### F5 DLSS core: isolated DLSS for the preview (`PreviewDLSS`)
+
+Source files: `ext/ffxiv/chara/CharaDlss*.{h,cpp}` (gate, slots, finish step, NGX composition), `CharaMotion*`, `CharaCamera*`,
+`CharaGuides.*` with `shaders/chara_guides.hlsl`, `CharaDiag*`. Written from the behaviour specification only; the shader is
+described there in words and formulas and was written fresh. Nickle is credited as for the rest of CharaView.
+
+What it does, per preview render:
+
+1. A UI draw that samples a preview output within 250 ms of its finisher claims a slot (up to 16). Only then is the preview
+   jittered, replayed and upscaled, and the very first evaluation of a slot is not jittered.
+2. Depth prepass and G-buffer draws run with the viewport shifted by a Halton (2, 3) jitter over 16 phases. The opaque
+   G-buffer draws are replayed once into a private RGBA16F target with render target 3 only and depth writes off, which keeps the
+   signed motion that the game's 8-bit target cannot hold. The replay is skipped while an occlusion or statistics query is
+   open, with unordered access views or stream-out targets bound, on multisampled or non-opaque targets, and for pixel
+   shaders that are neither tagged nor of the exact G-buffer shape.
+3. The pixel-shader constant buffer 2 of the first G-buffer draw (59 vectors) is copied; the helper pass subtracts its last
+   vector's zw from the motion, maps non-finite values to zero and clamps to +-2. Depth is read through a 24-bit view.
+4. After the finisher the native image becomes the colour input, an NGX super resolution feature (render size W x H, output
+   2W x 2H, MaxPerf, flags 0x42 or 0x4A with a reversed depth buffer, motion at render resolution, automatic exposure) is
+   evaluated through the driver's D3D11 NGX entry points, and the native alpha is read back at `uv + jitter / size` into an
+   RGBA8 image. UI draws that sample the preview get that image for the one draw.
+5. All helper passes and the upscaler run inside a private device context state; the game's state is swapped back.
+6. Every failure keeps the native image: a slot failure is counted and sticks, a feature creation failure ends the path for
+   the session, and a latched path releases its slots (after the GPU finished with them) before it goes quiet.
+
+Differences from Nickle's build: the diagnostics are off by default and capped (12 files, 100 MiB, `PreviewGuideCapture`);
+the finish step also waits for the camera copy; the copy-chain trigger is not implemented (the dispatcher treats a UI draw that
+samples a table entry as the consumer); the NGX coverage counters of the exported shim are not reproduced (no seam without
+touching the upstream shim).
+
+Not established: whether the game's NGX device is the immediate context's device under the DX11-on-DX12 bridge, whether a
+D3D11 feature can be created while the bridge's own feature exists, the meaning and sign of the camera offset (the log prints
+it with `PreviewGuideCapture`), and the window coverage (portraits).

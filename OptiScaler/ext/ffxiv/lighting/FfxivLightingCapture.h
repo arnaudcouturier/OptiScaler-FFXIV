@@ -9,6 +9,7 @@
 #include "../../core/Crc32.h"
 #include "ext/core/DetourThreads.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaDispatch.h" // ext: S11 character preview (CharaView)
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/hdr/FfxivHdrPreview.h"
@@ -91,11 +92,14 @@ inline void STDMETHODCALLTYPE OnCopy(ID3D11DeviceContext* c,ID3D11Resource* dest
 {
     copy(c,dest,source);
     if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,true);ext::hdr::FfxivSceneHdr::Copy(dest,source,true);}
+    ext::ffxiv::chara::OnCopy(c,dest,source,true); // ext: S11 (after the native copy; not under `inside`, the feature has its own flags)
 }
 inline void STDMETHODCALLTYPE OnCopyRegion(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT sub,UINT x,UINT y,UINT z,ID3D11Resource* source,UINT from,const D3D11_BOX* box)
 {
     copyRegion(c,dest,sub,x,y,z,source,from,box);
-    if(c==context && !inside){const bool full=!sub && !from && !x && !y && !z && !box;FfxivLightingScan::ColorCopy(dest,source,full);ext::hdr::FfxivSceneHdr::Copy(dest,source,full);}
+    const bool full=!sub && !from && !x && !y && !z && !box;
+    if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,full);ext::hdr::FfxivSceneHdr::Copy(dest,source,full);}
+    ext::ffxiv::chara::OnCopy(c,dest,source,full); // ext: S11
 }
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
@@ -113,6 +117,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
     {
         const UINT crc=Crc(code,size); // hashed once: the scene-stage tag and the UI boundary stamp share it
         ext::hdr::FfxivSceneHdr::Tag(*out,crc);
+        ext::ffxiv::chara::OnShaderCreated(*out,crc); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
     }
     return hr;
@@ -128,9 +133,11 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
         if(id==6 || !wanted)FfxivLightingScan::Tick(c,wanted);
         FfxivLightingScan::Before(c,id);
         UINT hdrStage=0,hdrBytes=sizeof(hdrStage);if(ps)ps->GetPrivateData(ext::hdr::FfxivSceneHdr::shaderTag,&hdrBytes,&hdrStage);
-        if(hdrStage==6)ext::hdr::FfxivHdrPreview::BeforeDraw(c,original);
+        // ext: S11 the HDR replays run the draw lambda too; the character preview layer must not see them as draws
+        auto replay=[&]{ext::ffxiv::chara::ReplayScope scope;original();};
+        if(hdrStage==6)ext::hdr::FfxivHdrPreview::BeforeDraw(c,replay);
         original();FfxivLightingScan::After(c,id);
-        ext::hdr::FfxivSceneHdr::AfterDraw(c,original);return;
+        ext::hdr::FfxivSceneHdr::AfterDraw(c,replay);return;
     }
     if ((!wanted && !FfxivLightingScan::enabled.load()) || c!=context || inside)
     { original(); return; }
@@ -146,26 +153,43 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
     original();
     FfxivLightingScan::After(c, id);
 }
-inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { Around(c,"Draw",[&]{draw(c,n,start);}); }
+inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{draw(c,n,start);});}); }
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
     if(c==context && !inside && companionCallbacks.interceptVisibilityIndexed &&
        companionCallbacks.interceptVisibilityIndexed(c,n,start,b,indexed))return;
-    auto normal = [&]{ Around(c,"DrawIndexed",[&]{indexed(c,n,start,b);}); };
+    auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{indexed(c,n,start,b);});}); };
     if (c == context && !inside && companionCallbacks.aroundIndexed)
         companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
     else normal();
 }
-inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { Around(c,"DrawInstanced",[&]{instanced(c,n,i,start,f);}); }
+inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{instanced(c,n,i,start,f);});}); }
 inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
 {
-    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{indexedInstanced(c,n,i,start,b,f);}); };
+    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstanced,[&]{indexedInstanced(c,n,i,start,b,f);});}); };
     if (c == context && !inside && i && companionCallbacks.aroundIndexed)
         companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
     else normal();
 }
-inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawInstancedIndirect",[&]{indirect(c,b,o);}); }
-inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawIndexedInstancedIndirect",[&]{indexedIndirect(c,b,o);}); }
+inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{indirect(c,b,o);});}); }
+inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{indexedIndirect(c,b,o);});}); }
+// ext: S11 hooks the character preview layer needs besides the draws: ClearRenderTargetView, Begin, End, CreateVertexShader.
+using ClearRtv=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,const FLOAT[4]);
+using QueryCall=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
+using CreateVs=HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11VertexShader**);
+inline ClearRtv clearRtv=nullptr; inline QueryCall beginQuery=nullptr,endQuery=nullptr; inline CreateVs createVs=nullptr;
+inline void STDMETHODCALLTYPE OnClearRtv(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const FLOAT color[4])
+{ clearRtv(c,v,color); ext::ffxiv::chara::OnClearRenderTargetView(c,v,color); }
+inline void STDMETHODCALLTYPE OnBegin(ID3D11DeviceContext* c,ID3D11Asynchronous* q)
+{ ext::ffxiv::chara::OnQueryBegin(c,q); beginQuery(c,q); }
+inline void STDMETHODCALLTYPE OnEnd(ID3D11DeviceContext* c,ID3D11Asynchronous* q)
+{ endQuery(c,q); ext::ffxiv::chara::OnQueryEnd(c,q); }
+inline HRESULT STDMETHODCALLTYPE OnCreateVertexShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11VertexShader** out)
+{
+    auto hr=createVs(d,code,size,link,out);
+    if(SUCCEEDED(hr) && out && *out) ext::ffxiv::chara::OnVertexShaderCreated(d,*out,code,size);
+    return hr;
+}
 inline void Install(ID3D11Device* d)
 {
     if (create || !d) return;
@@ -176,6 +200,8 @@ inline void Install(ID3D11Device* d)
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
+    clearRtv=reinterpret_cast<ClearRtv>(cv[50]);beginQuery=reinterpret_cast<QueryCall>(cv[27]);endQuery=reinterpret_cast<QueryCall>(cv[28]); // ext: S11
+    createVs=reinterpret_cast<CreateVs>(dv[12]);
     // Single-thread enlistment only, deliberately, even though Detach() below enlists every
     // process thread. Install happens once per device, early; Detours itself allocates (per
     // ext::core::DetourThreadScope's own comment, now verified against the real detours.cpp
@@ -193,15 +219,17 @@ inline void Install(ID3D11Device* d)
     LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
+    LIGHT_ATTACH(clearRtv,OnClearRtv);LIGHT_ATTACH(beginQuery,OnBegin);LIGHT_ATTACH(endQuery,OnEnd);LIGHT_ATTACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_ATTACH
     LONG result=ERROR_INVALID_FUNCTION;
     if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
-    if (result==NO_ERROR) { context=c.Get(); installed.store(true); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
+    if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(draw)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
     else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
 inline void Detach()
 {
     ext::hdr::FfxivSceneHdr::EndFrame();
+    ext::ffxiv::chara::Detach(); // ext: S11 releases the preview layer's GPU objects while the device is still valid
     FfxivLightingScan::Stop();
     // installed only flips to false once the detach transaction actually commits (below): if
     // create is null (never attached) or the transaction fails/aborts, installed must stay
@@ -226,8 +254,9 @@ inline void Detach()
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
+    LIGHT_DETACH(clearRtv,OnClearRtv);LIGHT_DETACH(beginQuery,OnBegin);LIGHT_DETACH(endQuery,OnEnd);LIGHT_DETACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; ext::ffxiv::chara::OnDetached(); } }
     else DetourTransactionAbort();
 }
 }
