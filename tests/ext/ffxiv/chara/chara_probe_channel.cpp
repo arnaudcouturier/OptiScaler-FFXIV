@@ -134,9 +134,9 @@ void TestExecutor()
         FakeConfig cfg;
         FakeActions act;
         cfg.previewDlss = true;
-        CHECK(Run("aa on", cfg, act).find("no effect while PreviewDLSS is on") != std::string::npos);
+        CHECK(Run("aa on", cfg, act).find("bypassed while the PreviewDLSS pass runs") != std::string::npos);
         cfg.previewDlss = false;
-        CHECK(Run("aa on", cfg, act).find("no effect") == std::string::npos);
+        CHECK(Run("aa on", cfg, act).find("bypassed") == std::string::npos);
     }
 
     // unknown lines are ignored with the parser's reason and change nothing

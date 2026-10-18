@@ -2,7 +2,7 @@
 // Entry points of the character preview feature (CharaView) for the hook layer (ext/ffxiv/lighting/FfxivLightingCapture.h)
 // and the once-per-frame seam (ext/Seams.cpp). Everything attaches there; no upstream file is involved.
 //
-// Per draw the dispatcher routes:  (PreviewDLSS or PreviewNR) and the plumbing alive ? Dlss (SR and/or NR) : PreviewAA ? Enhance (spatial AA) : the native draw.
+// Per draw the dispatcher routes:  (PreviewDLSS or PreviewNR) and a path that can run ? Dlss (SR and/or NR) : PreviewAA ? Enhance (spatial AA) : the native draw.
 // Any doubt (accessor not verified, table empty, resource or format not understood, a deferred context) runs the native
 // draw untouched.
 //

@@ -1054,18 +1054,29 @@ void Cleanup(uint64_t now, bool disabled)
 
 bool Implemented() { return true; }
 
-bool Active()
+namespace
 {
-    // "Plumbing alive": true while the SR path or preview NR may run, and while any GPU object of either still exists (a latched
-    // or switched-off path is drained by the maintenance calls). An SR latch or a closed SR gate does not stop NR and the reverse.
+// The plumbing facts after the SR gate was refreshed when it is due (the gate is only looked at while SR is wanted and not latched).
+nr::PlumbingFacts RefreshedFacts()
+{
     const uint64_t now = GetTickCount64();
     const bool srWanted = ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
     if (srWanted && !SrLatched() && now >= g_nextGateCheck.load(std::memory_order_relaxed))
         Refresh(now);
     const nr::PlumbingFacts facts = PlumbingNow();
     NoteQueryHooks(nr::SrHooksNeeded(facts));
-    return nr::PlumbingActive(facts);
+    return facts;
 }
+} // namespace
+
+bool Active()
+{
+    // "Plumbing alive": true while the SR path or preview NR may run, and while any GPU object of either still exists (a latched
+    // or switched-off path is drained by the maintenance calls). An SR latch or a closed SR gate does not stop NR and the reverse.
+    return nr::PlumbingActive(RefreshedFacts());
+}
+
+bool CanRun() { return nr::PathCanRun(RefreshedFacts()); }
 
 bool SrAvailable()
 {

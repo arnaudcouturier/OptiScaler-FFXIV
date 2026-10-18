@@ -40,6 +40,10 @@ bool Implemented();
 // Implemented, switched on in the config and not failed for this session.
 bool Active();
 
+// The SR path or preview NR can do work for a draw now (wanted, not latched, gate open). The dispatcher routes a draw to this plumbing
+// only while this is true; Active() is also true while a latched or switched-off path only drains its objects.
+bool CanRun();
+
 // The SR path itself may do work (wanted, not latched, gate open) or still holds objects. The SR-only hooks (copy, clear, query)
 // check this instead of Active(), which is also true for preview NR alone.
 bool SrAvailable();

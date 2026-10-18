@@ -379,13 +379,14 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         identify::ObserveShader(view);
     identify::Observe(view);
 
-    // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see CharaRoute.h).
+    // Route: (PreviewDLSS or PreviewNR) and a path that can run ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see
+    // CharaRoute.h). With PreviewDLSS on but its path unable to run, the spatial AA still takes the equipment display draw.
     bool handled = false;
     const bool dlssWanted = DlssWanted();
     const bool nrWanted = nr::Wanted();
     if (dlssWanted)
         dlss::Probe(view);
-    const Route route = ChooseRoute(dlssWanted, (dlssWanted || nrWanted) && dlss::Active(), AaWanted(), view.roles, api, nrWanted);
+    const Route route = ChooseRoute(dlssWanted, (dlssWanted || nrWanted) && dlss::CanRun(), AaWanted(), view.roles, api, nrWanted);
     switch (route)
     {
     case Route::Dlss: handled = dlss::Around(view, draw); break;

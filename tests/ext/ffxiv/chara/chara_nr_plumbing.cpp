@@ -197,10 +197,41 @@ void TestRoute()
     // NR off: unchanged behaviour
     CHECK(ChooseRoute(false, true, false, RoleUi, api, false) == Route::Native);
     CHECK(ChooseRoute(false, true, true, RoleEquipDisplay, api) == Route::Enhance);
-    // PreviewDLSS wanted: never the AA, with or without NR
-    CHECK(ChooseRoute(true, false, true, RoleEquipDisplay, api, true) == Route::Native);
+    // PreviewDLSS wanted: never the AA while a path can run, with or without NR; when none can run the AA takes the equipment draw
+    CHECK(ChooseRoute(true, false, true, RoleEquipDisplay, api, true) == Route::Enhance);
     CHECK(ChooseRoute(true, true, true, RoleEquipDisplay, api, true) == Route::Dlss);
     CHECK(ChooseRoute(true, true, false, RoleNone, api) == Route::Dlss);
+}
+
+// PreviewDLSS on but the SR path cannot run: the draw goes to the spatial AA (when on), also while the plumbing is only alive because
+// slots of the latched path are still draining. Routing on "plumbing alive" would hand that draw to a path that leaves it native.
+void TestRouteFallbackToAa()
+{
+    const DrawApi api = DrawApi::DrawIndexed;
+    PlumbingFacts f = Facts(true, false);
+    CHECK(PathCanRun(f));
+    CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, false) == Route::Dlss);
+
+    f.srLatched = true; // the path latched after a failure; two slots still drain
+    f.srSlotsHeld = 2;
+    CHECK(PlumbingActive(f)); // alive: the cleanup must keep running
+    CHECK(!PathCanRun(f));    // but no draw can be handled
+    CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, false) == Route::Enhance);
+    CHECK(ChooseRoute(true, PathCanRun(f), false, RoleEquipDisplay, api, false) == Route::Native);  // AA off: native
+
+    f = Facts(true, false);
+    f.srGateOpen = false; // NGX not initialised yet
+    CHECK(!PathCanRun(f));
+    CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, false) == Route::Enhance);
+
+    // NR can run while SR cannot: the plumbing takes the draw
+    f = Facts(true, true);
+    f.srLatched = true;
+    CHECK(PathCanRun(f));
+    CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, true) == Route::Dlss);
+    f.nrLatched = true;
+    CHECK(!PathCanRun(f));
+    CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, true) == Route::Enhance);
 }
 
 void TestHooks()
@@ -246,6 +277,7 @@ int main()
     TestHolding();
     TestDispatcherAndMaintenance();
     TestEdgeTracker();
+    TestRouteFallbackToAa();
     TestRoute();
     TestUnavailable();
     TestConsumerSeen();

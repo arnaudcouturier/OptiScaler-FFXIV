@@ -36,7 +36,7 @@ template <class Config, class Actions> std::string Execute(const Command& comman
     {
         std::string text = flag("PreviewAA", config.previewAA);
         if (config.previewDlss.value_or_default())
-            text += "; note: PreviewAA has no effect while PreviewDLSS is on";
+            text += "; note: PreviewAA is bypassed while the PreviewDLSS pass runs";
         return text;
     }
     case CommandKind::Dlss: return flag("PreviewDLSS", config.previewDlss);

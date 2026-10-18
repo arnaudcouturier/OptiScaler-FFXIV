@@ -2,8 +2,10 @@
 // Which module handles a draw of the character preview feature. Pure: the dispatcher passes facts in and acts on the answer,
 // so every rule is tested without a device.
 //
-//   PreviewDLSS on  -> the isolated DLSS path (when it is available), nothing else
-//   PreviewAA on    -> spatial AA for the draw that shows the equipment preview image
+//   PreviewDLSS (or PreviewNR) on and a path able to run -> the isolated DLSS / NR plumbing, never the AA
+//   PreviewAA on    -> spatial AA for the draw that shows the equipment preview image, also when PreviewDLSS is on but its path
+//                      cannot run (NGX not initialised, the path latched after a failure). The reference build left that draw
+//                      native; falling back to the AA instead is a deliberate product decision of this fork.
 //   otherwise       -> the native draw
 //
 // The draw API does not take part in the decision. The game issues the equipment display draw as an indexed draw, not as a
@@ -22,18 +24,15 @@ enum class Route : uint8_t
     Enhance,
 };
 
-// `dlssActive` is the plumbing of CharaDlss.cpp being alive (dlss::Active()): true while the SR path or preview NR may run.
-// `nrWanted` ([FFXIV] PreviewNR) offers the draws to that plumbing also when PreviewDLSS is off. An active NR path takes the draw
-// before the spatial AA (NR replaces the native image the AA would filter); when NR cannot run the AA is used as before.
+// `dlssActive` is "the SR path or preview NR can do work now" (dlss::CanRun(): wanted, not latched, gate open). It is NOT "the plumbing
+// is alive": the plumbing also stays alive while a latched or switched-off path drains its slots, and those draws must not be routed
+// to a path that will leave them native. `nrWanted` ([FFXIV] PreviewNR) offers the draws to that plumbing also when PreviewDLSS is off.
+// An active NR path takes the draw before the spatial AA (NR replaces the native image the AA would filter); when no path can run the
+// AA is used.
 constexpr Route ChooseRoute(bool dlssWanted, bool dlssActive, bool aaWanted, uint32_t roles, DrawApi /*api*/, bool nrWanted = false)
 {
-    if (dlssWanted || nrWanted)
-    {
-        if (dlssActive)
-            return Route::Dlss;
-        if (dlssWanted)
-            return Route::Native;
-    }
+    if ((dlssWanted || nrWanted) && dlssActive)
+        return Route::Dlss;
     if (aaWanted && (roles & RoleEquipDisplay) != 0)
         return Route::Enhance;
     return Route::Native;

@@ -30,6 +30,10 @@ constexpr bool SrUsable(const PlumbingFacts& f) { return f.srWanted && !f.srLatc
 // Preview NR may do work (its own availability, bridge and files, is checked by the module itself).
 constexpr bool NrUsable(const PlumbingFacts& f) { return f.nrWanted && !f.nrLatched && f.nrAvailable; }
 
+// dlss::CanRun(): at least one path can do work for a draw now. This (not PlumbingActive) decides the route of a draw, so a draw is not
+// handed to a plumbing that is only draining objects of a latched or switched-off path.
+constexpr bool PathCanRun(const PlumbingFacts& f) { return SrUsable(f) || NrUsable(f); }
+
 // dlss::Active(): the plumbing (draw offers, copy and clear hooks, maintenance) is alive. It stays alive while either path may run
 // and while any GPU object of either path still exists, so a latched path is drained by the maintenance calls.
 constexpr bool PlumbingActive(const PlumbingFacts& f)

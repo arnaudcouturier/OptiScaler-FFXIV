@@ -7,7 +7,7 @@
 namespace ext::ffxiv::chara::enhance
 {
 // Handles one draw of the equipment display shader (the caller checked: immediate context, api Draw, the shader's role,
-// [FFXIV] PreviewAA on, PreviewDLSS off). Returns true when it ran the draw (it called `draw` exactly once), false when
+// [FFXIV] PreviewAA on, and no DLSS or NR path able to run). Returns true when it ran the draw (it called `draw` exactly once), false when
 // the draw is left to the caller: the t0 image is not the preview renderer's equipment output, its format or size is not
 // supported, or the filter pass could not run.
 bool Around(const DrawView& view, DrawCall draw);

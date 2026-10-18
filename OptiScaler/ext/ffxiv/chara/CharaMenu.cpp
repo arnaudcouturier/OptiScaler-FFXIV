@@ -152,7 +152,9 @@ void DrawCharaCard(ext::menu::Ctx&)
         return;
     }
 
-    if (aa && !dlss)
+    // The spatial AA runs when PreviewDLSS is off, and also while the DLSS path cannot run (its status note says why).
+    const char* dlssNote = dlss::StatusNote();
+    if (aa && (!dlss || (dlssNote != nullptr && dlssNote[0] != '\0')))
     {
         const unsigned long long processed = g_stats.aaProcessed.load(std::memory_order_relaxed);
         ImGui::Text("Processed preview draws: %llu", processed);
