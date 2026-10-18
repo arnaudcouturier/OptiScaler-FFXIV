@@ -749,6 +749,43 @@ void TestScanGate()
     CHECK(!ScanCanFindAnything(true, true, true, false, false));
 }
 
+// The ResolveSubresource detour has a hook transaction of its own: attached when a debug aid is first switched on, removed when both are off
+// (REVIEW-CHARA-2 M2).
+void TestResolveHookState()
+{
+    using Step = ResolveHookState::Step;
+    ResolveHookState h;
+    CHECK(h.Decide(false) == Step::None && !h.Attached() && !h.Incomplete()); // nothing wanted: nothing attached, nothing missing
+    CHECK(h.Decide(true) == Step::Attach);                                    // a debug aid was switched on
+    h.AttachResult(true);
+    CHECK(h.Attached() && !h.Incomplete());
+    CHECK(h.Decide(true) == Step::None && h.Decide(true) == Step::None);      // asked on every draw: acts on the change only
+    CHECK(h.Decide(false) == Step::Detach);                                   // both are off: remove the detour
+    h.Detached();
+    CHECK(!h.Attached() && !h.Incomplete());
+    CHECK(h.Decide(false) == Step::None);
+    CHECK(h.Decide(true) == Step::Attach); // switched on again: attached again
+
+    // a failed attach: tracking is incomplete (the probe says so), nothing is retried per draw, nothing to remove on switch-off
+    ResolveHookState failed;
+    CHECK(failed.Decide(true) == Step::Attach);
+    failed.AttachResult(false);
+    CHECK(!failed.Attached() && failed.Incomplete());
+    CHECK(failed.Decide(true) == Step::None && failed.Incomplete());
+    CHECK(failed.Decide(false) == Step::None && !failed.Incomplete()); // nothing was attached: nothing to detach
+    CHECK(failed.Decide(true) == Step::Attach);                        // the next switch-on tries again
+    failed.AttachResult(true);
+    CHECK(failed.Attached() && !failed.Incomplete());
+
+    // the probe and the flood test are one "wanted": the second aid switched on while the first is on changes nothing, and the detour stays
+    // until both are off (the caller passes the OR of both)
+    ResolveHookState both;
+    CHECK(both.Decide(true) == Step::Attach);
+    both.AttachResult(true);
+    CHECK(both.Decide(true) == Step::None);
+    CHECK(both.Decide(false) == Step::Detach);
+}
+
 int main()
 {
     TestScanGate();
@@ -766,5 +803,6 @@ int main()
     TestGarbage();
     TestParseFile();
     TestPng();
+    TestResolveHookState();
     return TEST_RESULT("chara_probe_rules");
 }

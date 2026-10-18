@@ -109,6 +109,35 @@ inline void STDMETHODCALLTYPE OnResolve(ID3D11DeviceContext* c,ID3D11Resource* d
     resolve(c,dest,destSub,source,sourceSub,format);
     ext::ffxiv::chara::OnResolve(c,dest,destSub,source,sourceSub,format);
 }
+// The detour is NOT part of the main hook transaction (Install): a debug aid must not be able to take the shipped features down. The preview
+// probe asks for it through ext::ffxiv::chara::probe::ResolveHookControl when the probe or the flood test is first switched on, from the
+// draw thread, and again to remove it. Own transaction with single-thread enlistment, like Install (Detours allocates while enlisted
+// threads are suspended: no other thread is enlisted here). A failure leaves every other hook as it was; Detours serialises transactions
+// (a second one started at the same time fails instead of waiting), and a failed attach is reported by the probe.
+inline bool resolveAttached=false;
+inline bool AttachResolve()
+{
+    if (!installed.load() || !context) return false; // the main hooks are not installed
+    if (resolveAttached) return true;
+    resolve=reinterpret_cast<ResolveCall>((*reinterpret_cast<void***>(context))[57]);
+    if (DetourTransactionBegin()!=NO_ERROR) return false;
+    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
+    ok &= DetourAttach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
+    LONG result=ERROR_INVALID_FUNCTION;
+    if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
+    resolveAttached=result==NO_ERROR;
+    return resolveAttached;
+}
+inline void DetachResolve()
+{
+    if (!resolveAttached) return;
+    if (DetourTransactionBegin()!=NO_ERROR) return;
+    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
+    ok &= DetourDetach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) resolveAttached=false; } // `resolve` is the original function again
+    else DetourTransactionAbort();
+}
+inline const ext::ffxiv::chara::probe::ResolveHookControl resolveControl { &AttachResolve, &DetachResolve };
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
     auto hr=create(d,code,size,link,out);
@@ -208,7 +237,6 @@ inline void Install(ID3D11Device* d)
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
-    resolve=reinterpret_cast<ResolveCall>(cv[57]); // ext: S11
     clearRtv=reinterpret_cast<ClearRtv>(cv[50]);beginQuery=reinterpret_cast<QueryCall>(cv[27]);endQuery=reinterpret_cast<QueryCall>(cv[28]); // ext: S11
     createVs=reinterpret_cast<CreateVs>(dv[12]);
     // Single-thread enlistment only, deliberately, even though Detach() below enlists every
@@ -228,12 +256,11 @@ inline void Install(ID3D11Device* d)
     LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
-    LIGHT_ATTACH(resolve,OnResolve); // ext: S11
     LIGHT_ATTACH(clearRtv,OnClearRtv);LIGHT_ATTACH(beginQuery,OnBegin);LIGHT_ATTACH(endQuery,OnEnd);LIGHT_ATTACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_ATTACH
     LONG result=ERROR_INVALID_FUNCTION;
     if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
-    if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(draw)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
+    if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::probe::SetResolveHookControl(&resolveControl); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(draw)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
     else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
 inline void Detach()
@@ -264,10 +291,10 @@ inline void Detach()
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
-    LIGHT_DETACH(resolve,OnResolve); // ext: S11
+    if (resolveAttached) LIGHT_DETACH(resolve,OnResolve); // ext: S11 (only when the probe attached it, see AttachResolve)
     LIGHT_DETACH(clearRtv,OnClearRtv);LIGHT_DETACH(beginQuery,OnBegin);LIGHT_DETACH(endQuery,OnEnd);LIGHT_DETACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; ext::ffxiv::chara::OnDetached(); } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; resolveAttached=false; ext::ffxiv::chara::probe::SetResolveHookControl(nullptr); ext::ffxiv::chara::OnDetached(); } }
     else DetourTransactionAbort();
 }
 }

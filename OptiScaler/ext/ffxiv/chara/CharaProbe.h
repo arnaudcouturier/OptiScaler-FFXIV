@@ -108,4 +108,17 @@ void Reset();
 
 // Releases everything and removes the sink (the hooks are going away, the device is still valid).
 void Detach();
+
+// The hook layer (ext/ffxiv/lighting/FfxivLightingCapture.h) owns the ResolveSubresource detour and offers this control for it: `attach`
+// runs the detour in a Detours transaction of its own (single-thread enlistment, like the main install; draw thread) and says whether it
+// is attached now; `detach` removes it. The probe attaches it when the probe or the flood test is first switched on and detaches it when
+// both are off and in Detach(); a failed attach only costs the resolve observation (state.txt and the log say so). Null: no hook layer.
+struct ResolveHookControl
+{
+    bool (*attach)() = nullptr;
+    void (*detach)() = nullptr;
+};
+void SetResolveHookControl(const ResolveHookControl* control);
+// A debug aid is on but ResolveSubresource is not observed: the copy tracking misses copies made by resolves.
+bool ResolveTrackingIncomplete();
 } // namespace ext::ffxiv::chara::probe

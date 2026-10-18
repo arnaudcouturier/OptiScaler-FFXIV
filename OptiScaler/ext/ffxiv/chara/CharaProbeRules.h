@@ -405,6 +405,47 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The ResolveSubresource hook
+// ---------------------------------------------------------------------------------------------------------------------
+
+// The probe observes ResolveSubresource (a resolve is another way a copy of the preview can reach a texture). The detour is not part of
+// the lighting layer's all-or-nothing hook transaction (a failure there would take the shipped features down for a debug aid): the hook
+// layer attaches it in a transaction of its own when the probe or the flood test is first switched on, and removes it when both are off
+// and when the hooks are removed. This state machine decides when, from "is any debug aid wanted" alone.
+class ResolveHookState
+{
+  public:
+    enum class Step : uint8_t
+    {
+        None,
+        Attach, // a debug aid was switched on: attach the detour now
+        Detach, // both were switched off and the detour is attached: remove it
+    };
+
+    // Asked on every dispatched draw with "the probe or the flood test is on"; acts on the changes only.
+    Step Decide(bool wanted)
+    {
+        if (wanted == _wanted)
+            return Step::None;
+        _wanted = wanted;
+        if (wanted)
+            return Step::Attach;
+        return _attached ? Step::Detach : Step::None;
+    }
+
+    void AttachResult(bool ok) { _attached = ok; }
+    void Detached() { _attached = false; }
+
+    bool Attached() const { return _attached; }
+    // Copy tracking is incomplete: a debug aid is on but the detour is not there (the attach failed, or no hook layer is installed).
+    bool Incomplete() const { return _wanted && !_attached; }
+
+  private:
+    bool _wanted = false;
+    bool _attached = false;
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Output budget
 // ---------------------------------------------------------------------------------------------------------------------
 

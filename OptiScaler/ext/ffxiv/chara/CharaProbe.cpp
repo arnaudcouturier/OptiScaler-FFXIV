@@ -117,6 +117,7 @@ struct State
     uint64_t lastPoll = 0;
     std::optional<CommandChannel> channel; // chara-probe.cmd / chara-probe.out, while the probe is on
     DerivedSet derived;
+    ResolveHookState resolveHook; // whether the hook layer's ResolveSubresource detour is wanted and attached
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
     BackbufferInfo backbuffer;
@@ -220,6 +221,38 @@ void ReportSwap(const SwapRecord& r)
 }
 
 const SwapSink kSink { &ArmSwap, &ReportSwap };
+
+// ---- The ResolveSubresource hook ------------------------------------------------------------------------------------------------
+std::atomic<const ResolveHookControl*> g_resolveControl { nullptr };
+
+// Attaches the detour when a debug aid (the probe or the flood test) was switched on, removes it when both are off (ResolveHookState
+// decides). Draw thread; costs one comparison per call when nothing changes. A failed attach is reported once per switch-on and only
+// costs the resolve observation: the other hooks never depended on it.
+void SyncResolveHook()
+{
+    State& s = S();
+    const ResolveHookControl* control = g_resolveControl.load(std::memory_order_acquire);
+    switch (s.resolveHook.Decide(s.on || s.flood))
+    {
+    case ResolveHookState::Step::Attach:
+    {
+        const bool ok = control != nullptr && control->attach != nullptr && control->attach();
+        s.resolveHook.AttachResult(ok);
+        if (ok)
+            LOG_INFO("CharaView probe: ResolveSubresource is observed (the detour has its own hook transaction)");
+        else
+            LOG_WARN("CharaView probe: copy tracking incomplete: resolve not hooked (copies made by ResolveSubresource are not followed; the other "
+                     "hooks are not affected)");
+        break;
+    }
+    case ResolveHookState::Step::Detach:
+        if (control != nullptr && control->detach != nullptr)
+            control->detach();
+        s.resolveHook.Detached();
+        break;
+    case ResolveHookState::Step::None: break;
+    }
+}
 
 // ---- Switching ------------------------------------------------------------------------------------------------------------
 
@@ -451,6 +484,9 @@ std::string BuildState(uint64_t now)
     t.AddBool("probe.on", s.on);
     t.AddBool("probe.floodActive", s.flood);
     t.AddBool("probe.copyTracking", s.derived.CopiesEnabled());
+    t.AddBool("probe.resolveHooked", s.resolveHook.Attached());
+    if (s.resolveHook.Incomplete())
+        t.Add("probe.copyTrackingNote", "copy tracking incomplete: resolve not hooked (copies made by ResolveSubresource are not followed)");
 
     const auto& cfg = ext::Cfg().ffxiv.chara;
     const auto onOff = [](bool v) { return v ? "on" : "off"; };
@@ -772,7 +808,7 @@ void Tick(ID3D11DeviceContext* context, uint64_t now)
 
 } // namespace
 
-void Update(uint64_t now, ID3D11DeviceContext* context)
+static void UpdateCore(uint64_t now, ID3D11DeviceContext* context)
 {
     State& s = S();
 
@@ -830,6 +866,16 @@ void Update(uint64_t now, ID3D11DeviceContext* context)
     if (s.on && context != nullptr)
         Tick(context, now);
 }
+
+void Update(uint64_t now, ID3D11DeviceContext* context)
+{
+    UpdateCore(now, context);
+    SyncResolveHook();
+}
+
+void SetResolveHookControl(const ResolveHookControl* control) { g_resolveControl.store(control, std::memory_order_release); }
+
+bool ResolveTrackingIncomplete() { return S().resolveHook.Incomplete(); }
 
 bool RequestDump()
 {
@@ -1120,5 +1166,6 @@ void Detach()
         ForgetAll();
     detail::g_live.store(false, std::memory_order_relaxed);
     flood::Release();
+    SyncResolveHook(); // both aids are off now: the ResolveSubresource detour goes (its own transaction)
 }
 } // namespace ext::ffxiv::chara::probe
