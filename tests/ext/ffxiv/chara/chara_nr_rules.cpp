@@ -1,6 +1,8 @@
 #include "check.h"
 #include "ext/ffxiv/chara/CharaNrRules.h"
 
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -479,6 +481,62 @@ void TestCost()
     CHECK(s.count == 2 && s.average == 2.0 && s.max == 3.0);
     CHECK(!c.Due(8000)); // reset after Take
 }
+
+// ---- The boundary towards the game -------------------------------------------------------------------------------------------------
+struct Boom
+{
+};
+
+void TestGuarded()
+{
+    int latchLines = 0;
+    Latches latches;
+    // The shape of the module's entry points: the body throws, the handler latches (one line only) and gives the fallback value.
+    const auto onThrow = [&]
+    {
+        if (latches.LatchNr())
+            ++latchLines;
+        return -1;
+    };
+
+    CHECK(Guarded([] { return 7; }, onThrow) == 7); // no exception: the body's value, the handler is not called
+    CHECK(latchLines == 0 && !latches.NrLatched());
+
+    const int fromThrowingBody = Guarded([]() -> int { throw Boom {}; }, onThrow);
+    CHECK(fromThrowingBody == -1);
+    CHECK(latchLines == 1 && latches.NrLatched() && !latches.SrLatched());
+
+    // Every kind of exception is stopped (library exceptions and non-standard ones); the second throw does not log again.
+    CHECK(Guarded([]() -> int { throw std::runtime_error("x"); }, onThrow) == -1);
+    CHECK(Guarded([]() -> int { throw 42; }, onThrow) == -1);
+    CHECK(Guarded([]() -> int { throw std::bad_alloc(); }, onThrow) == -1);
+    CHECK(latchLines == 1);
+
+    // A void entry point (Maintain, Detach, ...).
+    int ran = 0;
+    Guarded([&] { ++ran; }, [&] { ran += 100; });
+    CHECK(ran == 1);
+    Guarded([&]() { throw Boom {}; }, [&] { ran += 100; });
+    CHECK(ran == 101);
+
+    // A pointer result falls back to null; a handler that throws itself still does not let anything out (a value-initialised answer).
+    int target = 5;
+    CHECK(Guarded([&]() -> int* { return &target; }, []() -> int* { return nullptr; }) == &target);
+    CHECK(Guarded([&]() -> int* { throw Boom {}; }, []() -> int* { return nullptr; }) == nullptr);
+    CHECK(Guarded([]() -> int* { throw Boom {}; }, []() -> int* { throw Boom {}; }) == nullptr);
+    CHECK(Guarded([]() -> int { throw Boom {}; }, []() -> int { throw Boom {}; }) == 0);
+    Guarded([]() { throw Boom {}; }, []() { throw Boom {}; });
+
+    // The answer of a throwing run entry is the failure outcome, not an exception: the dispatcher keeps the native image.
+    int fallbacks = 0;
+    const int outcome = Guarded([]() -> int { throw Boom {}; },
+                                [&]
+                                {
+                                    ++fallbacks;
+                                    return static_cast<int>(3);
+                                });
+    CHECK(outcome == 3 && fallbacks == 1);
+}
 } // namespace
 
 int main()
@@ -496,5 +554,6 @@ int main()
     TestRebuild();
     TestFactsOf();
     TestCost();
+    TestGuarded();
     return TEST_RESULT("chara_nr_rules");
 }

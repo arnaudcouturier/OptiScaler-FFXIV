@@ -784,13 +784,13 @@ void RunSlot(int index, const DrawView& view)
 // ---- Preview NR hooks -----------------------------------------------------------------------------------------------------
 // Bring-up entry: right after the finisher wrote the native image. The module copies it to its shared colour image and queues the
 // NR list on the bridge's D3D12 queue (colour only, synthetic guides). Draw thread, immediate context. Failures stay inside the
-// module (it latches NR, not the SR path).
-void RunNrBringUp(const DrawView& view)
+// module (it latches NR, not the SR path). True: NR produced a result for this render.
+bool RunNrBringUpInner(const DrawView& view)
 {
     ID3D11Texture2D* texture = view.rtvTexture;
     const uint32_t w = view.facts.targetWidth, h = view.facts.targetHeight;
     if (texture == nullptr || w == 0 || h == 0 || w > kNrMaxSide || h > kNrMaxSide)
-        return;
+        return false;
     ReplayScope own; // the module copies on this context: the copy hooks must not treat that as the game's work
     nr::RunRequest request;
     request.context = view.context;
@@ -803,6 +803,21 @@ void RunNrBringUp(const DrawView& view)
         ++g_stats.nrRuns;
     if (diag::TraceEnabled() && outcome != nr::RunOutcome::Ran)
         diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR bring-up outcome {} for {}x{}", static_cast<int>(outcome), w, h));
+    return outcome == nr::RunOutcome::Ran;
+}
+
+// The second line of defence behind the module's own boundary (nr::RunBringUp never throws): whatever this function does around the
+// call (the trace text, the statistics) cannot leave the game's Draw hook either. An exception here latches preview NR and the render
+// keeps the native image.
+bool RunNrBringUp(const DrawView& view)
+{
+    return nr::Guarded([&] { return RunNrBringUpInner(view); },
+                       []
+                       {
+                           if (nr::SharedLatches().LatchNr())
+                               LOG_WARN("CharaView NR: an unexpected exception in the dispatcher's bring-up step; switched off for this session, native previews retained");
+                           return false;
+                       });
 }
 
 // Production entry: between the SR evaluate and the alpha pass of RunSlot, with the real guides. Only invoked when the SR evaluate

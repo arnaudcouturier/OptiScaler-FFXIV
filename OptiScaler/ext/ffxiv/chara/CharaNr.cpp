@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/core/PathText.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
@@ -562,7 +563,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
     }
     m.inited = true;
     UpdateHolds();
-    LOG_INFO("CharaView NR: ready on the bridge's D3D12 device; model {}; own fence and {} command allocators", std::filesystem::path(m.backend.modelPath).string(), kAllocators);
+    LOG_INFO("CharaView NR: ready on the bridge's D3D12 device; model {}; own fence and {} command allocators", ext::PathText(m.backend.modelPath), kAllocators);
     return true;
 }
 
@@ -885,7 +886,7 @@ bool Available() { return static_cast<Availability>(M().availabilitySnapshot.loa
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
 
-RunOutcome RunBringUp(const RunRequest& req)
+static RunOutcome RunBringUpImpl(const RunRequest& req)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -996,7 +997,7 @@ struct ConsumerOps
     bool WaitResult(uint64_t done) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), done)); }
 };
 
-ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* /*context*/, uintptr_t key, uint64_t now)
+static ID3D11ShaderResourceView* ResultForImpl(uintptr_t key, uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1022,7 +1023,7 @@ ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* /*context*/, uintptr_t 
     return s.result[buffer].srv.Get();
 }
 
-ID3D11Texture2D* ResultTexture(uint64_t now)
+static ID3D11Texture2D* ResultTextureImpl(uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1044,7 +1045,7 @@ ID3D11Texture2D* ResultTexture(uint64_t now)
     return buffer < 0 ? nullptr : m.streams[best].result[buffer].t11();
 }
 
-void Maintain(uint64_t now)
+static void MaintainImpl(uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1089,7 +1090,7 @@ void Maintain(uint64_t now)
 
 void OnFrameEnd() {}
 
-void OnBridgeShutdown()
+static void OnBridgeShutdownImpl()
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1101,14 +1102,14 @@ void OnBridgeShutdown()
     UpdateHolds();
 }
 
-void OnBridgeInit()
+static void OnBridgeInitImpl()
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
     m.holdOff = false;
 }
 
-void Detach()
+static void DetachImpl()
 {
     // Draw thread, device valid, the hooks are about to go. No wait here (the earlier version waited up to five seconds on a fence event
     // with the module locked, which is unsafe if this ever ran under the loader lock): the D3D11 context is flushed so that signals the
@@ -1127,7 +1128,7 @@ void Detach()
     }
 }
 
-Status GetStatus()
+static Status GetStatusImpl()
 {
     Module& m = M();
     Status s;
@@ -1146,5 +1147,72 @@ Status GetStatus()
     s.videoMemoryMb = m.vramAddedMb.load(std::memory_order_relaxed);
     s.late = Late();
     return s;
+}
+
+// ---- The public entry points: the boundary towards the game --------------------------------------------------------------------
+// Each one runs its body through Guarded (CharaNrRules.h): an exception (an out-of-memory, a failing library call, a path that cannot be
+// converted) latches the module with one fixed log line and gives the answer "no NR" instead of leaving the game's Draw hook. The latch
+// text is a literal on purpose: the handler must not do anything that can throw itself.
+RunOutcome RunBringUp(const RunRequest& req)
+{
+    return Guarded([&] { return RunBringUpImpl(req); },
+                   []
+                   {
+                       Latch("an unexpected exception stopped the bring-up");
+                       return Fallback(RunOutcome::Failed);
+                   });
+}
+
+ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
+{
+    return Guarded([&] { return ResultForImpl(key, now); },
+                   []() -> ID3D11ShaderResourceView*
+                   {
+                       Latch("an unexpected exception while looking up a result");
+                       return nullptr;
+                   });
+}
+
+ID3D11Texture2D* ResultTexture(uint64_t now)
+{
+    return Guarded([&] { return ResultTextureImpl(now); },
+                   []() -> ID3D11Texture2D*
+                   {
+                       Latch("an unexpected exception while looking up the result texture");
+                       return nullptr;
+                   });
+}
+
+void Maintain(uint64_t now)
+{
+    Guarded([&] { MaintainImpl(now); }, [] { Latch("an unexpected exception in the maintenance"); });
+}
+
+void OnBridgeShutdown()
+{
+    Guarded([&] { OnBridgeShutdownImpl(); }, [] { Latch("an unexpected exception at the bridge shutdown"); });
+}
+
+void OnBridgeInit()
+{
+    Guarded([&] { OnBridgeInitImpl(); }, [] { Latch("an unexpected exception at the bridge start"); });
+}
+
+void Detach()
+{
+    Guarded([&] { DetachImpl(); }, [] { Latch("an unexpected exception while detaching"); });
+}
+
+Status GetStatus()
+{
+    return Guarded([&] { return GetStatusImpl(); },
+                   []
+                   {
+                       Latch("an unexpected exception while reading the status");
+                       Status s;
+                       s.availability = Availability::Latched;
+                       s.reason = ReasonText(Availability::Latched);
+                       return s;
+                   });
 }
 } // namespace ext::ffxiv::chara::nr

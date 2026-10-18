@@ -11,6 +11,7 @@
 #include "ext/nr/NrFocus.h"
 #include "ext/nr/NrHooks.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/core/PathText.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
 #include "ext/nr/native/DlssNrNative.h"
@@ -475,7 +476,7 @@ bool EnsureForwarder()
     if (!found.has_value())
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll not found beside OptiScaler ({}) or the game executable",
-                  g_dllDir.string());
+                  ext::PathText(g_dllDir));
         g_nr.reason = "nvngx.dll_dlssnr.dll is missing";
         return false;
     }
@@ -486,7 +487,7 @@ bool EnsureForwarder()
 
     if (g_nr.forwarder == nullptr)
     {
-        LOG_ERROR("nvngx.dll_dlssnr.dll found at {} but would not load, error {}", path.string(),
+        LOG_ERROR("nvngx.dll_dlssnr.dll found at {} but would not load, error {}", ext::PathText(path),
                   GetLastError());
         g_nr.reason = "nvngx.dll_dlssnr.dll would not load";
         return false;
@@ -513,7 +514,7 @@ bool EnsureForwarder()
         return false;
     }
 
-    LOG_INFO("DLSS-NR forwarder loaded from {}", path.string());
+    LOG_INFO("DLSS-NR forwarder loaded from {}", ext::PathText(path));
     return true;
 }
 
