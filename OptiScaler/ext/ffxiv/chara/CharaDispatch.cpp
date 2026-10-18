@@ -3,6 +3,7 @@
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaEnhance.h"
+#include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaRoute.h"
 #include "ext/ffxiv/chara/CharaStats.h"
@@ -315,9 +316,12 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     }
 
     // The probe compares every draw's first resources with the preview textures before the draw is classified: the draws that put
-    // a copy of the preview on screen have no role and no table render target, so Gather would drop them. It reads state only.
+    // a copy of the preview on screen have no role and no table render target, so Gather would drop them. It reads state only. The
+    // result also tells the flood test which slots hold the preview or a copy of it.
+    probe::ScanResult scan;
     if (probe::Live())
-        probe::OnDraw(context, api, snap, now);
+        scan = probe::OnDraw(context, api, snap, now);
+    const bool floodThisDraw = scan.count != 0 && flood::On();
 
     if (!g_loggedTags)
     {
@@ -334,7 +338,10 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     {
         ++g_stats.classified;
         ++g_stats.kind[static_cast<size_t>(DrawKind::Ignore)];
-        draw();
+        // No role and no render target of the table: this is where a UI draw that samples a copy of the preview ends up. The flood
+        // test gives it the magenta image (our own replays never get here: t_replay / t_busy returned above).
+        if (!floodThisDraw || !flood::SwapAndDraw(context, scan.slotMask, draw))
+            draw();
         return;
     }
 
@@ -371,7 +378,14 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     case Route::Native: break;
     }
     if (!handled)
-        draw();
+    {
+        // A draw no module took: the flood test gives it the magenta image in place of the preview (or a copy of it), unless it
+        // renders into one of the preview renderer's own textures.
+        const bool targetIsTableEntry = gathered.rtvResource != nullptr &&
+                                        table::IndexOfPointer(snap, reinterpret_cast<uintptr_t>(gathered.rtvResource.Get())) >= 0;
+        if (!floodThisDraw || targetIsTableEntry || !flood::SwapAndDraw(context, scan.slotMask, draw))
+            draw();
+    }
 
     if (view.kind == DrawKind::Finisher)
     {

@@ -4,6 +4,7 @@
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
+#include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 
@@ -163,38 +164,51 @@ bool Around(const DrawView& view, DrawCall draw)
     const DXGI_FORMAT format = viewDesc.Format != DXGI_FORMAT_UNKNOWN ? viewDesc.Format : desc.Format;
     bool srgb = false;
     const UINT scale = ext::Cfg().ffxiv.chara.previewUpscale.value_or_default() ? 2u : 1u;
-    if (!SupportedFormat(format, srgb) || desc.Width * scale > kMaxOutput || desc.Height * scale > kMaxOutput)
-    {
-        ++g_stats.aaSkipped;
-        if (!g_loggedFormat)
-        {
-            g_loggedFormat = true;
-            LOG_WARN("CharaView: spatial AA skipped, equipment image {}x{} format {} (scale {}) is not supported", desc.Width,
-                     desc.Height, static_cast<int>(format), scale);
-        }
-        return false;
-    }
 
+    // The flood test (PreviewDebugFlood) replaces the image by solid magenta here, before the format checks and without running the
+    // pass: it must show whether this draw reaches the screen whatever the AA could or could not produce.
     ID3D11ShaderResourceView* filtered = nullptr;
-    const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
-    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle, tinted) ||
-        filtered == nullptr)
+    bool flooded = false;
+    if (flood::On() && flood::SamplesAsFloat(format))
     {
-        ++g_stats.aaSkipped;
-        if (!g_loggedFailure)
-        {
-            g_loggedFailure = true;
-            LOG_WARN("CharaView: spatial AA could not run ({}); native preview retained",
-                     Pass().Failure() != nullptr ? Pass().Failure() : "output texture not available");
-        }
-        return false;
+        filtered = flood::View(context, format);
+        flooded = filtered != nullptr;
     }
 
-    if (tinted)
-        ++g_stats.tintApplied;
+    if (!flooded)
+    {
+        if (!SupportedFormat(format, srgb) || desc.Width * scale > kMaxOutput || desc.Height * scale > kMaxOutput)
+        {
+            ++g_stats.aaSkipped;
+            if (!g_loggedFormat)
+            {
+                g_loggedFormat = true;
+                LOG_WARN("CharaView: spatial AA skipped, equipment image {}x{} format {} (scale {}) is not supported", desc.Width,
+                         desc.Height, static_cast<int>(format), scale);
+            }
+            return false;
+        }
 
-    // Show the filtered image to this one draw, then give the draw its own image back.
-    probe::SwapTrace trace(context, probe::SwapKind::Aa, 0, filtered);
+        const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
+        if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle, tinted) ||
+            filtered == nullptr)
+        {
+            ++g_stats.aaSkipped;
+            if (!g_loggedFailure)
+            {
+                g_loggedFailure = true;
+                LOG_WARN("CharaView: spatial AA could not run ({}); native preview retained",
+                         Pass().Failure() != nullptr ? Pass().Failure() : "output texture not available");
+            }
+            return false;
+        }
+
+        if (tinted)
+            ++g_stats.tintApplied;
+    }
+
+    // Show the filtered image (or the flood image) to this one draw, then give the draw its own image back.
+    probe::SwapTrace trace(context, flooded ? probe::SwapKind::Flood : probe::SwapKind::Aa, 0, filtered);
     WithSource0(context, filtered,
                 [&]
                 {
@@ -202,6 +216,12 @@ bool Around(const DrawView& view, DrawCall draw)
                     draw();
                 });
     trace.Restored();
+
+    if (flooded)
+    {
+        ++g_stats.floodSwaps;
+        return true;
+    }
 
     const uint64_t n = ++g_stats.aaProcessed;
     if (n == 1)

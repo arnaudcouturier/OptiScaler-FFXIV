@@ -58,6 +58,17 @@ void DrawCharaCard(ext::menu::Ctx&)
     ImGui::TextDisabled("Preview debug tint: %s, applied %llu times", tint ? "on" : "off",
                         (unsigned long long) g_stats.tintApplied.load(std::memory_order_relaxed));
 
+    bool flood = cfg.previewDebugFlood.value_or_default();
+    if (ImGui::Checkbox("Flood the preview with solid magenta (debug)", &flood))
+        cfg.previewDebugFlood = flood;
+    ext::menu::Tooltip("Debug aid, leave off in normal use. Every draw that samples the preview image, or a copy of it that was followed, "
+                       "gets a solid magenta image instead. If nothing on screen turns magenta while this is on, the draws that were "
+                       "changed do not put the preview on screen. It works without the spatial AA, the DLSS path and the probe. A draw "
+                       "that reads the image with texel loads instead of sampling it shows black with a magenta corner. It checks every "
+                       "draw while it is on.");
+    ImGui::TextDisabled("Preview flood: %s, %llu draws given the magenta image", flood ? "on" : "off",
+                        (unsigned long long) g_stats.floodSwaps.load(std::memory_order_relaxed));
+
     bool probeOn = cfg.previewProbe.value_or_default();
     if (ImGui::Checkbox("Preview probe (debug)", &probeOn))
         cfg.previewProbe = probeOn;

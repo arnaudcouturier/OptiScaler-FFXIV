@@ -2,6 +2,7 @@
 
 #include "ext/ffxiv/chara/CharaProbe.h"
 
+#include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaProbeRules.h"
@@ -40,7 +41,8 @@ struct BackbufferInfo
 
 struct State
 {
-    bool on = false;
+    bool on = false;    // PreviewProbe: log lines, sink, counters
+    bool flood = false; // PreviewDebugFlood: the scan runs on every draw and copies are followed (silently), so the flood reaches copies
     DerivedSet derived;
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
@@ -150,7 +152,7 @@ void SwitchOff(const char* why)
 {
     State& s = S();
     g_swapSink.store(nullptr, std::memory_order_relaxed);
-    detail::g_live.store(false, std::memory_order_relaxed);
+    detail::g_live.store(s.flood, std::memory_order_relaxed);
     s.on = false;
     LOG_INFO("CharaView probe: off ({}); copy cases logged {}, sampler cases logged {}, consumer swap traces {}, derived textures seen {}",
              why, g_stats.probeCopyLines.load(), g_stats.probeSamplerLines.load(), g_stats.probeSwapLines.load(),
@@ -202,7 +204,7 @@ std::string DetailText(const CopyDetail& d)
 void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& detail)
 {
     State& s = S();
-    if (!s.on || dest == nullptr || source == nullptr || !table::Ready())
+    if ((!s.on && !s.flood) || dest == nullptr || source == nullptr || !table::Ready())
         return;
 
     const uint64_t now = GetTickCount64();
@@ -260,6 +262,9 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
     else
         ++g_stats.probeCopiesRefused; // the preview is not rendering: not followed, but worth a line
 
+    if (!s.on)
+        return; // only the flood test is on: the copy is followed, nothing is logged
+
     const int sourceEntry = fromPreview ? entry : from.sourceEntry;
     const uint32_t hops = fromPreview ? 1 : from.hops + 1;
     const uint64_t sourceTag = fromPreview ? static_cast<uint64_t>(entry) : 1000 + static_cast<uint64_t>(from.sourceEntry) * 16 + from.hops;
@@ -291,23 +296,29 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
         LOG_INFO("CharaView probe: the limit of {} copy cases is reached; further new cases are only counted", kCopyCaseCap);
 }
 
-// ---- Sampler draws --------------------------------------------------------------------------------------------------------------
-
-struct Hit
-{
-    UINT slot = 0;
-    uintptr_t texture = 0;
-    int entry = -1;        // preview table entry when the texture is a preview output, else -1
-    bool derived = false;  // the texture is in the derived set
-    int sourceEntry = -1;  // the preview entry its image came from
-    uint32_t hops = 0;     // derived only
-    DerivedKind kind = DerivedKind::Copy;
-};
 } // namespace
 
 void Update(uint64_t now)
 {
     State& s = S();
+
+    // The flood test: its own log lines and texture are handled by the flood unit; here it only decides whether the scan and the
+    // copy tracking run for it.
+    flood::Update(now);
+    const bool wantFlood = flood::On();
+    if (wantFlood != s.flood)
+    {
+        s.flood = wantFlood;
+        if (wantFlood && !s.on)
+        {
+            ForgetAll();
+            detail::g_lastActivity.store(0, std::memory_order_relaxed);
+        }
+        else if (!wantFlood && !s.on)
+            ForgetAll();
+        detail::g_live.store(s.on || s.flood, std::memory_order_relaxed);
+    }
+
     const bool want = ProbeOn();
     if (want != s.on)
     {
@@ -337,23 +348,25 @@ void Update(uint64_t now)
     }
 }
 
-void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now)
+ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now)
 {
+    ScanResult result;
     State& s = S();
-    if (!s.on || context == nullptr)
-        return;
+    if ((!s.on && !s.flood) || context == nullptr)
+        return result;
 
-    // One cheap check before any COM call: scan only while the preview renderer is active or copies of it are alive.
+    // One cheap check before any COM call: the probe scans only while the preview renderer is active or copies of it are alive.
+    // The flood test scans every draw (a preview that stopped re-rendering is still on screen).
     const uint64_t activity = detail::g_lastActivity.load(std::memory_order_relaxed);
     const bool recent = activity != 0 && now >= activity && now - activity <= kActivityMs;
-    if (!recent && s.derived.Empty(now))
-        return;
+    if (!s.flood && !recent && s.derived.Empty(now))
+        return result;
 
-    ++g_stats.probeScanned;
+    if (s.on)
+        ++g_stats.probeScanned;
     ID3D11ShaderResourceView* views[kScanSlots] {};
     context->PSGetShaderResources(0, kScanSlots, views);
 
-    std::array<Hit, kScanSlots> hits {};
     size_t count = 0;
     for (UINT i = 0; i < kScanSlots; ++i)
     {
@@ -366,7 +379,7 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
         if (texture == 0)
             continue;
 
-        Hit hit;
+        ScanHit hit;
         hit.slot = i;
         hit.texture = texture;
         const int entry = table::IndexOfPointer(snapshot, texture);
@@ -386,19 +399,18 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
         }
         else
             continue;
-        hits[count++] = hit;
+        hit.resource = std::move(resource);
+        result.slotMask |= 1u << i;
+        result.hits[count++] = std::move(hit);
     }
+    result.count = count;
     if (count == 0)
-        return;
+        return result;
 
-    ++g_stats.probeSamplerDraws;
+    if (s.on)
+        ++g_stats.probeSamplerDraws;
 
-    // The draw samples a preview image: read what it is and where it renders. Only draws that matched get here.
-    ComPtr<ID3D11PixelShader> ps;
-    context->PSGetShader(&ps, nullptr, nullptr);
-    const ShaderInfo shader = GetShaderInfo(ps.Get());
-    const uint32_t roles = RoleOf(ps.Get());
-
+    // The draw samples a preview image: read where it renders. Only draws that matched get here.
     ComPtr<ID3D11RenderTargetView> rtv;
     context->OMGetRenderTargets(1, &rtv, nullptr);
     ComPtr<ID3D11Resource> rtResource;
@@ -416,44 +428,53 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
     }
     const uintptr_t rtPointer = reinterpret_cast<uintptr_t>(rtResource.Get());
 
-    D3D11_VIEWPORT viewport {};
-    UINT viewportCount = 1;
-    context->RSGetViewports(&viewportCount, &viewport);
-    if (viewportCount < 1)
-        viewport = D3D11_VIEWPORT {};
-
     const BackbufferInfo& bb = Backbuffer(now);
     const bool targetIsBackbuffer = haveTarget && bb.valid && bb.texture == rtPointer;
 
-    for (size_t n = 0; n < count; ++n)
+    if (s.on)
     {
-        const Hit& hit = hits[n];
-        const uint64_t tag = hit.derived ? 1000 + static_cast<uint64_t>(hit.sourceEntry) * 16 + hit.hops + (hit.kind == DerivedKind::Draw ? 8 : 0)
-                                         : static_cast<uint64_t>(hit.entry);
-        const uint64_t key = CaseKey(tag, hit.slot | (static_cast<uint64_t>(api) << 8),
-                                     shader.known ? (static_cast<uint64_t>(shader.crc) | (static_cast<uint64_t>(shader.size) << 32))
-                                                  : reinterpret_cast<uintptr_t>(ps.Get()),
-                                     (static_cast<uint64_t>(rtDesc.Width) << 32) | rtDesc.Height,
-                                     static_cast<uint64_t>(rtDesc.Format) | (static_cast<uint64_t>(targetIsBackbuffer) << 32));
-        if (!s.samplerCases.Offer(key))
-            continue;
+        // The pixel shader, viewport and the log lines are the probe's own.
+        ComPtr<ID3D11PixelShader> ps;
+        context->PSGetShader(&ps, nullptr, nullptr);
+        const ShaderInfo shader = GetShaderInfo(ps.Get());
+        const uint32_t roles = RoleOf(ps.Get());
 
-        const std::string crc = shader.known ? std::format("{:08X}", shader.crc) : std::string("unknown (shader made before the hooks)");
-        const std::string target = haveTarget ? std::format("{:#x} {}x{} format {}", rtPointer, rtDesc.Width, rtDesc.Height,
-                                                            FormatText(static_cast<uint32_t>(rtDesc.Format)))
-                                              : std::string("none");
-        std::string what;
-        if (hit.derived)
-            what = std::format("draw samples preview-derived texture {:#x} ({} of {}, hops {})", hit.texture,
-                               hit.kind == DerivedKind::Draw ? "draw" : "copy", hit.sourceEntry, hit.hops);
-        else
-            what = std::format("draw samples preview texture {:#x} (entry {})", hit.texture, hit.entry);
-        ++g_stats.probeSamplerLines;
-        LOG_INFO("CharaView probe: {} at t{}: shader CRC {} roles {:#x}, render target {} (backbuffer? {}), viewport {}x{}, via {}", what,
-                 hit.slot, crc, roles, target, bb.valid ? YesNo(targetIsBackbuffer) : "unknown", static_cast<int>(viewport.Width),
-                 static_cast<int>(viewport.Height), DrawApiName(api));
-        if (s.samplerCases.Count() == kSamplerCaseCap)
-            LOG_INFO("CharaView probe: the limit of {} sampler-draw cases is reached; further new cases are only counted", kSamplerCaseCap);
+        D3D11_VIEWPORT viewport {};
+        UINT viewportCount = 1;
+        context->RSGetViewports(&viewportCount, &viewport);
+        if (viewportCount < 1)
+            viewport = D3D11_VIEWPORT {};
+
+        for (size_t n = 0; n < count; ++n)
+        {
+            const ScanHit& hit = result.hits[n];
+            const uint64_t tag = hit.derived ? 1000 + static_cast<uint64_t>(hit.sourceEntry) * 16 + hit.hops + (hit.kind == DerivedKind::Draw ? 8 : 0)
+                                             : static_cast<uint64_t>(hit.entry);
+            const uint64_t key = CaseKey(tag, hit.slot | (static_cast<uint64_t>(api) << 8),
+                                         shader.known ? (static_cast<uint64_t>(shader.crc) | (static_cast<uint64_t>(shader.size) << 32))
+                                                      : reinterpret_cast<uintptr_t>(ps.Get()),
+                                         (static_cast<uint64_t>(rtDesc.Width) << 32) | rtDesc.Height,
+                                         static_cast<uint64_t>(rtDesc.Format) | (static_cast<uint64_t>(targetIsBackbuffer) << 32));
+            if (!s.samplerCases.Offer(key))
+                continue;
+
+            const std::string crc = shader.known ? std::format("{:08X}", shader.crc) : std::string("unknown (shader made before the hooks)");
+            const std::string target = haveTarget ? std::format("{:#x} {}x{} format {}", rtPointer, rtDesc.Width, rtDesc.Height,
+                                                                FormatText(static_cast<uint32_t>(rtDesc.Format)))
+                                                  : std::string("none");
+            std::string what;
+            if (hit.derived)
+                what = std::format("draw samples preview-derived texture {:#x} ({} of {}, hops {})", hit.texture,
+                                   hit.kind == DerivedKind::Draw ? "draw" : "copy", hit.sourceEntry, hit.hops);
+            else
+                what = std::format("draw samples preview texture {:#x} (entry {})", hit.texture, hit.entry);
+            ++g_stats.probeSamplerLines;
+            LOG_INFO("CharaView probe: {} at t{}: shader CRC {} roles {:#x}, render target {} (backbuffer? {}), viewport {}x{}, via {}", what,
+                     hit.slot, crc, roles, target, bb.valid ? YesNo(targetIsBackbuffer) : "unknown", static_cast<int>(viewport.Width),
+                     static_cast<int>(viewport.Height), DrawApiName(api));
+            if (s.samplerCases.Count() == kSamplerCaseCap)
+                LOG_INFO("CharaView probe: the limit of {} sampler-draw cases is reached; further new cases are only counted", kSamplerCaseCap);
+        }
     }
 
     // The render target of a draw that sampled the preview (or a copy of it) holds the image too, unless it is the screen.
@@ -463,19 +484,20 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
         table::IndexOfPointer(snapshot, rtPointer) < 0)
     {
         // the closest source: a preview output first, then the derived texture with the fewest hops
-        const Hit* best = &hits[0];
+        const ScanHit* best = &result.hits[0];
         for (size_t n = 1; n < count; ++n)
         {
-            const Hit& h = hits[n];
+            const ScanHit& h = result.hits[n];
             if ((!h.derived && best->derived) || (h.derived == best->derived && h.hops < best->hops))
                 best = &h;
         }
         const TextureInfo info { rtDesc.Width, rtDesc.Height, static_cast<uint32_t>(rtDesc.Format) };
-        const DeriveResult result = best->derived ? s.derived.FromDerived(best->texture, rtPointer, info, false, DerivedKind::Draw, now)
-                                                  : s.derived.FromPreview(best->entry, best->texture, rtPointer, info, false, DerivedKind::Draw, now);
-        if (result == DeriveResult::Added || result == DeriveResult::Replaced)
+        const DeriveResult derived = best->derived ? s.derived.FromDerived(best->texture, rtPointer, info, false, DerivedKind::Draw, now)
+                                                   : s.derived.FromPreview(best->entry, best->texture, rtPointer, info, false, DerivedKind::Draw, now);
+        if (derived == DeriveResult::Added || derived == DeriveResult::Replaced)
             ++g_stats.probeDerivedAdded;
     }
+    return result;
 }
 
 void OnCopy(ID3D11DeviceContext*, ID3D11Resource* dest, ID3D11Resource* source)
@@ -533,9 +555,12 @@ void Detach()
 {
     State& s = S();
     g_swapSink.store(nullptr, std::memory_order_relaxed);
+    s.flood = false; // before SwitchOff: nothing stays live
     if (s.on)
         SwitchOff("the hooks are being removed");
     else
         ForgetAll();
+    detail::g_live.store(false, std::memory_order_relaxed);
+    flood::Release();
 }
 } // namespace ext::ffxiv::chara::probe

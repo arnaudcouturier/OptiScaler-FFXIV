@@ -8,6 +8,7 @@
 #include "ext/ffxiv/chara/CharaDlssGate.h"
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
+#include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
@@ -769,6 +770,8 @@ bool Consume(const DrawView& view, DrawCall draw)
 
     ID3D11ShaderResourceView* replaced[kSrvSlots] {};
     bool any = false;
+    bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
+    const bool floodOn = flood::On();
     for (UINT i = 0; i < kSrvSlots; ++i)
     {
         replaced[i] = original[i];
@@ -809,6 +812,16 @@ bool Consume(const DrawView& view, DrawCall draw)
         g_slots.Touch(index, view.now);
         const SlotState& s = g_slots.Slot(index);
         const SlotGpu& g = g_gpu[static_cast<size_t>(index)];
+        if (floodOn && flood::CanReplace(sd))
+        {
+            // The flood test bypasses the "evaluated and not failed" condition: any image that has a slot gets the magenta one.
+            if (ID3D11ShaderResourceView* magenta = flood::View(context, sd.Format))
+            {
+                replaced[i] = magenta;
+                flooded = true;
+                continue;
+            }
+        }
         if (s.everEvaluated && !s.failed && g.composed.srv != nullptr)
         {
             replaced[i] = g.composed.srv.Get();
@@ -817,13 +830,19 @@ bool Consume(const DrawView& view, DrawCall draw)
     }
 
     bool handled = false;
-    if (any)
+    if (any || flooded)
     {
-        ++g_stats.consumerSwaps;
-        if (g_lines.ShouldLog(kLineSwap, identify::BurstNumber()))
-            LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
-        if (diag::TraceEnabled())
-            diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
+        // A flooded draw is counted as a flood swap only: it did not get the composed image.
+        if (flooded)
+            ++g_stats.floodSwaps;
+        else
+        {
+            ++g_stats.consumerSwaps;
+            if (g_lines.ShouldLog(kLineSwap, identify::BurstNumber()))
+                LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
+            if (diag::TraceEnabled())
+                diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
+        }
 
         // The probe traces the first slot that was replaced (the image can be bound in a slot other than t0).
         UINT tracedSlot = 0;
@@ -835,7 +854,7 @@ bool Consume(const DrawView& view, DrawCall draw)
                 break;
             }
         }
-        probe::SwapTrace trace(context, probe::SwapKind::Dlss, tracedSlot, replaced[tracedSlot]);
+        probe::SwapTrace trace(context, flooded ? probe::SwapKind::Flood : probe::SwapKind::Dlss, tracedSlot, replaced[tracedSlot]);
         context->PSSetShaderResources(0, kSrvSlots, replaced);
         trace.Applied();
         draw();

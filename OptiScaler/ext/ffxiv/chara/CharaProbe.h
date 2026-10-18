@@ -6,11 +6,14 @@
 // Everything runs on the draw thread, from the dispatcher (CharaDispatch.cpp) and with the immediate context only. The menu
 // reads the counters in g_stats and Live(). While the probe is off every entry point returns after one flag check.
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <d3d11.h>
+#include <wrl/client.h>
 
 #include "ext/ffxiv/chara/CharaDraw.h"
+#include "ext/ffxiv/chara/CharaProbeRules.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 
 namespace ext::ffxiv::chara::probe
@@ -21,8 +24,9 @@ inline std::atomic<bool> g_live { false };           // the probe is switched on
 inline std::atomic<uint64_t> g_lastActivity { 0 };   // GetTickCount64() of the last draw that rendered into a table entry or was geometry
 } // namespace detail
 
-// True from the moment Update saw the key on until it saw it off. The dispatcher keeps running while this is set, so the probe
-// can release its objects after the key was switched off.
+// True from the moment Update saw PreviewProbe or PreviewDebugFlood on until it saw both off. The dispatcher keeps running while
+// this is set, so the probe can release its objects after a key was switched off. (The flood test follows copies of the preview
+// the same way the probe does, but writes none of the probe's log lines.)
 inline bool Live() { return detail::g_live.load(std::memory_order_relaxed); }
 
 // Cheap: remembers that the preview renderer is active (called for every draw that renders into a table entry and for geometry
@@ -37,10 +41,33 @@ inline void NoteActivity(uint64_t now)
 // at the start of every dispatched draw; costs one config read and one atomic load.
 void Update(uint64_t now);
 
+// One of the first eight pixel-shader resources that is a preview output (table entries 0..7) or a texture derived from one.
+struct ScanHit
+{
+    UINT slot = 0;
+    uintptr_t texture = 0;
+    int entry = -1;       // preview table entry when the texture is a preview output, else -1
+    bool derived = false; // the texture is in the derived set
+    int sourceEntry = -1; // the preview entry its image came from
+    uint32_t hops = 0;    // derived only
+    DerivedKind kind = DerivedKind::Copy;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource; // the texture (a reference, released with the result)
+};
+
+// What the per-draw scan found. `slotMask` has bit n set for every hit at pixel-shader slot n. Used by the flood test and (later)
+// by the dump of the preview images.
+struct ScanResult
+{
+    std::array<ScanHit, 8> hits {};
+    size_t count = 0;
+    uint32_t slotMask = 0;
+};
+
 // Per draw, before the draw is classified (the draws that matter here sample a copy of the preview and have no role): compares the
-// first eight pixel-shader resources with the preview outputs (table entries 0..7) and the derived set, logs new cases and grows
-// the derived set with the render target of a draw that sampled one.
-void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now);
+// first eight pixel-shader resources with the preview outputs (table entries 0..7) and the derived set. While the probe is on it
+// logs new cases and grows the derived set with the render target of a draw that sampled one; while only the flood test is on it
+// scans every draw and follows copies without writing log lines. Returns the hits (empty when both are off or nothing matched).
+ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now);
 
 // Copies and resolves on the immediate context (not made by the feature itself). Called by the dispatcher before the DLSS gate:
 // when the source is a preview output (entries 0..7) or a derived texture, the destination becomes derived.
