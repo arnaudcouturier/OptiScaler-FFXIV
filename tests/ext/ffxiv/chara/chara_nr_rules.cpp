@@ -911,6 +911,62 @@ void TestLateVariantInUse()
     CHECK(!LateVariantInUse(a.built) && LateVariantInUse(b.built));
 }
 
+
+// The one place that decides what a bring-up consumer (a UI draw) is given: a current production stream is never handed over.
+void TestResultForDecision()
+{
+    StreamShape bringUp;
+    bringUp.width = 576;
+    bringUp.height = 960;
+    StreamShape production = bringUp;
+    production.width *= 2;
+    production.height *= 2;
+    production.production = true;
+    production.guideWidth = 576;
+    production.guideHeight = 960;
+
+    const auto running = [](const StreamShape& shape)
+    {
+        StreamState st;
+        st.key = 0x1000;
+        st.built = shape;
+        st.hasBuilt = true;
+        st.everRan = true;
+        st.attempts = st.ranAttempt = 4; // the newest attempt produced the result
+        st.runs = 4;
+        st.chain = 4;
+        st.lastRun = 1000;
+        return st;
+    };
+
+    // a current bring-up stream answers with the buffer of its newest run
+    StreamState bring = running(bringUp);
+    CHECK(ResultForDecision(bring, false, 1100) == ResultBufferForRun(3));
+    // ... a late stream with the run before it
+    CHECK(ResultForDecision(bring, true, 1100) == ResultBufferForRun(2));
+    // a current PRODUCTION stream is never handed to a bring-up consumer, in either variant
+    StreamState prod = running(production);
+    CHECK(ResultKindOf(prod) == ResultKind::Production);
+    CHECK(ResultForDecision(prod, false, 1100) == -1 && ResultForDecision(prod, true, 1100) == -1);
+    // stale, too old, a clock that went back, no run yet
+    bring.NoteRenderWithoutResult();
+    CHECK(ResultForDecision(bring, false, 1100) == -1);
+    StreamState old = running(bringUp);
+    CHECK(ResultForDecision(old, false, 1000 + kLiveMs) != -1 && ResultForDecision(old, false, 1000 + kLiveMs + 1) == -1);
+    CHECK(ResultForDecision(old, false, 999) == -1);
+    StreamState none = running(bringUp);
+    none.runs = 0;
+    CHECK(ResultForDecision(none, false, 1100) == -1);
+    // the late variant needs two results of one chain
+    StreamState chained = running(bringUp);
+    chained.chain = 1;
+    CHECK(ResultForDecision(chained, true, 1100) == -1);
+    // a stream that was never built has no kind at all
+    StreamState fresh = running(bringUp);
+    fresh.hasBuilt = false;
+    CHECK(ResultForDecision(fresh, false, 1100) == -1);
+}
+
 } // namespace
 
 int main()
@@ -936,5 +992,6 @@ int main()
     TestVideoMemoryAccount();
     TestTimerRing();
     TestLateVariantInUse();
+    TestResultForDecision();
     return TEST_RESULT("chara_nr_rules");
 }

@@ -698,6 +698,16 @@ constexpr int ConsumerBuffer(bool late, uint64_t runs, uint64_t chain)
     return (runs >= 2 && chain >= 2) ? ResultBufferForRun(runs - 2) : -1;
 }
 
+// The result image a bring-up consumer (a UI draw that samples a preview image) may be given: the buffer index, or -1 for none. A production
+// stream never answers (its image is the raw NR output of the super-resolution image, twice the size, with no recomposed alpha), a result must be
+// the newest attempt's (ResultKindOf) and recent, and the late variant needs two results of one chain (ConsumerBuffer).
+inline int ResultForDecision(const StreamState& st, bool late, uint64_t now)
+{
+    if (!ServesBringUpConsumer(ResultKindOf(st)) || now < st.lastRun || now - st.lastRun > kLiveMs)
+        return -1;
+    return ConsumerBuffer(late, st.runs, st.chain);
+}
+
 // The value a consumer waits for on the done fence before it samples the result: the late variant did not wait inline, so it waits for
 // the run that wrote the image it is about to read; the default variant waited right after the run. 0: nothing to wait for.
 constexpr uint64_t ConsumerWaitValue(bool late, uint64_t doneValueOfBuffer) { return late ? doneValueOfBuffer : 0; }

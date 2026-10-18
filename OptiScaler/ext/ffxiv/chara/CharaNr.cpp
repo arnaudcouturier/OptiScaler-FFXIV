@@ -1150,12 +1150,10 @@ static ResultView ResultForImpl(uintptr_t key, uint64_t now)
     if (index == kNoStream)
         return {};
     const StreamState& st = m.table.At(index);
-    // Only the result of the newest call, only a bring-up result (a production stream holds the raw output of the super-resolution image,
-    // which only the alpha pass of that path reads), and only while it is recent: a skipped, preparing or failed render has no result.
-    if (!ServesBringUpConsumer(ResultKindOf(st)) || now < st.lastRun || now - st.lastRun > kLiveMs)
-        return {};
+    // ResultForDecision: only the result of the newest call, only a bring-up result (a production stream holds the raw output of the
+    // super-resolution image, which only the alpha pass of that path reads), and only while it is recent.
     Stream& s = m.streams[index];
-    const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
+    const int buffer = ResultForDecision(st, s.late, now);
     if (buffer < 0 || !WaitForResult(m, s, buffer))
         return {};
     ResultView view;
