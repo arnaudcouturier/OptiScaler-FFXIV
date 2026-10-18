@@ -126,7 +126,7 @@ int main()
     auto aa = Make(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 4, 4, aaData, 4);
     // an unsupported format
     const auto floatData = Pattern(2 * 2 * 8, 3);
-    auto floating = Make(DXGI_FORMAT_R16G16B16A16_FLOAT, 2, 2, floatData, 8);
+    auto floating = Make(DXGI_FORMAT_R16G16_FLOAT, 2, 2, floatData, 8);
     CHECK(native && aa && floating);
 
     // expected pictures
@@ -180,7 +180,7 @@ int main()
     CHECK(state.find("image.native: 5x3 B8G8R8A8_UNORM(87), saved as native.png and alpha-native.png\n") != std::string::npos);
     CHECK(state.find("image.aa: 4x4 R8G8B8A8_UNORM_SRGB(29), saved as aa.png and alpha-aa.png\n") != std::string::npos);
     CHECK(state.find("image.dlss: not saved, the DLSS path has no evaluated preview image\n") != std::string::npos);
-    CHECK(state.find("image.extra: not saved, format R16G16B16A16_FLOAT(10) is not supported") != std::string::npos);
+    CHECK(state.find("image.extra: not saved, format R16G16_FLOAT(34) is not supported") != std::string::npos);
 
     dump::Status status = dump::GetStatus();
     CHECK(status.dumps == 1 && status.files == 5 && status.refusals == 0 && !status.inFlight);

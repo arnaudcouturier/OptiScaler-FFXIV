@@ -142,7 +142,7 @@ bool Begin(ID3D11DeviceContext* context, const std::vector<Source>& sources, std
         if (desc.SampleDesc.Count != 1)
             img.note = "the texture is multisampled (" + std::to_string(desc.SampleDesc.Count) + " samples)";
         else if (LayoutOfFormat(img.format) == PixelLayout::Unsupported)
-            img.note = "format " + img.formatText + " is not supported (only B8G8R8A8 and R8G8B8A8 formats are converted)";
+            img.note = "format " + img.formatText + " is not supported (only B8G8R8A8, R8G8B8A8 and R16G16B16A16_FLOAT formats are converted)";
         else if (desc.Width > kMaxPngDimension || desc.Height > kMaxPngDimension)
             img.note = "the texture is larger than " + std::to_string(kMaxPngDimension) + " pixels";
         else

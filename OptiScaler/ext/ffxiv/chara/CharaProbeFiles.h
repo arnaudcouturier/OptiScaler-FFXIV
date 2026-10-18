@@ -275,7 +275,7 @@ inline DumpPlan MakePlan(const std::vector<DumpImage>& images, const std::string
         if (LayoutOfFormat(img.format) == PixelLayout::Unsupported)
         {
             lines += key + "not saved, format " + img.formatText +
-                     " is not supported (only B8G8R8A8 and R8G8B8A8 formats are converted)\n";
+                     " is not supported (only B8G8R8A8, R8G8B8A8 and R16G16B16A16_FLOAT formats are converted)\n";
             continue;
         }
         const uint64_t rgb = PngSize(img.width, img.height, 3);
