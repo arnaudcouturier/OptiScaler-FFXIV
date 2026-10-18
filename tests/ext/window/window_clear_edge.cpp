@@ -22,9 +22,9 @@ constexpr uint32_t kExOverlapped = 0x00000300u;     // WS_EX_OVERLAPPEDWINDOW (w
 int main()
 {
     // The bit values the module relies on.
-    CHECK(kStyleCaption == (kBorder | kDlgFrame));
-    CHECK(kStyleThickFrame == kThickFrame);
-    CHECK(kExStyleClientEdge == kExClientEdge && kExStyleWindowEdge == kExWindowEdge);
+    static_assert(kStyleCaption == (kBorder | kDlgFrame));
+    static_assert(kStyleThickFrame == kThickFrame);
+    static_assert(kExStyleClientEdge == kExClientEdge && kExStyleWindowEdge == kExWindowEdge);
 
     // The bug itself: the fork's leave branch wrote WS_EX_OVERLAPPEDWINDOW; the game kept its own frame-less style. The
     // exstyle 0x200 seen live (client edge only) is cleared too.

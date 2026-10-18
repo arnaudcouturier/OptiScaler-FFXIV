@@ -148,6 +148,40 @@ int main()
         CHECK(env.logs.size() == logs);
     }
 
+    // The logged sequence: the startup enter has no resize behind it, so the last resize saw the flag false. The hook flips the
+    // flag on the enter and again on the leave; only presents see it in between. The leave must still arm the fix: at the
+    // next present (and, with a resize after the leave, at that resize).
+    for (const bool resizeAfterLeave : { false, true })
+    {
+        FakeEnv env;
+        Controller c;
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.exclusive = false;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // the startup resize: flag false
+        env.exclusive = true;                           // the hook's enter, no resize after it
+        Present(c, env, Mode::On, kOff, kOff);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        env.exclusive = false; // the hook's leave
+        if (resizeAfterLeave)
+        {
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+            CHECK_CONTAINS(env.Last(), "exclusive=0 prevExclusive=1"); // the present's sample is the previous value
+            CHECK_CONTAINS(env.All(), "seen at a bridge resize");
+            CHECK(env.applied.empty());
+            Present(c, env, Mode::On, kOff, kOff);
+        }
+        else
+        {
+            Present(c, env, Mode::On, kOff, kOff); // armed at this present's end and applied in the same call
+            CHECK_CONTAINS(env.All(), "seen at a present");
+        }
+        CHECK(env.applied.size() == 1);
+        CHECK(!env.applied[0].fgActiveAtCall);
+        CHECK(env.window.clientWidth == 3840 && env.window.clientHeight == 2160);
+    }
+
     // Not armed without the true -> false change: a first resize with the flag already false, and an enter.
     {
         FakeEnv env;

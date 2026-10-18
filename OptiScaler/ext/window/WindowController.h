@@ -74,32 +74,10 @@ class Controller
         _hwnd = hwnd;
 
         const bool nested = _actionDepth > 0;
-        const bool exclusive = env.Exclusive();
-        const int prev = _haveExclusive ? (_lastExclusive ? 1 : 0) : -1;
-        const bool left = prev == 1 && !exclusive;
-        _haveExclusive = true;
-        _lastExclusive = exclusive;
-
-        // The border fix follows the pseudo fullscreen: armed by the leave, dropped by an enter.
-        if (mode == Mode::On)
-        {
-            if (exclusive)
-            {
-                _fixArmed = false;
-            }
-            else if (left)
-            {
-                _fixArmed = true;
-                _fixChecks = 0;
-                _fixWaitNoted = false;
-                env.Log("Window: border fix armed (SCExclusiveFullscreen true -> false); it runs after a complete present with "
-                        "frame generation off",
-                        false);
-            }
-        }
+        const int prev = SampleExclusive(env, mode, "bridge resize");
 
         ProbeFields f = Fill(env, mode, "resize-done", hwnd);
-        f.exclusive = exclusive;
+        f.exclusive = _lastExclusive;
         f.prevExclusive = prev;
         f.nested = nested;
         env.Log(FormatProbeLine(f), false);
@@ -125,6 +103,10 @@ class Controller
             return;
         const FgSnapshot fg = env.Fg();
         _gate.OnPresentEnd(fg);
+
+        // The flag changes inside upstream's SetFullscreenState hook, and a game does not necessarily resize its swapchain
+        // after the switch (the logged startup enter has no resize behind it), so a present boundary is a sampling point too.
+        SampleExclusive(env, mode, "present");
 
         if (mode != Mode::On)
             return;
@@ -236,6 +218,37 @@ class Controller
         env.Log(std::format("Window: module active, mode={} (one line per bridge resize and per set_fullscreen_state call)",
                             ModeName(mode)),
                 false);
+    }
+
+    // Reads SCExclusiveFullscreen and keeps the last value seen at ANY sampling point (bridge resize or present end). A true ->
+    // false change arms the border fix wherever it is first seen; an enter disarms it. Returns the previous value (-1 = none).
+    int SampleExclusive(Env& env, Mode mode, const char* where)
+    {
+        const bool exclusive = env.Exclusive();
+        const int prev = _haveExclusive ? (_lastExclusive ? 1 : 0) : -1;
+        const bool left = prev == 1 && !exclusive;
+        _haveExclusive = true;
+        _lastExclusive = exclusive;
+
+        // The border fix follows the pseudo fullscreen: armed by the leave, dropped by an enter.
+        if (mode == Mode::On)
+        {
+            if (exclusive)
+            {
+                _fixArmed = false;
+            }
+            else if (left)
+            {
+                _fixArmed = true;
+                _fixChecks = 0;
+                _fixWaitNoted = false;
+                env.Log(std::format("Window: border fix armed (SCExclusiveFullscreen true -> false, seen at a {}); it runs after "
+                                    "a complete present with frame generation off",
+                                    where),
+                        false);
+            }
+        }
+        return prev;
     }
 
     ProbeFields Fill(Env& env, Mode mode, std::string_view event, uint64_t hwnd)

@@ -350,29 +350,33 @@ int main()
     }
 
     // End to end, leave with frame generation on: held, replayed once it is off (the hook then flips the flag and restyles),
-    // the resize arms the border fix, and the fix is applied only after frame generation is confirmed off again.
+    // the flag change arms the border fix, and the fix is applied only after frame generation is confirmed off again. The
+    // pseudo fullscreen was entered at startup with no resize behind it (the logged startup enter has none), so only a
+    // present has seen the flag true. Once with the game resizing after the leave, once without.
+    for (const bool gameResizes : { true, false })
     {
         FakeEnv env;
         Controller c;
         Running(c, env);
-        env.exclusive = true; // pseudo fullscreen is in effect, and an earlier resize saw it
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+        env.exclusive = true; // the pseudo fullscreen is in effect; a present has sampled it, no resize has
+        Present(c, env, Mode::On, kActive, kActive);
         env.fg = kActive;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(false)));
         env.onReplay = [&]
         {
             // upstream's hook: SCExclusiveFullscreen true -> false, overlapped style plus WS_EX_OVERLAPPEDWINDOW; the game then
-            // writes its own frame-less style and resizes.
+            // writes its own frame-less style (and maybe resizes).
             env.exclusive = false;
             env.window.style = 0x90000000u;
             env.window.exstyle = 0x300u;
             env.window.clientWidth = 3836;
             env.window.clientHeight = 2156;
-            c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+            if (gameResizes)
+                c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
         };
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.size() == 1 && !env.replays[0].fgActiveAtCall);
-        CHECK(c.FixArmed());
+        CHECK(c.FixArmed() == gameResizes); // without a resize the next present sampling arms it
         CHECK(env.applied.empty());
         // The pause ends: frame generation comes back before the fix had a complete off present.
         Present(c, env, Mode::On, kPaused, kActive);
