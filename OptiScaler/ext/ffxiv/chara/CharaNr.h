@@ -14,7 +14,7 @@
 //
 // Entry points for the preview dispatcher (all on the thread that issues draws on the immediate context):
 //   RunBringUp    : after the finisher drew the native image; colour only, synthetic guides (a cleared depth, zero motion)
-//   RunProduction : NEXT STAGE (stub): after the super-resolution evaluate, with the real guides
+//   RunProduction : not implemented yet (stub): after the super-resolution evaluate, with the real guides
 //   ResultFor     : a UI draw that samples a preview image asks for the NR result to draw instead
 //   Maintain      : releases streams (linger) and keeps the status current; call at least every 100 ms of draw activity
 //   OnBridgeShutdown / Detach : release everything
@@ -54,13 +54,13 @@ bool Latched();
 // True while a stream or GPU object exists, also with the config off: the dispatcher keeps calling Maintain until it is released.
 bool HoldsResources();
 
-// The latch pair shared with the super-resolution path (CharaDlss.cpp uses SrLatched/LatchSr of the same object in the next stage).
+// The latch pair shared with the super-resolution path (CharaDlss.cpp is meant to use SrLatched/LatchSr of the same object).
 Latches& SharedLatches();
 
 RunOutcome RunBringUp(const RunRequest& request);
 
-// NEXT STAGE. Runs NR on the super-resolution output (between the DLSS evaluate and the alpha pass of CharaDlss.cpp RunSlot), with
-// the real depth and motion guides. Not implemented in this stage.
+// Runs NR on the super-resolution output (between the DLSS evaluate and the alpha pass of CharaDlss.cpp RunSlot), with the real depth
+// and motion guides. Not implemented yet: it returns NotImplemented.
 RunOutcome RunProduction(const RunRequest& request);
 
 // The result image a UI draw should sample instead of `key` (the preview image's texture pointer), or null when the stream has no

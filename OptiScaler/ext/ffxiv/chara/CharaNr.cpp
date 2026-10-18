@@ -361,17 +361,19 @@ void ReleaseAll(bool drain)
     else if (m.doneFence != nullptr)
         idle = GpuDone(m.completion);
     if (!idle)
-        LOG_WARN("CharaView NR: the GPU did not finish in time at release; the model instances are kept");
+    {
+        LOG_WARN("CharaView NR: the GPU did not finish in time at release; the images and model instances are kept");
+        return;
+    }
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
         if (m.table.At(static_cast<int>(i)).Used())
         {
-            ReleaseStreamObjects(m.streams[i], idle);
+            ReleaseStreamObjects(m.streams[i], true);
             m.table.Free(static_cast<int>(i));
         }
     }
-    if (idle)
-        ReleaseGlobal();
+    ReleaseGlobal();
     m.vramAddedMb.store(0, std::memory_order_relaxed);
     UpdateHolds();
 }
@@ -404,6 +406,12 @@ bool EnsureInit(ID3D11DeviceContext* context)
     }
     if (m.inited)
         return true;
+    if (::State::Instance().isRunningOnLinux)
+    {
+        // The bridge waits for D3D12 on the CPU there; a GPU wait queued on its shared queue could stall it. Not supported yet.
+        Latch("not supported when running under Wine or Proton yet");
+        return false;
+    }
 
     if (m.probedDevice != dev12)
     {
@@ -525,6 +533,7 @@ class GpuRecorder
     bool Evaluate(const ModelCall& c)
     {
         const DlssNr::PreviewBackend& b = _m.backend;
+        DlssNr::PreviewEvaluateScope serialised; // the main pass holds the same lock around its evaluate
         // The capability block is shared with the main NR pass: its interface pointers are cleared before every evaluate.
         if (b.setExtras != nullptr)
             b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
@@ -613,8 +622,6 @@ struct HandoffOps
     bool Record()
     {
         const auto start = std::chrono::steady_clock::now();
-        if (!BeginList())
-            return false;
         bool ok = false;
         {
             DlssNr::PreviewStateEnvelope envelope(m.list.Get());
@@ -647,9 +654,10 @@ RunOutcome CreateFeatureStep(int index, Stream& s)
     const DlssNr::PreviewTuning t = DlssNr::CurrentPreviewTuning();
     s.vramBefore = VramUsedBytes();
     const auto start = std::chrono::steady_clock::now();
-    if (b.setExtras != nullptr)
-        b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
     {
+        DlssNr::PreviewEvaluateScope serialised;
+        if (b.setExtras != nullptr)
+            b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
         DlssNr::PreviewStateEnvelope envelope(m.list.Get());
         s.feature = b.create(b.modelPath.c_str(), b.dataPath.c_str(), m.dev12, m.list.Get(), b.capabilityParams, s.width, s.height, t.preset,
                              t.intensity, t.style, t.structure, t.tone, t.skin, t.autoMask ? 1 : 0, 1);
@@ -726,6 +734,11 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     plan.settings = SettingsFromConfig();
     plan.tuning = TuningFromBackend();
 
+    // A free command allocator is needed before anything is queued: none free (many windows open, a slow GPU) is not an error, the
+    // native image stays for this render.
+    if (!BeginList())
+        return Fallback(RunOutcome::Skipped);
+
     ID3D11DeviceContext* ctx = req.context;
     if (plan.initGuides)
     {
@@ -738,6 +751,8 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     const HandoffOutcome out = RunHandoff(ops, m.fence, !late);
     if (!out.ok)
     {
+        if (out.failedAt == HandoffStep::Signal11 || out.failedAt == HandoffStep::Wait12)
+            m.list->Close(); // the list was reset for this run but never recorded
         char text[96];
         std::snprintf(text, sizeof(text), "a run failed at the %s step", HandoffStepName(out.failedAt));
         Latch(text);
@@ -830,8 +845,8 @@ RunOutcome RunBringUp(const RunRequest& req)
 
 RunOutcome RunProduction(const RunRequest&)
 {
-    // NEXT STAGE: runs between the super-resolution evaluate and the alpha pass (CharaDlss.cpp RunSlot), reading the SR output as the
-    // colour image and the real depth and motion guides, and writing the result image that the alpha pass reads.
+    // Not implemented yet. Planned position: between the super-resolution evaluate and the alpha pass (CharaDlss.cpp RunSlot), with the
+    // SR output as the colour image and the real depth and motion guides, writing the result image that the alpha pass reads.
     return RunOutcome::NotImplemented;
 }
 

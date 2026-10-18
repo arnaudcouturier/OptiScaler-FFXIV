@@ -3748,6 +3748,9 @@ PreviewTuning CurrentPreviewTuning()
 
 bool PreviewBackendSuspended() { return g_bridgeSuspended.load(); }
 
+PreviewEvaluateScope::PreviewEvaluateScope() : _impl(new std::unique_lock<std::recursive_mutex>(g_nrMutex)) {}
+PreviewEvaluateScope::~PreviewEvaluateScope() { delete static_cast<std::unique_lock<std::recursive_mutex>*>(_impl); }
+
 PreviewStateEnvelope::PreviewStateEnvelope(ID3D12GraphicsCommandList* commands) : _impl(new ScopedNrStateEnvelope(commands)) {}
 PreviewStateEnvelope::~PreviewStateEnvelope() { delete static_cast<ScopedNrStateEnvelope*>(_impl); }
 

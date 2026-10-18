@@ -83,6 +83,20 @@ PreviewTuning CurrentPreviewTuning();
 // True while the graphics bridge is shutting down (the main NR is suspended).
 bool PreviewBackendSuspended();
 
+// Held around create, set_extras, BeginEvaluate/evaluate/EndEvaluate of a preview model: the main pass holds the same lock around its
+// own evaluate, and the native wrapper keeps per-evaluate state that two threads must not interleave.
+class PreviewEvaluateScope
+{
+  public:
+    PreviewEvaluateScope();
+    ~PreviewEvaluateScope();
+    PreviewEvaluateScope(const PreviewEvaluateScope&) = delete;
+    PreviewEvaluateScope& operator=(const PreviewEvaluateScope&) = delete;
+
+  private:
+    void* _impl = nullptr;
+};
+
 // The state envelope every NR compute pass runs in (root-signature tracking off, restored afterwards), for a caller-owned list.
 class PreviewStateEnvelope
 {

@@ -70,7 +70,7 @@ void TestStateLog()
     CHECK(!log.ShouldLog(Availability::BridgeNotUp));  // the same reason again: none
     CHECK(log.ShouldLog(Availability::NotNvidia));     // another reason
     CHECK(log.ShouldLog(Availability::Available));     // recovery after a reason
-    CHECK(!log.ShouldLog(Availability::ConfigOff));    // switching off is the user's act
+    CHECK(!log.ShouldLog(Availability::ConfigOff));    // switching the feature off is not a fault
     // a flapping state stops logging after the limit
     StateLog flap;
     uint32_t lines = 0;
