@@ -57,6 +57,7 @@ struct Doubles
     bool followedCopies = false;
     std::thread::id detachThread;
     std::vector<SeenDraw> seen;
+    std::vector<std::string> events; // the order of the NR hold-off calls: "nr.detach", "nr.init"
 
 
     void ResetCounts()
@@ -65,6 +66,7 @@ struct Doubles
         nrMaintain = nrFrameEnd = nrDetach = 0;
         probeUpdate = probeDetach = probeOnDraw = 0;
         seen.clear();
+        events.clear();
     }
 } d;
 
@@ -136,7 +138,12 @@ bool Wanted() { return d.nrWanted; }
 bool HoldsResources() { return d.nrHolds; }
 void Maintain(uint64_t) { ++d.nrMaintain; }
 void OnFrameEnd() { ++d.nrFrameEnd; }
-void Detach() { ++d.nrDetach; }
+void Detach()
+{
+    ++d.nrDetach;
+    d.events.push_back("nr.detach");
+}
+void OnBridgeInit() { d.events.push_back("nr.init"); }
 } // namespace nr
 
 namespace probe
@@ -633,9 +640,12 @@ void TestDetachFromAnotherThread(Scene& s)
     Detach();
     CHECK(d.dlssDetach == 1 && d.nrDetach == 1 && d.probeDetach == 1);
     CHECK(!Wanted());
+    CHECK(d.events.size() == 1 && d.events[0] == "nr.detach"); // preview NR was closed by the teardown (REVIEW-NR-2 L1) ...
 
+    // ... and is opened again by the hooks that are installed next, not before
     // installed again: the gate follows the configuration again
     OnInstalled(s.context.Get(), nullptr);
+    CHECK(d.events.size() == 2 && d.events[1] == "nr.init");
     CHECK(Wanted());
     Config(false, false, false);
     CHECK(!Wanted());
@@ -654,13 +664,18 @@ void TestDetachFromAnotherThread(Scene& s)
     std::thread unhook2([] { Detach(); });
     unhook2.join();
     OnDetached();                       // the hooks are gone, nothing was released
+    d.events.clear();
     OnInstalled(s.context.Get(), nullptr); // a new device's hooks
+    CHECK(d.events.size() == 1 && d.events[0] == "nr.init"); // opened for the new hooks ...
     CHECK(Wanted());
     CHECK(d.dlssDetach == 0);
     CHECK(Draw(s.context.Get()) == 1);  // the first draw on the new device releases the old objects ...
     CHECK(d.dlssDetach == 1 && d.nrDetach == 1 && d.probeDetach == 1);
     CHECK(d.detachThread == std::this_thread::get_id());
     CHECK(Wanted());                    // ... and the gate stays open for the new hooks
+    // The teardown that was still pending closed preview NR again (nr::Detach) and the dispatcher opened it once more afterwards: the
+    // last call is the opening, so preview NR is usable on the new hooks (a hold-off left behind would keep it off until a bridge restart)
+    CHECK(d.events.size() == 3 && d.events[1] == "nr.detach" && d.events[2] == "nr.init");
     d.ResetCounts();
     d.aroundHandles = true;
     CHECK(Draw(s.context.Get()) == 1);

@@ -300,6 +300,9 @@ void DetachNow()
     dlss::Detach();
     g_pass.End();
     detail::g_detach.Completed();
+    // Hooks installed again after the teardown was requested (a new device): the hold-off that nr::Detach set belongs to the old hooks.
+    if (!detail::g_detach.Detached())
+        nr::OnBridgeInit();
 }
 } // namespace
 
@@ -456,6 +459,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 void OnInstalled(ID3D11DeviceContext* immediate, void* rawDraw)
 {
     detail::g_detach.Installed(); // a teardown still pending for the previous device stays pending (see DetachGate::Installed)
+    nr::OnBridgeInit();           // preview NR was held off by nr::Detach: the new hooks may use it again (a pending teardown holds it off once more
+                                  // and reopens it when it is done, see DetachNow)
     g_rawDraw = reinterpret_cast<RawDraw>(rawDraw);
     g_immediate = immediate;
 }

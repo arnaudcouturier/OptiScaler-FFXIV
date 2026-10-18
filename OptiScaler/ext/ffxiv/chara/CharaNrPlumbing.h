@@ -44,6 +44,15 @@ constexpr bool PlumbingActive(const PlumbingFacts& f)
 // The hooks that only the SR path needs (clear of the G-buffer, query bookkeeping, vertex shader, motion replay).
 constexpr bool SrHooksNeeded(const PlumbingFacts& f) { return SrUsable(f) || f.srSlotsHeld != 0; }
 
+// The same answer as SrHooksNeeded(facts), for the hook forwarders that run on every copy, clear, query and shader creation of the game:
+// the cheap conditions come first and the dearer ones (`srLatched`, `srGateOpen`: callables) are evaluated only when the answer still
+// depends on them. With PreviewDLSS off and no slot held (the default configuration) nothing but the configuration key and one counter is read.
+template <class LatchedFn, class GateFn>
+constexpr bool SrHooksNeededLazy(uint32_t srSlotsHeld, bool srWanted, LatchedFn&& srLatched, GateFn&& srGateOpen)
+{
+    return srSlotsHeld != 0 || (srWanted && !srLatched() && srGateOpen());
+}
+
 // The dispatcher's cheap gate in front of every draw (the debug aids keep it running as before). Both paths keep it open while they
 // still hold GPU objects after their key was switched off, so the maintenance that releases them still runs.
 constexpr bool DispatcherWanted(bool aaWanted, bool srWanted, bool nrWanted, bool nrHoldsResources, bool srHoldsObjects, bool debugAids)

@@ -196,6 +196,27 @@ void TestFallBackToAa()
     CHECK(FallBackToAa(Route::Dlss, false, false, true, equip | RoleUi));
 }
 
+// The hook forwarders' gate gives the same answer as SrHooksNeeded(facts) but reads the dear inputs only when they matter (REVIEW-NR-2 L6).
+void TestSrHooksNeededLazy()
+{
+    for (int bits = 0; bits < 16; ++bits)
+    {
+        PlumbingFacts f;
+        f.srWanted = (bits & 1) != 0;
+        f.srLatched = (bits & 2) != 0;
+        f.srGateOpen = (bits & 4) != 0;
+        f.srSlotsHeld = (bits & 8) != 0 ? 3u : 0u;
+        int latchedReads = 0, gateReads = 0;
+        const bool lazy = SrHooksNeededLazy(
+            f.srSlotsHeld, f.srWanted, [&] { ++latchedReads; return f.srLatched; }, [&] { ++gateReads; return f.srGateOpen; });
+        CHECK(lazy == SrHooksNeeded(f));
+        if (f.srSlotsHeld != 0 || !f.srWanted)
+            CHECK(latchedReads == 0 && gateReads == 0); // the default configuration (PreviewDLSS off, nothing held) reads neither
+        if (f.srLatched)
+            CHECK(gateReads == 0); // a latched path does not look at the gate
+    }
+}
+
 void TestConsumerSeen()
 {
     ConsumerSeen seen;
@@ -342,6 +363,7 @@ int main()
     TestRoute();
     TestUnavailable();
     TestFallBackToAa();
+    TestSrHooksNeededLazy();
     TestConsumerSeen();
     TestHooks();
     return TEST_RESULT("chara_nr_plumbing");

@@ -1144,6 +1144,10 @@ static void DetachImpl()
     // its Detach either.
     Module& m = M();
     std::lock_guard lock(m.mutex);
+    // The module is closed from here on, like at the bridge shutdown: a finisher that arrives before the hooks are removed (or when their
+    // removal is skipped) must not rebuild fences, allocators and D3D11 interface pointers on a device that is going away. The hold-off is
+    // cleared when the hooks are installed again (OnBridgeInit, called by the dispatcher).
+    m.holdOff = true;
     if (m.ctx4 != nullptr)
         m.ctx4->Flush();
     if (!ReleaseAll(false))

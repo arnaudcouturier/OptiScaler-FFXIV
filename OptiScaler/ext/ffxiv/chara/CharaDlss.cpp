@@ -1129,7 +1129,10 @@ bool NrCanRun() { return nr::NrUsable(PlumbingNow()); }
 
 bool SrAvailable()
 {
-    const bool on = nr::SrHooksNeeded(PlumbingNow());
+    // Runs for every copy, clear, query and vertex shader creation of the game: the cheap conditions first (see SrHooksNeededLazy).
+    const bool on = nr::SrHooksNeededLazy(
+        g_slotsHeld.load(std::memory_order_relaxed), ext::Cfg().ffxiv.chara.previewDlss.value_or_default(), [] { return SrLatched(); },
+        [] { return static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available; });
     NoteQueryHooks(on);
     return on;
 }
