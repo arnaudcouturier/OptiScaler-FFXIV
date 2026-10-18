@@ -36,6 +36,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 | FFXIV companion / nameplates | tested | [FFXIV module](#ffxiv-module) |
 | FFXIV composition swapchain hook | untested on its own | [FFXIV module](#ffxiv-module) |
 | Character preview DLSS and spatial AA (CharaView) | opt-in, off by default; untested in game | [CharaView](#character-preview-charaview) |
+| Automatic mipmap bias | opt-in, off by default; untested in game | [Automatic mipmap bias](#automatic-mipmap-bias) |
 | Recovered items F2, F3, F4 | untested | [Recovered items](#items-recovered-from-nickles-build) |
 
 ## DLSS Neural Rendering (NR)
@@ -208,6 +209,20 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 **Probe output.** While PreviewProbe is on, the button "Save preview images" (or the command `dump`) writes `native.png`, `aa.png`, `dlss.png`, `nr.png` (whichever exist; `nr.png` is the NR result converted to 8 bits), each with `alpha-<name>.png` (the alpha channel as a grayscale picture), and `state.txt` (one `key: value` per line) into a new `OptiScaler\PreviewDebug\<yyyyMMdd-HHmmss>\` folder; at most 40 files and 300 MiB per session. About twice a second the probe reads `OptiScaler\chara-probe.cmd` (one command per line: `tint|flood|aa|dlss|upscale|copies on|off`, `dump`, `state`, `reset`, `help`; at most 4 KiB), runs it, deletes it and appends the results to `OptiScaler\chara-probe.out` (capped at 256 KiB). Commands change the settings in memory only; the ini file is not touched.
 
 **Safety.** It fails open: any doubt leaves the native image. It reads the game's `.text` once, read-only, for an 18-byte code pattern that must match exactly once at the documented addresses; otherwise the feature switches itself off for the session with one log line. The DLSS pass uses the driver's real D3D11 NGX and latches off for the session if feature creation fails. Switching `PreviewDLSS` off at run time releases the preview GPU objects (images and NGX features) as soon as their last GPU work has finished.
+
+## Automatic mipmap bias
+
+**What it does.** Works out the texture sharpening (mipmap bias) that goes with the upscaling ratio, so there is no number to calculate by hand. While `MipmapBiasAuto` is on, the value is `log2(render width / display width)` of the newest upscaler the game created (the same number as the calculator in the "Mipmap Bias" card, with the output scaling multiplier taken into account), plus an optional offset. It is applied the way upstream already applies `MipmapBiasOverride` to the samplers the game creates: added to the game's own bias, only for samplers that already have a negative bias unless "MB Override All Textures" is ticked, and fixed or scaled instead if those upstream options are set. It follows the latest accepted create, so 3840x2160 (native DLAA at the login screen) gives 0, a forced Quality preset (2560x1440) gives -0.585 and Balanced (2258x1270) gives -0.766. A create that is not a game scene (a size missing or outside 20 to 16384, a display narrower than 640 pixels, a portrait display such as the character preview's) is ignored and leaves the value alone. The override stays engaged for as long as the option is on; turning it off puts your own `MipmapBiasOverride` from the ini back. Like the manual value it only reaches samplers created after a change: samplers the game made earlier keep theirs.
+
+**Status.** Opt-in, off by default; untested in game. The sampler path is the manual value's, which runs in every tested session; the automatic part (which create to follow) has only been replayed offline on the logged sessions.
+
+**Code:** `ext/upscaler/MipBias.h` (formula, source policy, log and menu texts, tested in `tests/ext/upscaler/mip_bias_*`), `ext/upscaler/MipBias.cpp` (glue), `ext/upscaler/menu/MipBiasMenu.cpp`. **Seams:** none added; the existing upscaler seam `ApplyForcedQuality` also hands every feature create to the automatic mip bias. **Config:** `[Mipmap] MipmapBiasAuto`, `[Mipmap] MipmapBiasAutoOffset` (-3 to 3, default 0), fragment `ext/ini/Mipmap.ini`. **Menu:** card "Automatic Mipmap Bias" in the Textures tab, after "Mipmap Bias".
+
+**Good to know.** A manual number worked out for another preset gives a different look: forcing Quality with Balanced's -0.766 typed by hand becomes -0.585 automatically, and an offset of -0.18 gives back -0.765. FFXIV seems to add a bias of its own to one family of samplers, which stacks with this exactly as it does with a manual value. In the menu, "Set" and "Reset" in the upstream card above are overwritten at the next quality change while this is on.
+
+**How to check.** Set `MipmapBiasAuto = true`, start the game and read `OptiScaler.log`: every accepted create logs one line, `Automatic mipmap bias: create render 3840x2160, display 3840x2160, ratio 1.000 -> bias 0.0000 ...` at the login screen and `... create render 2560x1440, display 3840x2160, ratio 1.500 -> bias -0.5850 (was 0.0000 ...)` after the quality switch, and a create that was ignored logs `ignored create ...` with the reason. With the debug log level the existing `Overriding mipmap bias X -> Y` lines after it show the sampler hook received the value.
+
+**DLSS presets L and M.** The fork forwards `[DLSS] RenderPresetForAll = 12` (L) and `13` (M) to NGX unchanged, like the working `11` (K), so to see whether the installed DLL takes them set the key, start the game and look for `Using App hint Preset L` (or `Preset M`) in `OptiScaler.log`; a line that still says K means the DLL does not accept the letter.
 
 ## Items recovered from Nickle's build
 

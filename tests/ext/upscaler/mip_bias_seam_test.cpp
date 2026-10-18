@@ -8,6 +8,7 @@
 //     before any early return, so it runs for every create: no forced preset needed, native DLAA included.
 //  2. [Mipmap] MipmapBiasAuto / MipmapBiasAutoOffset are bound, and the config load calls upscaler.PostLoad().
 //  3. The ini fragment documents both keys.
+//  4. The menu card is registered in the Textures tab right after upstream's "mipmap" card, which still exists.
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -103,6 +104,21 @@ int main(int argc, char** argv)
         CHECK(ini.find("\nMipmapBiasAutoOffset=auto\n") != std::string::npos);
     }
 
+    // ---- 4. the menu card sits after upstream's "mipmap" card, which must still exist under that id -------------------
+    {
+        const std::string card = ReadAll(root + "/OptiScaler/ext/upscaler/menu/MipBiasMenu.cpp");
+        CHECK(card.find("{ \"mipmap_auto\", \"Textures\", \"Automatic Mipmap Bias\", Draw, \"mipmap\",") !=
+              std::string::npos);
+        CHECK(card.find("ctx.state.swapchainApi != Vulkan") != std::string::npos);
+        CHECK(card.find("\"Follow the upscaling ratio\"") != std::string::npos);
+        CHECK(card.find("\"Extra offset\", &offset, -3.0f, 3.0f") != std::string::npos);
+
+        // If a sync renames or drops upstream's card, ours would silently move to the end of the tab.
+        const std::string menu = ReadAll(root + "/OptiScaler/menu/menu_common.cpp");
+        CHECK(menu.find("{ \"mipmap\", \"Textures\", \"Mipmap Bias\", nullptr, RenderApiAndTextureSettings }") !=
+              std::string::npos);
+    }
+
     if (g_failed != 0)
     {
         std::printf("%d check(s) failed\n", g_failed);
@@ -110,6 +126,6 @@ int main(int argc, char** argv)
     }
 
     std::puts("PASS: automatic mip bias wiring: one unconditional call in ApplyForcedQuality, config keys bound, "
-              "load hook, ini fragment");
+              "load hook, ini fragment, menu card anchor");
     return 0;
 }
