@@ -462,7 +462,9 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     }
     ParamSetter setter { params };
     ngx::ApplyCreate(setter, w, h, reversedZ);
-    ngx::ApplyPresetHints(setter, CurrentPresetHints());
+    // Read once: the values that are applied are the values that are logged (the configuration or the main DLSS can change in between).
+    const ngx::PresetHints hints = CurrentPresetHints();
+    ngx::ApplyPresetHints(setter, hints);
 
     NVSDK_NGX_Handle* handle = nullptr;
     const NVSDK_NGX_Result result = create(context, NVSDK_NGX_Feature_SuperSampling, params, &handle);
@@ -480,7 +482,6 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     g.handle = handle;
     g.ngxGeneration = g_ngxGeneration.load(std::memory_order_acquire);
     g_slots.Slot(index).hasFeature = true;
-    const ngx::PresetHints hints = CurrentPresetHints();
     LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; render presets "
              "DLAA {} / UltraQuality {} / Quality {} / Balanced {} / Performance {} / UltraPerformance {}; {}",
              w, h, w * ngx::kOutputScale, h * ngx::kOutputScale, static_cast<unsigned>(result), hints.value[0], hints.value[1],

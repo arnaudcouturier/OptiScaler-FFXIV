@@ -577,7 +577,7 @@ D3D12_RESOURCE_STATES ToD3D12(State s)
 class GpuRecorder
 {
   public:
-    GpuRecorder(Module& m, Stream& s, int resultBuffer, ID3D12GraphicsCommandList* list) : _m(m), _s(s), _buf(resultBuffer), _list(list) {}
+    GpuRecorder(Module& m, Stream& s, ID3D12GraphicsCommandList* list) : _m(m), _s(s), _list(list) {}
 
     void TimerStart()
     {
@@ -632,13 +632,15 @@ class GpuRecorder
     {
         switch (t)
         {
-        case Tex::Colour: return _s.colour[_s.late ? _buf : 0].r12(); // the late variant alternates the colour images with the results
+        case Tex::Colour0: return _s.colour[0].r12();
+        case Tex::Colour1: return _s.colour[1].r12(); // exists in the late variant only
         case Tex::Proxy: return _s.proxy.Get();
         case Tex::Original: return _s.original.Get();
         case Tex::Depth: return _s.depth.r12();
         case Tex::Motion: return _s.motion.r12();
         case Tex::ModelOut: return _s.modelOut.Get();
-        case Tex::Result: return _s.result[_buf].r12();
+        case Tex::Result0: return _s.result[0].r12();
+        case Tex::Result1: return _s.result[1].r12();
         case Tex::None: break;
         }
         return nullptr;
@@ -646,7 +648,6 @@ class GpuRecorder
 
     Module& _m;
     Stream& _s;
-    int _buf;
     ID3D12GraphicsCommandList* _list;
 };
 
@@ -699,7 +700,7 @@ struct HandoffOps
     // The late variant overwrites a colour image the run before last read: the D3D11 queue first waits for that run (done fence).
     bool WaitColourFree(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), v)); }
     // The extra copy of the bring-up: native image -> shareable colour image.
-    void CopyColour() { ctx->CopyResource(s.colour[s.late ? buffer : 0].t11(), native); }
+    void CopyColour() { ctx->CopyResource(s.colour[plan.colour == Tex::Colour1 ? 1 : 0].t11(), native); }
     bool Signal11(uint64_t v) { return SUCCEEDED(m.ctx4->Signal(m.readyFence11.Get(), v)); }
     bool Wait12(uint64_t v) { return SUCCEEDED(m.queue->Wait(m.readyFence12.Get(), v)); }
     // Records the list, executes it and queues the done signal. `done` is the value the signal takes (0: the list did not run).
@@ -709,7 +710,7 @@ struct HandoffOps
         bool ok = false;
         {
             DlssNr::PreviewStateEnvelope envelope(m.list.Get());
-            GpuRecorder recorder(m, s, buffer, m.list.Get());
+            GpuRecorder recorder(m, s, m.list.Get());
             ok = RecordRun(recorder, plan);
         }
         if (!ok)
@@ -815,6 +816,9 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     plan.width = s.width;
     plan.height = s.height;
     plan.initGuides = !s.guidesInit;
+    const int resultBuffer = ResultBufferForRun(st.runs);
+    plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                 // the result image this run writes
+    plan.colour = (late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
     const ResetReason reset = DecideReset(st.everRan, st.lastRun, req.now);
     plan.reset = reset != ResetReason::None;
     plan.settings = SettingsFromConfig();
@@ -832,7 +836,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
         ctx->ClearRenderTargetView(s.depth.rtv.Get(), farPlane);
     }
 
-    const int buffer = ResultBufferForRun(st.runs);
+    const int buffer = resultBuffer;
     HandoffOps ops { m, s, st, ctx, req.native, plan, buffer };
     const HandoffOutcome out = RunFrame(ops, m.ready, late, s.doneValue[buffer]);
     if (!out.ok)

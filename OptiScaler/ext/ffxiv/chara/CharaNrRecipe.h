@@ -25,15 +25,19 @@ namespace ext::ffxiv::chara::nr
 {
 enum class Tex : uint8_t
 {
-    Colour,   // shared: the native preview image copied in (read)
+    Colour0,  // shared: the native preview image copied in (read); the late variant alternates two of them
+    Colour1,
     Proxy,    // private
     Original, // private
     Depth,    // shared: a cleared depth image (bring-up) or the preview's depth (production)
     Motion,   // shared: a zeroed motion image (bring-up) or the preview's motion (production)
     ModelOut, // private: the model's answer
-    Result,   // shared: the result image the D3D11 side draws (one of two, chosen by the caller)
+    Result0,  // shared: the result images the D3D11 side draws (two, alternating; the plan names the one this run writes)
+    Result1,
     None,
 };
+
+inline constexpr size_t kTexCount = static_cast<size_t>(Tex::None) + 1;
 
 enum class State : uint8_t
 {
@@ -42,7 +46,10 @@ enum class State : uint8_t
     Srv, // NON_PIXEL_SHADER_RESOURCE
 };
 
-constexpr bool IsShared(Tex t) { return t == Tex::Colour || t == Tex::Depth || t == Tex::Motion || t == Tex::Result; }
+constexpr bool IsShared(Tex t)
+{
+    return t == Tex::Colour0 || t == Tex::Colour1 || t == Tex::Depth || t == Tex::Motion || t == Tex::Result0 || t == Tex::Result1;
+}
 constexpr State RestState(Tex t) { return IsShared(t) ? State::Common : State::Uav; }
 
 // The values of [DlssNr] that shape the result image (the same keys and meaning as the main pass).
@@ -169,7 +176,8 @@ struct FramePlan
     bool reset = false;
     Settings settings {};
     ModelTuning tuning {};
-    Tex result = Tex::Result;
+    Tex colour = Tex::Colour0; // the colour image this run reads (the late variant alternates Colour0 / Colour1)
+    Tex result = Tex::Result0; // the result image this run writes (alternates Result0 / Result1)
 };
 
 // `R` provides
@@ -181,19 +189,19 @@ struct FramePlan
 template <class R> bool RecordRun(R& r, const FramePlan& p)
 {
     r.TimerStart();
-    r.Barrier(Tex::Colour, State::Common, State::Srv);
+    r.Barrier(p.colour, State::Common, State::Srv);
 
     if (p.initGuides)
     {
         r.Barrier(Tex::Motion, State::Common, State::Uav);
-        if (!r.Pass(MakeZeroMotion(p.width, p.height), Tex::Colour, Tex::None, Tex::None, Tex::Motion, Tex::None))
+        if (!r.Pass(MakeZeroMotion(p.width, p.height), p.colour, Tex::None, Tex::None, Tex::Motion, Tex::None))
             return false;
         r.Barrier(Tex::Motion, State::Uav, State::Common);
     }
 
-    if (!r.Pass(MakeEncode(p.width, p.height, p.settings), Tex::Colour, Tex::None, Tex::None, Tex::Proxy, Tex::Original))
+    if (!r.Pass(MakeEncode(p.width, p.height, p.settings), p.colour, Tex::None, Tex::None, Tex::Proxy, Tex::Original))
         return false;
-    r.Barrier(Tex::Colour, State::Srv, State::Common);
+    r.Barrier(p.colour, State::Srv, State::Common);
     r.Barrier(Tex::Proxy, State::Uav, State::Srv);
     r.Barrier(Tex::Original, State::Uav, State::Srv);
 

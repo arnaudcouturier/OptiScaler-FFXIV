@@ -3,6 +3,7 @@
 
 #include <limits>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace ext::ffxiv::chara::nr;
@@ -12,18 +13,21 @@ namespace
 // Tracks the state of every image and records the order of the operations. Any use of an image in the wrong state is a failure.
 struct Fake
 {
-    State state[8];
+    State state[kTexCount];
     std::vector<std::string> ops;
+    std::vector<std::tuple<Tex, State, State>> barriers; // every barrier in order
+    bool touched[kTexCount] = {};                         // images any barrier or pass named
     int errors = 0;
     bool failEvaluate = false;
     DlssNrConstants constants[4];
     int passes = 0;
     ModelCall call;
     bool evaluated = false;
+    bool quiet = false; // a deliberately wrong sequence: no message
 
     Fake()
     {
-        for (int i = 0; i < 8; ++i)
+        for (size_t i = 0; i < kTexCount; ++i)
             state[i] = RestState(static_cast<Tex>(i));
     }
     State& S(Tex t) { return state[static_cast<int>(t)]; }
@@ -32,7 +36,8 @@ struct Fake
         if (t != Tex::None && S(t) != s)
         {
             ++errors;
-            std::printf("state error: %s on image %d (state %d, wanted %d)\n", what, static_cast<int>(t), static_cast<int>(S(t)),
+            if (!quiet)
+                std::printf("state error: %s on image %d (state %d, wanted %d)\n", what, static_cast<int>(t), static_cast<int>(S(t)),
                         static_cast<int>(s));
         }
     }
@@ -42,6 +47,8 @@ struct Fake
     {
         Expect(t, from, "barrier from");
         S(t) = to;
+        touched[static_cast<int>(t)] = true;
+        barriers.emplace_back(t, from, to);
         ops.push_back("barrier");
     }
     bool Pass(const DlssNrConstants& c, Tex source, Tex model, Tex original, Tex target, Tex keep)
@@ -75,12 +82,23 @@ struct Fake
     }
     bool AllAtRest() const
     {
-        for (int i = 0; i < 7; ++i)
+        for (size_t i = 0; i < static_cast<size_t>(Tex::None); ++i)
         {
             if (state[i] != RestState(static_cast<Tex>(i)))
                 return false;
         }
         return true;
+    }
+    // the barriers of one image, in order
+    std::vector<std::pair<State, State>> BarriersOf(Tex t) const
+    {
+        std::vector<std::pair<State, State>> out;
+        for (const auto& b : barriers)
+        {
+            if (std::get<0>(b) == t)
+                out.emplace_back(std::get<1>(b), std::get<2>(b));
+        }
+        return out;
     }
     int IndexOf(const std::string& op) const
     {
@@ -121,11 +139,73 @@ void TestSequence()
     const int zero = g.IndexOf("pass:11");
     CHECK(zero >= 0 && zero < g.IndexOf("pass:0")); // the motion image is zeroed before the model reads it
 
-    // the other result image
+}
+
+// Two runs of one stream, as the module issues them: the plan names the result image (and in the late variant the colour image) a run
+// uses, and the recording touches exactly those. Before, both results were the same name here, so a run that wrote the wrong image could
+// not be told from one that wrote the right one.
+void TestTwoBuffers()
+{
+    Fake f; // one set of images shared by the two runs, as in a stream
+    FramePlan a = Plan(true);
+    a.result = Tex::Result0;
+    a.colour = Tex::Colour0;
+    CHECK(RecordRun(f, a) && f.errors == 0 && f.AllAtRest());
+    CHECK(f.touched[static_cast<int>(Tex::Result0)] && !f.touched[static_cast<int>(Tex::Result1)]);
+    CHECK(f.touched[static_cast<int>(Tex::Colour0)] && !f.touched[static_cast<int>(Tex::Colour1)]);
+
+    FramePlan b = Plan(false);
+    b.result = Tex::Result1;
+    b.colour = Tex::Colour1;
+    CHECK(RecordRun(f, b) && f.errors == 0 && f.AllAtRest());
+    CHECK(f.touched[static_cast<int>(Tex::Result1)] && f.touched[static_cast<int>(Tex::Colour1)]);
+
+    // run b alone touches only its own pair, in the order the first run used for its own
+    Fake g;
+    CHECK(RecordRun(g, b) && g.errors == 0);
+    CHECK(!g.touched[static_cast<int>(Tex::Result0)] && !g.touched[static_cast<int>(Tex::Colour0)]);
     Fake h;
-    FramePlan p = Plan(false);
-    p.result = Tex::Result;
-    CHECK(RecordRun(h, p) && h.errors == 0);
+    FramePlan a2 = Plan(false);
+    CHECK(RecordRun(h, a2));
+    const auto r0 = h.BarriersOf(Tex::Result0);
+    const auto r1 = g.BarriersOf(Tex::Result1);
+    CHECK(r0 == r1 && r0.size() == 2); // Common -> Uav before the resolve, Uav -> Common after it
+    CHECK(h.BarriersOf(Tex::Colour0) == g.BarriersOf(Tex::Colour1));
+    CHECK(h.BarriersOf(Tex::Colour0).size() == 2);
+
+    // the shared images rest in COMMON, so alternating never leaves an image in a state the next run does not expect
+    CHECK(IsShared(Tex::Colour1) && IsShared(Tex::Result1) && RestState(Tex::Result1) == State::Common && RestState(Tex::Colour1) == State::Common);
+
+    // a recording that uses the plan's other result image is caught by the state tracker: its resolve writes an image it never
+    // transitioned (a run for buffer 1 that names Result0 in the pass but Result1 in the barrier would fail the same way)
+    Fake bad;
+    FramePlan mixed = Plan(false);
+    mixed.result = Tex::Result1;
+    bad.quiet = true;
+    bad.S(Tex::Result1) = State::Uav; // the other run left it in the wrong state
+    RecordRun(bad, mixed);
+    CHECK(bad.errors > 0);
+}
+
+// The state model of the Fake is the recipe's own; this is an independent oracle: the transitions the main NR pass makes for the same
+// images on its SDR path, read from DlssNr_Dx12.cpp (colorCopy = the proxy, hdrCopy = the kept original, output = the model's answer):
+//   encode writes colorCopy and hdrCopy in UNORDERED_ACCESS, then UAV -> NON_PIXEL_SHADER_RESOURCE for both (lines 2419, 2425);
+//   MakeModelWritable(output) keeps/puts the answer in UAV before the evaluate (2678), MakeModelReadable(finalAnswer) UAV -> NPSR after it
+//   (2700), and after the resolve MakeModelWritable(output) NPSR -> UAV (2962/3001); colorCopy and hdrCopy end NPSR -> UAV (3005, 3070).
+// What this cannot prove, and only a GPU run with the D3D12 debug layer can: COMMON <-> UAV / NPSR transitions of the shared images
+// (opened from a D3D11 shared handle), the model's own use of its inputs inside the evaluate, and that the encode pass does not need
+// the colour image in another state.
+void TestMatchesTheMainPass()
+{
+    Fake f;
+    CHECK(RecordRun(f, Plan(false)));
+    using P = std::pair<State, State>;
+    const std::vector<P> privateUse = { P { State::Uav, State::Srv }, P { State::Srv, State::Uav } };
+    CHECK(f.BarriersOf(Tex::Proxy) == privateUse);    // colorCopy
+    CHECK(f.BarriersOf(Tex::Original) == privateUse); // hdrCopy
+    CHECK(f.BarriersOf(Tex::ModelOut) == privateUse); // output: readable after the evaluate, writable again after the resolve
+    // the main pass starts every frame with these three in UAV and ends with them there
+    CHECK(RestState(Tex::Proxy) == State::Uav && RestState(Tex::Original) == State::Uav && RestState(Tex::ModelOut) == State::Uav);
 }
 
 void TestConstants()
@@ -203,6 +283,8 @@ void TestFailure()
 int main()
 {
     TestSequence();
+    TestTwoBuffers();
+    TestMatchesTheMainPass();
     TestConstants();
     TestModelCall();
     TestFailure();
