@@ -173,6 +173,8 @@ Provider-neutral frame-generation seams (DLSS-G, XeFG, FSR-FG) on `IFGFeature_Dx
 
 Drop list for this group (SEAMS 5): E6 KCD2 waitable-object hunks, `External` early-returns, 64-bit `sleep` widening (18 `low_latency` files untouched), `IFGFeature.cpp` log tweak, `OnFgActivated` diagnostics.
 
+Dynamic MFG on RTX 40 adds no seam. It rides on three existing ones, all in `ext/fg`: `AdjustDlssgOptions` (first statements, per frame) runs the selector tick (`ext/fg/DynamicMfgSeams.cpp`, `AutoMfgTickFrame`), which may change `numFramesToGenerate` of that frame and writes the same count with `FGDLSSGInterpolationCount.set_volatile_value` so `SetOptions` of the next frame, the menu and the frame counters agree and Save Settings keeps the slider value; the same function then applies the ForceDMFG guard (`eDynamic` becomes `eOn` when Streamline reports dynamic MFG unsupported) and the Ada ceiling (an automatic choice never uses more than 3 generated frames). `AfterDlssgSetOptions` hands the tick the `GetState` status and presented count (`AutoMfgObserve`). `OnActivated` (DLSS-G branch) calls `ResetAutoMfg()` next to `ResetDlssgPresentStats()`: a new observation window, the kill-switch memory stays. The only write to upstream state is `State::fgChanged` once, for the recovery through the existing toggle path. Status: untested in game; the self-test in `[DLSSG] AutoMFGSelfTest` is the check.
+
 ## present
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
