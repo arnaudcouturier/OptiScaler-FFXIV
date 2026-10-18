@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <utility>
 #include <vector>
@@ -449,6 +450,139 @@ void TestCoverage()
         assert(Present(core3, Mode::UiFree, p).reason == Reason::None);
     }
 }
+
+// Closes the loop the real engine has and the tests above feed by hand: the paste producer runs only on presents whose
+// PasteDecision() is Produce, its readback (coverage + sequence) reaches the next presents with a latency, a completed
+// image makes the paste ready, an Invalidate withdraws every image, and the live source goes idle for the next present
+// when this one did not ask it (LiveSource::EndFrame arms the next frame only if Take() ran).
+struct Replay
+{
+    static constexpr uint64_t kLatency = 2; // presents between Produce and its completed image / readback
+
+    FakeHost host;
+    Core core { host };
+    float coverage = 0.f;     // mask coverage of the images produced from now on
+    bool noBoundary = false;  // the game shows no UI boundary in this present (fade to a loading screen, menu, ...)
+
+    struct Image
+    {
+        uint64_t ordinal;
+        float coverage;
+        uint64_t dueAt;
+        bool valid; // not withdrawn by an Invalidate before it completed
+    };
+    std::deque<Image> inFlight;
+    PasteCounters counters;
+    uint64_t present = 0;
+    uint64_t produced = 0;
+    bool completed = false; // a completed image exists and nothing invalidated the ring since
+    bool tookLast = true;   // the source was asked in the previous present
+
+    std::vector<Run> runs;
+    std::vector<PasteAction> actions;
+    uint64_t flips = 0; // changes of the swapped state
+    bool lastSwapped = false;
+
+    Run Step()
+    {
+        ++present;
+        while (!inFlight.empty() && inFlight.front().dueAt <= present)
+        {
+            const Image image = inFlight.front();
+            inFlight.pop_front();
+            counters.produced = image.ordinal;
+            counters.coverage = image.coverage;
+            counters.coverageSequence = image.ordinal;
+            if (image.valid)
+                completed = true;
+        }
+
+        host.source.result = (noBoundary || !tookLast) ? TakeResult::NotThisFrame : TakeResult::Ok;
+        host.pasteReady = completed;
+        const int takesBefore = host.source.takes;
+        const Run r = Present(core, Mode::UiFree, counters);
+        tookLast = host.source.takes > takesBefore;
+
+        const PasteAction action = core.PasteDecision();
+        if (action == PasteAction::Produce)
+        {
+            inFlight.push_back({ ++produced, coverage, present + kLatency, true });
+        }
+        else if (action == PasteAction::Invalidate)
+        {
+            completed = false;
+            for (auto& image : inFlight)
+                image.valid = false;
+        }
+
+        flips += r.swapped != lastSwapped;
+        lastSwapped = r.swapped;
+        runs.push_back(r);
+        actions.push_back(action);
+        return r;
+    }
+
+    void Steps(int n)
+    {
+        for (int i = 0; i < n; ++i)
+            Step();
+    }
+};
+
+// Characterization of the behaviour the guard had before the silent probe: a constant coverage over the limit makes the
+// engine trip, block for exactly kRetryFrames presents, retry with a burst of presents that are swapped for a few
+// frames and trip again. Every burst is two changes of the frame generation base. This is the cause of the flash at
+// fades and the dialogue flicker in cutscenes; later changes replace this test.
+void TestReplayFlappingToday()
+{
+    Replay replay;
+    replay.coverage = 0.95f;
+    replay.Steps(1000);
+    const auto& runs = replay.runs;
+
+    // Presents 1 and 2 have no completed image (paste not ready), 3..6 are swapped (5 fresh samples over the limit
+    // arrive at presents 3..7), present 7 is the first blocked one.
+    assert(runs[0].reason == Reason::PasteNotReady && runs[1].reason == Reason::PasteNotReady);
+    for (size_t i = 2; i < 6; ++i)
+        assert(runs[i].swapped && runs[i].reason == Reason::None);
+    assert(runs[6].reason == Reason::MaskCoverage && !runs[6].staged);
+
+    // Blocked runs: exactly 120 presents each (the last one is cut off by the end of the replay)
+    std::vector<std::pair<size_t, size_t>> blocked; // first index, length
+    for (size_t i = 0; i < runs.size(); ++i)
+    {
+        if (runs[i].reason != Reason::MaskCoverage)
+            continue;
+        if (!blocked.empty() && blocked.back().first + blocked.back().second == i)
+            ++blocked.back().second;
+        else
+            blocked.push_back({ i, 1 });
+    }
+    assert(blocked.size() == 8);
+    for (size_t k = 0; k + 1 < blocked.size(); ++k)
+        assert(blocked[k].second == static_cast<size_t>(CoverageGuard::kRetryFrames));
+    assert(blocked.back().second < static_cast<size_t>(CoverageGuard::kRetryFrames));
+
+    // Between two blocked runs: one retry burst. The source was idle during the block, so the first present of the burst
+    // has no boundary; the next two have no completed image (every image was withdrawn by the block); then four
+    // swapped presents until the fifth fresh sample over the limit trips the guard again.
+    for (size_t k = 0; k + 1 < blocked.size(); ++k)
+    {
+        const size_t first = blocked[k].first + blocked[k].second;
+        assert(blocked[k + 1].first - first == 7);
+        assert(runs[first].reason == Reason::NoBoundaryThisFrame && !runs[first].staged);
+        assert(runs[first + 1].reason == Reason::PasteNotReady && runs[first + 2].reason == Reason::PasteNotReady);
+        for (size_t j = 3; j < 7; ++j)
+            assert(runs[first + j].swapped && runs[first + j].reason == Reason::None);
+    }
+
+    // The pattern repeats every kRetryFrames + 7 presents, each cycle is two changes of the base
+    assert(blocked[1].first - blocked[0].first == static_cast<size_t>(CoverageGuard::kRetryFrames) + 7);
+    assert(replay.flips >= 2 * (1000 / 127));
+    assert(replay.flips == 2 + 2 * (blocked.size() - 1));
+    const Status s = replay.core.Snapshot();
+    assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == blocked.size() - 1);
+}
 } // namespace
 
 int main()
@@ -461,6 +595,7 @@ int main()
     TestNoFrameGenerationGoesOff();
     TestSummary();
     TestCoverage();
+    TestReplayFlappingToday();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
     return 0;
 }
