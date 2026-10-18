@@ -5,6 +5,7 @@
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
 
+#include <algorithm>
 #include <set>
 
 using namespace ext::ffxiv::chara;
@@ -85,6 +86,40 @@ void TestDepthReadable()
     CHECK(!DepthReadable(44, false));
     CHECK(!DepthReadable(45, true));  // D24_UNORM_S8_UINT: no typeless view possible
     CHECK(!DepthReadable(39, true));  // R32_TYPELESS: not the 24-bit path
+}
+
+// Slot failures add up only inside the window: four close together end the path, four spread over minutes do not.
+void TestFailureWindow()
+{
+    constexpr uint32_t kLatchAt = 4; // kMaxSlotFailures of CharaDlss.cpp
+    {
+        FailureWindow w;
+        CHECK(w.Note(1000) == 1);
+        CHECK(w.Note(2000) == 2);
+        CHECK(w.Note(30000) == 3);
+        CHECK(w.Note(60000) >= kLatchAt); // all four within 60 s of the last: the path ends
+    }
+    {
+        FailureWindow w;
+        uint32_t most = 0;
+        for (uint64_t now = 1000; now < 1000 + 20 * 61000; now += 61000) // one failure a little more than a minute apart
+            most = std::max(most, w.Note(now));
+        CHECK(most == 1);
+    }
+    {
+        FailureWindow w;
+        CHECK(w.Note(1000) == 1 && w.Note(1010) == 2 && w.Note(1020) == 3);
+        CHECK(w.Note(1000 + 60001 + 20) == 1); // the first three are out of the window now
+        CHECK(w.Note(70000, 1000) == 1);       // a short custom window
+        CHECK(w.Note(65000) >= 1);             // the clock went backwards: older entries are dropped, nothing underflows
+    }
+    {
+        FailureWindow w; // a full buffer drops the oldest, the count stays bounded
+        for (uint64_t i = 0; i < 100; ++i)
+            CHECK(w.Note(1000 + i) <= FailureWindow::kCapacity);
+        w.Reset();
+        CHECK(w.Note(5000) == 1);
+    }
 }
 
 // The pass's depth texture is examined once. An unreadable format used to be looked at (and logged) in every pass.
@@ -289,6 +324,7 @@ int main()
     TestFinishRules();
     TestDepthReadable();
     TestDepthMemo();
+    TestFailureWindow();
     TestLifecycle();
     TestLatchDrain();
     TestJitterFeed();

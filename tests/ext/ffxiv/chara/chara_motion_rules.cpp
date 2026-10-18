@@ -129,6 +129,33 @@ void TestDepth()
     CHECK(!IsReversedZ(true, D3D11_COMPARISON_ALWAYS));
     CHECK(!IsReversedZ(false, D3D11_COMPARISON_GREATER)); // no state bound: not reversed
 
+    // What one bound state says about the convention, and the memo that keeps the last decisive answer
+    CHECK(ConventionOf(true, true, D3D11_COMPARISON_GREATER) == DepthConvention::Reversed);
+    CHECK(ConventionOf(true, true, D3D11_COMPARISON_GREATER_EQUAL) == DepthConvention::Reversed);
+    CHECK(ConventionOf(true, true, D3D11_COMPARISON_LESS) == DepthConvention::Normal);
+    CHECK(ConventionOf(true, true, D3D11_COMPARISON_LESS_EQUAL) == DepthConvention::Normal);
+    CHECK(ConventionOf(false, false, D3D11_COMPARISON_LESS) == DepthConvention::Normal); // no state = the default state
+    // draws that say nothing: depth test off, or a function that does not order depths
+    CHECK(ConventionOf(true, false, D3D11_COMPARISON_GREATER) == DepthConvention::Unknown);
+    CHECK(ConventionOf(true, false, D3D11_COMPARISON_LESS) == DepthConvention::Unknown);
+    for (const auto f : { D3D11_COMPARISON_ALWAYS, D3D11_COMPARISON_NEVER, D3D11_COMPARISON_EQUAL, D3D11_COMPARISON_NOT_EQUAL })
+        CHECK(ConventionOf(true, true, f) == DepthConvention::Unknown);
+    {
+        DepthConventionMemo m;
+        CHECK(!m.Known() && !m.Reversed());
+        m.Observe(ConventionOf(true, true, D3D11_COMPARISON_ALWAYS)); // a masking draw first: says nothing
+        CHECK(!m.Known() && !m.Reversed());
+        m.Observe(ConventionOf(true, true, D3D11_COMPARISON_GREATER_EQUAL));
+        CHECK(m.Known() && m.Reversed());
+        m.Observe(ConventionOf(true, false, D3D11_COMPARISON_LESS)); // a later draw with the test off does not undo it
+        m.Observe(ConventionOf(true, true, D3D11_COMPARISON_ALWAYS));
+        CHECK(m.Reversed());
+        m.Observe(ConventionOf(true, true, D3D11_COMPARISON_LESS)); // a decisive answer replaces it
+        CHECK(m.Known() && !m.Reversed());
+        m.Reset();
+        CHECK(!m.Known());
+    }
+
     D3D11_DEPTH_STENCIL_DESC src {};
     src.DepthEnable = TRUE;
     src.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;

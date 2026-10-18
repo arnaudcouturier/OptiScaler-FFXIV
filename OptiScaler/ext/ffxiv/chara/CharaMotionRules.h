@@ -135,6 +135,49 @@ inline bool IsReversedZ(bool haveState, D3D11_COMPARISON_FUNC func)
     return haveState && (func == D3D11_COMPARISON_GREATER || func == D3D11_COMPARISON_GREATER_EQUAL);
 }
 
+// What one bound depth-stencil state says about the convention. No state bound is the default state (depth test on, LESS). A state
+// with the depth test off, or a function that does not order depths (ALWAYS, NEVER, EQUAL, NOT_EQUAL), says nothing: the draw that
+// binds it (a fullscreen or masking draw) must not decide the convention.
+enum class DepthConvention : uint8_t
+{
+    Unknown,
+    Normal,
+    Reversed,
+};
+
+inline DepthConvention ConventionOf(bool haveState, bool depthEnable, D3D11_COMPARISON_FUNC func)
+{
+    if (!haveState)
+        return DepthConvention::Normal;
+    if (!depthEnable)
+        return DepthConvention::Unknown;
+    switch (func)
+    {
+    case D3D11_COMPARISON_GREATER:
+    case D3D11_COMPARISON_GREATER_EQUAL: return DepthConvention::Reversed;
+    case D3D11_COMPARISON_LESS:
+    case D3D11_COMPARISON_LESS_EQUAL: return DepthConvention::Normal;
+    default: return DepthConvention::Unknown;
+    }
+}
+
+// The convention of the scene: the last draw that said something decides, a draw that says nothing keeps the earlier answer.
+class DepthConventionMemo
+{
+  public:
+    void Observe(DepthConvention c)
+    {
+        if (c != DepthConvention::Unknown)
+            _known = c;
+    }
+    bool Reversed() const { return _known == DepthConvention::Reversed; }
+    bool Known() const { return _known != DepthConvention::Unknown; }
+    void Reset() { _known = DepthConvention::Unknown; }
+
+  private:
+    DepthConvention _known = DepthConvention::Unknown;
+};
+
 // The depth state of the replay: the game's own state with depth and stencil writes switched off, so the replay only
 // reads the already final prepass depth. With no state bound the default test is used (depth on, LESS).
 inline D3D11_DEPTH_STENCIL_DESC ReplayDepthDesc(bool haveSource, const D3D11_DEPTH_STENCIL_DESC& source)

@@ -34,8 +34,9 @@ ID3D11Texture2D* TargetTexture();
 // has already set the viewport the draw should use. Never leaves pipeline state changed.
 ReplayResult Replay(const DrawView& view, DrawCall draw);
 
-// Whether the depth state bound now compares with GREATER / GREATER_EQUAL (a reversed depth buffer).
-bool BoundDepthIsReversed(ID3D11DeviceContext* context);
+// What the depth state bound now says about the depth convention: reversed (GREATER / GREATER_EQUAL), normal (the default state,
+// LESS / LESS_EQUAL) or nothing (depth test off, ALWAYS and the like: such a draw must not decide it).
+DepthConvention BoundDepthConvention(ID3D11DeviceContext* context);
 
 // Query bookkeeping (hooks).
 void OnQueryBegin(ID3D11Asynchronous* query);

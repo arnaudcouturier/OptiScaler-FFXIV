@@ -10,7 +10,8 @@
 //   slot idle release : a slot unused for more than 2000 ms (or any slot, when DLSS is switched off) is released, but only
 //                       after the GPU query that marks its last work reports done
 //   reset flag        : the upscaler history is reset when the slot never evaluated or its last evaluation is older than 250 ms
-//   failed            : a failed evaluation or feature creation sticks until the slot is released (no retry)
+//   failed            : a failed evaluation or feature creation sticks until the slot is released (no retry); a failed slot is
+//                       released kFailedReleaseMs after it failed even while it is touched, so the preview can try again
 
 #include <array>
 #include <cstddef>
@@ -24,7 +25,12 @@ inline constexpr uint64_t kRecentMs = 250;
 inline constexpr uint64_t kLiveMs = 250;
 inline constexpr uint64_t kResetMs = 250;
 inline constexpr uint64_t kIdleReleaseMs = 2000;
+inline constexpr uint64_t kFailedReleaseMs = 10000; // a failed slot is released this long after it failed, whatever touches it
 inline constexpr int kNoSlot = -1;
+
+// What an event query's GetData answer means: only S_FALSE (1) is "the GPU has not got there yet". S_OK means done, and a failure
+// (a lost or removed device never reports S_OK) means no more work will come out of it, so the slot may go.
+constexpr bool QueryResultMeansDone(int32_t hresult) { return hresult != 1; }
 
 struct RecentEntry
 {
@@ -44,6 +50,7 @@ struct SlotState
     uint32_t evaluatePass = 0;
     bool everEvaluated = false; // the "evaluated OK" flag
     bool failed = false;
+    uint64_t failedAt = 0;      // when it failed (0 = not known: never released by the failed-slot rule)
     bool hasFeature = false;    // an upscaler feature exists (counted as active)
     bool queryPending = false;  // GPU work was submitted; release waits for the query to report done
 
@@ -156,7 +163,25 @@ class SlotTable
         s.queryPending = true;
     }
 
-    void MarkFailed(int index) { Slot(index).failed = true; }
+    void MarkFailed(int index, uint64_t now = 0)
+    {
+        SlotState& s = Slot(index);
+        s.failed = true;
+        s.failedAt = now;
+    }
+
+    // A slot's GPU objects may be released only once the work submitted for it finished (the event query ended after its last
+    // evaluate reports done). Clears the pending flag when it did. Serves the idle release and the rebuild of a resized preview.
+    template <class QueryDone> bool ReadyForRelease(int index, QueryDone&& queryDone)
+    {
+        SlotState& s = Slot(index);
+        if (!s.queryPending)
+            return true;
+        if (!queryDone(index))
+            return false;
+        s.queryPending = false;
+        return true;
+    }
     void ClearEvaluated(int index) { Slot(index).everEvaluated = false; }
 
     // Some slot is not failed and was used within 250 ms.
@@ -204,9 +229,10 @@ class SlotTable
             if (!s.Used())
                 continue;
             const bool idle = now >= s.lastUse && now - s.lastUse > kIdleReleaseMs;
-            if (!idle && !disabled)
+            const bool failedLong = s.failed && s.failedAt != 0 && now >= s.failedAt && now - s.failedAt > kFailedReleaseMs;
+            if (!idle && !disabled && !failedLong)
                 continue;
-            if (s.queryPending && !queryDone(static_cast<int>(i)))
+            if (!ReadyForRelease(static_cast<int>(i), queryDone))
                 continue;
             release(static_cast<int>(i));
             s = SlotState {};

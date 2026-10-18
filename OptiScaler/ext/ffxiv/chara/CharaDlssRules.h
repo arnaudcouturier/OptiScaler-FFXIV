@@ -149,6 +149,43 @@ constexpr bool DepthReadable(uint32_t dxgiFormat, bool shaderResourceBind)
 // R24_UNORM_X8_TYPELESS, a float buffer would come with a reversed-Z convention nobody has seen in this renderer, and a wrong
 // guess produces wrong guides silently, where an unknown format keeps the preview native.
 
+// Failed slots end the DLSS path for the session only when they come close together: the count decays, so a transient failure
+// (one allocation that failed while a window was opened, one driver hiccup) is forgotten after the window and four of them spread over
+// an evening do not switch the feature off.
+inline constexpr uint64_t kFailureWindowMs = 60000;
+
+class FailureWindow
+{
+  public:
+    static constexpr size_t kCapacity = 8;
+
+    // Records a failure at `now` and returns how many failures happened within the last `windowMs`, this one included.
+    uint32_t Note(uint64_t now, uint64_t windowMs = kFailureWindowMs)
+    {
+        size_t keep = 0;
+        for (size_t i = 0; i < _count; ++i)
+        {
+            if (now >= _times[i] && now - _times[i] <= windowMs)
+                _times[keep++] = _times[i];
+        }
+        _count = keep;
+        if (_count == kCapacity) // the oldest makes room
+        {
+            for (size_t i = 1; i < _count; ++i)
+                _times[i - 1] = _times[i];
+            --_count;
+        }
+        _times[_count++] = now;
+        return static_cast<uint32_t>(_count);
+    }
+
+    void Reset() { _count = 0; }
+
+  private:
+    uint64_t _times[kCapacity] {};
+    size_t _count = 0;
+};
+
 // What was learnt about the pass's depth texture, so that an unreadable one is looked at (and logged) once instead of once per pass.
 // The creation of the shader resource view may fail for a readable format; it is tried a few times and then given up on.
 class DepthMemo

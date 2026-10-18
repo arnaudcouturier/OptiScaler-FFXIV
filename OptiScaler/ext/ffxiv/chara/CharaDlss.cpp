@@ -117,7 +117,7 @@ std::atomic<uint32_t> g_activeSlots { 0 };
 std::atomic<uint64_t> g_evaluations { 0 };
 std::atomic<uint64_t> g_fallbacks { 0 };
 std::atomic<uint64_t> g_copyChains { 0 };
-std::atomic<uint32_t> g_slotFailures { 0 };
+FailureWindow g_failures; // draw thread only
 
 // ---- Draw-thread state --------------------------------------------------------------------------------------------------
 DeviceCache g_deviceCache;
@@ -168,6 +168,7 @@ ComPtr<ID3D11Texture2D> g_depthTexture;
 ComPtr<ID3D11ShaderResourceView> g_depthSrv;
 DepthMemo g_depthMemo; // what was learnt about g_depthTexture (an unreadable one is looked at and logged once)
 bool g_reversedZ = false;
+motion::DepthConventionMemo g_depthConvention; // what the depth states of the G-buffer draws said so far
 bool g_loggedNoPrepass = false;
 BurstLimiter g_lines; // log lines of the path: once per reason per burst of preview activity (reasons: FinishVerdict values, then kLine*)
 constexpr size_t kLineSlotAcquired = 10;
@@ -490,7 +491,8 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
 
 void FailSlot(int index, const char* why)
 {
-    g_slots.MarkFailed(index);
+    const uint64_t now = GetTickCount64();
+    g_slots.MarkFailed(index, now); // released again after kFailedReleaseMs, so the preview can try again
     CountFallback();
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     if (!g.failureLogged)
@@ -498,8 +500,18 @@ void FailSlot(int index, const char* why)
         g.failureLogged = true;
         LOG_WARN("CharaView DLSS: {}; native preview retained", why);
     }
-    if (g_slotFailures.fetch_add(1) + 1 >= kMaxSlotFailures)
+    // Failures count inside a sliding window: transient ones decay, four close together end the path for the session.
+    if (g_failures.Note(now) >= kMaxSlotFailures)
         Latch("several previews failed");
+}
+
+// True when the work submitted for slot `i` finished: no query to wait for, S_OK, or a failed query (a lost device never reports S_OK).
+bool SlotQueryDone(int i)
+{
+    const SlotGpu& g = g_gpu[static_cast<size_t>(i)];
+    if (g.query == nullptr || g_context == nullptr)
+        return true;
+    return QueryResultMeansDone(static_cast<int32_t>(g_context->GetData(g.query.Get(), nullptr, 0, 0)));
 }
 
 // ---- Pass bookkeeping ----------------------------------------------------------------------------------------------------
@@ -575,7 +587,10 @@ void CaptureGuideInputs(const DrawView& view)
     if (camera::Capture(context) == camera::Result::Captured)
         g_pass.cameraCaptured = true;
 
-    g_reversedZ = motion::BoundDepthIsReversed(context);
+    // The last draw that has a say decides; a draw that says nothing (depth test off, ALWAYS) keeps the earlier answer. The convention
+    // is a property of the renderer, so it is not overwritten by a masking draw (a flip would rebuild the slot).
+    g_depthConvention.Observe(motion::BoundDepthConvention(context));
+    g_reversedZ = g_depthConvention.Reversed();
 
     ID3D11Texture2D* depth = view.dsvTexture;
     if (depth == nullptr)
@@ -871,6 +886,14 @@ void Finish(const DrawView& view)
         return;
     }
     case FinishVerdict::Rebuild:
+        // The previous evaluate may still be running: its NGX feature is freed only after the slot's query reports done. Until then this
+        // render keeps the native image and the next one asks again.
+        if (!g_slots.ReadyForRelease(index, SlotQueryDone))
+        {
+            g_slots.ClearEvaluated(index);
+            CountFallback();
+            return;
+        }
         ReleaseSlotGpu(index);
         g_slots.ClearEvaluated(index);
         g_slots.Slot(index).width = g_pass.width;
@@ -1058,12 +1081,7 @@ void Cleanup(uint64_t now, bool disabled)
         }
     }
     g_slots.Cleanup(
-        now, disabled,
-        [](int i) {
-            const SlotGpu& g = g_gpu[static_cast<size_t>(i)];
-            return g.query == nullptr || g_context->GetData(g.query.Get(), nullptr, 0, 0) == S_OK;
-        },
-        [](int i) { ReleaseSlotGpu(i); });
+        now, disabled, [](int i) { return SlotQueryDone(i); }, [](int i) { ReleaseSlotGpu(i); });
     UpdateCounts();
 }
 } // namespace
@@ -1282,6 +1300,8 @@ void Detach()
     g_depthSrv.Reset();
     g_depthTexture.Reset();
     g_depthMemo.Reset();
+    g_depthConvention.Reset();
+    g_reversedZ = false;
     g_pass = PassData {};
     g_context = nullptr;
     g_device.Reset();

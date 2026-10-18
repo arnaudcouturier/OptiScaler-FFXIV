@@ -161,16 +161,16 @@ void ClearTarget(ID3D11DeviceContext* context)
 ID3D11ShaderResourceView* TargetSrv() { return g_target.srv.Get(); }
 ID3D11Texture2D* TargetTexture() { return g_target.texture.Get(); }
 
-bool BoundDepthIsReversed(ID3D11DeviceContext* context)
+DepthConvention BoundDepthConvention(ID3D11DeviceContext* context)
 {
     ComPtr<ID3D11DepthStencilState> state;
     UINT ref = 0;
     context->OMGetDepthStencilState(&state, &ref);
     if (state == nullptr)
-        return false;
+        return ConventionOf(false, false, D3D11_COMPARISON_LESS);
     D3D11_DEPTH_STENCIL_DESC desc {};
     state->GetDesc(&desc);
-    return IsReversedZ(true, desc.DepthFunc);
+    return ConventionOf(true, desc.DepthEnable != FALSE, desc.DepthFunc);
 }
 
 ReplayResult Replay(const DrawView& view, DrawCall draw)
