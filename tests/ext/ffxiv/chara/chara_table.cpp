@@ -3,6 +3,10 @@
 #include "ext/ffxiv/chara/CharaTable.h"
 
 #include <cstring>
+#include <initializer_list>
+#include <new>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace ext::ffxiv;
@@ -193,6 +197,181 @@ void TestPeSection()
     CHECK(!FindSection(image.data(), 0x90, ".text", s)); // section table beyond the copy
     auto empty = FakeImage(".text", 0x1000, 0);
     CHECK(!FindSection(empty.data(), empty.size(), ".text", s)); // zero-sized .text is no .text
+}
+
+// ---- The verification of the accessor on a synthetic executable (the success path and every refusal) ----
+
+constexpr uintptr_t kImageBase = 0x140000000ull;
+constexpr uint32_t kTextRva = 0x1000;
+constexpr uint32_t kTextSize = 0x3000;
+
+struct Hit
+{
+    uint32_t rva;        // where the accessor code is
+    uint32_t managerRva; // the global it loads
+};
+
+// Headers (a first section named `firstName` at 0x1000), the filler code and the accessor patterns at the given places.
+std::vector<uint8_t> MakeImage(std::initializer_list<Hit> hits, const char* firstName = ".text")
+{
+    std::vector<uint8_t> image(0x6000, 0);
+    const auto headers = FakeImage(firstName, kTextRva, kTextSize, 1);
+    std::memcpy(image.data(), headers.data(), headers.size());
+    const auto text = Text(kTextSize);
+    std::memcpy(image.data() + kTextRva, text.data(), text.size());
+    for (const Hit& h : hits)
+    {
+        const int32_t disp = static_cast<int32_t>(static_cast<int64_t>(h.managerRva) - (static_cast<int64_t>(h.rva) + 7));
+        Put(image, h.rva, AccessorBytes(disp));
+    }
+    return image;
+}
+
+// A reader of the image; `failAbove` makes reads that end above that address fail, `failExact` makes the 4-byte read at one address fail.
+struct ImageReader
+{
+    const std::vector<uint8_t>& image;
+    uintptr_t failAbove = ~uintptr_t(0);
+    uintptr_t failExact = 0;
+    bool everything = true;
+
+    bool operator()(uintptr_t address, void* out, size_t bytes) const
+    {
+        if (!everything || address < kImageBase || address - kImageBase + bytes > image.size())
+            return false;
+        if (address - kImageBase + bytes > failAbove - kImageBase)
+            return false;
+        if (failExact != 0 && address == failExact && bytes == 4)
+            return false;
+        std::memcpy(out, image.data() + (address - kImageBase), bytes);
+        return true;
+    }
+};
+
+CharaViewBuild BuildAt(uint32_t accessorRva, uint32_t managerRva)
+{
+    CharaViewBuild cv;
+    cv.accessorRva = accessorRva;
+    cv.managerPointerRva = managerRva;
+    cv.maxTextBytes = 0x10000;
+    return cv;
+}
+
+bool Contains(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
+
+void TestResolveFromImage()
+{
+    constexpr uint32_t accessor = kTextRva + 0x850;
+    constexpr uint32_t manager = 0x5000;
+    const CharaViewBuild cv = BuildAt(accessor, manager);
+
+    // one hit, matching the documented values: Ready
+    auto image = MakeImage({ { accessor, manager } });
+    Resolution r = ResolveFromImage(ImageReader { image }, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Ready && r.reason.empty());
+    CHECK(r.accessorRva == accessor && r.managerPointerRva == manager);
+    CHECK(r.managerPointerAddress == kImageBase + manager && r.textBytes == kTextSize);
+
+    // a hit that straddles a scan window (the window is 0x400 bytes): found once
+    for (const uint32_t offset : { 0x3f0u, 0x3fbu, 0x400u, 0x7ffu })
+    {
+        const uint32_t rva = kTextRva + offset;
+        image = MakeImage({ { rva, manager } });
+        r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(rva, manager), 0x400);
+        CHECK(r.state == AccessorState::Ready && r.accessorRva == rva);
+    }
+    // the very end of the section
+    {
+        const uint32_t rva = kTextRva + kTextSize - static_cast<uint32_t>(kBuild.pattern.size());
+        image = MakeImage({ { rva, manager } });
+        r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(rva, manager), 0x400);
+        CHECK(r.state == AccessorState::Ready && r.accessorRva == rva);
+    }
+
+    // no hit, two hits: exactly one is needed
+    image = MakeImage({});
+    r = ResolveFromImage(ImageReader { image }, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "found 0 times"));
+    image = MakeImage({ { accessor, manager }, { kTextRva + 0x1850, manager } });
+    r = ResolveFromImage(ImageReader { image }, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "found 2 times"));
+
+    // a hit that disagrees with the documented values of the matched build: either of the two
+    image = MakeImage({ { accessor, manager } });
+    r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(accessor + 1, manager), 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "documents"));
+    r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(accessor, manager + 8), 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "documents"));
+    CHECK(r.managerPointerAddress == 0); // nothing usable is handed out
+
+    // the load points below the image
+    image = MakeImage({ { accessor, 0 } });
+    {
+        const int32_t disp = -0x100000;
+        Put(image, accessor, AccessorBytes(disp));
+        r = ResolveFromImage(ImageReader { image }, kImageBase, cv, 0x400);
+        CHECK(r.state == AccessorState::Inert && Contains(r.reason, "outside"));
+    }
+
+    // headers: unreadable, no .text section, .text above the scan limit
+    image = MakeImage({ { accessor, manager } });
+    ImageReader nothing { image };
+    nothing.everything = false;
+    r = ResolveFromImage(nothing, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "headers"));
+    r = ResolveFromImage(ImageReader { image }, 0, cv, 0x400); // no module
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "headers"));
+    auto noText = MakeImage({ { accessor, manager } }, ".rdata");
+    r = ResolveFromImage(ImageReader { noText }, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "no readable .text"));
+    CharaViewBuild limited = cv;
+    limited.maxTextBytes = kTextSize - 1;
+    r = ResolveFromImage(ImageReader { image }, kImageBase, limited, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "larger than the scan limit"));
+    limited.maxTextBytes = kTextSize; // the limit itself is allowed
+    r = ResolveFromImage(ImageReader { image }, kImageBase, limited, 0x400);
+    CHECK(r.state == AccessorState::Ready);
+
+    // a part of the code that cannot be read
+    ImageReader partial { image };
+    partial.failAbove = kImageBase + kTextRva + 0x1000;
+    r = ResolveFromImage(partial, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "could not be read for the accessor scan"));
+
+    // the displacement read after the scan fails
+    ImageReader noDisp { image };
+    noDisp.failExact = kImageBase + accessor + 3;
+    r = ResolveFromImage(noDisp, kImageBase, cv, 0x400);
+    CHECK(r.state == AccessorState::Inert && Contains(r.reason, "displacement"));
+}
+
+// An exception during the verification becomes Inert (it used to leave the once-flag unset, so every draw threw again).
+void TestResolveSafely()
+{
+    bool threw = true;
+    const Resolution ok = ResolveSafely(
+        []
+        {
+            Resolution r;
+            r.state = AccessorState::Ready;
+            r.accessorRva = 5;
+            return r;
+        },
+        &threw);
+    CHECK(!threw && ok.state == AccessorState::Ready && ok.accessorRva == 5);
+
+    const Resolution bad = ResolveSafely([]() -> Resolution { throw std::bad_alloc(); }, &threw);
+    CHECK(threw && bad.state == AccessorState::Inert && !bad.reason.empty());
+    CHECK(ResolveSafely([]() -> Resolution { throw 1; }).state == AccessorState::Inert); // any exception, no out parameter
+
+    // the real chain: a reader that throws
+    const auto image = MakeImage({});
+    const Resolution fromReader = ResolveSafely(
+        [&]
+        { return ResolveFromImage([](uintptr_t, void*, size_t) -> bool { throw std::runtime_error("read"); }, kImageBase, kBuild, 0x400); },
+        &threw);
+    CHECK(threw && fromReader.state == AccessorState::Inert);
+    (void)image;
 }
 
 // A fake manager and entry objects in a map "address -> bytes"
@@ -396,6 +575,8 @@ int main()
     TestChunkedScan();
     TestRipDecoding();
     TestPeSection();
+    TestResolveFromImage();
+    TestResolveSafely();
     TestEntryOffsets();
     TestManagerParse();
     TestEntryRules();

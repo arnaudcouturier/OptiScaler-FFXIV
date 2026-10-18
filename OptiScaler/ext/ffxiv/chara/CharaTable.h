@@ -10,8 +10,11 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <windows.h>
+
+#include "ext/ffxiv/GameBuild.h"
 
 namespace ext::ffxiv::chara::table
 {
@@ -331,8 +334,95 @@ struct Resolution
     uintptr_t managerPointerAddress = 0; // address of the global that holds the manager
     uint32_t accessorRva = 0;
     uint32_t managerPointerRva = 0;
+    uint32_t textBytes = 0; // size of the scanned .text section (Ready)
     std::string reason; // why Inert
 };
+
+// The whole verification of the accessor against an image of the executable: the headers, the .text section, exactly one hit of the
+// code pattern, the displacement of the load and the cross-check with the RVAs documented for the matched build. Every read goes
+// through `read(address, out, bytes)` (false = unreadable), so the success path and each refusal are tested on a synthetic image. It
+// does not log: the caller writes the one line. `chunk` is the scan window.
+template <class ReadFn>
+Resolution ResolveFromImage(ReadFn&& read, uintptr_t base, const ext::ffxiv::CharaViewBuild& cv, size_t chunk = 1u << 20)
+{
+    Resolution r;
+    r.state = AccessorState::Inert;
+    auto inert = [&r](std::string reason)
+    {
+        r.reason = std::move(reason);
+        return r;
+    };
+
+    std::vector<uint8_t> headers(0x1000);
+    if (base == 0 || !read(base, headers.data(), headers.size()))
+        return inert("the executable headers could not be read");
+
+    Section text;
+    if (!FindSection(headers.data(), headers.size(), ".text", text))
+        return inert("the executable has no readable .text section");
+    if (text.size > cv.maxTextBytes)
+        return inert("the .text section is larger than the scan limit");
+
+    std::vector<uint8_t> scratch(chunk + cv.pattern.size());
+    bool unreadable = false;
+    const ScanResult scan = ScanRegion([&](size_t offset, void* out, size_t bytes) { return read(base + text.rva + offset, out, bytes); },
+                                       text.size, cv.pattern.data(), cv.patternMask.data(), cv.pattern.size(), chunk, scratch.data(),
+                                       unreadable);
+    if (unreadable)
+        return inert("the executable code could not be read for the accessor scan");
+    if (scan.hits != 1)
+        return inert("the preview accessor pattern was found " + std::to_string(scan.hits) + " times in the executable (exactly one is needed)");
+
+    const uint32_t matchRva = text.rva + static_cast<uint32_t>(scan.firstOffset);
+    int32_t disp = 0;
+    if (!read(base + matchRva + 3, &disp, sizeof(disp)))
+        return inert("the accessor displacement could not be read");
+
+    const int64_t globalRva = RipTargetRva(matchRva, cv.ripInstructionLength, disp);
+    if (globalRva <= 0 || globalRva >= static_cast<int64_t>(UINT32_MAX))
+        return inert("the accessor points outside the executable image");
+
+    // A matched build with a different hit means the documentation or the scan is wrong: stay off rather than guess.
+    if (matchRva != cv.accessorRva || static_cast<uint32_t>(globalRva) != cv.managerPointerRva)
+        return inert("the accessor is at RVA " + std::to_string(matchRva) + " and the manager pointer at RVA " + std::to_string(globalRva) +
+                     ", the matched build documents " + std::to_string(cv.accessorRva) + " and " + std::to_string(cv.managerPointerRva));
+
+    r.state = AccessorState::Ready;
+    r.reason.clear();
+    r.accessorRva = matchRva;
+    r.managerPointerRva = static_cast<uint32_t>(globalRva);
+    r.managerPointerAddress = base + static_cast<uintptr_t>(globalRva);
+    r.textBytes = text.size;
+    return r;
+}
+
+// Runs a resolution. An exception (a failed allocation while a reason is built or the scan buffers are grown) turns into an Inert
+// result with a fixed text and sets `*threw`, instead of leaving a std::call_once unset so that every draw throws again. Nothing
+// that can throw is done on the failure path beyond one guarded string assignment.
+template <class Fn> Resolution ResolveSafely(Fn&& doResolve, bool* threw = nullptr)
+{
+    if (threw != nullptr)
+        *threw = false;
+    try
+    {
+        return doResolve();
+    }
+    catch (...)
+    {
+        if (threw != nullptr)
+            *threw = true;
+        Resolution r;
+        r.state = AccessorState::Inert;
+        try
+        {
+            r.reason = "an error occurred while the accessor was verified";
+        }
+        catch (...)
+        {
+        }
+        return r;
+    }
+}
 
 // Verifies the build and the accessor once (a PE check, a read-only scan of the executable's .text, a cross-check with the
 // documented RVAs) and returns the result. Safe to call from any thread. The first call logs one line.
