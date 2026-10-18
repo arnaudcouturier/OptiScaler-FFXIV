@@ -112,6 +112,7 @@ struct Module
     StateLog stateLog;
     CostAccumulator gpuCost, cpuCost;
     Availability availability = Availability::ConfigOff;
+    std::atomic<uint8_t> availabilitySnapshot { static_cast<uint8_t>(Availability::Available) }; // readable without the mutex
     uint64_t lastMaintain = 0;
     bool wasLate = false;
 
@@ -155,6 +156,7 @@ Availability Refresh()
     Module& m = M();
     const Availability a = Evaluate(Facts());
     m.availability = a;
+    m.availabilitySnapshot.store(static_cast<uint8_t>(a), std::memory_order_relaxed);
     if (m.stateLog.ShouldLog(a))
     {
         if (a == Availability::Available)
@@ -786,6 +788,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
 
 bool Wanted() { return ext::Cfg().ffxiv.chara.previewNr.value_or_default(); }
 bool Latched() { return M().latches.NrLatched(); }
+bool Available() { return static_cast<Availability>(M().availabilitySnapshot.load(std::memory_order_relaxed)) == Availability::Available; }
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
 
@@ -900,13 +903,13 @@ void Maintain(uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
-    if (!m.inited && m.table.UsedCount() == 0)
-        return;
     if (now >= m.lastMaintain && now - m.lastMaintain < 100)
         return;
     m.lastMaintain = now;
 
-    const Availability a = Refresh();
+    const Availability a = Refresh(); // also with nothing created: the dispatcher reads the cached result (Available())
+    if (!m.inited && m.table.UsedCount() == 0)
+        return;
     const bool disabled = a != Availability::Available;
     const uint64_t linger = LingerMs(ext::Cfg().ffxiv.chara.previewNrLingerSeconds.value_or_default());
     for (size_t i = 0; i < kMaxStreams; ++i)

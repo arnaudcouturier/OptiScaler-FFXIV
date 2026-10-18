@@ -51,6 +51,8 @@ enum class RunOutcome : uint8_t
 bool Wanted();
 // The NR latch (independent of the super-resolution latch).
 bool Latched();
+// The last availability check passed (kept current by Maintain; true before the first check so the first render can try).
+bool Available();
 // True while a stream or GPU object exists, also with the config off: the dispatcher keeps calling Maintain until it is released.
 bool HoldsResources();
 

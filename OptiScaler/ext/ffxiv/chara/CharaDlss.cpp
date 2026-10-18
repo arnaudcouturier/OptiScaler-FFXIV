@@ -155,6 +155,8 @@ struct PassData
 };
 
 SlotTable g_slots;
+nr::ConsumerSeen g_consumed; // preview images a UI draw sampled lately: the liveness signal that gates NR bring-up
+constexpr uint64_t kNrLiveWindowMs = 1000;
 std::array<SlotGpu, kMaxSlots> g_gpu;
 PassData g_pass;
 int g_lastEvaluatedSlot = kNoSlot; // the slot of the most recent successful evaluation (the preview image dump reads its composed image)
@@ -204,6 +206,7 @@ nr::PlumbingFacts PlumbingNow()
     f.nrWanted = nr::Wanted();
     f.srLatched = SrLatched();
     f.nrLatched = nr::Latched();
+    f.nrAvailable = nr::Available();
     f.srGateOpen = static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available;
     f.nrHoldsResources = nr::HoldsResources();
     f.srSlotsHeld = g_slotsHeld.load(std::memory_order_relaxed);
@@ -894,6 +897,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         ComPtr<ID3D11Resource> resource;
         original[i]->GetResource(&resource);
         const uintptr_t key = reinterpret_cast<uintptr_t>(resource.Get());
+        if (nrOn && IsPreviewOutput(view, key))
+            g_consumed.Record(key, view.now);
         int index = sr ? g_slots.Find(key) : kNoSlot;
         if (sr && index == kNoSlot && g_slots.RecentContains(key, view.now))
         {
@@ -1151,7 +1156,10 @@ bool Around(const DrawView& view, DrawCall draw)
         draw(); // the native image first
         // Preview NR: bring-up entry. It needs only the native image, not the SR guides, so it does not wait for them and does not
         // care whether the SR path is latched or failed.
-        if (nr::RunBringUpNow(facts, view.finisherAccepted))
+        // A live window only: a UI draw must have sampled this preview image lately (the first render after opening is native).
+        const bool live = view.rtvTexture != nullptr &&
+                          g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
+        if (nr::RunBringUpNow(facts, view.finisherAccepted, live))
             RunNrBringUp(view);
         if (!sr)
             return true;

@@ -124,6 +124,42 @@ void TestDispatcherAndMaintenance()
     CHECK(p.nr && !p.sr);
 }
 
+void TestUnavailable()
+{
+    // NR wanted but the module cannot run (bridge not up, no NVIDIA card, files missing): it does not claim the draws, so the AA
+    // that works without NR keeps working, and the plumbing is not kept alive for it
+    PlumbingFacts f = Facts(false, true);
+    f.nrAvailable = false;
+    CHECK(!NrUsable(f) && !PlumbingActive(f));
+    const DrawApi api = DrawApi::DrawIndexed;
+    CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, true) == Route::Enhance);
+    // with SR usable the plumbing stays alive for SR
+    f = Facts(true, true);
+    f.nrAvailable = false;
+    CHECK(SrUsable(f) && !NrUsable(f) && PlumbingActive(f));
+}
+
+void TestConsumerSeen()
+{
+    ConsumerSeen seen;
+    CHECK(!seen.Recent(0x10, 1000, 1000));
+    seen.Record(0x10, 1000);
+    CHECK(seen.Recent(0x10, 1000, 1000) && seen.Recent(0x10, 2000, 1000)); // inside the window (inclusive)
+    CHECK(!seen.Recent(0x10, 2001, 1000));                                  // too old
+    CHECK(!seen.Recent(0x20, 1000, 1000));                                  // another image
+    CHECK(!seen.Recent(0x10, 900, 1000));                                   // the clock went back: not recent
+    seen.Record(0x10, 2500);                                                // refreshed
+    CHECK(seen.Recent(0x10, 3400, 1000));
+    seen.Record(0, 3000);                                                   // key 0 is never recorded
+    CHECK(!seen.Recent(0, 3000, 1000));
+    // more images than entries: the one seen longest ago is replaced, recent ones survive
+    for (uintptr_t k = 1; k <= ConsumerSeen::kCapacity; ++k)
+        seen.Record(0x100 + k, 10000 + k);
+    seen.Record(0x999, 20000); // replaces 0x101 (oldest)
+    CHECK(seen.Recent(0x999, 20000, 1000) && !seen.Recent(0x101, 10001, 1000));
+    CHECK(seen.Recent(0x102, 10002, 1000) && seen.Recent(0x110, 10016, 1000));
+}
+
 void TestRoute()
 {
     const DrawApi api = DrawApi::DrawIndexed;
@@ -146,16 +182,20 @@ void TestHooks()
 {
     PlumbingFacts f = Facts(true, true);
     // NR bring-up needs only an accepted finisher and a usable NR; SR state plays no part
-    CHECK(RunBringUpNow(f, true));
-    CHECK(!RunBringUpNow(f, false));
+    CHECK(RunBringUpNow(f, true, true));
+    CHECK(!RunBringUpNow(f, false, true));
+    CHECK(!RunBringUpNow(f, true, false)); // nobody shows this preview: no model
     f.srLatched = true;
-    CHECK(RunBringUpNow(f, true));
+    CHECK(RunBringUpNow(f, true, true));
     f.srGateOpen = false;
-    CHECK(RunBringUpNow(f, true));
+    CHECK(RunBringUpNow(f, true, true));
     f.nrLatched = true;
-    CHECK(!RunBringUpNow(f, true));
+    CHECK(!RunBringUpNow(f, true, true));
     f = Facts(false, false);
-    CHECK(!RunBringUpNow(f, true));
+    CHECK(!RunBringUpNow(f, true, true));
+    f = Facts(false, true);
+    f.nrAvailable = false; // bridge not up, no NVIDIA card or files missing
+    CHECK(!RunBringUpNow(f, true, true));
 
     // the production entry needs an SR evaluate that succeeded
     f = Facts(true, true);
@@ -181,6 +221,8 @@ int main()
     TestHolding();
     TestDispatcherAndMaintenance();
     TestRoute();
+    TestUnavailable();
+    TestConsumerSeen();
     TestHooks();
     return TEST_RESULT("chara_nr_plumbing");
 }
