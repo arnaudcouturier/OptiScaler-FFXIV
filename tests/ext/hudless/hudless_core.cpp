@@ -523,7 +523,8 @@ void TestCoverage()
 // when this one did not ask it (LiveSource::EndFrame arms the next frame only if Take() ran).
 struct Replay
 {
-    static constexpr uint64_t kLatency = 2; // presents between Produce and its completed image / readback
+    static constexpr uint64_t kLatency = 2;          // presents between Produce and its completed image / readback
+    static constexpr uint64_t kOutputsPerPresent = 2; // 2x frame generation: a generated frame and the real one
 
     FakeHost host;
     Core core { host };
@@ -547,6 +548,7 @@ struct Replay
     std::vector<Run> runs;
     std::vector<PasteAction> actions;
     std::vector<bool> visible; // the paste is drawn over the outputs of the present (Core::PasteVisible)
+    std::vector<bool> tags;    // the hud-less tag is sent for the present (Core::WantsTags)
     uint64_t flips = 0;        // changes of the swapped state
     bool lastSwapped = false;
 
@@ -588,6 +590,9 @@ struct Replay
         runs.push_back(r);
         actions.push_back(action);
         visible.push_back(core.PasteVisible());
+        tags.push_back(core.WantsTags());
+        if (visible.back())
+            counters.pasted += kOutputsPerPresent; // no GPU here: the gate stands in for "the outputs were pasted"
         return r;
     }
 
@@ -1140,6 +1145,87 @@ void TestTagGating()
     }
     assert(replay.flips > 10 && replay.core.Snapshot().captured > 1000);
 }
+
+// Log lines of the replays: the periodic summary (every 600 presents) and the state-change lines
+std::vector<std::string> SummaryLines(const Replay& replay)
+{
+    std::vector<std::string> out;
+    for (const auto& line : replay.host.log)
+        if (line.find("600 presents:") != std::string::npos)
+            out.push_back(line);
+    return out;
+}
+
+// Normal gameplay must not change: the mask covers about 12 % of the screen, the base is swapped on every present once the
+// first image completed, the paste stays visible on every present, nothing holds, nothing invalidates, every present is
+// tagged. The replay has no GPU: `pasted` is modelled as two outputs per present with the paste visible (2x frame
+// generation), so "pasted 1200" checks the gate present for present.
+void TestSteadyGameplayReplay()
+{
+    Replay replay;
+    replay.coverage = 0.12f;
+    replay.Steps(1300);
+
+    for (size_t i = 2; i < replay.runs.size(); ++i)
+    {
+        assert(replay.runs[i].staged && replay.runs[i].swapped && replay.runs[i].reason == Reason::None);
+        assert(replay.actions[i] == PasteAction::Produce && replay.visible[i] && replay.tags[i]);
+    }
+    assert(replay.flips == 1); // the bootstrap swap, nothing after it
+    assert(!replay.core.Snapshot().coverageTripped);
+
+    // the second window is the steady state: 600 of 600 captured, one paste image per present, two outputs pasted each
+    const auto lines = SummaryLines(replay);
+    assert(lines.size() == 2);
+    assert(lines[1] ==
+           "HudLess: mode ui_free, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage avg 12.0% max 12.0%; "
+           "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok");
+}
+
+// A black screen inside a cutscene (the boundary still fires, the mask covers nearly everything): after the trip the
+// window reads Fallback(MaskCoverage) with nothing captured, one paste image per present and nothing pasted.
+void TestBlackScreenSummary()
+{
+    Replay replay;
+    replay.coverage = 0.95f;
+    replay.Steps(1300);
+    const auto lines = SummaryLines(replay);
+    assert(lines.size() == 2);
+    assert(lines[1] ==
+           "HudLess: mode ui_free, state Fallback(MaskCoverage); 600 presents: 0 captured, 600 fallbacks (MaskCoverage 600); "
+           "mask coverage avg 95.0% max 95.0%; paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok");
+}
+
+// One fade: the displayed state changes twice (into Fallback(MaskCoverage) at the trip, back to Active after the release),
+// not once per swap of the base.
+void TestStateLinesPerFade()
+{
+    Replay replay;
+    for (int n = 1; n <= 1000; ++n)
+    {
+        replay.coverage = (n > 200 && n <= 400) ? 0.95f : 0.12f; // a fade of 200 presents
+        replay.Step();
+    }
+    // The first Active is reached after the two bootstrap presents (the tracker passes through Fallback(PasteNotReady) on
+    // the way, because 8 of the first 10 presents are not yet 90 %): count the lines after it.
+    std::vector<std::string> states;
+    bool active = false;
+    for (const auto& line : replay.host.log)
+    {
+        if (line.rfind("HudLess: state ", 0) != 0)
+            continue;
+        if (active)
+            states.push_back(line);
+        else if (line.ends_with("-> Active"))
+            active = true;
+    }
+    assert(active);
+    assert(states.size() == 2);
+    assert(states[0] == "HudLess: state Active -> Fallback(MaskCoverage)");
+    assert(states[1] == "HudLess: state Fallback(MaskCoverage) -> Active");
+    assert(replay.flips == 3); // bootstrap swap, trip, release
+    assert(replay.core.Snapshot().reasons[static_cast<size_t>(Reason::PasteNotReady)] == 2);
+}
 } // namespace
 
 int main()
@@ -1162,6 +1248,9 @@ int main()
     TestHoldAvoidsPasteNotReady();
     TestCutsceneReplay();
     TestTagGating();
+    TestSteadyGameplayReplay();
+    TestBlackScreenSummary();
+    TestStateLinesPerFade();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
     return 0;
 }
