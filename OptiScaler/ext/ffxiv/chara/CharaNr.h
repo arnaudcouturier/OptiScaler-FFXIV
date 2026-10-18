@@ -94,6 +94,9 @@ struct ProductionResult
     uint64_t serial = 0;
 };
 ProductionResult RunProduction(const ProductionRequest& request);
+// The dispatcher declined to offer a render to the production entry (no preview texture, or a size NR does not take): counted as a production
+// fallback and as a render that kept the super-resolution output.
+void NoteProductionDeclined();
 
 // A bring-up result a UI draw samples instead of the native image. `serial` identifies the result (never reused): the debug tint is made
 // once per result.

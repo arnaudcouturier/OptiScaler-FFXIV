@@ -1318,6 +1318,12 @@ ProductionResult RunProduction(const ProductionRequest& request)
                    });
 }
 
+void NoteProductionDeclined()
+{
+    M().productionFallbacks.fetch_add(1, std::memory_order_relaxed);
+    M().fallbacks.fetch_add(1, std::memory_order_relaxed);
+}
+
 ResultView ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
 {
     return Guarded([&] { return ResultForImpl(key, now); },

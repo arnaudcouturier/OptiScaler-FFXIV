@@ -870,6 +870,7 @@ bool RunNrBringUp(const DrawView& view)
 // images, queues the NR list on the bridge's D3D12 queue and waits for it on this context (same-frame hand-off), then hands back the NR
 // output. Anything else (the model is still being built, no list free, the module is switched off or failed) returns an empty view and the
 // alpha pass keeps the SR output: counted by the module, logged here once per cause.
+constexpr unsigned kProductionCauseDeclined = 8; // above every RunOutcome value
 const char* ProductionCauseText(nr::RunOutcome outcome)
 {
     switch (outcome)
@@ -886,7 +887,15 @@ ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, cons
 {
     const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
     if (view.rtvTexture == nullptr || outW > kNrMaxSide || outH > kNrMaxSide)
+    {
+        // Not offered to NR: counted like any other fallback and logged once (a cause outside the RunOutcome range).
+        nr::NoteProductionDeclined();
+        if (g_productionCauses.First(kProductionCauseDeclined))
+            LOG_INFO("CharaView NR: production NR kept the super-resolution output of a render: the preview texture is unknown or its size ({}x{}) is "
+                     "larger than NR takes (counted; this cause is logged once)",
+                     outW, outH);
         return nullptr;
+    }
     nr::ProductionRequest request;
     request.base.context = view.context;
     request.base.native = view.rtvTexture;
