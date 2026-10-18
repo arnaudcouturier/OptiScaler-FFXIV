@@ -13,7 +13,7 @@
 // fence, and treats any failure as final for the session (one log line, the native image stays).
 //
 // Two modes, one stream table (keyed by the preview image's texture pointer, one stream per image):
-//   bring-up   : NR on the native image (PreviewNR alone, and renders the super-resolution path did not evaluate): colour only, synthetic
+//   bring-up   : NR on the native image (PreviewNR alone, or a preview the super-resolution path does not serve): colour only, synthetic
 //                guides (a cleared depth, zero motion); the result replaces the native image in the UI draws that sample it.
 //   production : NR on the super-resolution output (PreviewDLSS and PreviewNR): the output (RGBA16F, twice the render size) and copies of the
 //                slot's depth and motion (render size, the upscaler's own conventions) are handed over; the result (same size) is what the alpha

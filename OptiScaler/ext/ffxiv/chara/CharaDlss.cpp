@@ -178,6 +178,7 @@ DepthMemo g_depthMemo; // what was learnt about g_depthTexture (an unreadable on
 bool g_reversedZ = false;
 motion::DepthConventionMemo g_depthConvention; // what the depth states of the G-buffer draws said so far
 bool g_loggedNoPrepass = false;
+FinishVerdict g_lastFinishVerdict = FinishVerdict::NoSlot; // what the last Finish() decided (read by the finisher step for the bring-up gate)
 BurstLimiter g_lines; // log lines of the path: once per reason per burst of preview activity (reasons: FinishVerdict values, then kLine*)
 constexpr size_t kLineSlotAcquired = 10;
 constexpr size_t kLinePassLive = 11;
@@ -966,6 +967,7 @@ void Finish(const DrawView& view)
     f.guides.cameraCaptured = g_pass.cameraCaptured;
 
     const FinishVerdict verdict = DecideFinish(f);
+    g_lastFinishVerdict = verdict;
     ++g_stats.finishVerdict[static_cast<size_t>(verdict)];
     if (diag::TraceEnabled() && verdict != FinishVerdict::Proceed)
         diag::Trace(diag::TraceCategory::Finish, view.now,
@@ -1395,9 +1397,10 @@ bool Around(const DrawView& view, DrawCall draw)
     {
         draw(); // the native image first
         g_nrProductionThisRender = false; // set by RunSlot when production NR improved this render's SR output
-        // The super-resolution step of this render. Its result wins at the consumer, so preview NR (below) is not run for a render
-        // that SR evaluated: its result would be thrown away.
-        bool srResultWins = false;
+        // The super-resolution step of this render. While the SR path is in charge of this preview (it can run, the slot has not failed and
+        // the preview is not too large for it) preview NR does not run a bring-up for a render SR did not evaluate: that render keeps the
+        // native image, as with PreviewDLSS alone, and NR works on the SR result (production) only.
+        bool srInCharge = false;
         if (sr)
         {
             if (!view.finisherAccepted)
@@ -1414,9 +1417,11 @@ bool Around(const DrawView& view, DrawCall draw)
             }
             else
             {
+                g_lastFinishVerdict = FinishVerdict::NoSlot;
                 Finish(view);
                 const int slot = view.rtvTexture != nullptr ? g_slots.Find(reinterpret_cast<uintptr_t>(view.rtvTexture)) : kNoSlot;
-                srResultWins = slot != kNoSlot && g_slots.EvaluatedInPass(slot, g_pass.counter);
+                const bool slotFailed = slot != kNoSlot && g_slots.Slot(slot).failed;
+                srInCharge = nr::SrInCharge(true, slotFailed, g_lastFinishVerdict == FinishVerdict::TooLarge);
             }
         }
         // Preview NR: bring-up entry. It needs only the native image, not the SR guides, so it does not wait for them and does not
@@ -1425,11 +1430,11 @@ bool Around(const DrawView& view, DrawCall draw)
         const bool live = view.rtvTexture != nullptr &&
                           g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
         bool bringUpProduced = false;
-        if (nr::RunBringUpNow(facts, view.finisherAccepted, live, srResultWins))
+        if (nr::RunBringUpNow(facts, view.finisherAccepted, live, srInCharge))
             bringUpProduced = RunNrBringUp(view);
         // Production NR ran inside the SR step above: it counts as a result for this render, or the withdrawal below would mark it stale at once.
         const bool nrProducedResult = nr::NrProducedForRender(bringUpProduced, g_nrProductionThisRender);
-        // A render that has no NR result (rejected finisher, nobody shows the window, the SR result won, a skipped or failed bring-up)
+        // A render that has no NR result (rejected finisher, nobody shows the window, the SR path is in charge, a skipped or failed bring-up)
         // withdraws the older result of this image: the UI draw must not show an older render for up to a quarter of a second.
         if (nr::InvalidateNow(facts, nrProducedResult) && view.rtvTexture != nullptr)
             nr::Invalidate(reinterpret_cast<uintptr_t>(view.rtvTexture));

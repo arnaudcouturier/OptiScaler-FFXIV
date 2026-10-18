@@ -297,6 +297,38 @@ void TestRouteFallbackToAa()
     CHECK(ChooseRoute(true, PathCanRun(f), true, RoleEquipDisplay, api, true) == Route::Enhance);
 }
 
+// The truth table of the bring-up gate: the SR path in charge of a preview (usable, slot not failed, preview not too large for it) means no
+// bring-up for any render of that preview; every other combination keeps the bring-up. What the user sees: with both options on, a render the
+// SR path did not evaluate keeps the native image (no throwaway 1x NR model at window open, no bring-up/production flapping).
+void TestBringUpGate()
+{
+    for (int bits = 0; bits < 8; ++bits)
+    {
+        const bool srUsable = (bits & 1) != 0, slotFailed = (bits & 2) != 0, tooLarge = (bits & 4) != 0;
+        const bool inCharge = SrInCharge(srUsable, slotFailed, tooLarge);
+        CHECK(inCharge == (srUsable && !slotFailed && !tooLarge));
+        PlumbingFacts f = Facts(true, true);
+        CHECK(RunBringUpNow(f, true, true, inCharge) == !inCharge);
+        // the other conditions still apply
+        CHECK(!RunBringUpNow(f, false, true, inCharge) && !RunBringUpNow(f, true, false, inCharge));
+        f.nrLatched = true;
+        CHECK(!RunBringUpNow(f, true, true, inCharge));
+    }
+    // PreviewDLSS off: the SR path is not usable, the bring-up runs for a shown window
+    const PlumbingFacts nrOnly = Facts(false, true);
+    CHECK(RunBringUpNow(nrOnly, true, true, SrInCharge(SrUsable(nrOnly), false, false)));
+    // both on, the SR path in charge: no bring-up
+    const PlumbingFacts both = Facts(true, true);
+    CHECK(SrUsable(both) && !RunBringUpNow(both, true, true, SrInCharge(SrUsable(both), false, false)));
+    // the slot failed, or the preview is too large for SR: the bring-up takes over
+    CHECK(RunBringUpNow(both, true, true, SrInCharge(true, true, false)));
+    CHECK(RunBringUpNow(both, true, true, SrInCharge(true, false, true)));
+    // the SR path latched or its gate closed: the bring-up takes over
+    PlumbingFacts latched = both;
+    latched.srLatched = true;
+    CHECK(RunBringUpNow(latched, true, true, SrInCharge(SrUsable(latched), false, false)));
+}
+
 void TestHooks()
 {
     PlumbingFacts f = Facts(true, true);
@@ -304,9 +336,10 @@ void TestHooks()
     CHECK(RunBringUpNow(f, true, true, false));
     CHECK(!RunBringUpNow(f, false, true, false));
     CHECK(!RunBringUpNow(f, true, false, false)); // nobody shows this preview: no model
-    // PreviewDLSS and PreviewNR both on: a render that SR evaluated shows the SR result, so NR is not run for it (and costs nothing) ...
+    // The fourth argument is "the SR path is in charge of this preview" (SrInCharge): then the bring-up is never run, whether or not SR
+    // evaluated this render; the render keeps the native image like PreviewDLSS alone, and NR works on the SR result (production).
     CHECK(!RunBringUpNow(f, true, true, true));
-    // ... while a render SR did not evaluate (waiting for guides, failed, latched) still gets the NR result
+    // ... while a preview the SR path does not serve (PreviewDLSS off, SR latched or unusable, a failed or too large slot) gets the bring-up
     CHECK(RunBringUpNow(f, true, true, false));
     f.srLatched = true;
     CHECK(RunBringUpNow(f, true, true, false));
@@ -429,5 +462,6 @@ int main()
     TestSrHooksNeededLazy();
     TestConsumerSeen();
     TestHooks();
+    TestBringUpGate();
     return TEST_RESULT("chara_nr_plumbing");
 }

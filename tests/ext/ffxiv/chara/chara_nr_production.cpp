@@ -173,7 +173,12 @@ void TestStreamModes()
     CHECK(DecideRebuild(st, Production(), 1000) == RebuildAction::Settle);
     CHECK(DecideRebuild(st, Production(), 1000 + kRebuildSettleMs - 1) == RebuildAction::Settle);
     CHECK(DecideRebuild(st, Production(), 1000 + kRebuildSettleMs) == RebuildAction::Rebuild);
-    // the alternating render (SR evaluated one render, not the next) never rebuilds: the wanted shape does not hold still
+    // Both options on, SR evaluating only some of the renders: the glue no longer runs the bring-up while the SR path is in charge of the
+    // preview (SrInCharge / RunBringUpNow, chara_nr_plumbing), so a production stream is never asked for the bring-up shape by the renders
+    // SR skipped. Here: with the SR path in charge the bring-up shape is never wanted ...
+    PlumbingFacts both;
+    both.srWanted = both.nrWanted = true;
+    both.srGateOpen = true;
     StreamState flap;
     flap.built = Production();
     flap.hasBuilt = true;
@@ -181,9 +186,23 @@ void TestStreamModes()
     for (int i = 0; i < 50; ++i)
     {
         t += 16;
-        const RebuildAction a = DecideRebuild(flap, (i & 1) ? BringUp() : Production(), t);
-        CHECK(a != RebuildAction::Rebuild);
+        const bool srEvaluatedThisRender = (i & 1) == 0;                // SR evaluates every other render
+        const bool bringUp = RunBringUpNow(both, true, true, SrInCharge(true, false, false));
+        CHECK(!bringUp);                                                 // the SR path is in charge: never
+        const bool wantsProduction = RunProductionNow(both, srEvaluatedThisRender, true);
+        if (wantsProduction)
+            CHECK(DecideRebuild(flap, Production(), t) == RebuildAction::Keep); // the production stream stays as it is
     }
+    // ... and one stray bring-up call (the SR path latched for a moment, a failed slot) does not rebuild a production stream: the next
+    // production call wants the built shape again and the pending change is dropped
+    StreamState stray;
+    stray.built = Production();
+    stray.hasBuilt = true;
+    CHECK(DecideRebuild(stray, BringUp(), 1000) == RebuildAction::Settle);
+    CHECK(DecideRebuild(stray, Production(), 1016) == RebuildAction::Keep && !stray.hasPending);
+    CHECK(DecideRebuild(stray, BringUp(), 1032 + kRebuildSettleMs) == RebuildAction::Settle); // a new change starts its own clock
+    // a bring-up that holds still for the settle time (the SR path is really out) is a real change: the stream is rebuilt
+    CHECK(DecideRebuild(stray, BringUp(), 1032 + 2 * kRebuildSettleMs) == RebuildAction::Rebuild);
 
     // a bring-up consumer is only given a bring-up result
     StreamState bring;
@@ -247,7 +266,7 @@ void TestRenderDecisions()
     const bool srEvaluated = true, windowShown = true;
     const bool production = RunProductionNow(f, srEvaluated, windowShown);
     CHECK(production);
-    CHECK(!RunBringUpNow(f, true, windowShown, /*srResultWins=*/srEvaluated)); // the fix round's rule is kept: SR wins, no bring-up cost
+    CHECK(!RunBringUpNow(f, true, windowShown, /*srInCharge=*/SrInCharge(true, false, false))); // the SR path is in charge: no bring-up, no cost
     CHECK(!InvalidateNow(f, NrProducedForRender(false, production)));
     CHECK(ChooseConsumerSource(false, production, srEvaluated, false) == ConsumerSource::ProductionResult);
     CHECK(AlphaTintFor(true, ChooseAlphaInput(production)) == TintKind::Nr);
@@ -259,9 +278,13 @@ void TestRenderDecisions()
     CHECK(AlphaTintFor(true, ChooseAlphaInput(fellBack)) == TintKind::Sr);
     CHECK(AlphaTintFor(false, ChooseAlphaInput(fellBack)) == TintKind::None);
 
-    // SR did not evaluate this render: no production; the bring-up still runs for a shown window (the fix round's rule is kept)
+    // SR did not evaluate this render: no production. While the SR path is in charge of the preview the render keeps the native image (no
+    // bring-up, as with PreviewDLSS alone); the bring-up runs only where the SR path does not serve the preview (latched, a failed slot, too large)
     CHECK(!RunProductionNow(f, false, windowShown));
-    CHECK(RunBringUpNow(f, true, windowShown, false));
+    CHECK(!RunBringUpNow(f, true, windowShown, SrInCharge(true, false, false)));
+    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, true, false)));  // the slot failed
+    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, false, true)));  // too large for the SR path
+    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(false, false, false))); // the SR path is not usable
     CHECK(ChooseConsumerSource(false, false, false, true) == ConsumerSource::NrResult);
 }
 } // namespace

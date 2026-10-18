@@ -155,7 +155,7 @@ class Latches
 //
 // Two modes share the stream table, keyed by the preview image's texture pointer (one stream per image, whichever mode runs):
 //   bring-up   : colour = the native image (width x height), guides = synthetic images of the same size; the result is drawn instead of
-//                the native image by the UI draws (ResultFor); PreviewNR without PreviewDLSS, and renders the SR path did not evaluate.
+//                the native image by the UI draws (ResultFor); PreviewNR without PreviewDLSS, and previews the SR path does not serve (latched, a failed slot, too large for it).
 //   production : colour = the super-resolution output (width x height = twice the render size), guides = copies of the preview's own
 //                depth and motion at the render size (guideWidth x guideHeight); the result is read by the alpha pass of the SR path.
 // The two never run at once for one image. When the wanted mode changes the stream is rebuilt once the change has held still for the

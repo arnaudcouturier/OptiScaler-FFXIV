@@ -119,13 +119,20 @@ constexpr bool WantNrResult(bool nrOn, bool floodOn, bool srResultReady, bool pr
     return nrOn && !floodOn && !srResultReady && previewOutput;
 }
 
+// The super-resolution path is in charge of a preview's picture: it can run (`srUsable`) and this preview has neither failed in it
+// (`slotFailed`) nor been declined as too large for it (`tooLarge`). While it is in charge, a render it did not evaluate (the finisher was
+// rejected, the guides were not ready yet, a stale or waiting verdict) keeps the native image, exactly as with PreviewDLSS alone; NR works on
+// the SR result (production) and never on a render of its own.
+constexpr bool SrInCharge(bool srUsable, bool slotFailed, bool tooLarge) { return srUsable && !slotFailed && !tooLarge; }
+
 // NR bring-up runs after the finisher wrote the native image: the finisher check passed, NR may run and a UI draw sampled this
 // preview image recently (a live window; a finisher output nobody shows gets no model). It does not wait for the SR guides.
-// `srResultWins`: the SR path evaluated this render, so the consumer will draw the SR result and an NR result would be thrown away
-// (the production entry that runs NR on the SR output is still a stub); the bring-up is not run then, and the NR cost is not paid.
-constexpr bool RunBringUpNow(const PlumbingFacts& f, bool finisherAccepted, bool consumerRecent, bool srResultWins)
+// It is for the previews the SR path does not serve: PreviewDLSS off, the SR path latched or unusable, a slot that failed, a preview too
+// large for it (`srInCharge`, see SrInCharge). With the SR path in charge the bring-up is never run: a bring-up stream beside the production
+// stream of one window would be rebuilt back and forth by the 500 ms settle rule, and the throwaway bring-up model would be built first.
+constexpr bool RunBringUpNow(const PlumbingFacts& f, bool finisherAccepted, bool consumerRecent, bool srInCharge)
 {
-    return finisherAccepted && consumerRecent && NrUsable(f) && !srResultWins;
+    return finisherAccepted && consumerRecent && NrUsable(f) && !srInCharge;
 }
 
 // A finisher of a preview image went by and preview NR produced no result for that render (the finisher was rejected, the bring-up was
