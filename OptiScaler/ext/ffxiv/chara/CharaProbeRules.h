@@ -1,0 +1,783 @@
+#pragma once
+// Pure rules of the character preview probe (CharaProbe.cpp): which textures count as "derived from the preview", how
+// often the probe may write a log line, the output budget, the live command parser and a small PNG writer.
+// Nothing here touches D3D, COM or the file system, so the CPU tests cover all of it.
+//
+// The probe is off unless [FFXIV] PreviewProbe is on. Times are milliseconds on any monotonic clock the caller picks.
+
+#include "ext/core/Crc32.h"
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ext::ffxiv::chara::probe
+{
+// ---------------------------------------------------------------------------------------------------------------------
+// Derived textures: textures that hold (a copy of) the preview image
+// ---------------------------------------------------------------------------------------------------------------------
+
+inline constexpr uint32_t kMaxHops = 3;            // copy chain length: preview -> A (1) -> B (2) -> C (3)
+inline constexpr uint64_t kExpiryMs = 3000;        // an entry that was not refreshed for this long is forgotten
+inline constexpr int kPreviewEntries = 8;          // table entries 0..7 are the preview outputs
+
+enum class DerivedKind : uint8_t
+{
+    Copy, // destination of CopyResource / CopySubresourceRegion / ResolveSubresource
+    Draw, // render target of a draw that sampled the preview or another derived texture
+};
+
+struct TextureInfo
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0; // DXGI_FORMAT value
+};
+
+struct Derived
+{
+    uintptr_t ptr = 0;
+    TextureInfo info;
+    int sourceEntry = -1;   // the preview table entry (0..7) the image came from
+    uint32_t hops = 0;      // 1 = copied straight from the preview
+    DerivedKind kind = DerivedKind::Copy;
+    uint64_t firstSeen = 0;
+    uint64_t lastSeen = 0;
+    bool used = false;
+};
+
+enum class DeriveResult : uint8_t
+{
+    Added,         // new entry
+    Refreshed,     // the destination was already derived: seen again
+    Replaced,      // new entry, the oldest live entry was dropped because the set was full
+    CopiesOff,     // tracking is switched off ("copies off")
+    NullPointer,   // source or destination is null
+    SameTexture,   // destination == source
+    DestIsPreview, // the destination is itself a preview entry
+    UnknownSource, // the source is not a preview entry (0..7) and not a live derived texture
+    TooManyHops,   // the destination would be more than kMaxHops copies away from the preview
+};
+
+constexpr bool Accepted(DeriveResult r)
+{
+    return r == DeriveResult::Added || r == DeriveResult::Refreshed || r == DeriveResult::Replaced;
+}
+
+class DerivedSet
+{
+public:
+    static constexpr size_t kCapacity = 16;
+
+    void SetCopiesEnabled(bool on) { copies_ = on; }
+    bool CopiesEnabled() const { return copies_; }
+
+    // The source is the preview output with table entry `entry` (0..7): the destination is one hop away.
+    DeriveResult FromPreview(int entry, uintptr_t source, uintptr_t dest, const TextureInfo& info, bool destIsPreviewEntry,
+                             DerivedKind kind, uint64_t now)
+    {
+        if (!copies_)
+            return DeriveResult::CopiesOff;
+        if (source == 0 || dest == 0)
+            return DeriveResult::NullPointer;
+        if (source == dest)
+            return DeriveResult::SameTexture;
+        if (destIsPreviewEntry)
+            return DeriveResult::DestIsPreview;
+        if (entry < 0 || entry >= kPreviewEntries)
+            return DeriveResult::UnknownSource;
+        return Insert(dest, info, entry, 1, kind, now);
+    }
+
+    // The source is a texture that is already derived (and not expired): the destination is one hop further.
+    DeriveResult FromDerived(uintptr_t source, uintptr_t dest, const TextureInfo& info, bool destIsPreviewEntry,
+                             DerivedKind kind, uint64_t now)
+    {
+        if (!copies_)
+            return DeriveResult::CopiesOff;
+        if (source == 0 || dest == 0)
+            return DeriveResult::NullPointer;
+        if (source == dest)
+            return DeriveResult::SameTexture;
+        if (destIsPreviewEntry)
+            return DeriveResult::DestIsPreview;
+        const Derived* src = Find(source, now);
+        if (!src)
+            return DeriveResult::UnknownSource;
+        if (src->hops + 1 > kMaxHops)
+            return DeriveResult::TooManyHops;
+        return Insert(dest, info, src->sourceEntry, src->hops + 1, kind, now);
+    }
+
+    // The live entry of this texture, or null (never stored, or not refreshed for kExpiryMs).
+    const Derived* Find(uintptr_t ptr, uint64_t now) const
+    {
+        if (ptr == 0)
+            return nullptr;
+        for (const Derived& d : entries_)
+            if (d.used && d.ptr == ptr && Alive(d, now))
+                return &d;
+        return nullptr;
+    }
+
+    // A draw saw the texture again: keeps it alive. Returns false when it is unknown or expired.
+    bool Touch(uintptr_t ptr, uint64_t now)
+    {
+        for (Derived& d : entries_)
+            if (d.used && d.ptr == ptr && Alive(d, now))
+            {
+                d.lastSeen = std::max(d.lastSeen, now);
+                return true;
+            }
+        return false;
+    }
+
+    size_t Count(uint64_t now) const
+    {
+        size_t n = 0;
+        for (const Derived& d : entries_)
+            n += (d.used && Alive(d, now)) ? 1 : 0;
+        return n;
+    }
+
+    bool Empty(uint64_t now) const { return Count(now) == 0; }
+
+    std::vector<Derived> Live(uint64_t now) const
+    {
+        std::vector<Derived> out;
+        for (const Derived& d : entries_)
+            if (d.used && Alive(d, now))
+                out.push_back(d);
+        return out;
+    }
+
+    void Clear() { entries_ = {}; }
+
+private:
+    static bool Alive(const Derived& d, uint64_t now) { return now < d.lastSeen || now - d.lastSeen < kExpiryMs; }
+
+    DeriveResult Insert(uintptr_t dest, const TextureInfo& info, int entry, uint32_t hops, DerivedKind kind, uint64_t now)
+    {
+        // the same texture again (live): keep the shortest chain, refresh the time
+        for (Derived& d : entries_)
+            if (d.used && d.ptr == dest && Alive(d, now))
+            {
+                if (hops < d.hops)
+                {
+                    d.hops = hops;
+                    d.sourceEntry = entry;
+                }
+                d.info = info;
+                d.kind = kind;
+                d.lastSeen = std::max(d.lastSeen, now);
+                return DeriveResult::Refreshed;
+            }
+
+        // a stale record of the same pointer is overwritten (the pointer may be a new texture), then free or expired slots
+        Derived* slot = nullptr;
+        for (Derived& d : entries_)
+            if (d.used && d.ptr == dest)
+                slot = &d;
+        if (!slot)
+            for (Derived& d : entries_)
+                if (!d.used || !Alive(d, now))
+                {
+                    slot = &d;
+                    break;
+                }
+        DeriveResult result = DeriveResult::Added;
+        if (!slot)
+        {
+            slot = &entries_[0];
+            for (Derived& d : entries_)
+                if (d.lastSeen < slot->lastSeen)
+                    slot = &d;
+            result = DeriveResult::Replaced;
+        }
+        slot->ptr = dest;
+        slot->info = info;
+        slot->sourceEntry = entry;
+        slot->hops = hops;
+        slot->kind = kind;
+        slot->firstSeen = now;
+        slot->lastSeen = now;
+        slot->used = true;
+        return result;
+    }
+
+    std::array<Derived, kCapacity> entries_ {};
+    bool copies_ = true;
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Log limits
+// ---------------------------------------------------------------------------------------------------------------------
+
+// 64-bit key of a case from a few small numbers (FNV-1a over the bytes of each value).
+constexpr uint64_t CaseKey(uint64_t a, uint64_t b = 0, uint64_t c = 0, uint64_t d = 0, uint64_t e = 0)
+{
+    uint64_t h = 1469598103934665603ull;
+    const uint64_t values[5] = { a, b, c, d, e };
+    for (uint64_t v : values)
+        for (int i = 0; i < 8; ++i)
+        {
+            h ^= (v >> (i * 8)) & 0xff;
+            h *= 1099511628211ull;
+        }
+    return h;
+}
+
+// At most N distinct cases are ever logged; a case is logged only the first time it is seen.
+template <size_t N> class CaseLog
+{
+public:
+    // True the first time `key` is offered while fewer than N cases were accepted.
+    bool Offer(uint64_t key)
+    {
+        for (size_t i = 0; i < count_; ++i)
+            if (keys_[i] == key)
+                return false;
+        if (count_ >= N)
+        {
+            ++refused_;
+            return false;
+        }
+        keys_[count_++] = key;
+        return true;
+    }
+
+    size_t Count() const { return count_; }
+    uint64_t Refused() const { return refused_; } // new cases that were not logged because the cap was reached
+    void Clear()
+    {
+        count_ = 0;
+        refused_ = 0;
+    }
+
+private:
+    std::array<uint64_t, N> keys_ {};
+    size_t count_ = 0;
+    uint64_t refused_ = 0;
+};
+
+inline constexpr size_t kCopyCaseCap = 48;
+inline constexpr size_t kSamplerCaseCap = 64;
+
+// Events per window of at least one second. Completed windows are queued for the caller to report.
+class RateCounter
+{
+public:
+    struct Window
+    {
+        uint64_t startMs = 0;
+        uint64_t durationMs = 0;
+        uint32_t count = 0;
+    };
+
+    void Add(uint64_t now, uint32_t n = 1)
+    {
+        Roll(now);
+        count_ += n;
+        total_ += n;
+    }
+
+    // Closes the current window when it is a second old (also without a new event).
+    void Roll(uint64_t now)
+    {
+        if (!started_)
+        {
+            started_ = true;
+            start_ = now;
+            return;
+        }
+        if (now >= start_ && now - start_ >= 1000)
+        {
+            if (count_ > 0)
+            {
+                if (queued_ == kQueue)
+                {
+                    for (size_t i = 1; i < kQueue; ++i)
+                        done_[i - 1] = done_[i];
+                    --queued_;
+                }
+                done_[queued_++] = Window { start_, now - start_, count_ };
+            }
+            start_ = now;
+            count_ = 0;
+        }
+    }
+
+    // Takes the oldest completed window.
+    bool Take(Window& out)
+    {
+        if (queued_ == 0)
+            return false;
+        out = done_[0];
+        for (size_t i = 1; i < queued_; ++i)
+            done_[i - 1] = done_[i];
+        --queued_;
+        return true;
+    }
+
+    uint64_t Total() const { return total_; }
+    void Clear() { *this = RateCounter(); }
+
+private:
+    static constexpr size_t kQueue = 8;
+    std::array<Window, kQueue> done_ {};
+    size_t queued_ = 0;
+    uint64_t start_ = 0;
+    uint32_t count_ = 0;
+    uint64_t total_ = 0;
+    bool started_ = false;
+};
+
+// "Swaps per second" lines while flooding: every second with swaps for the first 30, then every 10th second, at most 60 lines.
+class ThrottledSwapCounter
+{
+public:
+    static constexpr uint32_t kFirstSeconds = 30;
+    static constexpr uint32_t kThenEvery = 10;
+    static constexpr uint32_t kMaxLines = 60;
+
+    struct Line
+    {
+        uint32_t second = 0;          // 1-based number of this second with swaps
+        uint32_t perSecond = 0;       // swaps in that window, scaled to one second
+        uint64_t total = 0;           // swaps so far
+    };
+
+    void Add(uint64_t now, uint32_t n = 1) { rate_.Add(now, n); }
+
+    // The next line that is due, or false. Seconds that the limits skip are consumed silently.
+    bool TakeLine(uint64_t now, Line& out)
+    {
+        rate_.Roll(now);
+        RateCounter::Window w;
+        while (rate_.Take(w))
+        {
+            ++seconds_;
+            lineTotal_ += w.count;
+            const bool due = seconds_ <= kFirstSeconds || ((seconds_ - kFirstSeconds) % kThenEvery) == 0;
+            if (!due || lines_ >= kMaxLines)
+                continue;
+            ++lines_;
+            out.second = seconds_;
+            out.perSecond = w.durationMs ? static_cast<uint32_t>((static_cast<uint64_t>(w.count) * 1000 + w.durationMs / 2) / w.durationMs) : w.count;
+            out.total = lineTotal_;
+            return true;
+        }
+        return false;
+    }
+
+    uint32_t Lines() const { return lines_; }
+    uint64_t Total() const { return rate_.Total(); }
+    void Clear() { *this = ThrottledSwapCounter(); }
+
+private:
+    RateCounter rate_;
+    uint32_t seconds_ = 0;
+    uint32_t lines_ = 0;
+    uint64_t lineTotal_ = 0;
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Output budget
+// ---------------------------------------------------------------------------------------------------------------------
+
+inline constexpr uint32_t kMaxFiles = 40;
+inline constexpr uint64_t kMaxBytes = 300ull * 1024 * 1024;
+
+struct OutputBudget
+{
+    uint32_t files = 0;
+    uint64_t bytes = 0;
+
+    // All or nothing: a set of `addFiles` files with `addBytes` bytes in total is allowed only when all of it fits.
+    bool Fits(uint32_t addFiles, uint64_t addBytes) const
+    {
+        if (files > kMaxFiles || bytes > kMaxBytes)
+            return false;
+        return addFiles <= kMaxFiles - files && addBytes <= kMaxBytes - bytes;
+    }
+
+    void Add(uint32_t addFiles, uint64_t addBytes)
+    {
+        files = addFiles > UINT32_MAX - files ? UINT32_MAX : files + addFiles;
+        bytes = addBytes > UINT64_MAX - bytes ? UINT64_MAX : bytes + addBytes;
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Live command parser (one command per line of OptiScaler\chara-probe.cmd)
+// ---------------------------------------------------------------------------------------------------------------------
+
+inline constexpr size_t kMaxCommandBytes = 4096;
+inline constexpr size_t kMaxCommandLines = 32;
+inline constexpr size_t kMaxEchoChars = 48;
+
+enum class CommandKind : uint8_t
+{
+    Empty,   // blank line or comment only
+    Tint,    // tint on|off
+    Flood,   // flood on|off
+    Aa,      // aa on|off
+    Dlss,    // dlss on|off
+    Upscale, // upscale on|off
+    Dump,    // dump: save preview images and state
+    State,   // state: save state only
+    Copies,  // copies on|off
+    Reset,   // reset: forget derived textures and counters
+    Help,    // help
+    Unknown, // anything else; see Command::note
+};
+
+struct Command
+{
+    CommandKind kind = CommandKind::Empty;
+    bool value = false;    // the on/off of a toggle
+    bool hasValue = false; // true for a valid toggle
+    std::string text;      // the line as it can be echoed: printable ASCII only, at most kMaxEchoChars characters
+    std::string note;      // why a line is Unknown
+};
+
+inline constexpr const char* kHelpText =
+    "commands: tint on|off, flood on|off, aa on|off, dlss on|off, upscale on|off, copies on|off, dump, state, reset, help "
+    "(one per line, # starts a comment)";
+
+constexpr const char* CommandName(CommandKind k)
+{
+    switch (k)
+    {
+    case CommandKind::Empty: return "empty";
+    case CommandKind::Tint: return "tint";
+    case CommandKind::Flood: return "flood";
+    case CommandKind::Aa: return "aa";
+    case CommandKind::Dlss: return "dlss";
+    case CommandKind::Upscale: return "upscale";
+    case CommandKind::Dump: return "dump";
+    case CommandKind::State: return "state";
+    case CommandKind::Copies: return "copies";
+    case CommandKind::Reset: return "reset";
+    case CommandKind::Help: return "help";
+    case CommandKind::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+namespace detail
+{
+constexpr bool IsBlank(char c) { return c == ' ' || c == '\t'; }
+constexpr bool IsPrintable(char c) { return static_cast<unsigned char>(c) >= 0x20 && static_cast<unsigned char>(c) <= 0x7E; }
+
+inline std::string Echo(std::string_view s)
+{
+    std::string out;
+    for (char c : s)
+    {
+        if (!IsPrintable(c))
+            continue; // control bytes, NUL, and everything above 0x7E are dropped
+        if (out.size() >= kMaxEchoChars)
+            break;
+        out.push_back(c);
+    }
+    return out;
+}
+
+inline std::string Lower(std::string_view s)
+{
+    std::string out(s);
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    return out;
+}
+
+inline std::string_view Trim(std::string_view s)
+{
+    while (!s.empty() && (IsBlank(s.front()) || s.front() == '\r'))
+        s.remove_prefix(1);
+    while (!s.empty() && (IsBlank(s.back()) || s.back() == '\r'))
+        s.remove_suffix(1);
+    return s;
+}
+} // namespace detail
+
+inline Command ParseLine(std::string_view line)
+{
+    Command cmd;
+    const size_t hash = line.find('#');
+    if (hash != std::string_view::npos)
+        line = line.substr(0, hash);
+    line = detail::Trim(line);
+    if (line.empty())
+        return cmd; // Empty
+
+    cmd.text = detail::Echo(line);
+    auto unknown = [&cmd](const char* why) {
+        cmd.kind = CommandKind::Unknown;
+        cmd.value = false;
+        cmd.hasValue = false;
+        cmd.note = why;
+        return cmd;
+    };
+
+    for (char c : line)
+        if (!detail::IsBlank(c) && !detail::IsPrintable(c))
+            return unknown("the line contains bytes that are not printable ASCII");
+
+    // words separated by spaces or tabs
+    std::vector<std::string> words;
+    size_t i = 0;
+    while (i < line.size())
+    {
+        while (i < line.size() && detail::IsBlank(line[i]))
+            ++i;
+        const size_t begin = i;
+        while (i < line.size() && !detail::IsBlank(line[i]))
+            ++i;
+        if (i > begin)
+            words.push_back(detail::Lower(line.substr(begin, i - begin)));
+    }
+    if (words.empty())
+        return cmd;
+
+    struct Entry
+    {
+        const char* name;
+        CommandKind kind;
+        bool toggle;
+    };
+    static constexpr Entry table[] = {
+        { "tint", CommandKind::Tint, true },       { "flood", CommandKind::Flood, true },
+        { "aa", CommandKind::Aa, true },           { "dlss", CommandKind::Dlss, true },
+        { "upscale", CommandKind::Upscale, true }, { "copies", CommandKind::Copies, true },
+        { "dump", CommandKind::Dump, false },      { "state", CommandKind::State, false },
+        { "reset", CommandKind::Reset, false },    { "help", CommandKind::Help, false },
+    };
+    for (const Entry& e : table)
+    {
+        if (words[0] != e.name)
+            continue;
+        if (!e.toggle)
+        {
+            if (words.size() != 1)
+                return unknown("this command takes no argument");
+            cmd.kind = e.kind;
+            return cmd;
+        }
+        if (words.size() < 2)
+            return unknown("expected on or off");
+        if (words.size() > 2)
+            return unknown("expected only on or off");
+        const std::string& v = words[1];
+        if (v == "on" || v == "true" || v == "1")
+            cmd.value = true;
+        else if (v == "off" || v == "false" || v == "0")
+            cmd.value = false;
+        else
+            return unknown("expected on or off");
+        cmd.kind = e.kind;
+        cmd.hasValue = true;
+        return cmd;
+    }
+    return unknown("unknown command");
+}
+
+struct ParsedFile
+{
+    std::vector<Command> commands; // non-empty lines only, in order
+    bool truncatedBytes = false;   // the input was longer than maxBytes: the rest (and a partial last line) was ignored
+    bool truncatedLines = false;   // more than maxLines lines: the rest was ignored
+    size_t lines = 0;              // lines examined
+};
+
+inline ParsedFile ParseFile(std::string_view text, size_t maxBytes = kMaxCommandBytes, size_t maxLines = kMaxCommandLines)
+{
+    ParsedFile out;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF && static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF)
+        text.remove_prefix(3); // UTF-8 byte order mark that Windows editors may add
+    if (text.size() > maxBytes)
+    {
+        out.truncatedBytes = true;
+        const bool endsOnLine = text[maxBytes] == '\n'; // the cut is exactly at the end of a line
+        text = text.substr(0, maxBytes);
+        if (!endsOnLine)
+        {
+            const size_t lastNewline = text.rfind('\n');
+            text = lastNewline == std::string_view::npos ? std::string_view() : text.substr(0, lastNewline + 1); // no partial command
+        }
+    }
+    size_t pos = 0;
+    while (pos < text.size())
+    {
+        if (out.lines >= maxLines)
+        {
+            out.truncatedLines = true;
+            break;
+        }
+        size_t end = text.find('\n', pos);
+        if (end == std::string_view::npos)
+            end = text.size();
+        ++out.lines;
+        Command c = ParseLine(text.substr(pos, end - pos));
+        if (c.kind != CommandKind::Empty)
+            out.commands.push_back(std::move(c));
+        pos = end + 1;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PNG writer: 8-bit RGB or grayscale, zlib "stored" blocks (no compression), one IDAT chunk
+// ---------------------------------------------------------------------------------------------------------------------
+
+inline constexpr uint32_t kMaxPngDimension = 16384;
+
+inline uint32_t Adler32(const void* data, size_t size, uint32_t adler = 1)
+{
+    uint32_t a = adler & 0xffff, b = adler >> 16;
+    const auto* p = static_cast<const unsigned char*>(data);
+    while (size > 0)
+    {
+        const size_t n = std::min<size_t>(size, 5552); // largest block that cannot overflow 32 bits before the modulo
+        for (size_t i = 0; i < n; ++i)
+        {
+            a += p[i];
+            b += a;
+        }
+        a %= 65521;
+        b %= 65521;
+        p += n;
+        size -= n;
+    }
+    return (b << 16) | a;
+}
+
+// Exact size in bytes of EncodePng's output; 0 when the arguments are not valid.
+inline uint64_t PngSize(uint32_t width, uint32_t height, uint32_t channels)
+{
+    if (width == 0 || height == 0 || width > kMaxPngDimension || height > kMaxPngDimension || (channels != 1 && channels != 3))
+        return 0;
+    const uint64_t raw = static_cast<uint64_t>(height) * (1 + static_cast<uint64_t>(width) * channels); // a filter byte per row
+    const uint64_t blocks = (raw + 65534) / 65535;
+    const uint64_t zlib = 2 + blocks * 5 + raw + 4;
+    const uint64_t srgb = channels == 3 ? 12 + 1 : 0;
+    return 8 + (12 + 13) + srgb + (12 + zlib) + 12;
+}
+
+namespace detail
+{
+inline void Put32(std::vector<uint8_t>& v, uint32_t x)
+{
+    v.push_back(static_cast<uint8_t>(x >> 24));
+    v.push_back(static_cast<uint8_t>(x >> 16));
+    v.push_back(static_cast<uint8_t>(x >> 8));
+    v.push_back(static_cast<uint8_t>(x));
+}
+
+inline void PutTag(std::vector<uint8_t>& v, const char (&tag)[5]) { v.insert(v.end(), tag, tag + 4); }
+
+// Closes the chunk whose length field starts at `lengthAt`: fills in the length and appends the CRC of type + data.
+inline void CloseChunk(std::vector<uint8_t>& v, size_t lengthAt)
+{
+    const size_t dataEnd = v.size();
+    const uint32_t length = static_cast<uint32_t>(dataEnd - (lengthAt + 8));
+    v[lengthAt] = static_cast<uint8_t>(length >> 24);
+    v[lengthAt + 1] = static_cast<uint8_t>(length >> 16);
+    v[lengthAt + 2] = static_cast<uint8_t>(length >> 8);
+    v[lengthAt + 3] = static_cast<uint8_t>(length);
+    Put32(v, ext::core::Crc32(v.data() + lengthAt + 4, dataEnd - (lengthAt + 4)));
+}
+} // namespace detail
+
+// `pixels` is row-major, tightly packed, width * height * channels bytes (R,G,B per pixel for channels == 3).
+// Colour images (3 channels) carry an sRGB chunk. Appends nothing and returns false for invalid arguments.
+inline bool EncodePng(uint32_t width, uint32_t height, uint32_t channels, const uint8_t* pixels, std::vector<uint8_t>& out)
+{
+    const uint64_t total = PngSize(width, height, channels);
+    if (total == 0 || !pixels)
+        return false;
+    const size_t rowBytes = static_cast<size_t>(width) * channels;
+    const uint64_t raw = static_cast<uint64_t>(height) * (1 + rowBytes);
+
+    const size_t base = out.size();
+    out.reserve(base + static_cast<size_t>(total));
+    static constexpr uint8_t signature[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    out.insert(out.end(), signature, signature + 8);
+
+    size_t at = out.size();
+    detail::Put32(out, 0);
+    detail::PutTag(out, "IHDR");
+    detail::Put32(out, width);
+    detail::Put32(out, height);
+    out.push_back(8);                      // bit depth
+    out.push_back(channels == 3 ? 2 : 0);  // colour type: truecolour or grayscale
+    out.push_back(0);                      // compression
+    out.push_back(0);                      // filter method
+    out.push_back(0);                      // no interlace
+    detail::CloseChunk(out, at);
+
+    if (channels == 3)
+    {
+        at = out.size();
+        detail::Put32(out, 0);
+        detail::PutTag(out, "sRGB");
+        out.push_back(0); // perceptual rendering intent
+        detail::CloseChunk(out, at);
+    }
+
+    at = out.size();
+    detail::Put32(out, 0);
+    detail::PutTag(out, "IDAT");
+    out.push_back(0x78); // zlib header: deflate, 32 KiB window, no dictionary, fastest
+    out.push_back(0x01);
+
+    uint32_t adler = 1;
+    uint64_t position = 0; // in the raw stream (a zero filter byte, then the row, for each row)
+    std::vector<uint8_t> block;
+    while (position < raw)
+    {
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(65535, raw - position));
+        block.resize(n);
+        size_t filled = 0;
+        while (filled < n)
+        {
+            const uint64_t at2 = position + filled;
+            const uint64_t row = at2 / (1 + rowBytes);
+            const size_t col = static_cast<size_t>(at2 % (1 + rowBytes));
+            if (col == 0)
+            {
+                block[filled++] = 0; // filter type "none"
+                continue;
+            }
+            const size_t take = std::min(n - filled, rowBytes - (col - 1));
+            std::memcpy(block.data() + filled, pixels + row * rowBytes + (col - 1), take);
+            filled += take;
+        }
+        const bool last = position + n == raw;
+        out.push_back(last ? 1 : 0); // BFINAL, BTYPE = stored
+        out.push_back(static_cast<uint8_t>(n & 0xff));
+        out.push_back(static_cast<uint8_t>(n >> 8));
+        out.push_back(static_cast<uint8_t>(~n & 0xff));
+        out.push_back(static_cast<uint8_t>((~n >> 8) & 0xff));
+        out.insert(out.end(), block.begin(), block.end());
+        adler = Adler32(block.data(), n, adler);
+        position += n;
+    }
+    detail::Put32(out, adler);
+    detail::CloseChunk(out, at);
+
+    at = out.size();
+    detail::Put32(out, 0);
+    detail::PutTag(out, "IEND");
+    detail::CloseChunk(out, at);
+    return out.size() - base == total;
+}
+} // namespace ext::ffxiv::chara::probe

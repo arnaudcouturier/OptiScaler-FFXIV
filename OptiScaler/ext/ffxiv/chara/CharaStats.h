@@ -37,6 +37,21 @@ struct Stats
     std::atomic<uint64_t> aaProcessed { 0 };     // draws that got the filtered image
     std::atomic<uint64_t> aaSkipped { 0 };       // matched but left native (unsupported format/size, resource failure)
     std::atomic<uint64_t> deferredSeen { 0 };    // equipment display shader drawn on a deferred context (left native)
+
+    // Debug aids
+    std::atomic<uint64_t> tintApplied { 0 };     // processed preview images that were made with the debug tint (PreviewDebugTint)
+    std::atomic<uint64_t> floodSwaps { 0 };      // draws that were given the solid magenta image (PreviewDebugFlood)
+
+    // Preview probe (PreviewProbe). Written by the draw thread, read by the menu.
+    std::atomic<uint64_t> probeScanned { 0 };       // draws whose first eight pixel-shader resources were compared with the preview textures
+    std::atomic<uint64_t> probeSamplerDraws { 0 };  // ... of which sampled a preview or preview-derived texture
+    std::atomic<uint64_t> probeCopies { 0 };        // copies / resolves whose source was a preview or preview-derived texture
+    std::atomic<uint64_t> probeCopiesRefused { 0 }; // ... of which could not be followed (chain too long, destination is a preview output, tracking off)
+    std::atomic<uint64_t> probeDerivedAdded { 0 };  // textures newly added to the derived set (copy destinations and render targets of sampler draws)
+    std::atomic<uint32_t> probeDerivedLive { 0 };   // derived textures alive now
+    std::atomic<uint32_t> probeCopyLines { 0 };     // copy cases written to the log
+    std::atomic<uint32_t> probeSamplerLines { 0 };  // sampler-draw cases written to the log
+    std::atomic<uint32_t> probeSwapLines { 0 };     // consumer swap traces written to the log
 };
 
 inline Stats g_stats;

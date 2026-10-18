@@ -219,6 +219,103 @@ UiBoundaryProvider provider;
 
 ext::hudless::IHudlessSource& Provider() { return provider; }
 
+bool BackbufferIdentity(uintptr_t* texture, uint32_t* width, uint32_t* height, uint32_t* format)
+{
+    try
+    {
+        const void* buffer = nullptr;
+        dfmt::RtShape shape {};
+        if (!Backbuffer(&buffer, &shape) || buffer == nullptr)
+            return false;
+        if (texture)
+            *texture = reinterpret_cast<uintptr_t>(buffer);
+        if (width)
+            *width = shape.width;
+        if (height)
+            *height = shape.height;
+        if (format)
+            *format = shape.format;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+namespace
+{
+std::string PointerText(const void* pointer)
+{
+    char text[32];
+    std::snprintf(text, sizeof(text), "%p", pointer);
+    return text;
+}
+} // namespace
+
+std::vector<std::pair<std::string, std::string>> BridgeFacts()
+{
+    std::vector<std::pair<std::string, std::string>> facts;
+    try
+    {
+        const auto add = [&facts](const char* key, std::string value) { facts.emplace_back(key, std::move(value)); };
+
+        auto& st = State::Instance();
+        add("bridge.swapchain.current", PointerText(st.currentSwapchain));
+        add("bridge.swapchain.real", PointerText(st.currentRealSwapchain));
+        add("bridge.swapchain.wrapped", PointerText(st.currentWrappedSwapchain));
+        add("bridge.swapchain.fg", PointerText(st.currentFGSwapchain));
+        add("bridge.swapchain.fgExists", st.FGSwapchainExists() ? "yes" : "no");
+        add("bridge.swapchain.desc",
+            std::format("{}x{} format {} buffers {} windowed {} swapEffect {}", st.currentSwapchainDesc.BufferDesc.Width,
+                        st.currentSwapchainDesc.BufferDesc.Height, static_cast<int>(st.currentSwapchainDesc.BufferDesc.Format),
+                        st.currentSwapchainDesc.BufferCount, st.currentSwapchainDesc.Windowed ? "yes" : "no",
+                        static_cast<int>(st.currentSwapchainDesc.SwapEffect)));
+        add("bridge.d3d11Device", PointerText(st.currentD3D11Device));
+        add("bridge.d3d12Device", PointerText(st.currentD3D12Device));
+
+        uintptr_t texture = 0;
+        uint32_t width = 0, height = 0, format = 0;
+        if (BackbufferIdentity(&texture, &width, &height, &format))
+            add("bridge.backbuffer", std::format("{:#x} {}x{} format {}", texture, width, height, format));
+        else
+            add("bridge.backbuffer", "unknown");
+
+        std::string modules;
+        const struct
+        {
+            const wchar_t* wide;
+            const char* narrow;
+        } names[] = { { L"ReShade64.dll", "ReShade64.dll" }, { L"ReShade.dll", "ReShade.dll" }, { L"dxgi.dll", "dxgi.dll" },
+                      { L"d3d11.dll", "d3d11.dll" } };
+        for (const auto& n : names)
+            if (GetModuleHandleW(n.wide) != nullptr)
+            {
+                if (!modules.empty())
+                    modules += ", ";
+                modules += n.narrow;
+            }
+        add("bridge.modules", modules.empty() ? "none of ReShade64.dll, ReShade.dll, dxgi.dll, d3d11.dll is loaded" : modules + " loaded");
+
+        const auto addon = ext::reshade::Status();
+        add("reshade.addon.attempted", addon.attempted ? "yes" : "no");
+        add("reshade.addon.registered", addon.registered ? "yes" : "no");
+        add("reshade.addon.reason", std::to_string(static_cast<int>(addon.reason)));
+        const auto presets = ext::reshade::Stats();
+        add("reshade.presets.calls", std::to_string(presets.calls));
+        add("reshade.presets.inert", presets.inert ? "yes" : "no");
+        add("reshade.presets.lastDetail", presets.lastDetail);
+
+        add("hdr.ffxivHdr", ext::Cfg().hdr.ffxivHdr.value_or_default() ? "on" : "off");
+        add("hdr.mode", std::to_string(ext::Cfg().hdr.mode.value_or_default()));
+        add("hdr.sceneHdrRequested", ext::hdr::FfxivSceneHdr::Requested() ? "yes" : "no");
+    }
+    catch (...)
+    {
+    }
+    return facts;
+}
+
 void OnDraw(ID3D11DeviceContext* context, bool latched)
 {
     try

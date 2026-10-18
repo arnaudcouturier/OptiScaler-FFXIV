@@ -5,6 +5,7 @@
 #include "ext/core/MenuWidgets.h"
 #include "ext/ffxiv/chara/CharaDiag.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
+#include "ext/ffxiv/chara/CharaProbe.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/game/Game.h"
@@ -55,6 +56,51 @@ void DrawCharaCard(ext::menu::Ctx&)
         cfg.previewDebugTint = tint;
     ext::menu::Tooltip("Debug aid, leave off in normal use. Mixes magenta into the preview image that the spatial AA or the DLSS "
                        "pass produced, so you can see in the game whether the processed image is the one on screen.");
+    ImGui::TextDisabled("Preview debug tint: %s, applied %llu times", tint ? "on" : "off",
+                        (unsigned long long) g_stats.tintApplied.load(std::memory_order_relaxed));
+
+    bool flood = cfg.previewDebugFlood.value_or_default();
+    if (ImGui::Checkbox("Flood the preview with solid magenta (debug)", &flood))
+        cfg.previewDebugFlood = flood;
+    ext::menu::Tooltip("Debug aid, leave off in normal use. Every draw that samples the preview image, or a copy of it that was followed, "
+                       "gets a solid magenta image instead. If nothing on screen turns magenta while this is on, the draws that were "
+                       "changed do not put the preview on screen. It works without the spatial AA, the DLSS path and the probe. A draw "
+                       "that reads the image with texel loads instead of sampling it shows black with a magenta corner. It checks every "
+                       "draw while it is on.");
+    ImGui::TextDisabled("Preview flood: %s, %llu draws given the magenta image", flood ? "on" : "off",
+                        (unsigned long long) g_stats.floodSwaps.load(std::memory_order_relaxed));
+
+    bool probeOn = cfg.previewProbe.value_or_default();
+    if (ImGui::Checkbox("Preview probe (debug)", &probeOn))
+        cfg.previewProbe = probeOn;
+    ext::menu::Tooltip("Debug aid, leave off in normal use. Follows the preview image through copies and the draws that sample it, "
+                       "and writes what it finds to the log (lines that start with \"CharaView probe:\"). It adds a small cost to every "
+                       "draw while the preview is open.");
+    if (probeOn)
+    {
+        ImGui::TextDisabled("Probe: %u textures derived from the preview, %u copy cases, %u sampler-draw cases, %u swap traces",
+                            g_stats.probeDerivedLive.load(std::memory_order_relaxed), g_stats.probeCopyLines.load(std::memory_order_relaxed),
+                            g_stats.probeSamplerLines.load(std::memory_order_relaxed), g_stats.probeSwapLines.load(std::memory_order_relaxed));
+        ImGui::TextDisabled("Probe: %llu copies of the preview followed, %llu draws sampled the preview or a copy",
+                            (unsigned long long) g_stats.probeCopies.load(std::memory_order_relaxed),
+                            (unsigned long long) g_stats.probeSamplerDraws.load(std::memory_order_relaxed));
+
+        const probe::DumpStatus dumpStatus = probe::GetDumpStatus();
+        ImGui::BeginDisabled(dumpStatus.busy);
+        if (ImGui::Button("Save preview images"))
+            probe::RequestDump();
+        ImGui::EndDisabled();
+        ext::menu::Tooltip("Saves the native preview image, the spatial AA result and the DLSS 2x result (whichever exist) as PNG files, "
+                           "each with its alpha channel as a separate grayscale PNG, plus state.txt, into a new time-stamped folder under "
+                           "OptiScaler\\PreviewDebug next to the game's dxgi.dll. It never waits for the GPU. At most 40 files and 300 MiB "
+                           "per session.");
+        if (dumpStatus.busy)
+            ImGui::TextDisabled("Preview images: saving...");
+        ImGui::TextDisabled("Preview images: %u files written in %u dumps, %u refused by the budget%s%s", dumpStatus.files, dumpStatus.dumps,
+                            dumpStatus.refusals, dumpStatus.lastFolder.empty() ? "" : ", last folder ", dumpStatus.lastFolder.c_str());
+        if (!dumpStatus.lastMessage.empty())
+            ImGui::TextDisabled("Last request: %s", dumpStatus.lastMessage.c_str());
+    }
 
     // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
     if (const char* reason = table::InertReason(); reason != nullptr && reason[0] != '\0')

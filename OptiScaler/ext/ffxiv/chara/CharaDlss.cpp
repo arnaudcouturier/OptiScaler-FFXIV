@@ -8,10 +8,12 @@
 #include "ext/ffxiv/chara/CharaDlssGate.h"
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
+#include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
+#include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
@@ -151,6 +153,7 @@ struct PassData
 SlotTable g_slots;
 std::array<SlotGpu, kMaxSlots> g_gpu;
 PassData g_pass;
+int g_lastEvaluatedSlot = kNoSlot; // the slot of the most recent successful evaluation (the preview image dump reads its composed image)
 ComPtr<ID3D11Device> g_device;
 ID3D11DeviceContext* g_context = nullptr; // the immediate context (valid until Detach)
 guides::Passes g_passes;
@@ -668,18 +671,21 @@ void RunSlot(int index, const DrawView& view)
         return;
     }
 
-    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale,
-                     ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default()))
+    const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
+    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale, tinted))
     {
         FailSlot(index, "the alpha pass failed");
         return;
     }
+    if (tinted)
+        ++g_stats.tintApplied;
 
     {
         ReplayScope own; // the query End goes through the hooked context
         context->End(g.query.Get());
     }
     g_slots.MarkEvaluated(index, view.now, g_pass.counter);
+    g_lastEvaluatedSlot = index;
     const uint64_t n = g_evaluations.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n % kEvaluationLogEvery == 1 || n <= 3)
         LOG_INFO("CharaView DLSS: evaluations {} (slot {}, {}x{} -> {}x{})", n, index, w, h, w * ngx::kOutputScale,
@@ -801,6 +807,8 @@ bool Consume(const DrawView& view, DrawCall draw)
 
     ID3D11ShaderResourceView* replaced[kSrvSlots] {};
     bool any = false;
+    bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
+    const bool floodOn = flood::On();
     for (UINT i = 0; i < kSrvSlots; ++i)
     {
         replaced[i] = original[i];
@@ -841,6 +849,16 @@ bool Consume(const DrawView& view, DrawCall draw)
         g_slots.Touch(index, view.now);
         const SlotState& s = g_slots.Slot(index);
         const SlotGpu& g = g_gpu[static_cast<size_t>(index)];
+        if (floodOn && flood::CanReplace(sd))
+        {
+            // The flood test bypasses the "evaluated and not failed" condition: any image that has a slot gets the magenta one.
+            if (ID3D11ShaderResourceView* magenta = flood::View(context, sd.Format))
+            {
+                replaced[i] = magenta;
+                flooded = true;
+                continue;
+            }
+        }
         if (s.everEvaluated && !s.failed && g.composed.srv != nullptr)
         {
             replaced[i] = g.composed.srv.Get();
@@ -849,16 +867,36 @@ bool Consume(const DrawView& view, DrawCall draw)
     }
 
     bool handled = false;
-    if (any)
+    if (any || flooded)
     {
-        ++g_stats.consumerSwaps;
-        if (g_lines.ShouldLog(kLineSwap, identify::BurstNumber()))
-            LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
-        if (diag::TraceEnabled())
-            diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
+        // A flooded draw is counted as a flood swap only: it did not get the composed image.
+        if (flooded)
+            ++g_stats.floodSwaps;
+        else
+        {
+            ++g_stats.consumerSwaps;
+            if (g_lines.ShouldLog(kLineSwap, identify::BurstNumber()))
+                LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
+            if (diag::TraceEnabled())
+                diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
+        }
+
+        // The probe traces the first slot that was replaced (the image can be bound in a slot other than t0).
+        UINT tracedSlot = 0;
+        for (UINT i = 0; i < kSrvSlots; ++i)
+        {
+            if (replaced[i] != original[i])
+            {
+                tracedSlot = i;
+                break;
+            }
+        }
+        probe::SwapTrace trace(context, flooded ? probe::SwapKind::Flood : probe::SwapKind::Dlss, tracedSlot, replaced[tracedSlot]);
         context->PSSetShaderResources(0, kSrvSlots, replaced);
+        trace.Applied();
         draw();
         context->PSSetShaderResources(0, kSrvSlots, original);
+        trace.Restored();
         handled = true;
     }
     for (auto* v : original)
@@ -1093,6 +1131,17 @@ Counters GetCounters()
     c.evaluations = g_evaluations.load(std::memory_order_relaxed);
     c.fallbacks = g_fallbacks.load(std::memory_order_relaxed);
     return c;
+}
+
+ID3D11Texture2D* ComposedTexture()
+{
+    const int index = g_lastEvaluatedSlot;
+    if (index < 0 || index >= static_cast<int>(kMaxSlots))
+        return nullptr;
+    const SlotState& s = g_slots.Slot(index);
+    if (!s.Used() || !s.everEvaluated || s.failed)
+        return nullptr;
+    return g_gpu[static_cast<size_t>(index)].composed.texture.Get();
 }
 
 const char* StatusNote()

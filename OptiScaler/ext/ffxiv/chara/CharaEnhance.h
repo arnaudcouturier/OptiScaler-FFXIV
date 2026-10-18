@@ -12,6 +12,10 @@ namespace ext::ffxiv::chara::enhance
 // supported, or the filter pass could not run.
 bool Around(const DrawView& view, DrawCall draw);
 
+// The texture that holds the result of the last spatial AA pass (1x or 2x), or null when the pass has produced nothing. Borrowed:
+// valid until the next pass or Detach, draw thread only. Used by the preview image dump.
+ID3D11Texture2D* OutputTexture();
+
 // Releases the GPU objects.
 void Detach();
 } // namespace ext::ffxiv::chara::enhance
