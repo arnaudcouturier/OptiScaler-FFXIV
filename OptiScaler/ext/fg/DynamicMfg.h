@@ -91,6 +91,7 @@ class DynamicMfg
         probeRunning_ = false;
         started_ = true;
         lastChange_ = now;
+        settle_ = true; // the next interval still holds the transition (a long frame from the toggle path or a re-creation)
     }
 
     const Info& Last() const { return last_; }
@@ -135,6 +136,11 @@ class DynamicMfg
             return current;
         }
 
+        if (settle_)
+        {
+            settle_ = false;
+            return current;
+        }
         double sample = ms;
         if (avg_ > 0.0)
             sample = std::min(sample, kSpikeClip * avg_);
@@ -269,6 +275,7 @@ class DynamicMfg
         cand_ = 0;
         avg_ = 0.0;
         probeRunning_ = false;
+        settle_ = true; // the interval right after a switch can hold a re-creation stall: it must not seed the average
     }
 
     void RecordSwitch(uint64_t now)
@@ -296,6 +303,7 @@ class DynamicMfg
     uint64_t holdMs_ = kDefaultHoldMs;
     double avg_ = 0.0;
     bool started_ = false;
+    bool settle_ = false;
     uint64_t lastChange_ = 0;
     int cand_ = 0;
     uint64_t candSince_ = 0;

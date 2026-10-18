@@ -320,6 +320,29 @@ void RestartKeepsWhatWasLearned()
     CHECK(s.sel.HoldMs() == 12000); // the hold setting survives a reset
 }
 
+void FirstIntervalAfterASwitchIsDropped()
+{
+    // The interval right after a switch (or a restart) can hold a re-creation stall; it must not seed the average.
+    DynamicMfg d;
+    d.Select(40, 138, 1000, 2, 4, false); // starts the window
+    d.Restart(2000);
+    d.Select(190, 138, 2010, 2, 4, false);
+    CHECK(d.AverageMs() == 0.0);
+    d.Select(40, 138, 2050, 2, 4, false);
+    CHECK(d.AverageMs() == 40.0);
+
+    Sim s;
+    s.target = 138;
+    s.Step(40);
+    while (s.log.empty())
+        s.Step(40.0);
+    CHECK(s.sel.AverageMs() == 0.0); // reset by the switch
+    s.Step(190.0);                    // the stall of a re-creation
+    CHECK(s.sel.AverageMs() == 0.0);
+    s.Step(40.0);
+    CHECK(s.sel.AverageMs() == 40.0);
+}
+
 void ExternalChangeVoidsATrial()
 {
     // A probe is running and somebody else (the user's slider) changes the factor: no verdict, no revert.
@@ -352,6 +375,7 @@ int main()
     RegretGuardRevertsAndRefuses();
     RestartKeepsWhatWasLearned();
     ExternalChangeVoidsATrial();
+    FirstIntervalAfterASwitchIsDropped();
     if (g_failures)
     {
         std::printf("dynamic_mfg_unit: %d check(s) failed\n", g_failures);

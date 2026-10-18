@@ -20,6 +20,9 @@ void OnActivated(IFGFeature* fg)
     // DLSSG_Common::Activate, after the feature is marked active: DLSS-G presentation telemetry restarts (the Vulkan
     // output has none).
     else if (dynamic_cast<DLSSG_Dx12*>(fg) != nullptr)
+    {
         ResetDlssgPresentStats();
+        ResetAutoMfg(); // dynamic MFG on RTX 40: a new observation window (the kill-switch memory stays)
+    }
 }
 } // namespace ext::fg

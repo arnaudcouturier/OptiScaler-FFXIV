@@ -124,7 +124,8 @@ namespace ext::fg
 {
 void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options)
 {
-    ApplyDlssgGuard(fg, options, false);
+    const bool autoControls = AutoMfgTickFrame(fg, options); // dynamic MFG on RTX 40, may change the count of this frame
+    ApplyDlssgGuard(fg, options, autoControls);
 
     if (AsDx12(fg) != nullptr)
         AdjustUiRecomposition(options);
@@ -151,6 +152,7 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
     const auto sampleTime = GetTickCount64();
     const auto mode = static_cast<int>(options.mode);
     const auto count = runtimeState.numFramesActuallyPresented;
+    AutoMfgObserve(queryResult == sl::Result::eOk, static_cast<unsigned>(runtimeState.status), count);
     if (dx12Ext.sampleMode == mode && options.mode == sl::DLSSGMode::eDynamic &&
         dlssgSetOptionsResult == sl::Result::eOk && queryResult == sl::Result::eOk &&
         static_cast<unsigned>(runtimeState.status) == 0 && count >= 1 &&
