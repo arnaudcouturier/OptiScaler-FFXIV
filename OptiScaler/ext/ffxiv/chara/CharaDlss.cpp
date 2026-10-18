@@ -1517,6 +1517,14 @@ ID3D11Texture2D* ComposedTexture()
     return g_gpu[static_cast<size_t>(index)].composed.texture.Get();
 }
 
+bool ComposedFromNr()
+{
+    const int index = g_lastEvaluatedSlot;
+    if (ComposedTexture() == nullptr)
+        return false;
+    return g_gpu[static_cast<size_t>(index)].composedFromNr;
+}
+
 const char* StatusNote()
 {
     // The gate is only refreshed while the dispatcher asks: with the feature off there is nothing to say.

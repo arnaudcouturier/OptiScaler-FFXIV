@@ -29,9 +29,10 @@ void DrawNrSection(CharaConfig& cfg)
     if (ImGui::Checkbox("Preview Neural Rendering (NR, experimental)", &nrOn))
         cfg.previewNr = nrOn;
     ext::menu::Tooltip("Runs the DLSS NR model on each open character preview window (new work). Needs an NVIDIA card, the DirectX 11 on 12 "
-                       "bridge, and nvngx_dlssnr.dll with nvngx.dll_dlssnr.dll. It works alone or together with Preview DLSS (the DLSS "
-                       "result is shown when both produced one). The spatial AA still takes the equipment preview while NR has no result "
-                       "for a draw. Every open window costs "
+                       "bridge, and nvngx_dlssnr.dll with nvngx.dll_dlssnr.dll. Alone it runs on the native preview image. Together with "
+                       "Preview DLSS it runs on the DLSS result (twice the size, with the preview's depth and motion) and the preview's own "
+                       "alpha is put back afterwards; when NR cannot run for a render the plain DLSS image is shown. The spatial AA still "
+                       "takes the equipment preview while NR has no result for a draw. Every open window costs "
                        "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
                        "native preview stays.");
 
@@ -55,6 +56,23 @@ void DrawNrSection(CharaConfig& cfg)
     ImGui::TextDisabled("UI draws given an NR result: %llu", (unsigned long long) g_stats.nrSwaps.load(std::memory_order_relaxed));
     if (st.lastGpuMs > 0.0 || st.lastCpuMs > 0.0)
         ImGui::TextDisabled("Last NR run: GPU %.2f ms, CPU %.2f ms (recording and submitting)", st.lastGpuMs, st.lastCpuMs);
+    // The production path (NR on the DLSS result): its own numbers, shown while both options are on or after it ran.
+    const bool dlssOn = cfg.previewDlss.value_or_default();
+    if ((nrOn && dlssOn) || st.productionRuns != 0 || st.productionFallbacks != 0)
+    {
+        if (st.productionRuns == 0 && st.productionFallbacks == 0)
+            ImGui::TextDisabled("NR on the DLSS result: waiting for a preview that DLSS evaluated");
+        else
+        {
+            ImGui::TextDisabled("NR on the DLSS result: %llu runs, %llu renders kept the plain DLSS image; %llu DLSS images used the NR output",
+                                (unsigned long long) st.productionRuns, (unsigned long long) st.productionFallbacks,
+                                (unsigned long long) g_stats.nrProductionRuns.load(std::memory_order_relaxed));
+            ImGui::TextDisabled("UI draws given a DLSS image made from NR: %llu",
+                                (unsigned long long) g_stats.nrProductionSwaps.load(std::memory_order_relaxed));
+            if (st.productionGpuMs > 0.0 || st.productionCpuMs > 0.0)
+                ImGui::TextDisabled("Last NR run on the DLSS result: GPU %.2f ms, CPU %.2f ms", st.productionGpuMs, st.productionCpuMs);
+        }
+    }
     if (st.videoMemoryMb != 0)
         ImGui::TextDisabled("Video memory added by the NR models: about %llu MB", (unsigned long long) st.videoMemoryMb);
     else if (st.streams != 0)

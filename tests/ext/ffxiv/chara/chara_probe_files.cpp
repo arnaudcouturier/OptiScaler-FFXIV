@@ -214,6 +214,22 @@ void TestPlan()
         CHECK(ap.stateText.find("image.aa: 3x2 B8G8R8A8_UNORM(87), saved as aa.png and alpha-aa.png\n") != std::string::npos);
     }
 
+    // the nr image says which kind of NR result it is (the picture alone does not)
+    {
+        std::vector<DumpImage> nrImages;
+        DumpImage bringUp = MakeImage("nr", 10, "R16G16B16A16_FLOAT(10)", PaddedImage(3, 2, 3));
+        bringUp.age = NrImageNote(1);
+        nrImages.push_back(bringUp);
+        DumpImage production = MakeImage("nr-production", 10, "R16G16B16A16_FLOAT(10)", PaddedImage(3, 2, 3));
+        production.age = NrImageNote(2);
+        nrImages.push_back(production);
+        const DumpPlan np = MakePlan(nrImages, "");
+        CHECK(np.stateText.find("image.nr: 3x2 R16G16B16A16_FLOAT(10), saved as nr.png and alpha-nr.png; kind: bring-up result") != std::string::npos);
+        CHECK(np.stateText.find("; kind: production result (the raw NR output of the super-resolution image, twice the render size, before the alpha pass") != std::string::npos);
+        CHECK(np.stateText.find("alpha-nr.png is not the recomposed preview alpha") != std::string::npos);
+        CHECK(NrImageNote(0).empty() && NrImageNote(7).empty());
+        CHECK(NrImageNote(1) != NrImageNote(2));
+    }
     const DumpPlan none = MakePlan({}, "");
     CHECK(none.files.size() == 1 && none.files[0].fileName == "state.txt" && none.bytes == 0);
 }

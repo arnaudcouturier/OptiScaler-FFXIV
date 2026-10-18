@@ -257,6 +257,23 @@ inline std::string ImageAgeText(uint64_t now, uint64_t lastRendered, uint64_t la
     return text;
 }
 
+// What the "nr" image of a dump is: preview NR keeps two kinds of results and the picture on its own does not say which one it is.
+//   bring-up   : NR on the native preview image, native size, the native alpha kept (what a UI draw samples instead of the native image)
+//   production : the raw NR output of the super-resolution image, twice the render size, before the alpha pass (the alpha channel is not the
+//                preview's recomposed alpha, so alpha-nr.png says nothing about the silhouette; the composed picture is dlss.png)
+// `kind`: 0 none (the missing text explains), 1 bring-up, 2 production (the values of nr::ResultKind).
+inline std::string NrImageNote(int kind)
+{
+    switch (kind)
+    {
+    case 1: return "kind: bring-up result (preview NR on the native image, native size, native alpha kept)";
+    case 2:
+        return "kind: production result (the raw NR output of the super-resolution image, twice the render size, before the alpha pass; "
+               "alpha-nr.png is not the recomposed preview alpha, dlss.png is the composed picture)";
+    default: return "";
+    }
+}
+
 // One image of a dump: the pixels as read back (tightly packed rows) or the reason there are none.
 struct DumpImage
 {

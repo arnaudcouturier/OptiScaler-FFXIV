@@ -599,7 +599,11 @@ std::string BuildState(uint64_t now)
     t.Add("dlss.status", note != nullptr && note[0] != '\0' ? note : "no note");
     t.AddBool("dlss.composedImageAvailable", dlss::ComposedTexture() != nullptr);
     t.AddBool("aa.outputImageAvailable", enhance::OutputTexture() != nullptr);
-    t.AddBool("nr.resultImageAvailable", nr::ResultTexture(now, false) != nullptr);
+    nr::ResultKind nrKind = nr::ResultKind::None;
+    t.AddBool("nr.resultImageAvailable", nr::ResultTexture(now, false, &nrKind) != nullptr);
+    t.Add("nr.resultKind", nrKind == nr::ResultKind::BringUp      ? "bring-up (NR on the native image, native size)"
+                           : nrKind == nr::ResultKind::Production ? "production (NR on the super-resolution image, twice the render size, before the alpha pass)"
+                                                                  : "none");
     {
         const nr::Status ns = nr::GetStatus();
         t.Add("nr.state", ns.availability == nr::Availability::Available ? "available" : ns.reason[0] != 0 ? ns.reason : "off");
@@ -611,6 +615,11 @@ std::string BuildState(uint64_t now)
         t.Add("nr.videoMemoryMb", ns.videoMemoryMb);
         t.AddBool("nr.late", ns.late);
         t.Add("nr.uiDrawsGivenResult", g_stats.nrSwaps.load(std::memory_order_relaxed));
+        t.Add("nr.production.runs", ns.productionRuns);
+        t.Add("nr.production.fallbacks", ns.productionFallbacks);
+        t.Add("nr.production.lastGpuMicroseconds", static_cast<uint64_t>(ns.productionGpuMs * 1000.0));
+        t.Add("nr.production.imagesUsedByTheAlphaPass", g_stats.nrProductionRuns.load(std::memory_order_relaxed));
+        t.Add("nr.production.uiDrawsGivenComposedImage", g_stats.nrProductionSwaps.load(std::memory_order_relaxed));
     }
 
     // The table: pointers only, never dereferenced. The format is known for the entries a draw was seen sampling.
@@ -743,11 +752,19 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
         ++extras;
     }
     sources.push_back({ "aa", enhance::OutputTexture(), "the spatial AA has not produced an image" });
-    sources.push_back({ "dlss", dlss::ComposedTexture(), "the DLSS path has no evaluated preview image" });
+    {
+        dump::Source dlssSource { "dlss", dlss::ComposedTexture(), "the DLSS path has no evaluated preview image" };
+        if (dlss::ComposedFromNr())
+            dlssSource.age = "kind: composed from the production NR output (preview NR ran on the super-resolution image)";
+        sources.push_back(std::move(dlssSource));
+    }
     // The NR result is shared with the D3D12 queue: the wait (late variant) is queued on this context now, before the copy that Begin
     // issues, and the reference keeps the image alive until then.
-    const ComPtr<ID3D11Texture2D> nrResult = nr::ResultTexture(now, true);
-    sources.push_back({ "nr", nrResult.Get(), "preview NR has no current result" });
+    nr::ResultKind nrKind = nr::ResultKind::None;
+    const ComPtr<ID3D11Texture2D> nrResult = nr::ResultTexture(now, true, &nrKind);
+    dump::Source nrSource { "nr", nrResult.Get(), "preview NR has no current result" };
+    nrSource.age = NrImageNote(static_cast<int>(nrKind)); // bring-up or production: the picture does not say which
+    sources.push_back(std::move(nrSource));
 
     std::string why;
     if (!dump::Begin(context, sources, BuildState(now), now, why))

@@ -95,6 +95,9 @@ Counters GetCounters();
 // not live any more (released, failed, not evaluated). Borrowed: valid until the slot is released; draw thread only. Used by the
 // preview image dump.
 ID3D11Texture2D* ComposedTexture();
+// True when that composed image was made from the production NR output (NR on the super-resolution output) and not from the plain
+// super-resolution output. Same lifetime rules as ComposedTexture; false when there is no such image.
+bool ComposedFromNr();
 
 // One line for the menu while the DLSS path is not fully available (empty when there is nothing to say).
 const char* StatusNote();
