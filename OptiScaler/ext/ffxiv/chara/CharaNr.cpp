@@ -107,7 +107,7 @@ struct Module
     FenceCounter done;                   // values of the done fence (the completion counter: allocators, releases, creation)
     bool doneBroken = false;             // a done signal failed after its list ran: the next drain repairs the fence first
     bool tableFullLogged = false;        // the one line about a full stream table
-    bool releasePending = false;         // a device change found the GPU busy: the old objects are kept and released in Maintain
+    std::atomic<bool> releasePending { false }; // the old objects are kept and released in Maintain: a device change found the GPU busy, or a teardown threw (set from the handler of a teardown entry, so atomic)
 
     DlssNr::PreviewBackend backend;
     std::unique_ptr<DlssNr_Dx12> recorder;
@@ -1288,6 +1288,10 @@ static Status GetStatusImpl()
     return s;
 }
 
+// An exception inside a teardown entry leaves objects behind: mark the release pending (a plain store, it cannot throw), so Maintain retries it
+// and EnsureInit builds nothing new on top of them. The latch log line is written once, by the entry's handler.
+static void MarkReleasePending() noexcept { M().releasePending = true; }
+
 // ---- The public entry points: the boundary towards the game --------------------------------------------------------------------
 // Each one runs its body through Guarded (CharaNrRules.h): an exception (an out-of-memory, a failing library call, a path that cannot be
 // converted) latches the module with one fixed log line and gives the answer "no NR" instead of leaving the game's Draw hook. The latch
@@ -1348,12 +1352,12 @@ ComPtr<ID3D11Texture2D> ResultTexture(uint64_t now, bool waitForResult, ResultKi
 
 void Maintain(uint64_t now)
 {
-    Guarded([&] { MaintainImpl(now); }, [] { Latch("an unexpected exception in the maintenance"); });
+    GuardedTeardown([&] { MaintainImpl(now); }, MarkReleasePending, [] { Latch("an unexpected exception in the maintenance"); });
 }
 
 void OnBridgeShutdown()
 {
-    Guarded([&] { OnBridgeShutdownImpl(); }, [] { Latch("an unexpected exception at the bridge shutdown"); });
+    GuardedTeardown([&] { OnBridgeShutdownImpl(); }, MarkReleasePending, [] { Latch("an unexpected exception at the bridge shutdown"); });
 }
 
 void OnBridgeInit()
@@ -1363,7 +1367,7 @@ void OnBridgeInit()
 
 void Detach()
 {
-    Guarded([&] { DetachImpl(); }, [] { Latch("an unexpected exception while detaching"); });
+    GuardedTeardown([&] { DetachImpl(); }, MarkReleasePending, [] { Latch("an unexpected exception while detaching"); });
 }
 
 Status GetStatus()

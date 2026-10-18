@@ -665,4 +665,17 @@ template <class Body, class OnThrow> auto Guarded(Body&& body, OnThrow&& onThrow
         }
     }
 }
+
+// The boundary of an entry that tears objects down (Maintain, OnBridgeShutdown, Detach). An exception is stopped like in Guarded, and
+// before anything that can throw again the release is marked pending (`markPending` must be a non-throwing store): the retry in Maintain
+// then frees what the failed pass left, and nothing builds new objects meanwhile. `onThrow` latches the module (one log line, once).
+template <class Body, class MarkPending, class OnThrow> void GuardedTeardown(Body&& body, MarkPending&& markPending, OnThrow&& onThrow) noexcept
+{
+    Guarded(body,
+            [&]
+            {
+                markPending();
+                onThrow();
+            });
+}
 } // namespace ext::ffxiv::chara::nr

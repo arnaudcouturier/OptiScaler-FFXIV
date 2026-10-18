@@ -674,6 +674,37 @@ void TestDoneRepair()
     CHECK(!RepairDoneStep(done, broken, true, signal) && done.last == 4 && q.completed == 4);
 }
 
+
+// A teardown entry that throws marks the release pending first (before the latch line, which can throw itself), so the retry applies.
+void TestGuardedTeardown()
+{
+    std::vector<std::string> order;
+    bool pending = false;
+    const auto mark = [&]
+    {
+        pending = true;
+        order.push_back("pending");
+    };
+    const auto latch = [&] { order.push_back("latch"); };
+
+    GuardedTeardown([&] { order.push_back("body"); }, mark, latch); // a clean pass touches nothing
+    CHECK(!pending && order == std::vector<std::string> { "body" });
+
+    order.clear();
+    GuardedTeardown([]() { throw Boom {}; }, mark, latch); // the body throws: pending first, then the latch
+    CHECK((pending && order == std::vector<std::string> { "pending", "latch" }));
+
+    pending = false;
+    order.clear();
+    GuardedTeardown([]() { throw std::bad_alloc(); }, mark, [&] { order.push_back("latch"); throw Boom {}; }); // the latch line throws too
+    CHECK((pending && order == std::vector<std::string> { "pending", "latch" })); // pending was already set, and nothing leaves the call
+
+    // the same handler sequence for a body that throws every time (the retry path keeps working: the call never throws out)
+    for (int i = 0; i < 3; ++i)
+        GuardedTeardown([]() { throw Boom {}; }, mark, latch);
+    CHECK(pending);
+}
+
 } // namespace
 
 int main()
@@ -694,5 +725,6 @@ int main()
     TestCost();
     TestGuarded();
     TestDoneRepair();
+    TestGuardedTeardown();
     return TEST_RESULT("chara_nr_rules");
 }
