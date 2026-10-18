@@ -1214,29 +1214,37 @@ bool Around(const DrawView& view, DrawCall draw)
     case DrawKind::Finisher:
     {
         draw(); // the native image first
+        // The super-resolution step of this render. Its result wins at the consumer, so preview NR (below) is not run for a render
+        // that SR evaluated: its result would be thrown away.
+        bool srResultWins = false;
+        if (sr)
+        {
+            if (!view.finisherAccepted)
+            {
+                // The native image of this render was written but will not be upscaled: stop showing the older composed one.
+                if (view.rtvTexture != nullptr)
+                {
+                    const int rejected = g_slots.Find(reinterpret_cast<uintptr_t>(view.rtvTexture));
+                    if (rejected != kNoSlot)
+                        g_slots.ClearEvaluated(rejected);
+                }
+                if (g_pass.live)
+                    CountFallback();
+            }
+            else
+            {
+                Finish(view);
+                const int slot = view.rtvTexture != nullptr ? g_slots.Find(reinterpret_cast<uintptr_t>(view.rtvTexture)) : kNoSlot;
+                srResultWins = slot != kNoSlot && g_slots.EvaluatedInPass(slot, g_pass.counter);
+            }
+        }
         // Preview NR: bring-up entry. It needs only the native image, not the SR guides, so it does not wait for them and does not
-        // care whether the SR path is latched or failed.
-        // A live window only: a UI draw must have sampled this preview image lately (the first render after opening is native).
+        // care whether the SR path is latched or failed. A live window only: a UI draw must have sampled this preview image lately
+        // (the first render after opening is native). It only reads the native image, so running it after the SR step changes nothing.
         const bool live = view.rtvTexture != nullptr &&
                           g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
-        if (nr::RunBringUpNow(facts, view.finisherAccepted, live))
+        if (nr::RunBringUpNow(facts, view.finisherAccepted, live, srResultWins))
             RunNrBringUp(view);
-        if (!sr)
-            return true;
-        if (!view.finisherAccepted)
-        {
-            // The native image of this render was written but will not be upscaled: stop showing the older composed one.
-            if (view.rtvTexture != nullptr)
-            {
-                const int rejected = g_slots.Find(reinterpret_cast<uintptr_t>(view.rtvTexture));
-                if (rejected != kNoSlot)
-                    g_slots.ClearEvaluated(rejected);
-            }
-            if (g_pass.live)
-                CountFallback();
-            return true;
-        }
-        Finish(view);
         return true;
     }
     case DrawKind::Consumer: return Consume(view, draw, sr, nrOn);

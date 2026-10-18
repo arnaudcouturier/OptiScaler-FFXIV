@@ -98,9 +98,11 @@ constexpr ConsumerSource ChooseConsumerSource(bool floodOn, bool srResultReady, 
 
 // NR bring-up runs after the finisher wrote the native image: the finisher check passed, NR may run and a UI draw sampled this
 // preview image recently (a live window; a finisher output nobody shows gets no model). It does not wait for the SR guides.
-constexpr bool RunBringUpNow(const PlumbingFacts& f, bool finisherAccepted, bool consumerRecent)
+// `srResultWins`: the SR path evaluated this render, so the consumer will draw the SR result and an NR result would be thrown away
+// (the production entry that runs NR on the SR output is still a stub); the bring-up is not run then, and the NR cost is not paid.
+constexpr bool RunBringUpNow(const PlumbingFacts& f, bool finisherAccepted, bool consumerRecent, bool srResultWins)
 {
-    return finisherAccepted && consumerRecent && NrUsable(f);
+    return finisherAccepted && consumerRecent && NrUsable(f) && !srResultWins;
 }
 
 // Which preview images a UI draw sampled lately (the liveness signal for NR, independent of the SR slots).

@@ -252,6 +252,24 @@ void TestReadyForRelease()
     CHECK(QueryResultMeansDone(-2147024809));  // E_INVALIDARG
 }
 
+// The consumer draws the SR result of a slot evaluated in this render; the NR bring-up uses this to skip a result nobody would see.
+void TestEvaluatedInPass()
+{
+    SlotTable t;
+    t.NoteRecent(kA, 1000, 1);
+    const int s = t.AcquireForConsumer(kA, 1000, 64, 64);
+    CHECK(!t.EvaluatedInPass(s, 3)); // never evaluated
+    t.MarkEvaluated(s, 1010, 3);
+    CHECK(t.EvaluatedInPass(s, 3));
+    CHECK(!t.EvaluatedInPass(s, 4)); // evaluated in an earlier render: not this one
+    CHECK(!t.EvaluatedInPass(s, 0)); // no pass
+    t.ClearEvaluated(s);             // the render after it was rejected, stale, or waiting for guides
+    CHECK(!t.EvaluatedInPass(s, 3));
+    t.MarkEvaluated(s, 1020, 5);
+    t.MarkFailed(s, 1030);
+    CHECK(!t.EvaluatedInPass(s, 5)); // a failed slot shows nothing
+}
+
 void TestRecentExpiryInCleanup()
 {
     SlotTable t;
@@ -274,6 +292,7 @@ int main()
     TestCleanup();
     TestFailureSticks();
     TestReadyForRelease();
+    TestEvaluatedInPass();
     TestRecentExpiryInCleanup();
     return TEST_RESULT("chara_slots");
 }

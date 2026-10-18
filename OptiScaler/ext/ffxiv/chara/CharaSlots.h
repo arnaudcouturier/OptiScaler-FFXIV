@@ -163,6 +163,14 @@ class SlotTable
         s.queryPending = true;
     }
 
+    // The slot produced a result in render (pass) `pass`: evaluated OK, not failed since. The consumer draws that result, so an NR result
+    // of the same render would never be seen.
+    bool EvaluatedInPass(int index, uint32_t pass) const
+    {
+        const SlotState& s = Slot(index);
+        return pass != 0 && s.everEvaluated && !s.failed && s.evaluatePass == pass;
+    }
+
     void MarkFailed(int index, uint64_t now = 0)
     {
         SlotState& s = Slot(index);

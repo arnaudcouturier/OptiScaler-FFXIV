@@ -238,20 +238,24 @@ void TestHooks()
 {
     PlumbingFacts f = Facts(true, true);
     // NR bring-up needs only an accepted finisher and a usable NR; SR state plays no part
-    CHECK(RunBringUpNow(f, true, true));
-    CHECK(!RunBringUpNow(f, false, true));
-    CHECK(!RunBringUpNow(f, true, false)); // nobody shows this preview: no model
+    CHECK(RunBringUpNow(f, true, true, false));
+    CHECK(!RunBringUpNow(f, false, true, false));
+    CHECK(!RunBringUpNow(f, true, false, false)); // nobody shows this preview: no model
+    // PreviewDLSS and PreviewNR both on: a render that SR evaluated shows the SR result, so NR is not run for it (and costs nothing) ...
+    CHECK(!RunBringUpNow(f, true, true, true));
+    // ... while a render SR did not evaluate (waiting for guides, failed, latched) still gets the NR result
+    CHECK(RunBringUpNow(f, true, true, false));
     f.srLatched = true;
-    CHECK(RunBringUpNow(f, true, true));
+    CHECK(RunBringUpNow(f, true, true, false));
     f.srGateOpen = false;
-    CHECK(RunBringUpNow(f, true, true));
+    CHECK(RunBringUpNow(f, true, true, false));
     f.nrLatched = true;
-    CHECK(!RunBringUpNow(f, true, true));
+    CHECK(!RunBringUpNow(f, true, true, false));
     f = Facts(false, false);
-    CHECK(!RunBringUpNow(f, true, true));
+    CHECK(!RunBringUpNow(f, true, true, false));
     f = Facts(false, true);
     f.nrAvailable = false; // bridge not up, no NVIDIA card or files missing
-    CHECK(!RunBringUpNow(f, true, true));
+    CHECK(!RunBringUpNow(f, true, true, false));
 
     // the production entry needs an SR evaluate that succeeded
     f = Facts(true, true);
