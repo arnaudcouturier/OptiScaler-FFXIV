@@ -4,6 +4,7 @@
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaRoute.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/ffxiv/chara/CharaTags.h"
@@ -74,11 +75,11 @@ void Maintain(uint64_t now)
 
 void CountDeferred(ID3D11DeviceContext* context, DrawApi api)
 {
-    if (api != DrawApi::Draw || !AaWanted())
+    if (!AaWanted())
         return;
     ComPtr<ID3D11PixelShader> ps;
     context->PSGetShader(&ps, nullptr, nullptr);
-    if ((RoleOf(ps.Get()) & RoleEquipDisplay) != 0)
+    if (CountsAsDeferredEquip(true, RoleOf(ps.Get()), api))
         ++g_stats.deferredSeen;
 }
 
@@ -335,16 +336,14 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         view.finisherAccepted = EvaluateFinisher(context, view);
     identify::Observe(view);
 
-    // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native.
+    // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see CharaRoute.h).
     bool handled = false;
-    if (DlssWanted())
+    const bool dlssWanted = DlssWanted();
+    switch (ChooseRoute(dlssWanted, dlssWanted && dlss::Active(), AaWanted(), view.roles, api))
     {
-        if (dlss::Active())
-            handled = dlss::Around(view, draw);
-    }
-    else if (AaWanted() && api == DrawApi::Draw && (view.roles & RoleEquipDisplay) != 0)
-    {
-        handled = enhance::Around(view, draw);
+    case Route::Dlss: handled = dlss::Around(view, draw); break;
+    case Route::Enhance: handled = enhance::Around(view, draw); break;
+    case Route::Native: break;
     }
     if (!handled)
         draw();

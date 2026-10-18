@@ -6,6 +6,9 @@
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 
+#include <array>
+#include <string>
+
 namespace ext::ffxiv::chara::enhance
 {
 using Microsoft::WRL::ComPtr;
@@ -45,6 +48,47 @@ bool SupportedFormat(DXGI_FORMAT format, bool& srgb)
 bool g_loggedMatch = false;
 bool g_loggedFormat = false;
 bool g_loggedFailure = false;
+
+// Why an equipment display draw was left native: each reason is written once (the draw repeats every frame), so a log that
+// shows the shader was seen but the AA never ran also says what the draw looked like.
+enum class Why : uint8_t
+{
+    NoSource,
+    NotTexture2D,
+    NotATexture,
+    Multisampled,
+    NotEntryZero,
+    Count,
+};
+std::array<bool, static_cast<size_t>(Why::Count)> g_loggedWhy {};
+
+bool FirstTime(Why why)
+{
+    bool& logged = g_loggedWhy[static_cast<size_t>(why)];
+    const bool first = !logged;
+    logged = true;
+    return first;
+}
+
+// The pixel-shader slots (of the first eight) that hold a preview renderer image, as "t<slot>=entry <n>" text.
+std::string PreviewSlots(ID3D11DeviceContext* context, const table::Snapshot& snap)
+{
+    ID3D11ShaderResourceView* views[8] {};
+    context->PSGetShaderResources(0, 8, views);
+    std::string text;
+    for (UINT i = 0; i < 8; ++i)
+    {
+        if (views[i] == nullptr)
+            continue;
+        ComPtr<ID3D11Resource> resource;
+        views[i]->GetResource(&resource);
+        const int entry = table::IndexOfPointer(snap, reinterpret_cast<uintptr_t>(resource.Get()));
+        if (entry >= 0)
+            text += (text.empty() ? "t" : ", t") + std::to_string(i) + "=entry " + std::to_string(entry);
+        views[i]->Release();
+    }
+    return text.empty() ? std::string("none") : text;
+}
 } // namespace
 
 bool Around(const DrawView& view, DrawCall draw)
@@ -58,27 +102,54 @@ bool Around(const DrawView& view, DrawCall draw)
     ComPtr<ID3D11ShaderResourceView> source;
     context->PSGetShaderResources(0, 1, &source);
     if (source == nullptr)
+    {
+        if (FirstTime(Why::NoSource))
+            LOG_INFO("CharaView spatial AA: the equipment display draw ({}) has nothing bound at t0; preview images bound: {}",
+                     DrawApiName(view.api), PreviewSlots(context, *view.table));
         return false;
+    }
 
     D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc {};
     source->GetDesc(&viewDesc);
     if (viewDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D)
+    {
+        if (FirstTime(Why::NotTexture2D))
+            LOG_INFO("CharaView spatial AA: t0 of the equipment display draw ({}) is not a plain 2D texture (view dimension {})",
+                     DrawApiName(view.api), static_cast<int>(viewDesc.ViewDimension));
         return false;
+    }
 
     ComPtr<ID3D11Resource> resource;
     source->GetResource(&resource);
     ComPtr<ID3D11Texture2D> texture;
     if (resource == nullptr || FAILED(resource.As(&texture)))
+    {
+        if (FirstTime(Why::NotATexture))
+            LOG_INFO("CharaView spatial AA: t0 of the equipment display draw ({}) is not a 2D texture resource", DrawApiName(view.api));
         return false;
+    }
 
     D3D11_TEXTURE2D_DESC desc {};
     texture->GetDesc(&desc);
     if (desc.SampleDesc.Count != 1)
+    {
+        if (FirstTime(Why::Multisampled))
+            LOG_INFO("CharaView spatial AA: t0 of the equipment display draw ({}) has {} samples", DrawApiName(view.api),
+                     desc.SampleDesc.Count);
         return false;
+    }
 
     // The preview renderer's equipment output is table entry 0.
-    if (table::Lookup(*view.table, reinterpret_cast<uintptr_t>(texture.Get()), desc.Width, desc.Height) != 0)
+    const int entry = table::Lookup(*view.table, reinterpret_cast<uintptr_t>(texture.Get()), desc.Width, desc.Height);
+    if (entry != 0)
+    {
+        if (FirstTime(Why::NotEntryZero))
+            LOG_INFO("CharaView spatial AA: t0 of the equipment display draw ({}) is {}x{} format {}, table entry {} (entry 0 is "
+                     "needed); preview images bound: {}",
+                     DrawApiName(view.api), desc.Width, desc.Height, static_cast<int>(desc.Format),
+                     entry >= 0 ? std::to_string(entry) : std::string("none"), PreviewSlots(context, *view.table));
         return false;
+    }
 
     ++g_stats.equipMatched;
     if (!g_loggedMatch)
@@ -120,7 +191,11 @@ bool Around(const DrawView& view, DrawCall draw)
     WithSource0(context, filtered, [&] { draw(); });
 
     const uint64_t n = ++g_stats.aaProcessed;
-    if (n == 1 || n % 600 == 0)
+    if (n == 1)
+        LOG_INFO("CharaView spatial AA: first draw processed, via {}, {}x{} format {} -> {}x{}, processed draws 1",
+                 DrawApiName(view.api), desc.Width, desc.Height, static_cast<int>(format), Pass().OutputWidth(),
+                 Pass().OutputHeight());
+    else if (n % 600 == 0)
         LOG_INFO("CharaView spatial AA: {}x{} -> {}x{}, processed draws {}", desc.Width, desc.Height, Pass().OutputWidth(),
                  Pass().OutputHeight(), n);
     return true;

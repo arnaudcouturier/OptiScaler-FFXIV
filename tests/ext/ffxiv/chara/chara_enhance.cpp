@@ -153,12 +153,12 @@ struct Run
     UINT seenWidth = 0;
 };
 
-Run RunAround(Env& e, const table::Snapshot& snap, const DrawView* viewOverride = nullptr)
+Run RunAround(Env& e, const table::Snapshot& snap, const DrawView* viewOverride = nullptr, DrawApi api = DrawApi::Draw)
 {
     Run r;
     DrawView view;
     view.context = e.context.Get();
-    view.api = DrawApi::Draw;
+    view.api = api;
     view.table = &snap;
     if (viewOverride != nullptr)
         view = *viewOverride;
@@ -179,7 +179,10 @@ Run RunAround(Env& e, const table::Snapshot& snap, const DrawView* viewOverride 
             tex->GetDesc(&d);
             r.seenWidth = d.Width;
         }
-        e.context->Draw(3, 0);
+        if (api == DrawApi::DrawIndexed)
+            e.context->DrawIndexed(3, 0, 0);
+        else
+            e.context->Draw(3, 0);
     };
     r.handled = enhance::Around(view, DrawCall { [](void* p) { (*static_cast<decltype(native)*>(p))(); }, &native });
     return r;
@@ -244,6 +247,45 @@ void Main2(Env& e)
     CHECK(BoundT0(e, holder) == sourceSrv.Get());
     holder.Reset();
     CHECK(g_stats.aaProcessed == 2);
+
+    // ---- the game issues this draw as an indexed draw: same filtering, and the input-assembler state is untouched ----
+    {
+        const uint16_t indices[3] = { 0, 1, 2 };
+        D3D11_BUFFER_DESC bd {};
+        bd.ByteWidth = sizeof(indices);
+        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init { indices, 0, 0 };
+        ComPtr<ID3D11Buffer> indexBuffer;
+        CHECK(SUCCEEDED(e.device->CreateBuffer(&bd, &init, &indexBuffer)));
+        e.context->IASetIndexBuffer(indexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+        e.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        cfg.previewUpscale = false;
+        e.context->ClearRenderTargetView(game.rtv.Get(), std::array<float, 4> { 0, 0, 0, 0 }.data());
+        const auto processedBefore = g_stats.aaProcessed.load();
+        r = RunAround(e, snap, nullptr, DrawApi::DrawIndexed);
+        CHECK(r.handled && r.drawCalls == 1 && r.seenWidth == 32);
+        CHECK(g_stats.aaProcessed == processedBefore + 1);
+        const auto indexed = Read(e, game.target.Get(), 32, 32);
+        int indexedIntermediate = 0;
+        for (const auto& p : indexed)
+            indexedIntermediate += (p.r > 12 && p.r < 243) ? 1 : 0;
+        CHECK(indexedIntermediate >= 8); // the indexed draw saw the filtered image too
+
+        ComPtr<ID3D11Buffer> boundIndex;
+        DXGI_FORMAT indexFormat = DXGI_FORMAT_UNKNOWN;
+        UINT indexOffset = 1;
+        e.context->IAGetIndexBuffer(&boundIndex, &indexFormat, &indexOffset);
+        D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+        e.context->IAGetPrimitiveTopology(&topology);
+        ComPtr<ID3D11InputLayout> layout;
+        e.context->IAGetInputLayout(&layout);
+        CHECK(boundIndex.Get() == indexBuffer.Get() && indexFormat == DXGI_FORMAT_R16_UINT && indexOffset == 0);
+        CHECK(topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST && layout == nullptr);
+        CHECK(BoundT0(e, holder) == sourceSrv.Get());
+        holder.Reset();
+        cfg.previewUpscale = true;
+    }
 
     // ---- everything that is not the equipment output stays native: Around returns false, the draw is not run ----
     const auto before = g_stats.aaProcessed.load();
