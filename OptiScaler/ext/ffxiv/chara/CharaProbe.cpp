@@ -434,6 +434,15 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
             facts.z = detail.z;
             facts.sourceSub = detail.sourceSub;
             facts.hasBox = detail.box != nullptr;
+            if (detail.box != nullptr)
+            {
+                facts.boxLeft = detail.box->left;
+                facts.boxTop = detail.box->top;
+                facts.boxFront = detail.box->front;
+                facts.boxRight = detail.box->right;
+                facts.boxBottom = detail.box->bottom;
+                facts.boxBack = detail.box->back;
+            }
             facts.source = { sd.Width, sd.Height, static_cast<uint32_t>(sd.Format) };
             facts.dest = info;
             facts.resolveFormat = static_cast<uint32_t>(detail.format);

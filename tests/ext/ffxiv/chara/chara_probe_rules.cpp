@@ -174,6 +174,40 @@ void TestFormatFamilyAndWholeCopies()
         }
         CHECK(!WholeImageCopy(f));
     }
+    // an explicit box that covers the whole source is a whole copy ({0, 0, 0, width, height, 1}) ...
+    CopyFacts boxed = region;
+    boxed.hasBox = true;
+    boxed.boxRight = image.width;
+    boxed.boxBottom = image.height;
+    boxed.boxBack = 1;
+    CHECK(WholeImageCopy(boxed));
+    // ... any other box is partial: each edge one off, a deeper box, a box larger than the source, an empty box, a box with an offset
+    for (int edge = 0; edge < 8; ++edge)
+    {
+        CopyFacts f = boxed;
+        switch (edge)
+        {
+        case 0: f.boxLeft = 1; break;
+        case 1: f.boxTop = 1; break;
+        case 2: f.boxFront = 1; break;
+        case 3: f.boxRight = image.width - 1; break;
+        case 4: f.boxBottom = image.height - 1; break;
+        case 5: f.boxBack = 2; break;
+        case 6: f.boxRight = image.width + 1; break;
+        case 7: f.boxBack = 0; break;
+        }
+        CHECK(!WholeImageCopy(f));
+    }
+    CopyFacts emptyBox = region;
+    emptyBox.hasBox = true; // a box of zeros: nothing is copied
+    CHECK(!WholeImageCopy(emptyBox));
+    CopyFacts boxedOffset = boxed;
+    boxedOffset.x = 8; // a whole-size box copied to an offset is still partial of the destination
+    CHECK(!WholeImageCopy(boxedOffset));
+    CopyFacts boxedMip = boxed;
+    boxedMip.sourceSub = 1;
+    CHECK(!WholeImageCopy(boxedMip));
+
     // ... nor does a copy into a texture of another size or format
     CopyFacts bigger = whole;
     bigger.via = CopyVia::CopyResource;

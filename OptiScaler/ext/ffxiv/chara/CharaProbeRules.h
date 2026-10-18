@@ -93,6 +93,7 @@ struct CopyFacts
     uint32_t x = 0, y = 0, z = 0;
     uint32_t sourceSub = 0;
     bool hasBox = false;          // a source box was given
+    uint32_t boxLeft = 0, boxTop = 0, boxFront = 0, boxRight = 0, boxBottom = 0, boxBack = 0; // that box (D3D11_BOX); zeros when none
     TextureInfo source;           // the source texture's size and format
     TextureInfo dest;             // the destination texture's size and format
     uint32_t resolveFormat = 0;   // ResolveSubresource: the format argument
@@ -101,7 +102,8 @@ struct CopyFacts
 // A copy is followed only when it puts the WHOLE image into a texture of its own: subresource 0 to subresource 0, the whole of it, into a
 // destination of the same width, height and format family. A region copied into an atlas, a mip or an array slice would make the whole
 // destination "preview-derived" and with the flood test on every draw that samples the rest of the atlas would turn magenta. (Those
-// copies are still logged, as "partial copy, not followed": they are the interesting case for the maintainer.)
+// copies are still logged, as "partial copy, not followed": they are the interesting case for the maintainer.) An explicit source box that
+// covers the whole source ({0, 0, 0, width, height, 1}) is a whole copy like no box at all.
 constexpr bool WholeImageCopy(const CopyFacts& f)
 {
     if (f.source.width == 0 || f.source.height == 0 || f.source.width != f.dest.width || f.source.height != f.dest.height)
@@ -110,7 +112,12 @@ constexpr bool WholeImageCopy(const CopyFacts& f)
     {
     case CopyVia::CopyResource: return SameFormatFamily(f.source.format, f.dest.format);
     case CopyVia::CopyRegion:
-        return f.destSub == 0 && f.sourceSub == 0 && f.x == 0 && f.y == 0 && f.z == 0 && !f.hasBox && SameFormatFamily(f.source.format, f.dest.format);
+    {
+        const bool boxIsWhole = !f.hasBox || (f.boxLeft == 0 && f.boxTop == 0 && f.boxFront == 0 && f.boxRight == f.source.width &&
+                                              f.boxBottom == f.source.height && f.boxBack == 1);
+        return f.destSub == 0 && f.sourceSub == 0 && f.x == 0 && f.y == 0 && f.z == 0 && boxIsWhole &&
+               SameFormatFamily(f.source.format, f.dest.format);
+    }
     case CopyVia::Resolve:
         return f.destSub == 0 && f.sourceSub == 0 &&
                (SameFormatFamily(f.source.format, f.dest.format) || SameFormatFamily(f.resolveFormat, f.dest.format));
