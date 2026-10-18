@@ -117,6 +117,8 @@ struct State
     std::optional<CommandChannel> channel; // chara-probe.cmd / chara-probe.out, while the probe is on
     DerivedSet derived;
     ResolveHookState resolveHook; // whether the hook layer's ResolveSubresource detour is wanted and attached
+    DumpTrigger dumpTrigger;      // when a requested image dump is executed (at a point where the preview image is complete)
+    bool swapCompleted = false;   // a consumer swap was reported since the request was armed: the images of this frame exist
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
     BackbufferInfo backbuffer;
@@ -205,7 +207,8 @@ void ReportSwap(const SwapRecord& r)
     stored.valid = true;
     stored.record = r;
     stored.draw = s.lastDraw;
-    stored.sameDraw = s.lastDraw.valid && s.lastDraw.serial == s.drawSerial;
+    stored.sameDraw = SameDraw(s.lastDraw.valid, s.lastDraw.serial, s.drawSerial);
+    s.swapCompleted = true; // all the images of this frame exist now: a waiting dump request may start at the next draw
     stored.tick = GetTickCount64();
     ++stored.count;
 
@@ -711,6 +714,10 @@ std::string BuildState(uint64_t now)
 // Starts the dump of the preview images (draw thread). Returns the result text.
 std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
 {
+    // The copy into the staging texture is skipped by the runtime while the game has a predicate set (SetPredication): the files would be
+    // black. Wait for a later draw instead (ServiceDump retries at the next complete preview image).
+    if (dump::PredicationActive(context))
+        return "postponed, the game has a predicate set (SetPredication) on this draw; the dump is retried at the next complete preview image";
     State& s = S();
     std::vector<ComPtr<ID3D11Texture2D>> keep; // the held resources as textures, alive until Begin has made its copies
     std::vector<dump::Source> sources;
@@ -853,6 +860,49 @@ void PollCommands(uint64_t now)
     WriteOut(lines);
 }
 
+// Executes a waiting "save preview images" request. It is armed when first seen and started at the first point where the preview image
+// is complete (DumpTrigger): `finisherPoint` is true right after an accepted finisher draw; a consumer swap reported since the request was
+// armed also counts (every image of the frame exists then); 2 s without either, any draw will do. Draw thread, immediate context.
+void ServiceDump(ID3D11DeviceContext* context, uint64_t now, bool finisherPoint)
+{
+    State& s = S();
+    const bool pending = g_dumpPending.load(std::memory_order_relaxed);
+    if (!pending && !s.dumpTrigger.Armed())
+        return; // the common case: nothing waits
+    const bool arming = pending && !s.dumpTrigger.Armed();
+    if (arming)
+        s.swapCompleted = false; // a swap that happened before the request does not count
+    const bool point = finisherPoint || (!arming && s.swapCompleted);
+    if (s.dumpTrigger.Decide(pending, point, now) != DumpTrigger::Step::Start)
+        return;
+
+    std::string result;
+    try
+    {
+        result = StartDump(context, now);
+    }
+    catch (...)
+    {
+        result = "failed, an error stopped the request";
+    }
+    if (result.rfind("postponed", 0) == 0)
+    {
+        // The game's state forbids the copy for now (an active predicate): the request stays and the next complete preview image tries again.
+        if (s.dumpTrigger.Postpone(now))
+        {
+            dump::SetMessage(result);
+            return;
+        }
+        result = "refused, the game keeps a predicate set for the draws the dump could use; try again later";
+    }
+    g_dumpPending.store(false, std::memory_order_relaxed);
+    s.swapCompleted = false;
+    dump::SetMessage(result);
+    LOG_INFO("CharaView probe: save preview images: {}", result);
+    if (result.rfind("ok", 0) != 0) // a started dump reports when it finishes; a refused one says so here
+        WriteOut({ LogTimeNow() + " dump: " + result });
+}
+
 // Every kTickMs while the probe is on (called from Update on the draw thread, immediate context only).
 void Tick(ID3D11DeviceContext* context, uint64_t now)
 {
@@ -864,14 +914,6 @@ void Tick(ID3D11DeviceContext* context, uint64_t now)
     {
         PumpDump(context, now);
         PollCommands(now);
-        if (g_dumpPending.exchange(false, std::memory_order_relaxed))
-        {
-            const std::string result = StartDump(context, now);
-            dump::SetMessage(result);
-            LOG_INFO("CharaView probe: save preview images: {}", result);
-            if (result.rfind("ok", 0) != 0) // a started dump reports when it finishes; a refused one says so here
-                WriteOut({ LogTimeNow() + " dump: " + result });
-        }
     }
     catch (...)
     {
@@ -938,7 +980,10 @@ static void UpdateCore(uint64_t now, ID3D11DeviceContext* context)
         g_stats.probeDerivedLive.store(static_cast<uint32_t>(s.derived.Count(now)), std::memory_order_relaxed);
     }
     if (s.on && context != nullptr)
+    {
         Tick(context, now);
+        ServiceDump(context, now, false); // a swap seen since the request was armed, or the 2 s fallback, starts it at this draw
+    }
 }
 
 void Update(uint64_t now, ID3D11DeviceContext* context)
@@ -947,6 +992,13 @@ void Update(uint64_t now, ID3D11DeviceContext* context)
     SyncResolveHook();
 }
 
+
+void OnPreviewComplete(ID3D11DeviceContext* context, uint64_t now)
+{
+    if (context == nullptr || !g_onFlag.load(std::memory_order_relaxed))
+        return;
+    ServiceDump(context, now, true);
+}
 void SetResolveHookControl(const ResolveHookControl* control) { g_resolveControl.store(control, std::memory_order_release); }
 
 bool ResolveTrackingIncomplete() { return S().resolveHook.Incomplete(); }
@@ -986,20 +1038,18 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
     State& s = S();
     if ((!s.on && !s.flood) || context == nullptr)
         return result;
+    if (s.on)
+        ++s.drawSerial; // a draw counter: it advances for every dispatched draw, scanned or not (see SameDraw)
 
-    // One cheap check before any COM call (ScanCanFindAnything): the probe scans only while the preview renderer is active or copies of
-    // it are alive. The flood test also scans while a preview output exists (a preview that stopped re-rendering is still on screen), but
-    // no longer when the table holds none and no copy is followed: no draw can sample what does not exist.
+    // One cheap check before any COM call (ScanCanFindAnything): the scan runs while a preview output exists in the table (an open preview
+    // window, also when it stopped re-rendering), while copies of the preview are alive, and for the probe alone while the renderer is active.
     const uint64_t activity = detail::g_lastActivity.load(std::memory_order_relaxed);
     const bool recent = activity != 0 && now >= activity && now - activity <= kActivityMs;
     if (!ScanCanFindAnything(s.on, s.flood, recent, !s.derived.Empty(now), AnyPreviewOutput(snapshot)))
         return result;
 
     if (s.on)
-    {
         ++g_stats.probeScanned;
-        ++s.drawSerial;
-    }
     ID3D11ShaderResourceView* views[kScanSlots] {};
     context->PSGetShaderResources(0, kScanSlots, views);
 

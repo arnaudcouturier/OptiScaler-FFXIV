@@ -453,6 +453,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         if (view.finisherAccepted && route != Route::Dlss)
             ++(dlssWanted ? g_stats.finisherNoDlss : g_stats.finisherNotWanted); // the check passed, the DLSS path did not see it
         g_pass.OnFinisher(view.finisherVerdict);
+        if (view.finisherAccepted)
+            probe::OnPreviewComplete(context, now); // the preview image is complete: a waiting image dump starts here
     }
 }
 

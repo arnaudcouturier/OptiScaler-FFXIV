@@ -427,18 +427,86 @@ private:
 // draws that sample a preview output (table entries 0..7) or a followed copy of one.
 //   * nothing is on: no;
 //   * a followed copy is alive: yes (it may be sampled whatever the renderer does);
-//   * the flood test is on: yes while a preview output exists (a preview that stopped re-rendering is still on screen), no when the
-//     table holds no preview output and no copy is followed: there is nothing a draw could sample;
-//   * the probe alone: only while the preview renderer is active (as before).
+//   * a preview output exists in the table (a preview window is open): yes, probe or flood. A preview that stopped re-rendering (a paused
+//     window, a stall) is still on screen and its sampler draws must still be found;
+//   * otherwise: only while the preview renderer is active (as before) for the probe, never for the flood test alone (nothing exists a
+//     draw could sample).
 constexpr bool ScanCanFindAnything(bool probeOn, bool floodOn, bool rendererActive, bool followedCopyAlive, bool previewOutputExists)
 {
     if (!probeOn && !floodOn)
         return false;
-    if (followedCopyAlive)
+    if (followedCopyAlive || previewOutputExists)
         return true;
-    if (floodOn)
-        return previewOutputExists;
-    return rendererActive;
+    return probeOn && !floodOn ? rendererActive : false;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// When the image dump is taken
+// ---------------------------------------------------------------------------------------------------------------------
+
+// A dump executed at an arbitrary draw can capture the preview between its clear and its finisher. A request is therefore armed when it
+// is first seen and executed at the first point where the preview image is complete: right after an accepted finisher draw, or right after
+// a consumer swap (all the images of the frame exist then). If no such point comes within kDumpFallbackMs it is executed at any draw. A
+// start that the game's state forbids for now (an active predicate) is postponed to the next point, at most kMaxDumpPostponements times.
+inline constexpr uint64_t kDumpFallbackMs = 2000;
+inline constexpr uint32_t kMaxDumpPostponements = 20;
+
+class DumpTrigger
+{
+  public:
+    enum class Step : uint8_t
+    {
+        Idle,  // no request is waiting
+        Wait,  // armed: waiting for a point where the preview image is complete
+        Start, // execute the request now
+    };
+
+    // `pending`: a request is waiting. `completePoint`: the preview image is complete right now (not true on the call that arms the
+    // request unless the caller says so: a point seen before the request does not count).
+    Step Decide(bool pending, bool completePoint, uint64_t now)
+    {
+        if (!pending)
+        {
+            _armed = false;
+            _postponed = 0;
+            return Step::Idle;
+        }
+        if (!_armed)
+        {
+            _armed = true;
+            _armedAt = now;
+        }
+        if (completePoint || now < _armedAt || now - _armedAt >= kDumpFallbackMs)
+        {
+            _armed = false;
+            return Step::Start;
+        }
+        return Step::Wait;
+    }
+
+    // The caller could not start the dump now and wants the next point: false when it has been postponed too often (give up).
+    bool Postpone(uint64_t now)
+    {
+        if (++_postponed > kMaxDumpPostponements)
+            return false;
+        _armed = true;
+        _armedAt = now;
+        return true;
+    }
+
+    bool Armed() const { return _armed; }
+
+  private:
+    bool _armed = false;
+    uint64_t _armedAt = 0;
+    uint32_t _postponed = 0;
+};
+
+// The facts of a swap are those of the swapped draw only when that draw was the last one scanned (the draw serial advances for every
+// dispatched draw while the probe is on, scanned or not).
+constexpr bool SameDraw(bool lastDrawValid, uint64_t lastDrawSerial, uint64_t currentSerial)
+{
+    return lastDrawValid && lastDrawSerial == currentSerial;
 }
 
 inline constexpr size_t kCopyCaseCap = 48;

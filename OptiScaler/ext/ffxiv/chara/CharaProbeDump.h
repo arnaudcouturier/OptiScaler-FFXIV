@@ -32,6 +32,10 @@ fs::path OutputRoot();
 
 bool InFlight();
 
+// True while the game has a predicate set on the context (SetPredication): a copy made then can be skipped by the runtime, so the staging
+// texture would stay empty. Cheap; draw thread.
+bool PredicationActive(ID3D11DeviceContext* context);
+
 // Starts a dump: creates a staging texture per usable source, copies into it under ReplayScope and ends an event query. Images that are
 // missing, multisampled, in an unsupported format or too large are not staged; they get a line in state.txt. Returns false with `why`
 // set when a dump is already in flight or the query could not be made. `stateText` is written as state.txt when the dump finishes.

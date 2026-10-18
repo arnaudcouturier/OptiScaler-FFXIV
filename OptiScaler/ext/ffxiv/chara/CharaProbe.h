@@ -49,6 +49,10 @@ inline void NoteActivity(uint64_t now)
 // need the immediate context (`context`, null skips them).
 void Update(uint64_t now, ID3D11DeviceContext* context = nullptr);
 
+// The preview image is complete right now: the dispatcher calls this right after an accepted finisher draw. A waiting "save preview images"
+// request starts here (not at an arbitrary draw of the frame, where the preview can be between its clear and its finisher).
+void OnPreviewComplete(ID3D11DeviceContext* context, uint64_t now);
+
 // "Save preview images" (menu thread or command): asks for the preview images and state.txt to be saved. Executed on the draw thread
 // by Update. False when the probe is off or a request is already waiting or in flight.
 bool RequestDump();

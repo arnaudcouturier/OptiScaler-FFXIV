@@ -53,7 +53,7 @@ struct Doubles
     // records
     int dlssAround = 0, dlssProbe = 0, dlssMaintain = 0, dlssFrameEnd = 0, dlssDetach = 0;
     int nrMaintain = 0, nrFrameEnd = 0, nrDetach = 0;
-    int probeUpdate = 0, probeDetach = 0, probeOnDraw = 0;
+    int probeUpdate = 0, probeDetach = 0, probeOnDraw = 0, probeComplete = 0;
     bool followedCopies = false;
     std::thread::id detachThread;
     std::vector<SeenDraw> seen;
@@ -64,7 +64,7 @@ struct Doubles
     {
         dlssAround = dlssProbe = dlssMaintain = dlssFrameEnd = dlssDetach = 0;
         nrMaintain = nrFrameEnd = nrDetach = 0;
-        probeUpdate = probeDetach = probeOnDraw = 0;
+        probeUpdate = probeDetach = probeOnDraw = probeComplete = 0;
         seen.clear();
         events.clear();
     }
@@ -158,6 +158,7 @@ bool HasFollowedCopies(uint64_t) { return d.followedCopies; }
 void OnCopy(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*) {}
 void OnCopyRegion(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*) {}
 void OnResolve(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT) {}
+void OnPreviewComplete(ID3D11DeviceContext*, uint64_t) { ++d.probeComplete; }
 void Detach() { ++d.probeDetach; }
 } // namespace probe
 } // namespace ext::ffxiv::chara
@@ -540,6 +541,7 @@ void TestPassAcrossRenders(Scene& s)
     CHECK(Last().kind == DrawKind::Finisher);
     CHECK(Last().passActive);                         // the callback did not end the pass ...
     CHECK(Last().finisherAccepted);                   // ... so the finisher still finds it
+    CHECK(d.probeComplete == 1); // the probe is told that the preview image is complete: a waiting image dump starts there (REVIEW-CHARA-2 M6)
     CHECK(Last().counter == first);
 
     // render 2 of the same frame: the accepted finisher closed the first render, so this is a new pass (a new jitter phase)
@@ -549,6 +551,7 @@ void TestPassAcrossRenders(Scene& s)
     BindFinisher(s);
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(Last().finisherAccepted && Last().counter == first + 1);
+    CHECK(d.probeComplete == 2);
 
     // a render whose finisher is rejected (its viewport is not the whole target) ends the pass
     BindGBuffer(s);
@@ -557,6 +560,7 @@ void TestPassAcrossRenders(Scene& s)
     BindFinisher(s, 100, 100);
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(Last().kind == DrawKind::Finisher && !Last().finisherAccepted);
+    CHECK(d.probeComplete == 2); // a rejected finisher is not a complete preview image
     BindGBuffer(s);
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(Last().passStarted && Last().counter == first + 3);

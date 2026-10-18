@@ -99,6 +99,16 @@ fs::path OutputRoot()
 
 bool InFlight() { return g_inFlight.load(std::memory_order_relaxed); }
 
+bool PredicationActive(ID3D11DeviceContext* context)
+{
+    if (context == nullptr)
+        return false;
+    ComPtr<ID3D11Predicate> predicate;
+    BOOL value = FALSE;
+    context->GetPredication(&predicate, &value);
+    return predicate != nullptr;
+}
+
 bool Begin(ID3D11DeviceContext* context, const std::vector<Source>& sources, std::string stateText, uint64_t nowMs, std::string& why)
 {
     if (context == nullptr)

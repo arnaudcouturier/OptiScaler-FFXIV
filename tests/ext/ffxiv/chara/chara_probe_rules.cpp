@@ -975,11 +975,11 @@ void TestScanGate()
         CHECK(ScanCanFindAnything(true, false, (bits & 1) != 0, true, (bits & 2) != 0));
         CHECK(ScanCanFindAnything(false, true, (bits & 1) != 0, true, (bits & 2) != 0));
     }
-    // the probe alone: the renderer's activity decides, the table does not
+    // the probe alone: a preview output that exists (an open window, also one that stopped re-rendering) is enough, as for the flood test
     CHECK(ScanCanFindAnything(true, false, true, false, false));
     CHECK(ScanCanFindAnything(true, false, true, false, true));
-    CHECK(!ScanCanFindAnything(true, false, false, false, true));
-    CHECK(!ScanCanFindAnything(true, false, false, false, false));
+    CHECK(ScanCanFindAnything(true, false, false, false, true));
+    CHECK(!ScanCanFindAnything(true, false, false, false, false)); // no output, idle renderer, no copy: nothing to find
     // the flood test: a preview output that exists is enough (it stays on screen without re-rendering) ...
     CHECK(ScanCanFindAnything(false, true, false, false, true));
     CHECK(ScanCanFindAnything(true, true, false, false, true));
@@ -987,6 +987,73 @@ void TestScanGate()
     CHECK(!ScanCanFindAnything(false, true, false, false, false));
     CHECK(!ScanCanFindAnything(false, true, true, false, false)); // renderer activity without an output image: still nothing to flood
     CHECK(!ScanCanFindAnything(true, true, true, false, false));
+}
+
+// REVIEW-CHARA-2 M6: a requested dump starts where the preview image is complete, not at an arbitrary draw.
+void TestDumpTrigger()
+{
+    using Step = DumpTrigger::Step;
+    DumpTrigger t;
+    CHECK(t.Decide(false, false, 1000) == Step::Idle && !t.Armed());
+    CHECK(t.Decide(false, true, 1000) == Step::Idle); // a complete point without a request: nothing
+
+    // the request is armed; draws in the middle of the frame (no complete point) wait
+    CHECK(t.Decide(true, false, 2000) == Step::Wait && t.Armed());
+    CHECK(t.Decide(true, false, 2001) == Step::Wait);
+    CHECK(t.Decide(true, false, 3999) == Step::Wait); // 1999 ms after arming: still waiting
+    // the first complete point starts it
+    CHECK(t.Decide(true, true, 2500) == Step::Start && !t.Armed());
+    CHECK(t.Decide(false, false, 2501) == Step::Idle); // the caller cleared the request
+
+    // a complete point on the very call that arms it counts (the caller passes it)
+    CHECK(t.Decide(true, true, 5000) == Step::Start);
+    t.Decide(false, false, 5001);
+
+    // no complete point at all (no finisher, no swap): after 2 s any draw will do
+    CHECK(t.Decide(true, false, 6000) == Step::Wait);
+    CHECK(t.Decide(true, false, 6000 + kDumpFallbackMs - 1) == Step::Wait);
+    CHECK(t.Decide(true, false, 6000 + kDumpFallbackMs) == Step::Start);
+    t.Decide(false, false, 9000);
+
+    // a clock that went back does not wait forever
+    CHECK(t.Decide(true, false, 10000) == Step::Wait);
+    CHECK(t.Decide(true, false, 9000) == Step::Start);
+    t.Decide(false, false, 9001);
+
+    // a start the game's state forbids (an active predicate) is postponed to the next complete point, at most kMaxDumpPostponements times
+    CHECK(t.Decide(true, true, 20000) == Step::Start);
+    CHECK(t.Postpone(20000) && t.Armed());
+    CHECK(t.Decide(true, false, 20100) == Step::Wait); // armed again from the postponement
+    CHECK(t.Decide(true, true, 20200) == Step::Start);
+    for (uint32_t i = 2; i <= kMaxDumpPostponements; ++i)
+        CHECK(t.Postpone(20300));
+    CHECK(!t.Postpone(20300)); // too often: give up
+    t.Decide(false, false, 21000);
+    CHECK(t.Postpone(21000)); // a new request starts counting again
+}
+
+// REVIEW-CHARA-2 M8: "the facts are those of the swapped draw" only when the swapped draw was the last one scanned.
+void TestSameDraw()
+{
+    CHECK(SameDraw(true, 7, 7));
+    CHECK(!SameDraw(true, 7, 8));  // draws went by since the last scanned sampler draw
+    CHECK(!SameDraw(true, 8, 7));
+    CHECK(!SameDraw(false, 7, 7)); // nothing was scanned yet
+    CHECK(!SameDraw(false, 0, 0));
+
+    // The serial advances for every dispatched draw while the probe is on, scanned or not: a paused preview (draws not scanned, the
+    // sampler draw scanned earlier) must not make a swap on a later draw look like the scanned one.
+    uint64_t serial = 0;
+    uint64_t lastScannedSampler = 0;
+    bool valid = false;
+    for (int draw = 0; draw < 5; ++draw)
+        ++serial; // unscanned draws
+    ++serial;     // the sampler draw: scanned, recorded
+    lastScannedSampler = serial;
+    valid = true;
+    CHECK(SameDraw(valid, lastScannedSampler, serial)); // swapped on that very draw
+    ++serial;                                           // the next draw is swapped but not scanned (no hit)
+    CHECK(!SameDraw(valid, lastScannedSampler, serial));
 }
 
 // The ResolveSubresource detour has a hook transaction of its own: attached when a debug aid is first switched on, removed when both are off
@@ -1048,5 +1115,7 @@ int main()
     TestParseFile();
     TestPng();
     TestResolveHookState();
+    TestDumpTrigger();
+    TestSameDraw();
     return TEST_RESULT("chara_probe_rules");
 }

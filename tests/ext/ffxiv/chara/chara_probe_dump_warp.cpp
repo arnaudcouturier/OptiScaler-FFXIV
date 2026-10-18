@@ -205,6 +205,21 @@ int main()
     CHECK(status.dumps == 1 && status.files == 7 && status.refusals == 0 && !status.inFlight);
     CHECK(status.lastFolder == outcome->folder && status.lastMessage == outcome->message);
 
+    // ---- a predicate set by the game: the dump says so instead of copying under it (REVIEW-CHARA-2 L1) ---------------------------------
+    {
+        CHECK(!dump::PredicationActive(g_context.Get()) && !dump::PredicationActive(nullptr));
+        D3D11_QUERY_DESC qd {};
+        qd.Query = D3D11_QUERY_OCCLUSION_PREDICATE;
+        ComPtr<ID3D11Predicate> predicate;
+        if (Ok(g_device->CreatePredicate(&qd, &predicate), "predicate"))
+        {
+            g_context->SetPredication(predicate.Get(), FALSE);
+            CHECK(dump::PredicationActive(g_context.Get()));
+            g_context->SetPredication(nullptr, FALSE);
+            CHECK(!dump::PredicationActive(g_context.Get()));
+        }
+    }
+
     // ---- the pixel content is the content at copy time (not at pump time) -------------------------------------------------------
     // (a staging copy is a snapshot: the source can be overwritten right after Begin)
     {
