@@ -1067,6 +1067,79 @@ void TestCutsceneReplay()
     assert(invalidates == static_cast<size_t>(30 - Core::kLeaveHold) * kRuns);
     assert(s.reasons[static_cast<size_t>(Reason::PasteNotReady)] == 2 + 2 * kRuns);
 }
+
+// Which presents send the hud-less tag to the frame generator. In ui_free only the presents whose base was really swapped
+// to the hud-less image: a present that fell back (paste not ready, probing, a refused swap, no capture) gets the same
+// inputs as with the mode off. Recomposition needs the tags on every present with a capture, they ARE the feature.
+void TestTagGating()
+{
+    auto tagsOf = [](auto&& setup, Mode mode = Mode::UiFree)
+    {
+        FakeHost host;
+        setup(host);
+        Core core(host);
+        const Run r = Present(core, mode);
+        return std::pair { core.WantsTags(), r };
+    };
+    auto noop = [](FakeHost&) {};
+
+    {
+        const auto [tags, r] = tagsOf(noop);
+        assert(r.swapped && tags);
+    }
+    {
+        const auto [tags, r] = tagsOf([](FakeHost& h) { h.pasteReady = false; });
+        assert(r.staged && !r.swapped && r.reason == Reason::PasteNotReady && !tags);
+    }
+    {
+        const auto [tags, r] = tagsOf([](FakeHost& h) { h.sceneOwns = true; });
+        assert(r.staged && !r.swapped && r.reason == Reason::SceneHdrOwnsFrame && !tags);
+    }
+    for (auto setup : { +[](FakeHost& h) { h.fgActive = false; }, +[](FakeHost& h) { h.source.result = TakeResult::NotThisFrame; },
+                        +[](FakeHost& h) { h.source.result = TakeResult::Rejected; },
+                        +[](FakeHost& h) { h.check = Reason::SizeMismatch; }, +[](FakeHost& h) { h.stage = Reason::SlotBusy; } })
+    {
+        const auto [tags, r] = tagsOf(setup);
+        assert(!r.staged && !tags);
+    }
+
+    // a swap the host undid is not a swapped present
+    {
+        FakeHost host;
+        Core core(host);
+        core.BeginPresent(Mode::UiFree, {});
+        assert(core.DecideBase() && core.WantsTags());
+        core.Reject(Reason::FormatUnsupported);
+        assert(!core.Swapped() && !core.WantsTags());
+        core.EndPresent();
+    }
+
+    // recomposition: every present with a capture, nothing without one; mode off never
+    {
+        const auto [tags, r] = tagsOf(noop, Mode::Recomposition);
+        assert(r.staged && !r.swapped && tags);
+    }
+    {
+        const auto [tags, r] = tagsOf([](FakeHost& h) { h.pasteReady = false; h.sceneOwns = true; }, Mode::Recomposition);
+        assert(r.staged && tags);
+    }
+    {
+        const auto [tags, r] = tagsOf([](FakeHost& h) { h.source.result = TakeResult::NotThisFrame; }, Mode::Recomposition);
+        assert(!r.staged && !tags);
+    }
+    assert(!tagsOf(noop, Mode::Off).first);
+
+    // over a whole trip, a cutscene and the way back: the tag follows the swapped state exactly
+    Replay replay;
+    for (int n = 1; n <= 3000; ++n)
+    {
+        replay.coverage = (n < 200) ? 0.10f : (n < 600) ? 0.95f : (n < 1400) ? 0.50f : 0.10f; // trip at 200..., release after 1400
+        replay.noBoundary = (n % 250) >= 220;
+        const Run r = replay.Step();
+        assert(replay.core.WantsTags() == r.swapped);
+    }
+    assert(replay.flips > 10 && replay.core.Snapshot().captured > 1000);
+}
 } // namespace
 
 int main()
@@ -1088,6 +1161,7 @@ int main()
     TestPasteHoldAtTrip();
     TestHoldAvoidsPasteNotReady();
     TestCutsceneReplay();
+    TestTagGating();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
     return 0;
 }

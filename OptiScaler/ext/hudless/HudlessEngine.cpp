@@ -758,8 +758,10 @@ void Engine::Post(Dx11wDx12SC& sc)
         AddReader(index, Access::Hudless::CopyFence(sc), Access::Hudless::LastCopyValue(sc));
 
     // Tags. Not over HDR10 output: the base is already PQ, a hud-less SDR tag would be converted behind our back (and held
-    // raw by scene HDR), and DLSS-G refuses an SDR UI image there (docs/HUDLESS.md 8). Not on a probing present either
-    // (the tripped guard keeps the normal base): the frame generator then gets what it gets with the mode off.
+    // raw by scene HDR), and DLSS-G refuses an SDR UI image there (docs/HUDLESS.md 8). In ui_free only when the base really
+    // was swapped to the hud-less image: a paste-not-ready or probing present keeps the normal base, and a hud-less tag
+    // next to it would hand DLSS-G two images of the same frame that differ everywhere in a fade. Without the tag it gets
+    // what it gets with the mode off. Recomposition tags every present (Core::WantsTags).
     if (fg != nullptr && _core.WantsTags() && !HdrOutput() && finalImage != nullptr)
     {
         adapters::TagContext context;

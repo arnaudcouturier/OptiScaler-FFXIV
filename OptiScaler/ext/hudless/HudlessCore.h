@@ -324,9 +324,16 @@ class Core
     // The guard is tripped and this present took a capture only to keep the guard fed: the base is not swapped.
     bool Probing() const { return _probing; }
 
-    // Whether the host sends the hud-less (and UI) tags of this present to the frame generator. A probing present sends
-    // none, so the frame generator sees the same inputs as with the mode off.
-    bool WantsTags() const { return _active && _staged && !_probing; }
+    // Whether the host sends the hud-less (and UI) tags of this present to the frame generator. In ui_free only a present
+    // whose base really is the hud-less image does: a paste-not-ready, probing or otherwise fallen-back present sends none,
+    // so the frame generator gets the same inputs as with the mode off instead of a normal base with a mismatching hud-less
+    // tag. Recomposition needs the tags on every present with a capture, they are the feature.
+    bool WantsTags() const
+    {
+        if (!_active || !_staged)
+            return false;
+        return _mode == Mode::Recomposition || (_mode == Mode::UiFree && _swapped);
+    }
     Mode CurrentMode() const { return _mode; }
     Reason PresentReason() const { return _reason; }
 
