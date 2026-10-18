@@ -42,6 +42,9 @@ namespace detail
 {
 inline std::atomic<bool> g_inert { false }; // latched when the game build or the table accessor cannot be verified
 inline DetachGate g_detach;                 // the unhook path asks, the draw thread tears down (see CharaLifecycle.h)
+// The dispatcher has run for a draw on the immediate context at least once. Until then the feature has created nothing (every object is made
+// by a module that the dispatcher calls), so a teardown request has nothing to release and must not wake the gate.
+inline std::atomic<bool> g_entered { false };
 } // namespace detail
 
 inline bool DlssWanted() { return ext::Cfg().ffxiv.chara.previewDlss.value_or_default(); }

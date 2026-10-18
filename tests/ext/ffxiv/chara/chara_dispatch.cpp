@@ -54,6 +54,7 @@ struct Doubles
     int dlssAround = 0, dlssProbe = 0, dlssMaintain = 0, dlssFrameEnd = 0, dlssDetach = 0;
     int nrMaintain = 0, nrFrameEnd = 0, nrDetach = 0;
     int probeUpdate = 0, probeDetach = 0, probeOnDraw = 0, probeComplete = 0;
+    int tableReady = 0, tableResolve = 0; // calls of the accessor check (the first call is the one-time executable scan in the product)
     bool followedCopies = false;
     uint32_t scanSlotMask = 0; // what the probe double reports for every scanned draw (count 1 when the mask is not zero)
     std::thread::id detachThread;
@@ -66,6 +67,7 @@ struct Doubles
         dlssAround = dlssProbe = dlssMaintain = dlssFrameEnd = dlssDetach = 0;
         nrMaintain = nrFrameEnd = nrDetach = 0;
         probeUpdate = probeDetach = probeOnDraw = probeComplete = 0;
+        tableReady = tableResolve = 0;
         seen.clear();
         events.clear();
     }
@@ -82,10 +84,15 @@ namespace table
 {
 const Resolution& Resolve()
 {
+    ++d.tableResolve;
     static Resolution r = [] { Resolution x; x.state = AccessorState::Ready; return x; }();
     return r;
 }
-bool Ready() { return true; }
+bool Ready()
+{
+    ++d.tableReady;
+    return true;
+}
 const char* InertReason() { return ""; }
 const Snapshot& Current(uint64_t) { return g_snapshot; }
 void LogTable(const char*, const Snapshot&) {}
@@ -767,6 +774,48 @@ void TestDetachFromAnotherThread(Scene& s)
     Config(false, false, false);
     d.aroundHandles = false;
 }
+
+// A teardown request while every key is off. (a) The dispatcher never ran, so the feature created nothing: the request is dropped, the
+// gate stays shut, and the next draw neither runs the one-time executable scan nor writes a log line. (b) The dispatcher did run before
+// (a key was on, now all are off): the draw thread performs the teardown without asking the accessor check first (a teardown needs no
+// verified accessor).
+void TestTeardownWithKeysOff(Scene& s)
+{
+    detail::g_detach.Reset();
+    detail::g_inert.store(false);
+    detail::g_entered.store(false); // as in a process whose dispatcher has not run yet
+    Doubles_Off();
+    OnInstalled(s.context.Get(), nullptr);
+    Config(false, false, false);
+    BindConsumer(s, s.ui.Get(), s.outputSrv.Get());
+
+    const int linesBefore = g_testLogLines;
+    std::thread unhook([] { Detach(); });
+    unhook.join();
+    CHECK(!Wanted()); // nothing was requested: the gate stays shut
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.tableReady == 0 && d.tableResolve == 0); // no scan
+    CHECK(g_testLogLines == linesBefore);            // no log line
+    CHECK(d.dlssDetach == 0 && d.nrDetach == 0 && d.probeDetach == 0 && d.dlssAround == 0);
+
+    // (b) the dispatcher runs once (AA on), then every key goes off and the unhook thread asks
+    Config(false, true, false);
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.tableReady >= 1); // it consulted the accessor check while it was wanted
+    Config(false, false, false);
+    d.ResetCounts();
+    std::thread unhook2([] { Detach(); });
+    unhook2.join();
+    CHECK(Wanted()); // the draw thread has something to do
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.dlssDetach == 1 && d.nrDetach == 1 && d.probeDetach == 1);
+    CHECK(d.tableReady == 0 && d.tableResolve == 0); // the teardown did not wait for the accessor check
+    CHECK(!Wanted());
+
+    OnInstalled(s.context.Get(), nullptr); // leave the gate usable
+    Config(false, false, false);
+    Doubles_Off();
+}
 } // namespace
 
 int main()
@@ -785,5 +834,6 @@ int main()
     TestPassAcrossRenders(scene);
     TestMaintenanceAfterSwitchOff(scene);
     TestDetachFromAnotherThread(scene);
+    TestTeardownWithKeysOff(scene);
     return TEST_RESULT("chara_dispatch");
 }

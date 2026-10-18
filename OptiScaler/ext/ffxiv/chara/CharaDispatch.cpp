@@ -315,6 +315,22 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         return;
     }
 
+    // This is the thread that draws on the immediate context. A teardown that the unhook path asked for from another thread happens
+    // here, between two draws, with nothing of the feature in flight. It reads nothing from the game, so it does not wait for the accessor
+    // check below: that check starts a one-time scan of the executable, which a teardown must never be the first to cause.
+    ID3D11DeviceContext* const immediate = g_immediate.load();
+    if (immediate != nullptr && context == immediate)
+    {
+        detail::g_entered.store(true, std::memory_order_release);
+        g_drawThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+        if (detail::g_detach.Take())
+        {
+            DetachNow();
+            draw();
+            return;
+        }
+    }
+
     // The accessor of the preview renderer's table must be verified before anything is read; if the build or the accessor
     // cannot be verified the feature stays off for this session (Resolve logged the reason once).
     if (!table::Ready())
@@ -324,24 +340,14 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         return;
     }
 
-    if (g_immediate == nullptr)
+    if (immediate == nullptr)
     {
         draw();
         return;
     }
-    if (context != g_immediate)
+    if (context != immediate)
     {
         CountDeferred(context, api);
-        draw();
-        return;
-    }
-
-    // This is the thread that draws on the immediate context. A teardown that the unhook path asked for from another thread happens
-    // here, between two draws, with nothing of the feature in flight.
-    g_drawThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
-    if (detail::g_detach.Take())
-    {
-        DetachNow();
         draw();
         return;
     }
@@ -485,6 +491,10 @@ void OnDetached()
 
 void Detach()
 {
+    // The dispatcher has not run for a draw yet (every key was off since the process started): the feature created nothing, and a request
+    // would only open the gate so that the next draw enters the dispatcher for no reason.
+    if (!detail::g_entered.load(std::memory_order_acquire))
+        return;
     // Only the draw thread may release the objects: on any other thread a draw can be inside them right now. A request is raised
     // instead and the next draw performs the teardown (AroundSlow).
     detail::g_detach.Request();
