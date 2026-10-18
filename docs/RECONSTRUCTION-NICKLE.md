@@ -354,6 +354,11 @@ it with `PreviewGuideCapture`), and the window coverage (portraits).
 `[FFXIV] PreviewNR`, `PreviewNRLingerSeconds` and `PreviewNRLate` and the module behind them (`ext/ffxiv/chara/CharaNr*.{h,cpp}`, the small
 `ext/nr` seam) are not reconstructed from Nickle's build. The unpublished build only carried a trace that records which draws read the
 preview images (the "preview NR trace"); it contains no NR call for previews, and its menu said "Preview NR and FG are not active".
+Both modes are new work: the bring-up (NR on the native preview image) and the production mode (NR on the Super Resolution output, between the
+Super Resolution evaluate and the alpha pass, with copies of the preview's depth and motion). The cyan debug tint (`PreviewDebugTint` for an image
+NR produced) is new as well; the magenta tint of the Super Resolution image is Nickle's. What the production mode still needs from a game session
+is listed in FEATURES.md (state tracking of the shared inputs under the debug layer, the model's handling of render-size guides under an
+output-size colour image, image quality on the alpha-masked silhouette, cost with several windows).
 The design, the reasons for running the model on the Direct3D 12 side of the bridge, and the independence of the NR and
 Super Resolution paths are described in the feature section of FEATURES.md. The debug probe (`PreviewProbe`, `PreviewDebugFlood`,
 `chara-probe.cmd`) is also new work and has no counterpart in that build.
