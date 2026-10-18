@@ -59,6 +59,18 @@ class Controller
     // How many checks (presents with frame generation confirmed off) an armed border fix waits for the game to show a
     // frame-less window with an edge before it gives up and leaves the window as it is.
     static constexpr uint32_t kFixMaxChecks = 120;
+    // The replay needs this many COMPLETE presents with frame generation off, counted from the request, and at least this many
+    // ms since the request: Streamline applies eOff inside a present and its pacer is a separate worker, so one present is too
+    // short a proof.
+    static constexpr uint32_t kReplayConfirmPresents = 2;
+    static constexpr uint64_t kReplayConfirmMs = 50;
+
+    // Tests may relax the replay confirmation to focus on other rules; production keeps the defaults.
+    void SetReplayConfirm(uint32_t presents, uint64_t ms)
+    {
+        _confirmPresents = presents;
+        _confirmMs = ms;
+    }
 
     // Bridge swapchain resize finished (ext::dx11bridge::OnResizeDone). `bridge` identifies the bridge swapchain.
     // `swapWidth/swapHeight` = the bridge's FG swapchain size after this resize.
@@ -214,6 +226,7 @@ class Controller
                     _pendingThread = f.currentThread;
                     _deferral.Begin(ev.fullscreen, env.NowMs());
                     env.RequestFgOff();
+                    _requestMs = env.NowMs();
                     _gate.Reset();
                     prevent = true;
                     action = "held back: frame generation asked off, replayed once it is confirmed off";
@@ -313,6 +326,14 @@ class Controller
         env.Log(std::format("Window: held SetFullscreenState dropped, not replayed: {}", why), false);
     }
 
+    // DLSS-G confirmed off AND enough complete off presents AND enough time since the request (M3).
+    bool ReplayConfirmed(Env& env)
+    {
+        const uint64_t now = env.NowMs();
+        return _gate.Confirmed(env.DlssgOutput()) && _gate.Count() >= _confirmPresents && now >= _requestMs &&
+               now - _requestMs >= _confirmMs;
+    }
+
     // B2-a. Runs at the end of every game present while a call is held. The replay never runs while frame generation is
     // active: the pause after a Deactivate is only about ten frames, so the feature can come back during the wait; each
     // present that finds it active asks it off again. Only the hard limit replays regardless (fail open).
@@ -321,6 +342,7 @@ class Controller
         if (fg.present && fg.active)
         {
             env.RequestFgOff();
+            _requestMs = env.NowMs();
             _gate.Reset();
             if (!_reRequestNoted)
             {
@@ -333,7 +355,7 @@ class Controller
         // A held call is replayed on the thread that made it; another presenting thread leaves it for the hard limit.
         const bool rightThread = env.CurrentThread() == _pendingThread;
         const WaitResult result =
-            _deferral.OnPresentEnd(maybeOn, _gate.Confirmed(env.DlssgOutput()), env.NowMs(), rightThread);
+            _deferral.OnPresentEnd(maybeOn, ReplayConfirmed(env), env.NowMs(), rightThread);
         if (result == WaitResult::Wait)
             return;
 
@@ -454,6 +476,9 @@ class Controller
 
     // B2-a
     Deferral _deferral;
+    uint64_t _requestMs = 0;                            // when frame generation was last asked off
+    uint32_t _confirmPresents = kReplayConfirmPresents; // complete off presents needed before a replay
+    uint64_t _confirmMs = kReplayConfirmMs;            // and this long since the request
     uint64_t _pendingNative = 0;
     uint32_t _pendingThread = 0;
     bool _reRequestNoted = false;

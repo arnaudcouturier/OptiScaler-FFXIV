@@ -67,6 +67,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         const bool prevented = c.OnSetFullscreenState(env, Mode::On, Event(true));
         CHECK(prevented);
@@ -99,6 +100,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         bool replayPassed = false;
@@ -121,6 +123,7 @@ int main()
         // frame generation already off
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.fg = kOff;
         CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
@@ -165,6 +168,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3836, 2156);
         env.fg = kActive;
@@ -193,6 +197,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         c.OnResizeDone(env, Mode::On, 0x2000, kHwnd, 3840, 2160); // a new bridge
@@ -207,6 +212,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         c.OnBridgeDestroyed(env, Mode::On, 0x9999); // some other swapchain: the hold stays
@@ -216,6 +222,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         c.OnBridgeDestroyed(env, Mode::On, kBridge); // the bridge is torn down while the call is held
@@ -230,10 +237,44 @@ int main()
         c.OnBridgeDestroyed(env, Mode::Off, kBridge);
     }
 
+    // M3, with the production defaults: the replay needs 2 complete off presents AND 50 ms since the request. One present is
+    // not enough, a confirmed gate in the first present after the request does not replay, and 2 presents in 20 ms do not.
+    {
+        FakeEnv env;
+        Controller c; // defaults
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.nowMs = 1030;
+        Present(c, env, Mode::On, kPaused, kPaused); // 1 complete off present, 30 ms
+        CHECK(env.replays.empty());
+        env.nowMs = 1040;
+        Present(c, env, Mode::On, kPaused, kPaused); // 2 presents but only 40 ms
+        CHECK(env.replays.empty());
+        env.nowMs = 1050;
+        Present(c, env, Mode::On, kPaused, kPaused); // 3 presents, 50 ms: replay
+        CHECK(env.replays.size() == 1);
+        CHECK_CONTAINS(env.All(), "ms,"); // the elapsed time is in the replaying line
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.nowMs = 1500; // plenty of time, but only one complete present
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty());
+        env.nowMs = 1510;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+    }
+
     // Probe never holds or prevents; off does nothing.
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(!c.OnSetFullscreenState(env, Mode::Probe, Event(true)));
         CHECK(AnyLogContains(env, "verdict=defer wouldReturn=true returned=false"));
@@ -250,6 +291,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         Present(c, env, Mode::On, kOff, kOff); // a confirmed off period...
         env.fg = kActive;                      // ...then frame generation is activated between presents
@@ -262,6 +304,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // same direction: replaces, still prevented
@@ -276,6 +319,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.exclusive = false;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));   // enter held
@@ -293,6 +337,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.exclusive = true;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(false))); // leave held
@@ -305,6 +350,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true, 0x2000)));
@@ -317,6 +363,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         for (int i = 0; i < 12; ++i) // soft limit is 6 presents
@@ -336,6 +383,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         env.autoOff = false; // frame generation cannot be turned off
@@ -353,6 +401,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         for (int i = 0; i < 5; ++i)
@@ -368,6 +417,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.nowMs = 10000;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
@@ -384,6 +434,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         env.current = 7;
@@ -401,6 +452,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.replayResult = static_cast<int32_t>(0x887A0001);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
@@ -421,6 +473,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         Running(c, env);
         env.exclusive = true; // the pseudo fullscreen is in effect; a present has sampled it, no resize has
         Present(c, env, Mode::On, kActive, kActive);
