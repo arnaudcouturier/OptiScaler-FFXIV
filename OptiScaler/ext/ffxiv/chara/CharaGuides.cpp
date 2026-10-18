@@ -34,7 +34,7 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     }
 
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> copy, guides, alpha, alphaTint;
+    ComPtr<ID3D11PixelShader> copy, guides, alpha, alphaTint, alphaTintNr;
     if (FAILED(device->CreateVertexShader(shaders.vs.data, shaders.vs.size, nullptr, &vs)) ||
         FAILED(device->CreatePixelShader(shaders.copy.data, shaders.copy.size, nullptr, &copy)) ||
         FAILED(device->CreatePixelShader(shaders.guides.data, shaders.guides.size, nullptr, &guides)) ||
@@ -45,7 +45,10 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     }
     if (shaders.alphaTint.data != nullptr && shaders.alphaTint.size != 0 &&
         FAILED(device->CreatePixelShader(shaders.alphaTint.data, shaders.alphaTint.size, nullptr, &alphaTint)))
-        alphaTint.Reset(); // the debug variant is optional
+        alphaTint.Reset(); // the debug variants are optional
+    if (shaders.alphaTintNr.data != nullptr && shaders.alphaTintNr.size != 0 &&
+        FAILED(device->CreatePixelShader(shaders.alphaTintNr.data, shaders.alphaTintNr.size, nullptr, &alphaTintNr)))
+        alphaTintNr.Reset();
 
     D3D11_SAMPLER_DESC sd {};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -70,6 +73,7 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     _guides = guides;
     _alpha = alpha;
     _alphaTint = alphaTint;
+    _alphaTintNr = alphaTintNr;
     _sampler = sampler;
     _settings = settings;
     _drawTriangle = drawTriangle;
@@ -84,6 +88,7 @@ void Passes::Release()
     _guides.Reset();
     _alpha.Reset();
     _alphaTint.Reset();
+    _alphaTintNr.Reset();
     _sampler.Reset();
     _settings.Reset();
     _drawTriangle = nullptr;
@@ -181,11 +186,25 @@ bool Passes::Scope::Guides(ID3D11ShaderResourceView* motion, ID3D11ShaderResourc
 }
 
 bool Passes::Scope::Alpha(ID3D11ShaderResourceView* upscaled, ID3D11ShaderResourceView* original,
-                          ID3D11RenderTargetView* target, uint32_t width, uint32_t height, bool tint)
+                          ID3D11RenderTargetView* target, uint32_t width, uint32_t height, Tint tint)
 {
     if (upscaled == nullptr || original == nullptr || target == nullptr)
         return false;
     ID3D11ShaderResourceView* const srvs[4] { upscaled, nullptr, nullptr, original };
-    return Draw(tint && _passes._alphaTint != nullptr ? _passes._alphaTint.Get() : _passes._alpha.Get(), srvs, &target, 1, width, height);
+    ID3D11PixelShader* ps = _passes._alpha.Get();
+    if (tint == Tint::Sr && _passes._alphaTint != nullptr)
+        ps = _passes._alphaTint.Get();
+    else if (tint == Tint::Nr && _passes._alphaTintNr != nullptr)
+        ps = _passes._alphaTintNr.Get();
+    return Draw(ps, srvs, &target, 1, width, height);
+}
+
+bool Passes::Scope::TintResult(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target, uint32_t width, uint32_t height)
+{
+    // The tinted shader is required here: without it there would be nothing to tell the result from the untinted image, and the caller
+    // would count a tint that never happened.
+    if (_passes._alphaTintNr == nullptr)
+        return false;
+    return Alpha(source, source, target, width, height, Tint::Nr);
 }
 } // namespace ext::ffxiv::chara::guides

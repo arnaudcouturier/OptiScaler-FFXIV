@@ -25,6 +25,7 @@
 #include <State.h>
 #include <proxies/NVNGX_Proxy.h>
 
+#include <CharaGuides_AlphaTintNr_Shader.h>
 #include <CharaGuides_AlphaTint_Shader.h>
 #include <CharaGuides_Alpha_Shader.h>
 #include <CharaGuides_Copy_Shader.h>
@@ -649,6 +650,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
     shaders.guides = { CharaGuides_Guides_cso, sizeof(CharaGuides_Guides_cso) };
     shaders.alpha = { CharaGuides_Alpha_cso, sizeof(CharaGuides_Alpha_cso) };
     shaders.alphaTint = { CharaGuides_AlphaTint_cso, sizeof(CharaGuides_AlphaTint_cso) };
+    shaders.alphaTintNr = { CharaGuides_AlphaTintNr_cso, sizeof(CharaGuides_AlphaTintNr_cso) };
     if (g_device == nullptr || !g_passes.Init(g_device.Get(), shaders, &DrawFullscreenTriangle))
     {
         Latch("initialisation failed (private state, shaders or constants)");
@@ -740,7 +742,7 @@ void RunSlot(int index, const DrawView& view)
         RunNrProduction(view, w * ngx::kOutputScale, h * ngx::kOutputScale);
 
     const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
-    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale, tinted))
+    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale, tinted ? guides::Tint::Sr : guides::Tint::None))
     {
         FailSlot(index, "the alpha pass failed");
         return;

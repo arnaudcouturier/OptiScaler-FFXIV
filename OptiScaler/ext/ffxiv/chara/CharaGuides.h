@@ -23,7 +23,17 @@ struct Bytecode
 struct Shaders
 {
     Bytecode vs, copy, guides, alpha;
-    Bytecode alphaTint; // optional: the Alpha pass with a debug tint
+    Bytecode alphaTint;   // optional: the Alpha pass with the debug tint of a super-resolution image (magenta)
+    Bytecode alphaTintNr; // optional: ... and of an image NR produced (cyan)
+};
+
+// The debug tint of the Alpha pass (PreviewDebugTint): which image the pass is making. A shader that was not supplied falls back to the
+// plain Alpha pass.
+enum class Tint : uint8_t
+{
+    None,
+    Sr, // a super-resolution image: magenta
+    Nr, // an image NR produced: cyan
 };
 
 // Layout of the Settings constant buffer (register b0): Jitter (pixels), InvSize (1 / render size). 16 bytes.
@@ -63,7 +73,10 @@ class Passes
         bool Guides(ID3D11ShaderResourceView* motion, ID3D11ShaderResourceView* depth, ID3D11RenderTargetView* depthTarget,
                     ID3D11RenderTargetView* motionTarget, uint32_t width, uint32_t height);
         bool Alpha(ID3D11ShaderResourceView* upscaled, ID3D11ShaderResourceView* original, ID3D11RenderTargetView* target,
-                   uint32_t width, uint32_t height, bool tint = false);
+                   uint32_t width, uint32_t height, Tint tint = Tint::None);
+        // The cyan tint over a finished image (the bring-up NR result): colour and alpha both come from `source`. The Scope's settings
+        // must have a zero jitter, or the alpha is read at a shifted position.
+        bool TintResult(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target, uint32_t width, uint32_t height);
 
       private:
         bool Draw(ID3D11PixelShader* ps, ID3D11ShaderResourceView* const (&srvs)[4], ID3D11RenderTargetView* const* targets,
@@ -79,7 +92,7 @@ class Passes
   private:
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> _copy, _guides, _alpha, _alphaTint;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> _copy, _guides, _alpha, _alphaTint, _alphaTintNr;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> _sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> _settings;
     DrawTriangleFn _drawTriangle = nullptr;

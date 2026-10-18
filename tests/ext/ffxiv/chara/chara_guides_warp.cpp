@@ -292,6 +292,7 @@ void TestAlphaTint(Passes& passes)
     Tex up = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2, upscaled.data(), w * 2 * 4);
     Tex plain = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2);
     Tex tinted = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2);
+    Tex tintedNr = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2);
 
     Settings settings;
     settings.invWidth = 1.0f / w;
@@ -300,15 +301,19 @@ void TestAlphaTint(Passes& passes)
         Passes::Scope scope(passes, g_context.Get(), settings, nullptr, 0, 0);
         CHECK(scope.Ok());
         CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), plain.rtv.Get(), w * 2, h * 2));
-        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), tinted.rtv.Get(), w * 2, h * 2, true));
+        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), tinted.rtv.Get(), w * 2, h * 2, Tint::Sr));
+        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), tintedNr.rtv.Get(), w * 2, h * 2, Tint::Nr));
     }
     const auto a = Read(plain.texture.Get(), 4, w * 2, h * 2);
     const auto b = Read(tinted.texture.Get(), 4, w * 2, h * 2);
+    const auto c = Read(tintedNr.texture.Get(), 4, w * 2, h * 2);
     for (size_t i = 0; i < a.size(); i += 4)
     {
         CHECK(a[i] == 50 && a[i + 1] == 100 && a[i + 2] == 150 && a[i + 3] == 200);
         // lerp((50,100,150)/255, (1,0,1), 0.35) = (0.4775, 0.2549, 0.7320) -> (122, 65, 187)
         CHECK(Near(b[i], 122.0f, 1.5f) && Near(b[i + 1], 65.0f, 1.5f) && Near(b[i + 2], 187.0f, 1.5f) && b[i + 3] == 200);
+        // the NR variant: lerp((50,100,150)/255, (0,1,1), 0.35) = (0.1275, 0.6049, 0.7324) -> (32, 154, 187): cyan, not magenta
+        CHECK(Near(c[i], 32.0f, 1.5f) && Near(c[i + 1], 154.0f, 1.5f) && Near(c[i + 2], 187.0f, 1.5f) && c[i + 3] == 200);
     }
 }
 
@@ -410,13 +415,14 @@ int main(int argc, char** argv)
     auto guides = Compile(shader, "Guides", "ps_5_0");
     auto alpha = Compile(shader, "Alpha", "ps_5_0");
     auto alphaTint = Compile(shader, "AlphaTint", "ps_5_0");
-    if (!vs || !copy || !guides || !alpha || !alphaTint)
+    auto alphaTintNr = Compile(shader, "AlphaTintNr", "ps_5_0");
+    if (!vs || !copy || !guides || !alpha || !alphaTint || !alphaTintNr)
         return 1;
 
     Passes passes;
     CHECK(!passes.Init(g_device.Get(), Shaders {}, DrawTriangle)); // empty bytecode must fail, not crash
     CHECK(!passes.Ready());
-    CHECK(passes.Init(g_device.Get(), Shaders { Of(vs), Of(copy), Of(guides), Of(alpha), Of(alphaTint) }, DrawTriangle));
+    CHECK(passes.Init(g_device.Get(), Shaders { Of(vs), Of(copy), Of(guides), Of(alpha), Of(alphaTint), Of(alphaTintNr) }, DrawTriangle));
     if (!passes.Ready())
         return 1;
 
