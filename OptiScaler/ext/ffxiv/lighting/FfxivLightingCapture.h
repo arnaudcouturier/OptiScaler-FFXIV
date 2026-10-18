@@ -11,6 +11,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaDispatch.h" // ext: S11 character preview (CharaView)
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
+#include "ext/ffxiv/lighting/FfxivResolveGate.h"
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
@@ -111,31 +112,46 @@ inline void STDMETHODCALLTYPE OnResolve(ID3D11DeviceContext* c,ID3D11Resource* d
 }
 // The detour is NOT part of the main hook transaction (Install): a debug aid must not be able to take the shipped features down. The preview
 // probe asks for it through ext::ffxiv::chara::probe::ResolveHookControl when the probe or the flood test is first switched on, from the
-// draw thread, and again to remove it. Own transaction with single-thread enlistment, like Install (Detours allocates while enlisted
-// threads are suspended: no other thread is enlisted here). A failure leaves every other hook as it was; Detours serialises transactions
-// (a second one started at the same time fails instead of waiting), and a failed attach is reported by the probe.
-inline bool resolveAttached=false;
+// draw thread, and again to remove it. Every transaction of this layer (Install, the main Detach, these two) runs under one gate
+// (FfxivResolveGate.h): Detours rejects a second transaction that starts while one is open, and the unhook thread's main detach can meet the
+// draw thread's run-time removal after a deferred preview teardown. A failure leaves every other hook as it was, and a failed attach is
+// reported by the probe.
+// These two transactions run while the game's other threads are live, and the code of ResolveSubresource is shared with deferred contexts
+// that they may be executing while the patch is written: so they enlist every game thread (DetourThreadScope), like the main Detach does.
+// The risk the Install comment below describes (Detours allocates while enlisted threads are suspended) is accepted here: this only runs
+// when a debug aid (the probe or the flood test) is switched on or off, never in a normal session.
+inline TransactionGate transactionGate;
 inline bool AttachResolve()
 {
-    if (!installed.load() || !context) return false; // the main hooks are not installed
-    if (resolveAttached) return true;
-    resolve=reinterpret_cast<ResolveCall>((*reinterpret_cast<void***>(context))[57]);
-    if (DetourTransactionBegin()!=NO_ERROR) return false;
-    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
-    ok &= DetourAttach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
-    LONG result=ERROR_INVALID_FUNCTION;
-    if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
-    resolveAttached=result==NO_ERROR;
-    return resolveAttached;
+    return transactionGate.AttachResolve(
+        [] { return installed.load() && context != nullptr; }, // the main hooks are installed (evaluated under the gate)
+        []
+        {
+            resolve=reinterpret_cast<ResolveCall>((*reinterpret_cast<void***>(context))[57]);
+            ext::core::DetourThreadScope threads;
+            if (!threads.Ok()) { LOG_WARN("FFXIV lighting: unable to enlist game threads; the ResolveSubresource detour was not attached"); return false; }
+            if (DetourTransactionBegin()!=NO_ERROR) return false;
+            bool ok=threads.Update()==NO_ERROR;
+            ok &= DetourAttach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
+            LONG result=ERROR_INVALID_FUNCTION;
+            if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
+            return result==NO_ERROR;
+        });
 }
 inline void DetachResolve()
 {
-    if (!resolveAttached) return;
-    if (DetourTransactionBegin()!=NO_ERROR) return;
-    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
-    ok &= DetourDetach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) resolveAttached=false; } // `resolve` is the original function again
-    else DetourTransactionAbort();
+    transactionGate.DetachResolve(
+        []
+        {
+            ext::core::DetourThreadScope threads;
+            if (!threads.Ok()) { LOG_WARN("FFXIV lighting: unable to enlist game threads; the ResolveSubresource detour stays attached"); return false; }
+            if (DetourTransactionBegin()!=NO_ERROR) return false;
+            bool ok=threads.Update()==NO_ERROR;
+            ok &= DetourDetach(reinterpret_cast<PVOID*>(&resolve),OnResolve)==NO_ERROR;
+            if (ok) return DetourTransactionCommit()==NO_ERROR; // `resolve` is the original function again
+            DetourTransactionAbort();
+            return false;
+        });
 }
 inline const ext::ffxiv::chara::probe::ResolveHookControl resolveControl { &AttachResolve, &DetachResolve };
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
@@ -248,26 +264,33 @@ inline void Install(ID3D11Device* d)
     // exists to prevent (resuming a thread with its IP inside a patched prologue) is accepted
     // here, matching this codebase's existing convention at 120+ other single-thread Detours call
     // sites -- see the code-review ledger entry for the full trade-off.
-    if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
-    bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
-#define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
-    LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
-    LIGHT_ATTACH(createLayout,OnCreateLayout);
-    LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
-    LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
-    LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
-    LIGHT_ATTACH(clearRtv,OnClearRtv);LIGHT_ATTACH(beginQuery,OnBegin);LIGHT_ATTACH(endQuery,OnEnd);LIGHT_ATTACH(createVs,OnCreateVertexShader); // ext: S11
-#undef LIGHT_ATTACH
+    // The transaction runs under the layer's gate (see AttachResolve): the unhook thread's main detach or the draw thread's run-time resolve
+    // transaction must not be open at the same time.
+    bool began=false;
     LONG result=ERROR_INVALID_FUNCTION;
-    if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
+    transactionGate.Run([&]
+    {
+        if (DetourTransactionBegin()!=NO_ERROR) return 0;
+        began=true;
+        bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
+#define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
+        LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
+        LIGHT_ATTACH(createLayout,OnCreateLayout);
+        LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
+        LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
+        LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
+        LIGHT_ATTACH(clearRtv,OnClearRtv);LIGHT_ATTACH(beginQuery,OnBegin);LIGHT_ATTACH(endQuery,OnEnd);LIGHT_ATTACH(createVs,OnCreateVertexShader); // ext: S11
+#undef LIGHT_ATTACH
+        if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
+        return 0;
+    });
+    if (!began) { create=nullptr; return; }
     if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::probe::SetResolveHookControl(&resolveControl); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(draw)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
     else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
-inline void Detach()
+// The main detach transaction; runs under the layer's gate.
+inline void DetachTransaction()
 {
-    ext::hdr::FfxivSceneHdr::EndFrame();
-    ext::ffxiv::chara::Detach(); // ext: S11 releases the preview layer's GPU objects while the device is still valid
-    FfxivLightingScan::Stop();
     // installed only flips to false once the detach transaction actually commits (below): if
     // create is null (never attached) or the transaction fails/aborts, installed must stay
     // exactly as it was, since SceneLightingProvider::Status() reads this flag as a diagnostics
@@ -291,10 +314,19 @@ inline void Detach()
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
     LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
-    if (resolveAttached) LIGHT_DETACH(resolve,OnResolve); // ext: S11 (only when the probe attached it, see AttachResolve)
+    if (transactionGate.ResolveAttached()) LIGHT_DETACH(resolve,OnResolve); // ext: S11 (only when the probe attached it, see AttachResolve)
     LIGHT_DETACH(clearRtv,OnClearRtv);LIGHT_DETACH(beginQuery,OnBegin);LIGHT_DETACH(endQuery,OnEnd);LIGHT_DETACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; resolveAttached=false; ext::ffxiv::chara::probe::SetResolveHookControl(nullptr); ext::ffxiv::chara::OnDetached(); } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { installed.store(false); create=nullptr; createLayout=nullptr; context=nullptr; transactionGate.ResolveGone(); ext::ffxiv::chara::probe::SetResolveHookControl(nullptr); ext::ffxiv::chara::OnDetached(); } }
     else DetourTransactionAbort();
+}
+inline void Detach()
+{
+    ext::hdr::FfxivSceneHdr::EndFrame();
+    ext::ffxiv::chara::Detach(); // ext: S11 releases the preview layer's GPU objects while the device is still valid
+    FfxivLightingScan::Stop();
+    // The gate is taken only now: on the draw thread chara::Detach() above reaches the probe's run-time removal of the resolve detour,
+    // which takes the same gate.
+    transactionGate.Run([] { DetachTransaction(); return 0; });
 }
 }
