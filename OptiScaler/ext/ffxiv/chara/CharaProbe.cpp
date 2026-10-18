@@ -47,6 +47,7 @@ struct State
     BackbufferInfo backbuffer;
     bool backbufferKnown = false; // backbuffer holds an answer (valid or not) taken at backbufferStamp
     uint64_t backbufferStamp = 0;
+    uint64_t backbufferFrame = 0; // g_stats.frames when the answer was taken: a new frame asks again
     uint64_t lastGauge = 0;
     std::array<bool, 3> swapSeen {};
     std::array<uint32_t, 3> swapBurst {};
@@ -86,12 +87,15 @@ std::filesystem::path OutputDirectory()
     return std::filesystem::path(path).parent_path() / "OptiScaler" / "PreviewDebug";
 }
 
-// The swapchain buffer, looked up at most every kBackbufferCacheMs (only the pointer value and the size are kept).
+// The swapchain buffer, looked up at most every kBackbufferCacheMs and once per presented frame when the bridge reports frames
+// (a swapchain with several buffers may hand out a different texture each frame). Only the pointer value and the size are kept.
 const BackbufferInfo& Backbuffer(uint64_t now)
 {
     State& s = S();
-    if (!s.backbufferKnown || now < s.backbufferStamp || now - s.backbufferStamp >= kBackbufferCacheMs)
+    const uint64_t frame = g_stats.frames.load(std::memory_order_relaxed);
+    if (!s.backbufferKnown || frame != s.backbufferFrame || now < s.backbufferStamp || now - s.backbufferStamp >= kBackbufferCacheMs)
     {
+        s.backbufferFrame = frame;
         BackbufferInfo info;
         info.valid = ext::ffxiv::ui::BackbufferIdentity(&info.texture, &info.width, &info.height, &info.format);
         s.backbuffer = info;
@@ -221,7 +225,15 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
     }
 
     ++g_stats.probeCopies;
-    NoteActivity(now);
+
+    // A copy of the preview itself shows the renderer is active. A copy of a derived texture neither extends that nor keeps the
+    // set alive: lineage dies out about kExpiryMs after the preview stops rendering, however often the game still touches the
+    // derived texture. (The case is logged either way.)
+    const uint64_t activity = detail::g_lastActivity.load(std::memory_order_relaxed);
+    const bool recent = activity != 0 && now >= activity && now - activity <= kActivityMs;
+    const bool follow = fromPreview || recent;
+    if (fromPreview)
+        NoteActivity(now);
 
     ComPtr<ID3D11Texture2D> texture;
     if (FAILED(dest->QueryInterface(IID_PPV_ARGS(&texture))) || texture == nullptr)
@@ -231,17 +243,22 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
 
     const TextureInfo info { td.Width, td.Height, static_cast<uint32_t>(td.Format) };
     const bool destIsPreviewEntry = table::IndexOfPointer(snap, dst) >= 0;
-    const DeriveResult result = fromPreview ? s.derived.FromPreview(entry, src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now)
-                                            : s.derived.FromDerived(src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now);
-    if (!Accepted(result))
+    if (follow)
     {
-        ++g_stats.probeCopiesRefused;
-        return;
+        const DeriveResult result = fromPreview ? s.derived.FromPreview(entry, src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now)
+                                                : s.derived.FromDerived(src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now);
+        if (!Accepted(result))
+        {
+            ++g_stats.probeCopiesRefused;
+            return;
+        }
+        if (result == DeriveResult::Added || result == DeriveResult::Replaced)
+            ++g_stats.probeDerivedAdded;
+        if (!fromPreview)
+            s.derived.Touch(src, now);
     }
-    if (result == DeriveResult::Added || result == DeriveResult::Replaced)
-        ++g_stats.probeDerivedAdded;
-    if (!fromPreview)
-        s.derived.Touch(src, now);
+    else
+        ++g_stats.probeCopiesRefused; // the preview is not rendering: not followed, but worth a line
 
     const int sourceEntry = fromPreview ? entry : from.sourceEntry;
     const uint32_t hops = fromPreview ? 1 : from.hops + 1;
@@ -364,7 +381,8 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
             hit.sourceEntry = found->sourceEntry;
             hit.hops = found->hops;
             hit.kind = found->kind;
-            s.derived.Touch(texture, now); // a draw that still samples it keeps it alive
+            if (recent)
+                s.derived.Touch(texture, now); // sampled while the preview renders: still alive (never otherwise, or it would never expire)
         }
         else
             continue;
@@ -421,7 +439,8 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
             continue;
 
         const std::string crc = shader.known ? std::format("{:08X}", shader.crc) : std::string("unknown (shader made before the hooks)");
-        const std::string target = haveTarget ? std::format("{}x{} format {}", rtDesc.Width, rtDesc.Height, FormatText(static_cast<uint32_t>(rtDesc.Format)))
+        const std::string target = haveTarget ? std::format("{:#x} {}x{} format {}", rtPointer, rtDesc.Width, rtDesc.Height,
+                                                            FormatText(static_cast<uint32_t>(rtDesc.Format)))
                                               : std::string("none");
         std::string what;
         if (hit.derived)
@@ -438,7 +457,10 @@ void OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& sn
     }
 
     // The render target of a draw that sampled the preview (or a copy of it) holds the image too, unless it is the screen.
-    if (haveTarget && rtPointer != 0 && !targetIsBackbuffer && table::IndexOfPointer(snapshot, rtPointer) < 0)
+    // Only while the preview renders (see the copy path), and never a screen-size target when the backbuffer is not known.
+    const bool screenSize = rtDesc.Width >= kScreenClassWidth && rtDesc.Height >= kScreenClassHeight;
+    if (recent && haveTarget && rtPointer != 0 && !targetIsBackbuffer && (bb.valid || !screenSize) &&
+        table::IndexOfPointer(snapshot, rtPointer) < 0)
     {
         // the closest source: a preview output first, then the derived texture with the fewest hops
         const Hit* best = &hits[0];
