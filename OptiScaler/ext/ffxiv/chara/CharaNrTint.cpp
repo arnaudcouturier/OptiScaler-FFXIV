@@ -34,8 +34,13 @@ ComPtr<ID3D11ShaderResourceView> TintTargets::Tinted(guides::Passes& passes, ID3
         // The target already shows this result: no second pass for the next UI draw that samples the same image.
         if (entry->srv != nullptr && !ResultTintPassDue(true, ConsumerSource::NrResult, entry->serial, serial))
             return entry->srv;
+        // This result could not be tinted before (no cyan shader, no target, the pass failed): not again at every UI draw that samples it. The
+        // next result (a new serial) tries again.
+        if (entry->failedSerial == serial)
+            return nullptr;
     }
 
+    ++_attempts;
     ComPtr<ID3D11Resource> resource;
     source->GetResource(&resource);
     ComPtr<ID3D11Texture2D> texture;
@@ -71,7 +76,11 @@ ComPtr<ID3D11ShaderResourceView> TintTargets::Tinted(guides::Passes& passes, ID3
             FAILED(device->CreateShaderResourceView(entry->texture.Get(), nullptr, &entry->srv)) ||
             FAILED(device->CreateRenderTargetView(entry->texture.Get(), nullptr, &entry->rtv)))
         {
+            const uintptr_t failedKey = key;
             *entry = Entry {};
+            entry->key = failedKey; // remembered, so that the same result is not tried again at every draw
+            entry->lastUse = now;
+            entry->failedSerial = serial;
             return nullptr;
         }
         entry->width = desc.Width;
@@ -88,6 +97,7 @@ ComPtr<ID3D11ShaderResourceView> TintTargets::Tinted(guides::Passes& passes, ID3
     if (!scope.Ok() || !scope.TintResult(source, entry->rtv.Get(), desc.Width, desc.Height))
     {
         entry->serial = 0; // the target holds nothing usable
+        entry->failedSerial = serial;
         return nullptr;
     }
     entry->serial = serial;

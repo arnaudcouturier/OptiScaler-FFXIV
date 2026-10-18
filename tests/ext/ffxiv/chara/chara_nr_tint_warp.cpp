@@ -231,6 +231,19 @@ void TestNoShader(const ComPtr<ID3DBlob>& vs, const ComPtr<ID3DBlob>& copy, cons
     Tex result = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, kW, kH, data.data(), kW * 8);
     bool drawn = true;
     CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x1000, result.srv.Get(), 1, 100, &drawn) == nullptr && !drawn);
+
+    // The same result is not tried again at every UI draw that samples it: one attempt, then nothing until a new result comes
+    CHECK(targets.Attempts() == 1);
+    for (int draw = 0; draw < 5; ++draw)
+        CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x1000, result.srv.Get(), 1, 101 + draw, &drawn) == nullptr && !drawn);
+    CHECK(targets.Attempts() == 1);
+    CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x1000, result.srv.Get(), 2, 110, &drawn) == nullptr && !drawn); // a new result: one more try
+    CHECK(targets.Attempts() == 2);
+    CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x1000, result.srv.Get(), 2, 111, &drawn) == nullptr);
+    CHECK(targets.Attempts() == 2);
+    // another image has its own memory
+    CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x2000, result.srv.Get(), 2, 112, &drawn) == nullptr && targets.Attempts() == 3);
+    CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x2000, result.srv.Get(), 2, 113, &drawn) == nullptr && targets.Attempts() == 3);
 }
 
 // The alpha pass of the super-resolution path with an NR colour (the production result): cyan; with the SR colour: magenta; plain without.

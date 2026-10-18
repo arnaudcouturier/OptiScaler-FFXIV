@@ -38,12 +38,15 @@ class TintTargets
     void Release(uint64_t now, uint64_t unusedMs);
     void Clear();
     size_t Count() const;
+    // Calls of Tinted that got past the cheap checks (the target shows the result, the result already failed) and did work or tried to.
+    uint64_t Attempts() const { return _attempts; }
 
   private:
     struct Entry
     {
         uintptr_t key = 0;
         uint64_t serial = 0;  // the result the target shows (0: nothing yet)
+        uint64_t failedSerial = 0; // the result that could not be tinted (0: none); not retried until a new result comes
         uint64_t lastUse = 0;
         uint32_t width = 0, height = 0;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -52,5 +55,6 @@ class TintTargets
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
     };
     std::array<Entry, kCapacity> _entries {};
+    uint64_t _attempts = 0;
 };
 } // namespace ext::ffxiv::chara::nr
