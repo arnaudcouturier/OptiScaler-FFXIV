@@ -727,6 +727,49 @@ void TestFallbackTally()
     CHECK(t.all == 4 && t.production == 2 && t.production <= t.all);
 }
 
+
+// The video memory figure goes down when a stream's objects go, whichever way they go.
+void TestVideoMemoryAccount()
+{
+    CHECK(AddedMegabytes(100u << 20, 164u << 20) == 64);
+    CHECK(AddedMegabytes(164u << 20, 100u << 20) == 0);          // other users freed memory meanwhile: never negative
+    CHECK(AddedMegabytes(0, (3u << 20) - 1) == 2);                 // whole megabytes
+    CHECK(AddedMegabytes(5ull << 30, (5ull << 30) + (200ull << 20)) == 200);
+
+    VideoMemoryAccount account;
+    uint64_t a = 0, b = 0; // two streams' parts
+    account.Added(a, 52);  // a bring-up stream (images and model)
+    account.Added(b, 110); // another window
+    CHECK(account.Total() == 162 && a == 52 && b == 110);
+
+    // the bring-up -> production switch: the old stream is released (its figure goes), the new one adds its own
+    account.Released(a);
+    CHECK(account.Total() == 110 && a == 0);
+    account.Added(a, 200);
+    CHECK(account.Total() == 310 && a == 200);
+
+    // a linger release and a second release of the same (already empty) part change nothing more
+    account.Released(b);
+    CHECK(account.Total() == 200 && b == 0);
+    account.Released(b);
+    CHECK(account.Total() == 200);
+
+    // window open / close cycles do not accumulate
+    for (int cycle = 0; cycle < 10; ++cycle)
+    {
+        uint64_t part = 0;
+        account.Added(part, 150);
+        account.Released(part);
+    }
+    CHECK(account.Total() == 200);
+
+    // the full release resets the total; a part released afterwards cannot take it below zero
+    account.Reset();
+    CHECK(account.Total() == 0);
+    account.Released(a); // a still holds 200 from before the reset
+    CHECK(account.Total() == 0 && a == 0);
+}
+
 } // namespace
 
 int main()
@@ -749,5 +792,6 @@ int main()
     TestDoneRepair();
     TestGuardedTeardown();
     TestFallbackTally();
+    TestVideoMemoryAccount();
     return TEST_RESULT("chara_nr_rules");
 }

@@ -74,9 +74,9 @@ void DrawNrSection(CharaConfig& cfg)
         }
     }
     if (st.videoMemoryMb != 0)
-        ImGui::TextDisabled("Video memory added by the NR models: about %llu MB", (unsigned long long) st.videoMemoryMb);
+        ImGui::TextDisabled("Video memory added by the NR streams (images and models): about %llu MB", (unsigned long long) st.videoMemoryMb);
     else if (st.streams != 0)
-        ImGui::TextDisabled("Video memory added by the NR models: not measured");
+        ImGui::TextDisabled("Video memory added by the NR streams (images and models): not measured");
     if (st.late)
         ImGui::TextDisabled("Showing the previous frame's NR result (PreviewNRLate)");
 }

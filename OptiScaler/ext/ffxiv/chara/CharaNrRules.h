@@ -567,6 +567,40 @@ template <class Ops> HandoffOutcome RunFrame(Ops& ops, FenceCounter& ready, bool
     return RunHandoff(ops, ready, !late);
 }
 
+// ---- Video memory added by the module -------------------------------------------------------------------------------------------
+// The figure the menu shows ("video memory added by the NR models"). Each stream remembers what it added (its images and its model, measured
+// around their creation) and gives it back when its objects are released, whichever way that happens: the linger release, a rebuild (a size
+// change, or the switch between the bring-up and the production shape), or the full release. The total is only written under the module's
+// lock and read by the menu, so it is atomic; it never goes below zero.
+constexpr uint64_t AddedMegabytes(uint64_t usedBefore, uint64_t usedAfter)
+{
+    return usedAfter > usedBefore ? (usedAfter - usedBefore) >> 20 : 0;
+}
+
+class VideoMemoryAccount
+{
+  public:
+    // A stream's objects were created and measured: its part joins the total.
+    void Added(uint64_t& streamMb, uint64_t mb)
+    {
+        streamMb += mb;
+        _total.fetch_add(mb, std::memory_order_relaxed);
+    }
+    // The stream's objects are gone: its part leaves the total.
+    void Released(uint64_t& streamMb)
+    {
+        const uint64_t total = _total.load(std::memory_order_relaxed);
+        _total.store(streamMb >= total ? 0 : total - streamMb, std::memory_order_relaxed);
+        streamMb = 0;
+    }
+    // Everything was released.
+    void Reset() { _total.store(0, std::memory_order_relaxed); }
+    uint64_t Total() const { return _total.load(std::memory_order_relaxed); }
+
+  private:
+    std::atomic<uint64_t> _total { 0 };
+};
+
 // ---- Renders that kept the image ----------------------------------------------------------------------------------------------------
 // A render for which a call ended without a result (not available, still preparing, skipped, failed, or not offered at all) kept the native
 // image (bring-up) or the plain super-resolution image (production). Counted ONCE per call, at the one place a call ends (the module's

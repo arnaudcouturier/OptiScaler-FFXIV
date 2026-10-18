@@ -81,7 +81,8 @@ struct Stream
     uint64_t doneValue[2] = {};   // done-fence value after which result[i] (and colour[i] in the late variant) is no longer in use
     bool guidesInit = false;
     bool gpuObjects = false;
-    uint64_t vramBefore = 0;
+    uint64_t vramBefore = 0;      // video memory in use before the stream's images and model were created
+    uint64_t vramAddedMb = 0;     // this stream's part of the module's account (VideoMemoryAccount), given back when its objects are released
     std::chrono::steady_clock::time_point created {};
     bool readyLogged = false;
 };
@@ -138,7 +139,7 @@ struct Module
     std::atomic<uint32_t> streamCount { 0 }, liveCount { 0 };
     std::atomic<uint64_t> lastGpuUs { 0 }, lastCpuUs { 0 };
     std::atomic<uint64_t> lastProductionGpuUs { 0 }, lastProductionCpuUs { 0 };
-    std::atomic<uint64_t> vramAddedMb { 0 };
+    VideoMemoryAccount vram; // the figure of the menu: what the streams' images and models added
 };
 
 Module& M()
@@ -380,6 +381,7 @@ void ReleaseStreamObjects(Stream& s, bool releaseFeature)
     s.proxy.Reset();
     s.original.Reset();
     s.modelOut.Reset();
+    m.vram.Released(s.vramAddedMb); // every way a stream's objects go (linger, rebuild, mode switch, full release) gives its figure back
     s = Stream {};
 }
 
@@ -451,7 +453,7 @@ bool ReleaseAll(bool drain)
         }
     }
     ReleaseGlobal();
-    m.vramAddedMb.store(0, std::memory_order_relaxed);
+    m.vram.Reset();
     m.releasePending = false;
     UpdateHolds();
     return true;
@@ -769,7 +771,6 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
         return RunOutcome::Skipped;
     const DlssNr::PreviewBackend& b = m.backend;
     const DlssNr::PreviewTuning t = DlssNr::CurrentPreviewTuning();
-    s.vramBefore = VramUsedBytes();
     const auto start = std::chrono::steady_clock::now();
     {
         DlssNr::PreviewEvaluateScope serialised;
@@ -800,7 +801,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     s.createDone = value;
     s.created = start;
     const uint64_t after = VramUsedBytes();
-    LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB -> {} MB",
+    LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB (before the stream's images) -> {} MB",
              s.production ? "production" : "bring-up", index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
     return RunOutcome::Preparing;
 }
@@ -812,9 +813,9 @@ void NoteFeatureReady(Stream& s, int index)
     s.readyLogged = true;
     Module& m = M();
     const uint64_t used = VramUsedBytes();
-    const uint64_t added = used > s.vramBefore ? (used - s.vramBefore) >> 20 : 0;
-    m.vramAddedMb.fetch_add(added, std::memory_order_relaxed);
-    LOG_INFO("CharaView NR: model instance {} ready after {:.0f} ms; video memory in use {} MB ({} MB more than before it was created)", index,
+    const uint64_t added = AddedMegabytes(s.vramBefore, used);
+    m.vram.Added(s.vramAddedMb, added);
+    LOG_INFO("CharaView NR: model instance {} ready after {:.0f} ms; video memory in use {} MB ({} MB more than before the stream's images and model were created)", index,
              MsSince(s.created), used >> 20, added);
 }
 
@@ -1026,6 +1027,7 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         D3D11_TEXTURE2D_DESC nd {};
         req.native->GetDesc(&nd);
         const bool formatOk = production != nullptr || nd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        s.vramBefore = VramUsedBytes(); // before the images, so the figure covers the images as well as the model
         if (!formatOk || !CreateStreamGpu(s, wanted, nd.Format))
         {
             Latch(!formatOk ? "the preview image is not B8G8R8A8_UNORM" : "the shared images could not be created");
@@ -1284,7 +1286,7 @@ static Status GetStatusImpl()
     s.productionFallbacks = m.fallbacks.production.load(std::memory_order_relaxed);
     s.productionGpuMs = static_cast<double>(m.lastProductionGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.productionCpuMs = static_cast<double>(m.lastProductionCpuUs.load(std::memory_order_relaxed)) / 1000.0;
-    s.videoMemoryMb = m.vramAddedMb.load(std::memory_order_relaxed);
+    s.videoMemoryMb = m.vram.Total();
     s.late = Late();
     return s;
 }

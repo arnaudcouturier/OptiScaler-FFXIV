@@ -148,7 +148,7 @@ struct Status
     uint64_t productionFallbacks = 0; // production calls that left the super-resolution output as it was
     double productionGpuMs = 0.0;     // GPU time of the last production run (0 = none measured yet)
     double productionCpuMs = 0.0;
-    uint64_t videoMemoryMb = 0; // video memory the model instances added (measured around their creation; 0 = not measured)
+    uint64_t videoMemoryMb = 0; // video memory the streams' images and model instances added (measured around their creation, given back when a stream is released; 0 = not measured)
     bool late = false;
 };
 Status GetStatus();
