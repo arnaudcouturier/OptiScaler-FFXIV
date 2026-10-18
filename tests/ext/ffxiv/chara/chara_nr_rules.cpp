@@ -1,9 +1,12 @@
 #include "check.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaNrRules.h"
 
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ext::ffxiv::chara::nr;
@@ -579,6 +582,34 @@ void TestGuarded()
                                     return static_cast<int>(3);
                                 });
     CHECK(outcome == 3 && fallbacks == 1);
+
+    // The real outcome enum: when the body throws and even the failure handler throws, the answer is a value-initialised outcome. That must
+    // not be "Ran" (a result image exists): the dispatcher would count a run and skip withdrawing the older result.
+    CHECK(Guarded([]() -> RunOutcome { throw Boom {}; }, []() -> RunOutcome { throw Boom {}; }) != RunOutcome::Ran);
+    CHECK(Guarded([]() -> RunOutcome { throw Boom {}; }, []() -> RunOutcome { throw Boom {}; }) == RunOutcome::Failed);
+    CHECK(static_cast<int>(RunOutcome::Failed) == 0); // the value-initialised outcome
+    CHECK(Guarded([]() -> RunOutcome { return RunOutcome::Ran; }, []() -> RunOutcome { return RunOutcome::Failed; }) == RunOutcome::Ran);
+
+    // A body that throws while it holds the module's lock leaves the lock free (the lock guard unwinds before the handler runs): a second
+    // thread can take it right after.
+    std::mutex moduleLock;
+    Guarded(
+        [&]
+        {
+            std::lock_guard<std::mutex> hold(moduleLock);
+            throw Boom {};
+        },
+        [&] {});
+    bool lockFree = false;
+    std::thread other(
+        [&]
+        {
+            lockFree = moduleLock.try_lock();
+            if (lockFree)
+                moduleLock.unlock();
+        });
+    other.join();
+    CHECK(lockFree);
 }
 } // namespace
 

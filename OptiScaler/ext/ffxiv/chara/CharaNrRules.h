@@ -619,7 +619,7 @@ struct CostAccumulator
 // The module's entry points run inside the game's Draw hook and the bridge's callbacks; an exception that leaves one of them would
 // leave the game's call. Every entry runs its body through Guarded: an exception is stopped here, `onThrow` (which latches the module
 // with one fixed log line and returns the fallback value) answers instead, and nothing is thrown out. `onThrow` must not format paths or
-// call anything that can throw; if it does anyway, a value-initialised result is returned.
+// call anything that can throw; if it does anyway, a value-initialised result is returned (for RunOutcome that is Failed, see CharaNr.h).
 template <class Body, class OnThrow> auto Guarded(Body&& body, OnThrow&& onThrow) noexcept -> decltype(body())
 {
     try
