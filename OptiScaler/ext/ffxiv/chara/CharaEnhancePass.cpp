@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/ffxiv/chara/CharaContextState.h"
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
 
 #include <Chara_Fxaa_PS.h>
@@ -69,7 +70,9 @@ bool FxaaPass::Init(ID3D11Device* device)
     // The private state the pass runs in: the game's own pipeline state is not touched.
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL chosen {};
-    const UINT flags = (device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 ? D3D11_CREATE_DEVICE_SINGLETHREADED : 0;
+    static_assert(kDeviceCreateSingleThreaded == D3D11_CREATE_DEVICE_SINGLETHREADED);
+    static_assert(kContextStateSingleThreaded == D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED);
+    const UINT flags = ContextStateFlags(device->GetCreationFlags());
     if (FAILED(device1->CreateDeviceContextState(flags, levels, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), &chosen, &_state)) ||
         _state == nullptr)
     {
@@ -162,7 +165,9 @@ bool FxaaPass::Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* s
     context1->SwapDeviceContextState(_state.Get(), &previous);
     if (previous == nullptr)
     {
-        // Nothing to swap back to: leave the private state in place would corrupt the game; this must not happen.
+        // The game's state could not be captured. Do what the DLSS guides do in the same case: swap again at once, so the private state
+        // is not left active over the game's pipeline (best effort; the runtime always hands back a state, so this should not happen).
+        context1->SwapDeviceContextState(_state.Get(), nullptr);
         _failure = "the previous device-context state was not returned";
         return false;
     }

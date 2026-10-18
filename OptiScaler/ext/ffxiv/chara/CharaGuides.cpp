@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/ffxiv/chara/CharaContextState.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
 
 namespace ext::ffxiv::chara::guides
@@ -22,7 +23,11 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL chosen = D3D_FEATURE_LEVEL_11_0;
     ComPtr<ID3DDeviceContextState> state;
-    if (FAILED(device1->CreateDeviceContextState(0, levels, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device1), &chosen, &state)))
+    // The state agrees with the device's threading mode (the spatial AA does the same).
+    static_assert(kDeviceCreateSingleThreaded == D3D11_CREATE_DEVICE_SINGLETHREADED);
+    static_assert(kContextStateSingleThreaded == D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED);
+    if (FAILED(device1->CreateDeviceContextState(ContextStateFlags(device->GetCreationFlags()), levels, 1, D3D11_SDK_VERSION,
+                                                 __uuidof(ID3D11Device1), &chosen, &state)))
     {
         LOG_ERROR("CharaView DLSS: private context state could not be created");
         return false;
