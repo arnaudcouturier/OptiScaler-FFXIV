@@ -15,6 +15,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaDraw.h"
+#include "ext/ffxiv/chara/CharaProbe.h"
 
 namespace ext::ffxiv::chara
 {
@@ -41,13 +42,16 @@ inline std::atomic<bool> g_inert { false }; // latched when the game build or th
 inline bool DlssWanted() { return ext::Cfg().ffxiv.chara.previewDlss.value_or_default(); }
 inline bool AaWanted() { return ext::Cfg().ffxiv.chara.previewAA.value_or_default(); }
 
-// Cheap gate in front of every draw: false means the feature does nothing for this draw.
+// Cheap gate in front of every draw: false means the feature does nothing for this draw. The debug aids (the probe and the
+// flood test) keep the dispatcher running too; probe::Live() keeps it running for the draw that sees the probe switched off,
+// so the probe can release what it holds.
 inline bool Wanted()
 {
     if (detail::g_inert.load(std::memory_order_relaxed))
         return false;
     const auto& c = ext::Cfg().ffxiv.chara;
-    return c.previewAA.value_or_default() || c.previewDlss.value_or_default();
+    return c.previewAA.value_or_default() || c.previewDlss.value_or_default() || c.previewProbe.value_or_default() ||
+           c.previewDebugFlood.value_or_default() || probe::Live();
 }
 
 void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw);
@@ -73,8 +77,13 @@ void Detach();
 // CreatePixelShader succeeded; `crc` is the CRC-32 of the DXBC. Call after the other shader tags were written.
 void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize);
 
-// Hook forwarders. All of them return immediately unless the isolated DLSS path is on and active.
-void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* source, bool full);
+// Hook forwarders. All of them return immediately unless the isolated DLSS path is on and active (the three copy forwarders also
+// serve the preview probe, which does not depend on DLSS).
+void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* source, bool full); // CopyResource
+void OnCopyRegion(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destSub, UINT x, UINT y, UINT z, ID3D11Resource* source,
+                  UINT sourceSub, const D3D11_BOX* box);                                             // CopySubresourceRegion
+void OnResolve(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destSub, ID3D11Resource* source, UINT sourceSub,
+               DXGI_FORMAT format);                                                                 // ResolveSubresource
 void OnClearRenderTargetView(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const FLOAT color[4]);
 void OnQueryBegin(ID3D11DeviceContext* context, ID3D11Asynchronous* query);
 void OnQueryEnd(ID3D11DeviceContext* context, ID3D11Asynchronous* query);

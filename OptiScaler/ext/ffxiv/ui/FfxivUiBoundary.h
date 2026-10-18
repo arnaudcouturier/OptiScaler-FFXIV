@@ -31,6 +31,11 @@ void OnDraw(ID3D11DeviceContext* context, bool latched);
 // while Armed(). Never throws; does nothing unless the game module is a matched FFXIV build.
 void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t bytes);
 
+// Identity of the swapchain buffer the bridge copies from: the pointer value (never dereference it), its size and DXGI format.
+// Looks the buffer up through the swapchain on every call and keeps no reference (a retained reference would make ResizeBuffers
+// fail), so callers cache the answer; it is meant for log lines and debug probes, never for per-draw use. False when unknown.
+bool BackbufferIdentity(uintptr_t* texture, uint32_t* width, uint32_t* height, uint32_t* format);
+
 // Present entry (ext::dx11bridge::PresentScope constructor): refreshes the arming cache, runs the per-frame bookkeeping.
 void OnPresentBegin();
 } // namespace ext::ffxiv::ui

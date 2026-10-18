@@ -12,6 +12,7 @@
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
+#include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
@@ -633,12 +634,14 @@ void RunSlot(int index, const DrawView& view)
         return;
     }
 
-    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale,
-                     ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default()))
+    const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
+    if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale, tinted))
     {
         FailSlot(index, "the alpha pass failed");
         return;
     }
+    if (tinted)
+        ++g_stats.tintApplied;
 
     {
         ReplayScope own; // the query End goes through the hooked context
@@ -821,9 +824,23 @@ bool Consume(const DrawView& view, DrawCall draw)
             LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
         if (diag::TraceEnabled())
             diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
+
+        // The probe traces the first slot that was replaced (the image can be bound in a slot other than t0).
+        UINT tracedSlot = 0;
+        for (UINT i = 0; i < kSrvSlots; ++i)
+        {
+            if (replaced[i] != original[i])
+            {
+                tracedSlot = i;
+                break;
+            }
+        }
+        probe::SwapTrace trace(context, probe::SwapKind::Dlss, tracedSlot, replaced[tracedSlot]);
         context->PSSetShaderResources(0, kSrvSlots, replaced);
+        trace.Applied();
         draw();
         context->PSSetShaderResources(0, kSrvSlots, original);
+        trace.Restored();
         handled = true;
     }
     for (auto* v : original)

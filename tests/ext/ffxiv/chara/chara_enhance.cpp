@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaEnhance.h"
+#include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 
 #include <Chara_Fxaa_VS.h>
@@ -202,6 +203,30 @@ ID3D11ShaderResourceView* BoundT0(Env& e, ComPtr<ID3D11ShaderResourceView>& hold
     return holder.Get();
 }
 
+// A swap-trace sink of the test: remembers what the trace reported.
+struct SinkLog
+{
+    int arms = 0;
+    bool answer = true;
+    std::vector<probe::SwapRecord> records;
+} g_sink;
+
+bool TestArm(probe::SwapKind)
+{
+    ++g_sink.arms;
+    return g_sink.answer;
+}
+
+void TestReport(const probe::SwapRecord& record) { g_sink.records.push_back(record); }
+
+const probe::SwapSink kTestSink { &TestArm, &TestReport };
+
+ULONG RefCount(IUnknown* object)
+{
+    object->AddRef();
+    return object->Release();
+}
+
 void Main2(Env& e)
 {
     auto& cfg = ext::Cfg().ffxiv.chara;
@@ -368,6 +393,83 @@ void Main2(Env& e)
         CHECK(RunAround(e, TableWith(0, big.Get(), 2100, 8)).handled);  // 2100 is fine at 1x
         ID3D11ShaderResourceView* back = sourceSrv.Get();
         e.context->PSSetShaderResources(0, 1, &back);
+    }
+
+    // ---- the probe's swap trace: reports what t0 held before the swap, during the draw and after it, and changes nothing ----
+    {
+        cfg.previewUpscale = false;
+        const float clear[4] {};
+        auto render = [&]
+        {
+            e.context->ClearRenderTargetView(game.rtv.Get(), clear);
+            return RunAround(e, snap);
+        };
+
+        probe::g_swapSink.store(nullptr);
+        cfg.previewProbe = false;
+        const Run plainRun = render();
+        const auto plain = Read(e, game.target.Get(), 32, 32);
+        CHECK(plainRun.handled);
+
+        // sink installed and probe on: same draw result, one record with the three pointers, game view bound again, no leaked reference
+        g_sink = SinkLog {};
+        probe::g_swapSink.store(&kTestSink);
+        cfg.previewProbe = true;
+        const ULONG refsBefore = RefCount(sourceSrv.Get());
+        const Run tracedRun = render();
+        const auto traced = Read(e, game.target.Get(), 32, 32);
+        CHECK(tracedRun.handled && tracedRun.drawCalls == 1);
+        CHECK(traced == plain);
+        CHECK(g_sink.arms == 1 && g_sink.records.size() == 1);
+        if (g_sink.records.size() == 1)
+        {
+            const probe::SwapRecord& rec = g_sink.records[0];
+            CHECK(rec.kind == probe::SwapKind::Aa && rec.slot == 0);
+            CHECK(rec.before == reinterpret_cast<uintptr_t>(sourceSrv.Get()));
+            CHECK(rec.afterSwap == reinterpret_cast<uintptr_t>(tracedRun.seenAtDraw) && rec.afterSwap != rec.before);
+            CHECK(rec.replacement == rec.afterSwap);
+            CHECK(rec.afterDraw == rec.before);
+        }
+        CHECK(BoundT0(e, holder) == sourceSrv.Get());
+        holder.Reset();
+        CHECK(RefCount(sourceSrv.Get()) == refsBefore);
+
+        // the sink declines (the probe traces once per burst): the draw is still the same and nothing is reported
+        g_sink = SinkLog {};
+        g_sink.answer = false;
+        const Run declined = render();
+        CHECK(declined.handled && Read(e, game.target.Get(), 32, 32) == plain);
+        CHECK(g_sink.arms == 1 && g_sink.records.empty());
+
+        // probe key off: the sink is not even asked
+        g_sink = SinkLog {};
+        cfg.previewProbe = false;
+        CHECK(render().handled && Read(e, game.target.Get(), 32, 32) == plain);
+        CHECK(g_sink.arms == 0 && g_sink.records.empty());
+
+        // no sink: nothing happens either
+        cfg.previewProbe = true;
+        probe::g_swapSink.store(nullptr);
+        CHECK(render().handled && Read(e, game.target.Get(), 32, 32) == plain);
+        CHECK(g_sink.arms == 0 && g_sink.records.empty());
+        cfg.previewProbe = false;
+
+        // a trace around a draw that leaves a different view in the slot reports the difference (the draw is not ours to fix)
+        g_sink = SinkLog {};
+        probe::g_swapSink.store(&kTestSink);
+        cfg.previewProbe = true;
+        {
+            ID3D11ShaderResourceView* replacement = sourceSrv.Get();
+            probe::SwapTrace trace(e.context.Get(), probe::SwapKind::Flood, 0, replacement);
+            trace.Applied();
+            trace.Restored();
+            trace.Restored(); // reports once
+        }
+        CHECK(g_sink.records.size() == 1);
+        if (g_sink.records.size() == 1)
+            CHECK(g_sink.records[0].kind == probe::SwapKind::Flood && g_sink.records[0].before == g_sink.records[0].afterDraw);
+        probe::g_swapSink.store(nullptr);
+        cfg.previewProbe = false;
     }
 
     // after the module released its objects it works again

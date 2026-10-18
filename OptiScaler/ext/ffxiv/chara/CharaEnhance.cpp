@@ -4,6 +4,7 @@
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
+#include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 
 #include <array>
@@ -175,8 +176,9 @@ bool Around(const DrawView& view, DrawCall draw)
     }
 
     ID3D11ShaderResourceView* filtered = nullptr;
-    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle,
-                        ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default()) || filtered == nullptr)
+    const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
+    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle, tinted) ||
+        filtered == nullptr)
     {
         ++g_stats.aaSkipped;
         if (!g_loggedFailure)
@@ -188,8 +190,18 @@ bool Around(const DrawView& view, DrawCall draw)
         return false;
     }
 
+    if (tinted)
+        ++g_stats.tintApplied;
+
     // Show the filtered image to this one draw, then give the draw its own image back.
-    WithSource0(context, filtered, [&] { draw(); });
+    probe::SwapTrace trace(context, probe::SwapKind::Aa, 0, filtered);
+    WithSource0(context, filtered,
+                [&]
+                {
+                    trace.Applied();
+                    draw();
+                });
+    trace.Restored();
 
     const uint64_t n = ++g_stats.aaProcessed;
     if (n == 1)

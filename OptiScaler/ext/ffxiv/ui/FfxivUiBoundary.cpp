@@ -219,6 +219,30 @@ UiBoundaryProvider provider;
 
 ext::hudless::IHudlessSource& Provider() { return provider; }
 
+bool BackbufferIdentity(uintptr_t* texture, uint32_t* width, uint32_t* height, uint32_t* format)
+{
+    try
+    {
+        const void* buffer = nullptr;
+        dfmt::RtShape shape {};
+        if (!Backbuffer(&buffer, &shape) || buffer == nullptr)
+            return false;
+        if (texture)
+            *texture = reinterpret_cast<uintptr_t>(buffer);
+        if (width)
+            *width = shape.width;
+        if (height)
+            *height = shape.height;
+        if (format)
+            *format = shape.format;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 void OnDraw(ID3D11DeviceContext* context, bool latched)
 {
     try

@@ -305,6 +305,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
     const uint64_t now = GetTickCount64();
     Maintain(now);
+    probe::Update(now); // switches the preview probe on or off (releasing what it holds)
 
     const table::Snapshot& snap = table::Current(now);
     if (!snap.ready)
@@ -312,6 +313,11 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         draw();
         return;
     }
+
+    // The probe compares every draw's first resources with the preview textures before the draw is classified: the draws that put
+    // a copy of the preview on screen have no role and no table render target, so Gather would drop them. It reads state only.
+    if (probe::Live())
+        probe::OnDraw(context, api, snap, now);
 
     if (!g_loggedTags)
     {
@@ -333,6 +339,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     }
 
     view.kind = Classify(view.facts);
+    if (view.facts.rtv0Entry >= 0 || view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer)
+        probe::NoteActivity(now); // the preview renderer is active: the probe scans the draws that follow
     if (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer)
     {
         g_lastGeometry = now;
@@ -388,6 +396,7 @@ void OnDetached()
 
 void Detach()
 {
+    probe::Detach();
     enhance::Detach();
     dlss::Detach();
     g_pass.End();
@@ -424,9 +433,34 @@ void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize)
 
 void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* source, bool full)
 {
-    if (t_busy || t_replay || context != g_immediate || !DlssWanted() || !dlss::Active())
+    if (t_busy || t_replay || context != g_immediate)
+        return;
+    if (probe::Live())
+        probe::OnCopy(context, dest, source); // before the DLSS gate: the probe does not depend on DLSS
+    if (!DlssWanted() || !dlss::Active())
         return;
     dlss::OnCopy(context, dest, source, full);
+}
+
+void OnCopyRegion(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destSub, UINT x, UINT y, UINT z, ID3D11Resource* source,
+                  UINT sourceSub, const D3D11_BOX* box)
+{
+    if (t_busy || t_replay || context != g_immediate)
+        return;
+    if (probe::Live())
+        probe::OnCopyRegion(context, dest, destSub, x, y, z, source, sourceSub, box);
+    if (!DlssWanted() || !dlss::Active())
+        return;
+    const bool full = !destSub && !sourceSub && !x && !y && !z && !box; // the whole of subresource 0
+    dlss::OnCopy(context, dest, source, full);
+}
+
+void OnResolve(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destSub, ID3D11Resource* source, UINT sourceSub,
+               DXGI_FORMAT format)
+{
+    if (t_busy || t_replay || context != g_immediate || !probe::Live())
+        return;
+    probe::OnResolve(context, dest, destSub, source, sourceSub, format);
 }
 
 void OnClearRenderTargetView(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const FLOAT color[4])

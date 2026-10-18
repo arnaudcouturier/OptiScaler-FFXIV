@@ -55,6 +55,24 @@ void DrawCharaCard(ext::menu::Ctx&)
         cfg.previewDebugTint = tint;
     ext::menu::Tooltip("Debug aid, leave off in normal use. Mixes magenta into the preview image that the spatial AA or the DLSS "
                        "pass produced, so you can see in the game whether the processed image is the one on screen.");
+    ImGui::TextDisabled("Preview debug tint: %s, applied %llu times", tint ? "on" : "off",
+                        (unsigned long long) g_stats.tintApplied.load(std::memory_order_relaxed));
+
+    bool probeOn = cfg.previewProbe.value_or_default();
+    if (ImGui::Checkbox("Preview probe (debug)", &probeOn))
+        cfg.previewProbe = probeOn;
+    ext::menu::Tooltip("Debug aid, leave off in normal use. Follows the preview image through copies and the draws that sample it, "
+                       "and writes what it finds to the log (lines that start with \"CharaView probe:\"). It adds a small cost to every "
+                       "draw while the preview is open.");
+    if (probeOn)
+    {
+        ImGui::TextDisabled("Probe: %u textures derived from the preview, %u copy cases, %u sampler-draw cases, %u swap traces",
+                            g_stats.probeDerivedLive.load(std::memory_order_relaxed), g_stats.probeCopyLines.load(std::memory_order_relaxed),
+                            g_stats.probeSamplerLines.load(std::memory_order_relaxed), g_stats.probeSwapLines.load(std::memory_order_relaxed));
+        ImGui::TextDisabled("Probe: %llu copies of the preview followed, %llu draws sampled the preview or a copy",
+                            (unsigned long long) g_stats.probeCopies.load(std::memory_order_relaxed),
+                            (unsigned long long) g_stats.probeSamplerDraws.load(std::memory_order_relaxed));
+    }
 
     // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
     if (const char* reason = table::InertReason(); reason != nullptr && reason[0] != '\0')
