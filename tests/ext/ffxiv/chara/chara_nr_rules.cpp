@@ -887,6 +887,30 @@ void TestTimerRing()
     CHECK(staleReads == 1); // run 3 was read once, before the abandoned start; the stale copy is not read again
 }
 
+
+// PreviewNRLate belongs to the bring-up: whether the late variant is in use is decided by the stream's shape, not by the key alone (the menu line
+// and state.txt say "previous frame's result" only then).
+void TestLateVariantInUse()
+{
+    StreamShape bringUp;
+    bringUp.width = 576;
+    bringUp.height = 960;
+    CHECK(!LateVariantInUse(bringUp));       // key off
+    bringUp.late = true;
+    CHECK(LateVariantInUse(bringUp));        // key on, a bring-up stream
+    StreamShape production = bringUp;
+    production.production = true;
+    CHECK(!LateVariantInUse(production));    // key on, a production stream: same frame, whatever the key says
+    production.late = false;
+    CHECK(!LateVariantInUse(production));
+    // a table of streams: only a bring-up stream that was built with the late variant counts
+    StreamState a, b;
+    a.hasBuilt = b.hasBuilt = true;
+    a.built = production;
+    b.built = bringUp;
+    CHECK(!LateVariantInUse(a.built) && LateVariantInUse(b.built));
+}
+
 } // namespace
 
 int main()
@@ -911,5 +935,6 @@ int main()
     TestFallbackTally();
     TestVideoMemoryAccount();
     TestTimerRing();
+    TestLateVariantInUse();
     return TEST_RESULT("chara_nr_rules");
 }

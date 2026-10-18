@@ -621,7 +621,7 @@ std::string BuildState(uint64_t now)
         t.Add("nr.fallbacks", ns.fallbacks);
         t.Add("nr.lastGpuMicroseconds", static_cast<uint64_t>(ns.lastGpuMs * 1000.0));
         t.Add("nr.videoMemoryMb", ns.videoMemoryMb);
-        t.AddBool("nr.late", ns.late);
+        t.AddBool("nr.late", ns.late); // a bring-up stream uses the late variant now (PreviewNRLate applies to the bring-up only)
         t.Add("nr.uiDrawsGivenResult", g_stats.nrSwaps.load(std::memory_order_relaxed));
         t.Add("nr.production.runs", ns.productionRuns);
         t.Add("nr.production.fallbacks", ns.productionFallbacks);

@@ -342,7 +342,7 @@ bool CreateStreamGpu(Stream& s, const StreamShape& shape, DXGI_FORMAT nativeForm
 {
     const uint32_t w = shape.width, h = shape.height;
     const uint32_t gw = shape.production ? shape.guideWidth : w, gh = shape.production ? shape.guideHeight : h;
-    const bool late = shape.late && !shape.production;
+    const bool late = LateVariantInUse(shape);
     const DXGI_FORMAT colourFormat = shape.production ? kResultFormat : nativeFormat;
     s.width = w;
     s.height = h;
@@ -1293,6 +1293,11 @@ static Status GetStatusImpl()
         const Availability a = Evaluate(Facts());
         s.availability = a;
         s.reason = ReasonText(a);
+        for (size_t i = 0; i < kMaxStreams; ++i)
+        {
+            const StreamState& st = m.table.At(static_cast<int>(i));
+            s.late = s.late || (st.Used() && st.hasBuilt && LateVariantInUse(st.built));
+        }
     }
     s.streams = m.streamCount.load(std::memory_order_relaxed);
     s.liveStreams = m.liveCount.load(std::memory_order_relaxed);
@@ -1305,7 +1310,6 @@ static Status GetStatusImpl()
     s.productionGpuMs = static_cast<double>(m.lastProductionGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.productionCpuMs = static_cast<double>(m.lastProductionCpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.videoMemoryMb = m.vram.Total();
-    s.late = Late();
     return s;
 }
 

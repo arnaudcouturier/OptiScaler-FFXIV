@@ -174,6 +174,10 @@ struct StreamShape
     friend bool operator==(const StreamShape&, const StreamShape&) = default;
 };
 
+// The late hand-off variant (PreviewNRLate) belongs to the bring-up streams only: a production stream always uses this frame's result (the alpha
+// pass recomposes the original alpha onto this render's colour). So the key alone says nothing about what is on screen; this does.
+constexpr bool LateVariantInUse(const StreamShape& shape) { return shape.late && !shape.production; }
+
 struct StreamState
 {
     uintptr_t key = 0; // the preview image (the finisher's output texture) the stream belongs to; 0 = free

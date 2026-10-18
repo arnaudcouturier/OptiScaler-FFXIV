@@ -150,7 +150,7 @@ struct Status
     double productionGpuMs = 0.0;     // GPU time of the last production run (0 = none measured yet)
     double productionCpuMs = 0.0;
     uint64_t videoMemoryMb = 0; // video memory the streams' images and model instances added (measured around their creation, given back when a stream is released; 0 = not measured)
-    bool late = false;
+    bool late = false;         // a bring-up stream uses the late variant now (PreviewNRLate applies to the bring-up only; a production stream never does)
 };
 Status GetStatus();
 } // namespace ext::ffxiv::chara::nr

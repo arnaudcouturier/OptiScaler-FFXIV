@@ -78,7 +78,7 @@ void DrawNrSection(CharaConfig& cfg)
     else if (st.streams != 0)
         ImGui::TextDisabled("Video memory added by the NR streams (images and models): not measured");
     if (st.late)
-        ImGui::TextDisabled("Showing the previous frame's NR result (PreviewNRLate)");
+        ImGui::TextDisabled("Showing the previous frame's NR result for NR on the native image (PreviewNRLate, bring-up only)");
 }
 
 void DrawCharaCard(ext::menu::Ctx&)
