@@ -561,6 +561,33 @@ void TestDetachFromAnotherThread(Scene& s)
     Config(false, false, false);
     CHECK(!Wanted());
     OnDetached();
+
+    // The unhook thread asks, no draw comes before the hooks are removed, and the hooks are installed again (a new device): the request
+    // is not dropped. The first draw on the new device releases the previous device's objects once, before anything else, and the new
+    // hooks keep working.
+    Doubles_Off();
+    OnInstalled(s.context.Get(), nullptr);
+    Config(true, true, false);
+    d.canRun = d.active = true;
+    BindConsumer(s, s.ui.Get(), s.outputSrv.Get());
+    CHECK(Draw(s.context.Get()) == 1);
+    d.ResetCounts();
+    std::thread unhook2([] { Detach(); });
+    unhook2.join();
+    OnDetached();                       // the hooks are gone, nothing was released
+    OnInstalled(s.context.Get(), nullptr); // a new device's hooks
+    CHECK(Wanted());
+    CHECK(d.dlssDetach == 0);
+    CHECK(Draw(s.context.Get()) == 1);  // the first draw on the new device releases the old objects ...
+    CHECK(d.dlssDetach == 1 && d.nrDetach == 1 && d.probeDetach == 1);
+    CHECK(d.detachThread == std::this_thread::get_id());
+    CHECK(Wanted());                    // ... and the gate stays open for the new hooks
+    d.ResetCounts();
+    d.aroundHandles = true;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.dlssAround == 1 && d.dlssDetach == 0); // dispatched as usual, released only once
+    Config(false, false, false);
+    d.aroundHandles = false;
 }
 } // namespace
 

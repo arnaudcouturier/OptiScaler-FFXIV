@@ -37,8 +37,39 @@ void TestGate()
     gate.Completed();
     CHECK(gate.Detached());
     gate.Request();
-    gate.Reset(); // the hooks were installed again
+    gate.Reset(); // a fresh gate (tests)
     CHECK(!gate.Pending() && !gate.Detached());
+
+    // a teardown that ran for the hooks installed now closes the gate until the hooks are installed again
+    gate.Request();
+    CHECK(gate.Take());
+    gate.Completed();
+    CHECK(gate.Detached());
+    gate.Installed();
+    CHECK(!gate.Detached());
+
+    // The unhook thread asked, no draw came before the hooks were removed, a new device installed its hooks: the request is NOT dropped.
+    // The first draw on the new device releases the previous device's objects (nobody else would), and the new hooks keep working.
+    gate.Request();
+    gate.Installed();
+    CHECK(gate.Pending());
+    CHECK(gate.Take());
+    gate.Completed();
+    CHECK(!gate.Detached()); // the teardown was for the previous hooks
+    CHECK(!gate.Pending());
+
+    // the same when the install happens while the teardown is already running on the draw thread
+    gate.Request();
+    CHECK(gate.Take());
+    gate.Installed();
+    gate.Completed();
+    CHECK(!gate.Detached());
+
+    // and a request made for the new hooks closes them as before
+    gate.Request();
+    CHECK(gate.Take());
+    gate.Completed();
+    CHECK(gate.Detached());
 }
 
 // The unhook thread asks, the draw thread performs the teardown exactly once, and the unhook thread never does.

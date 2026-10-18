@@ -43,23 +43,43 @@ constexpr GateOverride GateOverrideFor(bool inert, bool detachPending, bool deta
 class DetachGate
 {
   public:
-    // Any thread: a teardown is wanted.
-    void Request() { _pending.store(true, std::memory_order_release); }
+    // Any thread: a teardown is wanted for the hooks installed now.
+    void Request()
+    {
+        _requestGeneration.store(_installGeneration.load(std::memory_order_acquire), std::memory_order_release);
+        _pending.store(true, std::memory_order_release);
+    }
     bool Pending() const { return _pending.load(std::memory_order_acquire); }
     // The draw thread: true once per request; the caller then tears down.
     bool Take() { return _pending.exchange(false, std::memory_order_acq_rel); }
-    // The teardown ran: the dispatcher stays off until the hooks are installed again.
-    void Completed() { _detached.store(true, std::memory_order_release); }
+    // The teardown ran. The dispatcher stays off until the hooks are installed again, unless they were installed again after the request
+    // was made: then the teardown released the objects of the previous device and the new hooks must keep working.
+    void Completed()
+    {
+        _detached.store(_installGeneration.load(std::memory_order_acquire) == _requestGeneration.load(std::memory_order_acquire),
+                        std::memory_order_release);
+    }
     bool Detached() const { return _detached.load(std::memory_order_acquire); }
-    // The hook layer was installed (again).
+    // The hook layer was installed (again). A request that is still pending is NOT dropped: the objects of the previous device are
+    // still alive (nobody has released them yet), and the first draw on the new device releases them before anything else.
+    void Installed()
+    {
+        _installGeneration.fetch_add(1, std::memory_order_acq_rel);
+        _detached.store(false, std::memory_order_release);
+    }
+    // Tests: a fresh gate.
     void Reset()
     {
         _pending.store(false, std::memory_order_release);
         _detached.store(false, std::memory_order_release);
+        _installGeneration.store(0, std::memory_order_release);
+        _requestGeneration.store(0, std::memory_order_release);
     }
 
   private:
     std::atomic<bool> _pending { false };
     std::atomic<bool> _detached { false };
+    std::atomic<uint32_t> _installGeneration { 0 };
+    std::atomic<uint32_t> _requestGeneration { 0 };
 };
 } // namespace ext::ffxiv::chara

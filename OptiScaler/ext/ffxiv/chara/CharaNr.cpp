@@ -213,6 +213,10 @@ void RepairDone()
     Module& m = M();
     if (!m.doneBroken || m.queue == nullptr || m.doneFence12 == nullptr)
         return;
+    // The queue is a non-owning pointer into the bridge. After a device change or a bridge restart it may be the old one (gone): never
+    // signal through it. The old objects are then released once the done fence reports them complete, which Maintain retries.
+    if (m.releasePending || m.queue != Dx11WithDx12::GetD3D12CommandQueue())
+        return;
     const uint64_t value = m.done.Next();
     if (SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)))
         m.doneBroken = false;

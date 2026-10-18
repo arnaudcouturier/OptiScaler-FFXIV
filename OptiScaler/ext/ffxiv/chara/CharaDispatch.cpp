@@ -450,7 +450,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
 void OnInstalled(ID3D11DeviceContext* immediate, void* rawDraw)
 {
-    detail::g_detach.Reset();
+    detail::g_detach.Installed(); // a teardown still pending for the previous device stays pending (see DetachGate::Installed)
     g_rawDraw = reinterpret_cast<RawDraw>(rawDraw);
     g_immediate = immediate;
 }
@@ -468,12 +468,12 @@ void Detach()
 {
     // Only the draw thread may release the objects: on any other thread a draw can be inside them right now. A request is raised
     // instead and the next draw performs the teardown (AroundSlow).
+    detail::g_detach.Request();
     if (DecideDetach(GetCurrentThreadId() == g_drawThread.load(std::memory_order_relaxed)) == DetachAction::Now)
     {
+        (void)detail::g_detach.Take();
         DetachNow();
-        return;
     }
-    detail::g_detach.Request();
 }
 
 void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize)
