@@ -40,6 +40,9 @@ void TestDefaultsAndBinding()
     CHECK(!defaults.previewGuideCapture.value_or_default());
     CHECK(!defaults.previewDebugTint.value_or_default());
     CHECK(!defaults.previewNrTrace.value_or_default());
+    CHECK(!defaults.previewNr.value_or_default());
+    CHECK(defaults.previewNrLingerSeconds.value_or_default() == 5u);
+    CHECK(!defaults.previewNrLate.value_or_default());
 
     config::Binder binder;
     defaults.Bind(binder);
@@ -55,9 +58,12 @@ void TestDefaultsAndBinding()
         { "FFXIV", "PreviewGuideCapture", &defaults.previewGuideCapture },
         { "FFXIV", "PreviewDebugTint", &defaults.previewDebugTint },
         { "HDR", "PreviewNRTrace", &defaults.previewNrTrace },
+        { "FFXIV", "PreviewNR", &defaults.previewNr },
+        { "FFXIV", "PreviewNRLingerSeconds", &defaults.previewNrLingerSeconds },
+        { "FFXIV", "PreviewNRLate", &defaults.previewNrLate },
     };
-    CHECK(binder.Table().size() == 6);
-    for (size_t i = 0; i < 6 && i < binder.Table().size(); ++i)
+    CHECK(binder.Table().size() == 9);
+    for (size_t i = 0; i < 9 && i < binder.Table().size(); ++i)
     {
         CHECK(std::string(binder.Table()[i].section) == expected[i].section);
         CHECK(std::string(binder.Table()[i].key) == expected[i].key);
@@ -75,6 +81,9 @@ void TestRoundTrip()
     ini.SetValue("FFXIV", "PreviewGuideCapture", "true");
     ini.SetValue("FFXIV", "PreviewDebugTint", "true");
     ini.SetValue("HDR", "PreviewNRTrace", "true");
+    ini.SetValue("FFXIV", "PreviewNR", "true");
+    ini.SetValue("FFXIV", "PreviewNRLingerSeconds", "12");
+    ini.SetValue("FFXIV", "PreviewNRLate", "true");
     config::Load(ini);
 
     const auto& c = Cfg().ffxiv.chara;
@@ -83,6 +92,7 @@ void TestRoundTrip()
     CHECK(!c.previewUpscale.value_or_default());
     CHECK(c.previewGuideCapture.value_or_default());
     CHECK(c.previewNrTrace.value_or_default());
+    CHECK(c.previewNr.value_or_default() && c.previewNrLate.value_or_default() && c.previewNrLingerSeconds.value_or_default() == 12u);
 
     // saving writes the non-default values back under the same section and key names
     CSimpleIniA out;
@@ -93,6 +103,9 @@ void TestRoundTrip()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewGuideCapture", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugTint", "")) == "true");
     CHECK(std::string(out.GetValue("HDR", "PreviewNRTrace", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewNR", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewNRLingerSeconds", "")) == "12");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewNRLate", "")) == "true");
 
     // the pre-existing FFXIV-companion keys keep working next to them
     CHECK(Cfg().ffxiv.companionHudReplacement.value_or_default() == false);
@@ -122,7 +135,7 @@ void TestFragments(const std::string& repo)
 {
     const std::string ffxiv = ReadFile(repo + "/OptiScaler/ext/ini/FFXIV.ini");
     CHECK(!ffxiv.empty());
-    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint" })
+    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint", "PreviewNR", "PreviewNRLingerSeconds", "PreviewNRLate" })
         CHECK(HasKeyLine(ffxiv, key));
     CHECK(!HasKeyLine(ffxiv, "PreviewNRTrace"));
     CHECK(ffxiv.find("[FFXIV]") == std::string::npos || ffxiv.find("[FFXIV]") == 0); // a leading header would be dropped by the packager

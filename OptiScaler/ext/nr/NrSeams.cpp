@@ -3,6 +3,7 @@
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/nr/DlssNr.h"
 #include <State.h>
 #include <Util.h>
@@ -272,6 +273,7 @@ namespace ext::dx11bridge
 void OnNgxInit()
 {
     DlssNr::ResumeAfterBridgeInit();
+    ext::ffxiv::chara::nr::OnBridgeInit();
     // The character preview DLSS path needs the device D3D11 NGX was initialised on (State::currentD3D11Device is set to it
     // just before this call).
     ext::ffxiv::chara::dlss::OnNgxInitialised(State::Instance().currentD3D11Device);
@@ -280,6 +282,7 @@ void OnNgxInit()
 void OnNgxShutdownBegin()
 {
     ext::ffxiv::chara::dlss::OnNgxShutdown();
+    ext::ffxiv::chara::nr::OnBridgeShutdown(); // before the driver's NGX shutdown: the preview NR models and their GPU work go first
     // The oracle tested the FFXIV exe name here; the bridge-active test is what the call is about.
     if (WithDx12::IsInited())
         DlssNr::SuspendForBridgeShutdown();

@@ -17,6 +17,9 @@ struct CharaConfig
     CustomOptional<bool> previewGuideCapture { false }; // [FFXIV] PreviewGuideCapture: diagnostics for the DLSS path
     CustomOptional<bool> previewDebugTint { false };    // [FFXIV] PreviewDebugTint: tints the processed preview image (debug aid)
     CustomOptional<bool> previewNrTrace { false };      // [HDR] PreviewNRTrace: trace log lines for preview NR work
+    CustomOptional<bool> previewNr { false };           // [FFXIV] PreviewNR: Neural Rendering for character previews (new work, not in Nickle's build)
+    CustomOptional<uint32_t> previewNrLingerSeconds { 5 }; // [FFXIV] PreviewNRLingerSeconds: how long a preview's NR model outlives its window
+    CustomOptional<bool> previewNrLate { false };       // [FFXIV] PreviewNRLate: show the previous frame's NR result (no GPU wait)
 
     template <class Binder> void Bind(Binder& b)
     {
@@ -26,6 +29,9 @@ struct CharaConfig
         b.Add("FFXIV", "PreviewGuideCapture", previewGuideCapture);
         b.Add("FFXIV", "PreviewDebugTint", previewDebugTint);
         b.Add("HDR", "PreviewNRTrace", previewNrTrace);
+        b.Add("FFXIV", "PreviewNR", previewNr);
+        b.Add("FFXIV", "PreviewNRLingerSeconds", previewNrLingerSeconds);
+        b.Add("FFXIV", "PreviewNRLate", previewNrLate);
     }
 };
 } // namespace ext::ffxiv::chara
