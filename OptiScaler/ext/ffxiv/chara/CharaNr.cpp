@@ -113,6 +113,7 @@ struct Module
     DlssNr::PreviewBackend backend;
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
+    TimerRing timerRing; // mirrors the query slots of `timer` (CharaNrRules.h): which list wrote each, its done value and mode
     ComPtr<ID3D12CommandAllocator> allocators[kAllocators];
     uint64_t allocatorValue[kAllocators] = {};
     size_t allocatorNext = 0;
@@ -127,6 +128,7 @@ struct Module
     Stream streams[kMaxStreams];
     StateLog stateLog;
     CostAccumulator gpuCost, cpuCost;
+    CostAccumulator productionGpuCost; // GPU time of the production runs alone, from the fenced per-slot read
     Availability availability = Availability::ConfigOff;
     std::atomic<uint8_t> availabilitySnapshot { static_cast<uint8_t>(Availability::Available) }; // readable without the mutex
     uint64_t lastMaintain = 0;
@@ -397,6 +399,7 @@ void ReleaseGlobal()
     Module& m = M();
     m.recorder.reset();
     m.timer.reset();
+    m.timerRing = TimerRing {};
     m.list.Reset();
     for (auto& a : m.allocators)
         a.Reset();
@@ -572,6 +575,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
             SUCCEEDED(m.list->Close());
     m.recorder = std::make_unique<DlssNr_Dx12>("CharaNr compute pass", dev12);
     m.timer = std::make_unique<GpuTime_Dx12>(dev12);
+    m.timerRing = TimerRing {};
     if (!lists || m.recorder == nullptr || !m.recorder->IsInit())
     {
         Latch("the command lists or the compute pass could not be created");
@@ -604,7 +608,10 @@ class GpuRecorder
     void TimerStart()
     {
         if (_m.timer != nullptr)
+        {
+            _m.timerRing.NoteStart(); // GpuTime_Dx12::Start advances its slot here, also for a list that is abandoned later
             _m.timer->Start(_list);
+        }
     }
     void TimerEnd()
     {
@@ -826,11 +833,15 @@ void LogCostIfDue(uint64_t now)
         return;
     const auto cpu = m.cpuCost.Take(now);
     const auto gpu = m.gpuCost.Take(now);
+    const auto productionGpu = m.productionGpuCost.Take(now);
     if (gpu.count != 0)
         LOG_INFO("CharaView NR cost: {} runs, GPU {:.2f} ms average ({:.2f} max), CPU recording {:.2f} ms average ({:.2f} max); {} stream(s)", cpu.count,
                  gpu.average, gpu.max, cpu.average, cpu.max, m.table.UsedCount());
     else
         LOG_INFO("CharaView NR cost: {} runs, CPU recording {:.2f} ms average ({:.2f} max); GPU time not measured yet", cpu.count, cpu.average, cpu.max);
+    if (productionGpu.count != 0)
+        LOG_INFO("CharaView NR cost, production runs alone: GPU {:.2f} ms average ({:.2f} max) over {} measured runs", productionGpu.average,
+                 productionGpu.max, productionGpu.count);
 }
 
 
@@ -883,6 +894,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     }
 
     s.doneValue[buffer] = out.done;
+    m.timerRing.NoteSubmitted(out.done, production != nullptr); // the list of this run wrote the timer slot Start advanced to
     s.serial[buffer] = m.serialCounter.fetch_add(1, std::memory_order_relaxed) + 1; // a new result: its tint (if any) is stale
     s.guidesInit = true;
     st.everRan = true;
@@ -898,14 +910,20 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
         m.productionRuns.fetch_add(1, std::memory_order_relaxed);
         m.lastProductionCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     }
-    if (m.timer != nullptr)
+    // The timer reads the slot of the run two back; it is read only when that run's list is complete, and the time is attributed to the mode
+    // of that run (not of the current one): with several streams in a frame the slot may belong to another stream or the other mode.
+    if (m.timer != nullptr && m.timerRing.CanRead(GpuDone))
     {
+        const bool measuredProduction = m.timerRing.ReadIsProduction();
         if (const auto gpuMs = m.timer->ReadGpuTime(m.queue); gpuMs.has_value())
         {
             m.lastGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
-            if (production != nullptr)
-                m.lastProductionGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
             m.gpuCost.Add(*gpuMs);
+            if (measuredProduction)
+            {
+                m.lastProductionGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
+                m.productionGpuCost.Add(*gpuMs);
+            }
         }
     }
     if (st.runs == 1)

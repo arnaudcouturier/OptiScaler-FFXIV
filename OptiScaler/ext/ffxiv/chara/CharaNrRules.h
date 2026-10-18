@@ -601,6 +601,47 @@ class VideoMemoryAccount
     std::atomic<uint64_t> _total { 0 };
 };
 
+// ---- GPU time of a run ----------------------------------------------------------------------------------------------------------
+// GpuTime_Dx12 (shared code, one instance for all streams) keeps a ring of three timestamp slots: Start() moves on to the next slot and uses
+// it, End() marks it readable, and ReadGpuTime() maps the slot AFTER the current one (the run two back) without asking whether the GPU got
+// there. With several streams in one frame that run may still be waiting for the Direct3D 11 flush: the readback then holds zeros (0 ms
+// added to the average) or the values of an older run, whichever stream and mode that was. This mirrors the ring (the same advance rule) and
+// remembers, per slot, whether a list was submitted, the done fence value it will complete, and which mode it was, so the read is made only
+// when that list is complete and its time is attributed to the mode that produced it.
+class TimerRing
+{
+  public:
+    static constexpr size_t kSlots = 3; // GpuTime_Dx12::QUERY_BUFFER_COUNT
+
+    // The recorder started a timed list (also one that is then abandoned): the slot advances and holds nothing yet.
+    void NoteStart()
+    {
+        _current = (_current + 1) % kSlots;
+        _slots[_current] = Slot {};
+    }
+    // The timed list of the current slot was executed and its done signal queued with fence value `done`.
+    void NoteSubmitted(uint64_t done, bool production) { _slots[_current] = Slot { true, done, production }; }
+
+    // The slot ReadGpuTime reads next holds a finished measurement (`gpuDone(value)`: the done fence reached it).
+    template <class GpuDone> bool CanRead(GpuDone&& gpuDone) const
+    {
+        const Slot& s = _slots[(_current + 1) % kSlots];
+        return s.submitted && gpuDone(s.done);
+    }
+    // The mode of the run in that slot.
+    bool ReadIsProduction() const { return _slots[(_current + 1) % kSlots].production; }
+
+  private:
+    struct Slot
+    {
+        bool submitted = false;
+        uint64_t done = 0;
+        bool production = false;
+    };
+    size_t _current = 0;
+    std::array<Slot, kSlots> _slots {};
+};
+
 // ---- Renders that kept the image ----------------------------------------------------------------------------------------------------
 // A render for which a call ended without a result (not available, still preparing, skipped, failed, or not offered at all) kept the native
 // image (bring-up) or the plain super-resolution image (production). Counted ONCE per call, at the one place a call ends (the module's

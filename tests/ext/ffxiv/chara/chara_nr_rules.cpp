@@ -4,6 +4,7 @@
 
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -770,6 +771,116 @@ void TestVideoMemoryAccount()
     CHECK(account.Total() == 0 && a == 0);
 }
 
+
+// The timestamp ring of GpuTime_Dx12 (OptiScaler/gpu_time/GpuTime_Dx12.cpp, shared with the main pass), as that source behaves: Start moves to
+// the next slot and uses it, End marks it readable, ReadGpuTime maps the slot AFTER the current one (the run two back) and returns what the
+// readback buffer holds, whether or not the GPU ran that list. `holds[slot]` is the id of the run whose timestamps the buffer holds there
+// (0: nothing was ever written, zeros).
+struct FakeTimestampRing
+{
+    static constexpr size_t kSlots = 3;
+    size_t current = 0;
+    bool trigger[kSlots] = {};
+    uint32_t holds[kSlots] = {};
+    uint32_t written[kSlots] = {}; // the run whose list ran for this slot (set by the fake GPU when the list completes)
+    void Start(uint32_t runId)
+    {
+        current = (current + 1) % kSlots;
+        pending = runId;
+    }
+    void End() { trigger[current] = true; }
+    uint32_t pending = 0;
+    // The GPU executed the list of `runId`: its timestamps reach the readback buffer.
+    void GpuRan(uint32_t runId)
+    {
+        for (size_t i = 0; i < kSlots; ++i)
+            if (slotOfRun[i] == runId)
+                holds[i] = runId;
+    }
+    uint32_t slotOfRun[kSlots] = {};
+    // ReadGpuTime: returns the run id whose timestamps are in the slot (0: zeros / nothing)
+    std::optional<uint32_t> Read()
+    {
+        const size_t prev = (current + 1) % kSlots;
+        if (!trigger[prev])
+            return std::nullopt;
+        trigger[prev] = false;
+        return holds[prev];
+    }
+};
+
+void TestTimerRing()
+{
+    // Three previews in one frame: runs 1, 2, 3 are submitted (done values 1, 2, 3) while the GPU is still behind (completed 0). The read for
+    // run 3 would map the slot of run 1, which has not executed: the old code read it anyway and took zeros into the average.
+    FakeTimestampRing gpu;
+    TimerRing ring;
+    uint64_t completed = 0;
+    const auto gpuDone = [&](uint64_t v) { return completed >= v; };
+    std::vector<std::pair<uint32_t, bool>> reads; // (run whose time was read, was it a production run)
+    uint32_t zeroReadsOfTheOldCode = 0;
+
+    const auto run = [&](uint32_t id, bool production)
+    {
+        ring.NoteStart();
+        gpu.Start(id);
+        gpu.slotOfRun[gpu.current] = id;
+        gpu.End();
+        ring.NoteSubmitted(id, production); // done value == run id in this model
+        // what the old code did: read at once
+        FakeTimestampRing oldCopy = gpu;
+        if (const auto v = oldCopy.Read(); v.has_value() && *v == 0)
+            ++zeroReadsOfTheOldCode;
+        // the fix: read only when the list in that slot is complete
+        if (ring.CanRead(gpuDone))
+        {
+            const bool isProduction = ring.ReadIsProduction();
+            if (const auto v = gpu.Read(); v.has_value())
+                reads.emplace_back(*v, isProduction);
+        }
+    };
+
+    run(1, false);
+    run(2, true);
+    run(3, false);
+    CHECK(reads.empty());                  // nothing completed yet: nothing is read
+    CHECK(zeroReadsOfTheOldCode >= 1);     // (the old code read slots the GPU had not written)
+
+    // the GPU catches up with runs 1 and 2; the next run reads the run two back, which is complete, and attributes it to ITS mode
+    completed = 2;
+    gpu.GpuRan(1);
+    gpu.GpuRan(2);
+    run(4, false);
+    CHECK(reads.size() == 1 && reads[0].first == 2 && reads[0].second == true); // run 2 (production), not the current run's mode
+    gpu.GpuRan(3);
+    gpu.GpuRan(4);
+    completed = 4;
+    run(5, true);
+    CHECK(reads.size() == 2 && reads[1].first == 3 && reads[1].second == false); // run 3 (bring-up), though the current run is production
+
+    // a run whose list never ran (it failed after the timer started): the slot it took is not read, the next one is
+    ring.NoteStart(); // run 6 started and was abandoned: the ring moved on, nothing was submitted
+    gpu.Start(6);
+    gpu.slotOfRun[gpu.current] = 6;
+    gpu.trigger[gpu.current] = true; // the slot still holds a stale measurement of an older run (3) that was never read out
+    gpu.holds[gpu.current] = 3;
+    completed = 6;
+    for (uint32_t id = 7; id <= 9; ++id)
+    {
+        gpu.GpuRan(id - 1);
+        run(id, false);
+    }
+    // the abandoned slot (run 6) was never submitted: the ring does not let its stale content be read as a measurement
+    bool readAbandoned = false;
+    for (const auto& r : reads)
+        readAbandoned = readAbandoned || r.first == 6;
+    CHECK(!readAbandoned);
+    uint32_t staleReads = 0;
+    for (const auto& r : reads)
+        staleReads += r.first == 3 ? 1 : 0;
+    CHECK(staleReads == 1); // run 3 was read once, before the abandoned start; the stale copy is not read again
+}
+
 } // namespace
 
 int main()
@@ -793,5 +904,6 @@ int main()
     TestGuardedTeardown();
     TestFallbackTally();
     TestVideoMemoryAccount();
+    TestTimerRing();
     return TEST_RESULT("chara_nr_rules");
 }
