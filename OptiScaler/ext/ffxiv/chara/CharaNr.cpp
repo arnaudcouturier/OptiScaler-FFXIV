@@ -62,13 +62,14 @@ struct Shared
 struct Stream
 {
     uint32_t width = 0, height = 0;
-    Shared colour, result[2], depth, motion;
+    bool late = false;            // the hand-off variant, decided when the stream is created (a config change rebuilds the stream)
+    Shared colour[2];             // the late variant uses both (the run before may still read one while the copy writes the other)
+    Shared result[2], depth, motion;
     ComPtr<ID3D12Resource> proxy, original, modelOut;
     void* feature = nullptr;
     bool featureReady = false;
     uint64_t createDone = 0;      // completion value of the list that created the feature
-    uint64_t lastSubmitted = 0;   // completion value of the newest list that used the stream
-    uint64_t doneValue[2] = {};   // handoff fence value after which result[i] is complete
+    uint64_t doneValue[2] = {};   // done-fence value after which result[i] (and colour[i] in the late variant) is no longer in use
     bool guidesInit = false;
     bool gpuObjects = false;
     uint64_t vramBefore = 0;
@@ -88,11 +89,16 @@ struct Module
     ComPtr<ID3D11DeviceContext4> ctx4;
     ID3D12Device* dev12 = nullptr;       // the bridge's objects, not owned
     ID3D12CommandQueue* queue = nullptr;
-    ComPtr<ID3D11Fence> fence11;         // the hand-off fence (shared)
-    ComPtr<ID3D12Fence> fence12;         // ... opened on D3D12
-    ComPtr<ID3D12Fence> doneFence;       // D3D12 only: completion of submitted lists (allocators, release, creation)
-    FenceCounter fence;
-    uint64_t completion = 0;
+    // Two fences, each signalled from one side only (CharaNrRules.h, "The fence hand-off"):
+    ComPtr<ID3D11Fence> readyFence11;    // ready: created on D3D11, only the D3D11 context signals it ...
+    ComPtr<ID3D12Fence> readyFence12;    // ... opened on D3D12, where only the queue waits on it
+    ComPtr<ID3D12Fence> doneFence12;     // done: created on D3D12, only the queue signals it; its values are also the completion values
+    ComPtr<ID3D11Fence> doneFence11;     // ... opened on D3D11, where only the context waits on it
+    FenceCounter ready;                  // values of the ready fence
+    FenceCounter done;                   // values of the done fence (the completion counter: allocators, releases, creation)
+    bool doneBroken = false;             // a done signal failed after its list ran: the next drain repairs the fence first
+    bool tableFullLogged = false;        // the one line about a full stream table
+    bool releasePending = false;         // a device change found the GPU busy: the old objects are kept and released in Maintain
 
     DlssNr::PreviewBackend backend;
     std::unique_ptr<DlssNr_Dx12> recorder;
@@ -114,7 +120,6 @@ struct Module
     Availability availability = Availability::ConfigOff;
     std::atomic<uint8_t> availabilitySnapshot { static_cast<uint8_t>(Availability::Available) }; // readable without the mutex
     uint64_t lastMaintain = 0;
-    bool wasLate = false;
 
     std::atomic<bool> holds { false };
     std::atomic<uint64_t> runs { 0 }, fallbacks { 0 };
@@ -145,6 +150,7 @@ GateFacts Facts()
     f.latched = m.latches.NrLatched();
     f.bridgeUp = WithDx12::IsInited() && Dx11WithDx12::GetD3D12Device() != nullptr && Dx11WithDx12::GetD3D12CommandQueue() != nullptr;
     f.bridgeSuspended = m.holdOff || DlssNr::PreviewBackendSuspended();
+    f.releasePending = m.releasePending;
     f.nvidia = m.nvidia;
     f.forwarder = m.forwarder;
     f.model = m.model;
@@ -180,7 +186,7 @@ uint64_t VramUsedBytes()
 bool GpuDone(uint64_t value)
 {
     Module& m = M();
-    return value == 0 || m.doneFence == nullptr || m.doneFence->GetCompletedValue() >= value;
+    return value == 0 || m.doneFence12 == nullptr || m.doneFence12->GetCompletedValue() >= value;
 }
 
 // Waits on the CPU for completion value `value` (shutdown paths only). False: not proven complete.
@@ -193,10 +199,23 @@ bool WaitCompletion(uint64_t value, DWORD timeoutMs)
     if (event == nullptr)
         return false;
     bool done = false;
-    if (SUCCEEDED(m.doneFence->SetEventOnCompletion(value, event)))
+    if (SUCCEEDED(m.doneFence12->SetEventOnCompletion(value, event)))
         done = WaitForSingleObject(event, timeoutMs) == WAIT_OBJECT_0;
     CloseHandle(event);
     return done;
+}
+
+// A done signal failed behind a list that ran: that value is never reached, so nothing waiting for it (allocator reuse, the drain at
+// release) would ever be satisfied. A newer value signalled behind everything queued before it (queue order) catches the fence up.
+// On a removed device the completed value is the maximum anyway and this changes nothing.
+void RepairDone()
+{
+    Module& m = M();
+    if (!m.doneBroken || m.queue == nullptr || m.doneFence12 == nullptr)
+        return;
+    const uint64_t value = m.done.Next();
+    if (SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)))
+        m.doneBroken = false;
 }
 
 // Resets the shared list on an allocator whose earlier work finished. False: none is free (not an error).
@@ -213,22 +232,40 @@ bool BeginList()
         if (FAILED(ext::gpu::ResetCommands(m.list.Get(), m.allocators[index].Get())))
             continue;
         m.allocatorNext = (index + 1) % kAllocators;
-        m.allocatorValue[index] = m.completion + 1; // the value the submission below signals
+        m.allocatorValue[index] = m.done.last + 1; // the value the done signal of this list takes
         return true;
     }
     return false;
 }
 
-// Closes and executes the list, then signals the completion fence. The value is returned in `value`.
-bool SubmitList(uint64_t& value)
+// Closes and executes the list. False: the list could not be closed and nothing ran.
+bool ExecuteList()
 {
     Module& m = M();
     if (FAILED(m.list->Close()))
         return false;
     ID3D12CommandList* lists[] = { m.list.Get() };
     ext::gpu::ExecuteCommands(m.queue, 1, lists);
-    value = ++m.completion;
-    return SUCCEEDED(m.queue->Signal(m.doneFence.Get(), value));
+    return true;
+}
+
+// Queues the done signal behind the executed list. `value` is set before the signal is queued, so a caller that tracks the list
+// (release waits for it) has the value even when the signal itself failed.
+bool SignalDone(uint64_t& value)
+{
+    Module& m = M();
+    value = m.done.Next();
+    if (SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)))
+        return true;
+    m.doneBroken = true;
+    return false;
+}
+
+// A list without a hand-off (the model creation): executes it and signals the done fence. `value` is non-zero as soon as the list ran.
+bool SubmitList(uint64_t& value)
+{
+    value = 0;
+    return ExecuteList() && SignalDone(value);
 }
 
 // ---- Images ----------------------------------------------------------------------------------------------------------------
@@ -285,11 +322,13 @@ bool CreatePrivate(uint32_t w, uint32_t h, ComPtr<ID3D12Resource>& out)
                                                         nullptr, IID_PPV_ARGS(&out)));
 }
 
-bool CreateStreamGpu(Stream& s, uint32_t w, uint32_t h, DXGI_FORMAT nativeFormat)
+bool CreateStreamGpu(Stream& s, uint32_t w, uint32_t h, DXGI_FORMAT nativeFormat, bool late)
 {
     s.width = w;
     s.height = h;
-    if (!CreateShared("CharaNr colour", w, h, nativeFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour) ||
+    s.late = late; // decided here, for the life of the stream
+    if (!CreateShared("CharaNr colour", w, h, nativeFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[0]) ||
+        (late && !CreateShared("CharaNr colour 1", w, h, nativeFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[1])) ||
         !CreateShared("CharaNr result 0", w, h, kResultFormat, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, true, false, s.result[0]) ||
         !CreateShared("CharaNr result 1", w, h, kResultFormat, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, true, false, s.result[1]) ||
         !CreateShared("CharaNr depth", w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, false, true, s.depth) ||
@@ -305,9 +344,15 @@ void ReleaseStreamObjects(Stream& s, bool releaseFeature)
 {
     Module& m = M();
     if (s.feature != nullptr && releaseFeature && m.backend.release != nullptr)
+    {
+        // The main pass destroys and evaluates its model under the same lock: a release from another thread (the bridge shutdown) must
+        // not run in the middle of its evaluate.
+        DlssNr::PreviewEvaluateScope serialised;
         m.backend.release(s.feature);
+    }
     s.feature = nullptr;
-    s.colour.Release();
+    s.colour[0].Release();
+    s.colour[1].Release();
     s.result[0].Release();
     s.result[1].Release();
     s.depth.Release();
@@ -335,9 +380,10 @@ void ReleaseGlobal()
         a.Reset();
     for (auto& v : m.allocatorValue)
         v = 0;
-    m.fence12.Reset();
-    m.fence11.Reset();
-    m.doneFence.Reset();
+    m.readyFence12.Reset();
+    m.readyFence11.Reset();
+    m.doneFence12.Reset();
+    m.doneFence11.Reset();
     m.ctx4.Reset();
     m.dev5.Reset();
     m.dev11.Reset();
@@ -345,27 +391,36 @@ void ReleaseGlobal()
     m.backend = DlssNr::PreviewBackend {};
     m.dev12 = nullptr;
     m.queue = nullptr;
-    m.completion = 0;
-    m.fence = FenceCounter {};
+    m.ready = FenceCounter {};
+    m.done = FenceCounter {};
+    m.doneBroken = false;
     m.inited = false;
     m.probedDevice = nullptr;
     m.nvidia = m.forwarder = m.model = Probe::Unknown;
 }
 
 // Releases every stream and the shared objects. `drain`: wait for the GPU first (shutdown); a failed wait keeps the model
-// features alive (a leak is better than freeing what the GPU still runs).
-void ReleaseAll(bool drain)
+// features alive (a leak is better than freeing what the GPU still runs) and returns false.
+bool ReleaseAll(bool drain)
 {
     Module& m = M();
     bool idle = true;
-    if (m.doneFence != nullptr && drain)
-        idle = WaitCompletion(m.completion, 5000);
-    else if (m.doneFence != nullptr)
-        idle = GpuDone(m.completion);
+    if (m.doneFence12 != nullptr)
+    {
+        RepairDone();
+        if (drain && m.readyFence12 != nullptr)
+        {
+            // The D3D12 queue may be waiting for a ready value that the D3D11 context has queued but not flushed (this can run on any
+            // thread, so the context is not touched): signalling the ready fence from the CPU releases those waits, and the queued
+            // work can finish. Nothing waits on the ready fence after this.
+            m.readyFence12->Signal(m.ready.last);
+        }
+        idle = drain ? WaitCompletion(m.done.last, 5000) : GpuDone(m.done.last);
+    }
     if (!idle)
     {
         LOG_WARN("CharaView NR: the GPU did not finish in time at release; the images and model instances are kept");
-        return;
+        return false;
     }
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
@@ -377,7 +432,9 @@ void ReleaseAll(bool drain)
     }
     ReleaseGlobal();
     m.vramAddedMb.store(0, std::memory_order_relaxed);
+    m.releasePending = false;
     UpdateHolds();
+    return true;
 }
 
 Probe ProbeNvidia(ID3D12Device* device, ComPtr<IDXGIAdapter3>& adapter3)
@@ -404,8 +461,18 @@ bool EnsureInit(ID3D11DeviceContext* context)
     if (m.inited && (m.dev12 != dev12 || m.queue != queue))
     {
         LOG_INFO("CharaView NR: the bridge's D3D12 device changed; preview NR objects are rebuilt");
-        ReleaseAll(true);
+        if (!ReleaseAll(true))
+        {
+            // The GPU did not finish in time, so the old objects stay (they belong to the previous device and queue). Carrying on with
+            // them would mix the old device's objects with the new bridge's queue: the module is not usable until the release succeeds,
+            // which Maintain retries.
+            m.releasePending = true;
+            UpdateHolds();
+            return false;
+        }
     }
+    if (m.releasePending)
+        return false;
     if (m.inited)
         return true;
     if (::State::Instance().isRunningOnLinux)
@@ -447,14 +514,20 @@ bool EnsureInit(ID3D11DeviceContext* context)
 
     m.dev12 = dev12;
     m.queue = queue;
-    HANDLE shared = nullptr;
+    // ready: created on D3D11, opened on D3D12. done: created on D3D12, opened on D3D11. Each is signalled from its creator's side only.
+    HANDLE readyHandle = nullptr;
+    HANDLE doneHandle = nullptr;
     const bool fences =
-        SUCCEEDED(m.dev5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m.fence11))) &&
-        SUCCEEDED(m.fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared)) && shared != nullptr &&
-        SUCCEEDED(dev12->OpenSharedHandle(shared, IID_PPV_ARGS(&m.fence12))) &&
-        SUCCEEDED(dev12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.doneFence)));
-    if (shared != nullptr)
-        CloseHandle(shared);
+        SUCCEEDED(m.dev5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m.readyFence11))) &&
+        SUCCEEDED(m.readyFence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &readyHandle)) && readyHandle != nullptr &&
+        SUCCEEDED(dev12->OpenSharedHandle(readyHandle, IID_PPV_ARGS(&m.readyFence12))) &&
+        SUCCEEDED(dev12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m.doneFence12))) &&
+        SUCCEEDED(dev12->CreateSharedHandle(m.doneFence12.Get(), nullptr, GENERIC_ALL, nullptr, &doneHandle)) && doneHandle != nullptr &&
+        SUCCEEDED(m.dev5->OpenSharedFence(doneHandle, IID_PPV_ARGS(&m.doneFence11)));
+    if (readyHandle != nullptr)
+        CloseHandle(readyHandle);
+    if (doneHandle != nullptr)
+        CloseHandle(doneHandle);
     if (!fences)
     {
         Latch("the module's own D3D11/D3D12 fence could not be created");
@@ -559,7 +632,7 @@ class GpuRecorder
     {
         switch (t)
         {
-        case Tex::Colour: return _s.colour.r12();
+        case Tex::Colour: return _s.colour[_s.late ? _buf : 0].r12(); // the late variant alternates the colour images with the results
         case Tex::Proxy: return _s.proxy.Get();
         case Tex::Original: return _s.original.Get();
         case Tex::Depth: return _s.depth.r12();
@@ -610,18 +683,27 @@ ModelTuning TuningFromBackend()
     return m;
 }
 
-// The five steps of one run, issued in the order RunHandoff dictates. Any failure is reported to the caller as a bool.
+// The steps of one run, issued in the order RunFrame / RunHandoff dictate (CharaNrRules.h; the timeline test drives the same templates).
+// Any failure is reported to the caller as a bool.
 struct HandoffOps
 {
     Module& m;
     Stream& s;
+    StreamState& st;
+    ID3D11DeviceContext* ctx;
+    ID3D11Texture2D* native;
     FramePlan plan;
     int buffer = 0;
     double cpuMs = 0.0;
 
-    bool Signal11(uint64_t v) { return SUCCEEDED(m.ctx4->Signal(m.fence11.Get(), v)); }
-    bool Wait12(uint64_t v) { return SUCCEEDED(m.queue->Wait(m.fence12.Get(), v)); }
-    bool Record()
+    // The late variant overwrites a colour image the run before last read: the D3D11 queue first waits for that run (done fence).
+    bool WaitColourFree(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), v)); }
+    // The extra copy of the bring-up: native image -> shareable colour image.
+    void CopyColour() { ctx->CopyResource(s.colour[s.late ? buffer : 0].t11(), native); }
+    bool Signal11(uint64_t v) { return SUCCEEDED(m.ctx4->Signal(m.readyFence11.Get(), v)); }
+    bool Wait12(uint64_t v) { return SUCCEEDED(m.queue->Wait(m.readyFence12.Get(), v)); }
+    // Records the list, executes it and queues the done signal. `done` is the value the signal takes (0: the list did not run).
+    bool Record(uint64_t& done)
     {
         const auto start = std::chrono::steady_clock::now();
         bool ok = false;
@@ -635,19 +717,18 @@ struct HandoffOps
             m.list->Close(); // never executed
             return false;
         }
-        uint64_t value = 0;
-        if (!SubmitList(value))
+        if (!ExecuteList())
             return false;
-        s.lastSubmitted = value;
-        cpuMs = MsSince(start);
-        return true;
+        const bool signalled = SignalDone(done);
+        st.lastSubmitted = done; // the list ran, whether or not its signal could be queued: release waits for it
+        if (signalled)
+            cpuMs = MsSince(start);
+        return signalled;
     }
-    bool Signal12(uint64_t v) { return SUCCEEDED(m.queue->Signal(m.fence12.Get(), v)); }
-    bool Wait11(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.fence11.Get(), v)); }
+    bool Wait11(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), v)); }
 };
-
 // Builds the model on its own list; evaluation waits for that list's completion (never in the same list or frame).
-RunOutcome CreateFeatureStep(int index, Stream& s)
+RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
 {
     Module& m = M();
     if (!BeginList())
@@ -674,12 +755,15 @@ RunOutcome CreateFeatureStep(int index, Stream& s)
         return RunOutcome::Failed;
     }
     uint64_t value = 0;
-    if (!SubmitList(value))
+    const bool submitted = SubmitList(value);
+    if (value != 0)
+        st.lastSubmitted = value; // the list ran even if its signal could not be queued: the model must not be freed under it
+    if (!submitted)
     {
         Latch("the model creation list could not be submitted");
         return RunOutcome::Failed;
     }
-    s.createDone = s.lastSubmitted = value;
+    s.createDone = value;
     s.created = start;
     const uint64_t after = VramUsedBytes();
     LOG_INFO("CharaView NR: model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB -> {} MB",
@@ -726,7 +810,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     ReplayScope own; // the copy and clear below go through the hooked context: they are not the game's work
     StreamState& st = m.table.At(index);
 
-    const bool late = Late();
+    const bool late = s.late; // decided when the stream was created: the run and its consumer always agree
     FramePlan plan;
     plan.width = s.width;
     plan.height = s.height;
@@ -747,13 +831,13 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
         const FLOAT farPlane[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // the bring-up depth: everything at the far plane, not inverted
         ctx->ClearRenderTargetView(s.depth.rtv.Get(), farPlane);
     }
-    ctx->CopyResource(s.colour.t11(), req.native); // the extra copy of the bring-up: native image -> shareable colour image
 
-    HandoffOps ops { m, s, plan, ResultBufferForRun(st.runs) };
-    const HandoffOutcome out = RunHandoff(ops, m.fence, !late);
+    const int buffer = ResultBufferForRun(st.runs);
+    HandoffOps ops { m, s, st, ctx, req.native, plan, buffer };
+    const HandoffOutcome out = RunFrame(ops, m.ready, late, s.doneValue[buffer]);
     if (!out.ok)
     {
-        if (out.failedAt == HandoffStep::Signal11 || out.failedAt == HandoffStep::Wait12)
+        if (out.failedAt == HandoffStep::ReuseWait || out.failedAt == HandoffStep::Signal11 || out.failedAt == HandoffStep::Wait12)
             m.list->Close(); // the list was reset for this run but never recorded
         char text[96];
         std::snprintf(text, sizeof(text), "a run failed at the %s step", HandoffStepName(out.failedAt));
@@ -761,12 +845,13 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
         return Fallback(RunOutcome::Failed);
     }
 
-    s.doneValue[ops.buffer] = out.done;
+    s.doneValue[buffer] = out.done;
     s.guidesInit = true;
     st.everRan = true;
     st.lastRun = req.now;
+    st.ranAttempt = st.attempts; // this bring-up call produced the result that is there now
     ++st.runs;
-    st.hasGpuWork = true;
+    st.chain = reset != ResetReason::None ? 1 : st.chain + 1; // the late variant shows the run before the newest only inside one chain
     m.runs.fetch_add(1, std::memory_order_relaxed);
     m.lastCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     m.cpuCost.Add(ops.cpuMs);
@@ -798,41 +883,84 @@ RunOutcome RunBringUp(const RunRequest& req)
     std::lock_guard lock(m.mutex);
     if (req.context == nullptr || req.native == nullptr || req.width == 0 || req.height == 0)
         return Fallback(RunOutcome::Skipped);
+
+    // Every call that reaches a preview that has a stream is an attempt. The result in the stream is current only while the newest
+    // attempt produced it: a render that was skipped, still preparing or failed leaves the older result stale, and a consumer draw must
+    // not show it for this render (ResultFor).
+    const uintptr_t key = reinterpret_cast<uintptr_t>(req.native);
+    if (const int known = m.table.Find(key); known != kNoStream)
+        ++m.table.At(known).attempts;
+
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return Fallback(RunOutcome::NotAvailable);
 
-    const uintptr_t key = reinterpret_cast<uintptr_t>(req.native);
     int index = m.table.Bind(key, req.width, req.height, req.now);
     if (index == kNoStream)
-        return Fallback(RunOutcome::Skipped);
-    if (m.table.NeedsRebuild(index, req.width, req.height))
     {
-        // The preview was resized: the stream is rebuilt once the GPU is finished with the old one.
-        if (!GpuDone(m.streams[index].lastSubmitted))
+        if (!m.tableFullLogged)
+        {
+            m.tableFullLogged = true;
+            LOG_INFO("CharaView NR: all {} preview NR streams are in use (open windows and windows still lingering); further previews keep the "
+                     "native image until one is released",
+                     kMaxStreams);
+        }
+        return Fallback(RunOutcome::Skipped);
+    }
+    if (m.table.At(index).attempts == 0)
+        m.table.At(index).attempts = 1; // a stream Bind just created
+
+    // What the stream has to be built for. A change (size, the model preset or style, the hand-off variant) must hold still for a
+    // moment before the stream is rebuilt: dragging a window to a new size reports a new size every frame, and each one would
+    // otherwise be a new model.
+    const DlssNr::PreviewTuning tuning = DlssNr::CurrentPreviewTuning();
+    StreamShape wanted;
+    wanted.width = req.width;
+    wanted.height = req.height;
+    wanted.preset = tuning.preset;
+    wanted.style = tuning.style;
+    wanted.late = Late();
+    m.table.At(index).lastLive = req.now;
+    switch (DecideRebuild(m.table.At(index), wanted, req.now))
+    {
+    case RebuildAction::Settle: UpdateHolds(); return Fallback(RunOutcome::Skipped);
+    case RebuildAction::Rebuild:
+    {
+        // The old stream goes once the GPU is finished with it.
+        if (!GpuDone(m.table.At(index).lastSubmitted))
             return Fallback(RunOutcome::Skipped);
-        LOG_INFO("CharaView NR: stream {} resized to {}x{}; rebuilt", index, req.width, req.height);
+        const StreamShape old = m.table.At(index).built;
+        LOG_INFO("CharaView NR: stream {} rebuilt: {}x{} -> {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index, old.width, old.height,
+                 wanted.width, wanted.height, old.preset, wanted.preset, old.style, wanted.style, old.late ? "late" : "same frame",
+                 wanted.late ? "late" : "same frame");
         ReleaseStreamObjects(m.streams[index], true);
         m.table.Free(index);
         index = m.table.Bind(key, req.width, req.height, req.now);
         if (index == kNoStream)
             return Fallback(RunOutcome::Skipped);
+        m.table.At(index).attempts = 1;
+        m.table.At(index).lastLive = req.now;
+        break;
+    }
+    case RebuildAction::Keep: break;
     }
     Stream& s = m.streams[index];
-    m.table.At(index).lastLive = req.now;
+    StreamState& st = m.table.At(index);
     UpdateHolds();
 
     if (!s.gpuObjects)
     {
         D3D11_TEXTURE2D_DESC nd {};
         req.native->GetDesc(&nd);
-        if (nd.Format != DXGI_FORMAT_B8G8R8A8_UNORM || !CreateStreamGpu(s, req.width, req.height, nd.Format))
+        if (nd.Format != DXGI_FORMAT_B8G8R8A8_UNORM || !CreateStreamGpu(s, req.width, req.height, nd.Format, wanted.late))
         {
             Latch(nd.Format != DXGI_FORMAT_B8G8R8A8_UNORM ? "the preview image is not B8G8R8A8_UNORM" : "the shared images could not be created");
             return Fallback(RunOutcome::Failed);
         }
+        st.built = wanted;
+        st.hasBuilt = true;
     }
     if (s.feature == nullptr)
-        return Fallback(CreateFeatureStep(index, s));
+        return Fallback(CreateFeatureStep(index, s, st));
     if (!s.featureReady)
     {
         if (!GpuDone(s.createDone))
@@ -853,6 +981,13 @@ RunOutcome RunProduction(const RunRequest&)
     return RunOutcome::NotImplemented;
 }
 
+// The consumer's side of the hand-off: the late variant waits (GPU side) for the run that wrote the image it is about to read.
+struct ConsumerOps
+{
+    Module& m;
+    bool WaitResult(uint64_t done) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), done)); }
+};
+
 ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* /*context*/, uintptr_t key, uint64_t now)
 {
     Module& m = M();
@@ -863,14 +998,15 @@ ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* /*context*/, uintptr_t 
     if (index == kNoStream)
         return nullptr;
     const StreamState& st = m.table.At(index);
-    if (!st.everRan || now < st.lastRun || now - st.lastRun > kLiveMs)
-        return nullptr;
-    const bool late = Late();
-    const int buffer = ConsumerBuffer(late, st.runs);
-    if (buffer < 0)
+    // Only the result of the newest bring-up call, and only while it is recent: a skipped, preparing or failed render has no result.
+    if (!st.ResultIsCurrent() || now < st.lastRun || now - st.lastRun > kLiveMs)
         return nullptr;
     Stream& s = m.streams[index];
-    if (late && FAILED(m.ctx4->Wait(m.fence11.Get(), s.doneValue[buffer]))) // finished long ago: this returns at once on the GPU
+    const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
+    if (buffer < 0)
+        return nullptr;
+    ConsumerOps ops { m };
+    if (!ConsumerWait(ops, s.late, s.doneValue[buffer]))
     {
         Latch("the D3D11 wait on the previous result failed");
         return nullptr;
@@ -888,14 +1024,15 @@ ID3D11Texture2D* ResultTexture(uint64_t now)
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
         const StreamState& st = m.table.At(static_cast<int>(i));
-        if (!st.Used() || !st.everRan || now < st.lastRun || now - st.lastRun > kLiveMs)
+        if (!st.Used() || !st.ResultIsCurrent() || now < st.lastRun || now - st.lastRun > kLiveMs)
             continue;
         if (best == kNoStream || st.lastRun > m.table.At(best).lastRun)
             best = static_cast<int>(i);
     }
     if (best == kNoStream)
         return nullptr;
-    const int buffer = ConsumerBuffer(Late(), m.table.At(best).runs);
+    const StreamState& st = m.table.At(best);
+    const int buffer = ConsumerBuffer(m.streams[best].late, st.runs, st.chain);
     return buffer < 0 ? nullptr : m.streams[best].result[buffer].t11();
 }
 
@@ -906,6 +1043,10 @@ void Maintain(uint64_t now)
     if (now >= m.lastMaintain && now - m.lastMaintain < 100)
         return;
     m.lastMaintain = now;
+
+    // The objects of a previous bridge device that the GPU was still using when it changed: released as soon as it is done.
+    if (m.releasePending && ReleaseAll(false))
+        LOG_INFO("CharaView NR: the objects of the previous graphics device were released");
 
     const Availability a = Refresh(); // also with nothing created: the dispatcher reads the cached result (Available())
     if (!m.inited && m.table.UsedCount() == 0)
@@ -923,13 +1064,8 @@ void Maintain(uint64_t now)
             s.featureReady = true;
             NoteFeatureReady(s, index);
         }
-        StreamFacts f;
-        f.disabled = disabled;
-        f.now = now;
-        f.lastLive = m.table.At(index).lastLive;
-        f.lingerMs = linger;
-        f.hasGpuWork = s.lastSubmitted != 0;
-        f.gpuDone = GpuDone(s.lastSubmitted);
+        const StreamState& st = m.table.At(index);
+        const StreamFacts f = FactsOf(st, disabled, now, linger, GpuDone(st.lastSubmitted));
         if (DecideStream(f) == StreamAction::Release)
         {
             LOG_INFO("CharaView NR: stream {} released ({})", index, disabled ? "preview NR is not available" : "its preview window closed");
@@ -938,7 +1074,7 @@ void Maintain(uint64_t now)
         }
     }
     m.liveCount.store(static_cast<uint32_t>(m.table.LiveCount(now)), std::memory_order_relaxed);
-    if (m.table.UsedCount() == 0 && m.inited && disabled && GpuDone(m.completion))
+    if (m.table.UsedCount() == 0 && m.inited && disabled && GpuDone(m.done.last))
         ReleaseGlobal(); // nothing left: the compute pass objects and fences go too
     UpdateHolds();
 }
@@ -952,7 +1088,9 @@ void OnBridgeShutdown()
     m.holdOff = true;
     if (m.inited || m.table.UsedCount() != 0)
         LOG_INFO("CharaView NR: the graphics bridge is shutting down; preview NR objects are released");
-    ReleaseAll(true);
+    if (!ReleaseAll(true))
+        m.releasePending = true; // the GPU is still using them: the module is not usable until Maintain has released them
+    UpdateHolds();
 }
 
 void OnBridgeInit()
@@ -964,9 +1102,21 @@ void OnBridgeInit()
 
 void Detach()
 {
+    // Draw thread, device valid, the hooks are about to go. No wait here (the earlier version waited up to five seconds on a fence event
+    // with the module locked, which is unsafe if this ever ran under the loader lock): the D3D11 context is flushed so that signals the
+    // D3D12 queue may be waiting for are on their way, and whatever the GPU has finished is released. What it is still using stays; the
+    // bridge shutdown (OnBridgeShutdown, which drains) or the device teardown takes it. The super-resolution path does no GPU wait in
+    // its Detach either.
     Module& m = M();
     std::lock_guard lock(m.mutex);
-    ReleaseAll(true);
+    if (m.ctx4 != nullptr)
+        m.ctx4->Flush();
+    if (!ReleaseAll(false))
+    {
+        m.releasePending = true;
+        UpdateHolds();
+        LOG_INFO("CharaView NR: the GPU was still using preview NR objects when the hooks were removed; they are released later");
+    }
 }
 
 Status GetStatus()
