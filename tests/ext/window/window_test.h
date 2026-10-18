@@ -64,6 +64,14 @@ struct ApplyCall
     uint32_t thread = 0;
 };
 
+struct ReplayCall
+{
+    uint64_t native = 0;
+    bool fullscreen = false;
+    bool fgActiveAtCall = false;
+    uint32_t thread = 0;
+};
+
 struct FakeEnv final : Env
 {
     bool forceBorderless = true;
@@ -78,6 +86,16 @@ struct FakeEnv final : Env
     bool applyResult = true;
     std::vector<ApplyCall> applied;
     std::function<void()> onApply; // runs inside the call, like the game's window procedure would
+
+    // Frame generation request, clock, swapchain references and the replayed call
+    uint64_t nowMs = 0;
+    bool autoOff = true; // RequestFgOff behaves like Deactivate: inactive and paused at once
+    int fgOffRequests = 0;
+    int retained = 0;
+    int released = 0;
+    std::vector<ReplayCall> replays;
+    int32_t replayResult = 0; // S_OK
+    std::function<void()> onReplay; // runs inside the call, like the hook and the game's window procedure would
 
     std::vector<std::string> logs;
     std::vector<bool> warns;
@@ -104,6 +122,25 @@ struct FakeEnv final : Env
         if (onApply)
             onApply();
         return applyResult;
+    }
+    void RequestFgOff() override
+    {
+        ++fgOffRequests;
+        if (autoOff)
+        {
+            fg.active = false;
+            fg.paused = true;
+        }
+    }
+    uint64_t NowMs() override { return nowMs; }
+    void Retain(uint64_t) override { ++retained; }
+    void Release(uint64_t) override { ++released; }
+    int32_t Replay(uint64_t native, bool fullscreen) override
+    {
+        replays.push_back({ native, fullscreen, fg.present && fg.active, current });
+        if (onReplay)
+            onReplay();
+        return replayResult;
     }
     void Log(const std::string& line, bool warn) override
     {

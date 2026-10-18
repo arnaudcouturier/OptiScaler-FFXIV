@@ -182,5 +182,9 @@ void OnReshadeLoaded(HMODULE reshadeModule)
                  result.missingExport);
     else
         LOG_INFO("ReShade built-in add-on: inert ({})", Describe(result.status));
+
+    // Window mode needs ReShade to see the game's window-mode call; the probe and the border fix run without it.
+    if (result.status != RegisterStatus::Ok && ext::window::CurrentMode() == ext::window::Mode::On)
+        LOG_INFO("Window: ReShade add-on not registered ({}): the mode-switch hold is inactive", Describe(result.status));
 }
 } // namespace ext::reshade

@@ -9,6 +9,7 @@
 
 #include "ext/window/WindowMode.h"
 #include "ext/window/WindowProbe.h"
+#include "ext/window/WindowDeferral.h"
 #include "ext/window/WindowRules.h"
 
 #include <cstdint>
@@ -41,6 +42,17 @@ class Env
     // SetWindowLongPtr(GWL_EXSTYLE) + SetWindowPos(NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED). Only ever called
     // on the window's owner thread. The window procedure runs inside it.
     virtual bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) = 0;
+
+    // The existing feature API, exactly what upstream's hook does first: fgChanged = true, UpdateTarget(), Deactivate().
+    virtual void RequestFgOff() = 0;
+    virtual uint64_t NowMs() = 0;
+    // Keeps the swapchain alive while a call is held (AddRef) and lets go of it (Release).
+    virtual void Retain(uint64_t native) = 0;
+    virtual void Release(uint64_t native) = 0;
+    // IDXGISwapChain::SetFullscreenState(fullscreen, nullptr) on `native` (the swapchain ReShade passed, NOT through ReShade's
+    // wrapper). Returns the HRESULT.
+    virtual int32_t Replay(uint64_t native, bool fullscreen) = 0;
+
     virtual void Log(const std::string& line, bool warn) = 0;
 };
 
@@ -114,7 +126,14 @@ class Controller
         const FgSnapshot fg = env.Fg();
         _gate.OnPresentEnd(fg);
 
-        if (mode == Mode::On && _fixArmed)
+        if (mode != Mode::On)
+            return;
+
+        // B2-a first: a held call is replayed at the end of the present that confirms frame generation off. The border fix
+        // does not run in the same present (the replay's restyle may be followed by the game's own style write).
+        if (_deferral.State() == DeferState::Pending)
+            StepDeferral(env, fg);
+        else if (_fixArmed)
             TryFix(env, fg);
     }
 
@@ -143,10 +162,64 @@ class Controller
         f.nativeSwapchain = ev.native;
         f.bridgeSwapchain = _bridge;
         f.verdict = DecideDefer(in);
-        f.wouldReturn = f.verdict == DeferVerdict::Defer;
-        f.returned = false; // step 3 turns this on
+
+        const DeferState before = _deferral.State();
+        f.deferState = DeferStateName(before);
+
+        bool prevent = false;
+        const char* action = nullptr;
+        if (mode == Mode::On)
+        {
+            switch (before)
+            {
+            case DeferState::Replaying:
+                break; // the module's own replay: through, untouched
+            case DeferState::Pending:
+                if (ev.native != _pendingNative)
+                {
+                    action = "another swapchain: passes";
+                }
+                else if (!WouldChangeWindow(ev.fullscreen, f.exclusive))
+                {
+                    // The latest request asks for the state that is in effect: the held call is moot, a replay would only
+                    // cost another frame generation outage. Drop it; this call passes (a no-op for the window).
+                    _deferral.Cancel();
+                    env.Release(_pendingNative);
+                    _pendingNative = 0;
+                    action = "latest request equals the state in effect: held call dropped, this call passes";
+                }
+                else
+                {
+                    _deferral.Replace(ev.fullscreen);
+                    prevent = true;
+                    action = "replaces the held call (only the latest is kept)";
+                }
+                break;
+            case DeferState::Idle:
+                if (f.verdict == DeferVerdict::Defer)
+                {
+                    // State is settled first, then the calls out.
+                    _pendingNative = ev.native;
+                    _pendingThread = f.currentThread;
+                    _deferral.Begin(ev.fullscreen, env.NowMs());
+                    env.Retain(ev.native);
+                    env.RequestFgOff();
+                    _gate.Reset();
+                    prevent = true;
+                    action = "held back: frame generation asked off, replayed once it is confirmed off";
+                }
+                break;
+            }
+        }
+
+        f.wouldReturn = before == DeferState::Idle ? f.verdict == DeferVerdict::Defer : prevent;
+        f.returned = prevent;
         env.Log(FormatProbeLine(f), false);
-        return false;
+        if (action != nullptr)
+            env.Log(std::format("Window: SetFullscreenState({}) {}; handler returns {}", ev.fullscreen ? "TRUE" : "FALSE",
+                                action, prevent ? "true (prevent)" : "false"),
+                    false);
+        return prevent;
     }
 
     // Test access.
@@ -184,6 +257,54 @@ class Controller
         f.fixArmed = _fixArmed;
         f.nested = _actionDepth > 0;
         return f;
+    }
+
+    // B2-a. Runs at the end of every game present while a call is held. The replay never runs while frame generation is
+    // active: the pause after a Deactivate is only about ten frames, so the feature can come back during the wait; each
+    // present that finds it active asks it off again. Only the hard limit replays regardless (fail open).
+    void StepDeferral(Env& env, const FgSnapshot& fg)
+    {
+        if (fg.present && fg.active)
+        {
+            env.RequestFgOff();
+            _gate.Reset();
+            if (!_reRequestNoted)
+            {
+                _reRequestNoted = true;
+                env.Log("Window: frame generation came back while a call is held, asked off again", false);
+            }
+        }
+
+        const bool maybeOn = !fg.present || fg.active;
+        // A held call is replayed on the thread that made it; another presenting thread leaves it for the hard limit.
+        const bool rightThread = env.CurrentThread() == _pendingThread;
+        const WaitResult result =
+            _deferral.OnPresentEnd(maybeOn, _gate.Confirmed(env.DlssgOutput()), env.NowMs(), rightThread);
+        if (result == WaitResult::Wait)
+            return;
+
+        const bool fullscreen = _deferral.PendingFullscreen();
+        const uint64_t native = _pendingNative;
+        const uint32_t presents = _deferral.Presents();
+        const uint64_t waited = _deferral.ElapsedMs(env.NowMs());
+        const uint32_t replaced = _deferral.Replaced();
+
+        _deferral.BeginReplay(); // settled before the call out: the replay passes through the handler and may resize
+        _pendingNative = 0;
+        _reRequestNoted = false;
+
+        env.Log(std::format("Window: replaying SetFullscreenState({}) with a null target: {} (after {} presents, {} ms, {} "
+                            "earlier call(s) replaced)",
+                            fullscreen ? "TRUE" : "FALSE", WaitResultName(result), presents, waited, replaced),
+                result == WaitResult::ReplayAtHardLimit);
+        ++_actionDepth;
+        const int32_t hr = env.Replay(native, fullscreen);
+        --_actionDepth;
+        env.Release(native);
+        _deferral.EndReplay();
+        env.Log(std::format("Window: replayed SetFullscreenState({}) returned {:#010x}", fullscreen ? "TRUE" : "FALSE",
+                            static_cast<uint32_t>(hr)),
+                hr < 0);
     }
 
     // B1-a. Runs at the end of a game present while the fix is armed. Frame generation must be confirmed off (a complete
@@ -268,5 +389,11 @@ class Controller
     bool _fixWaitNoted = false;
     bool _ownerSkipLogged = false;
     int _actionDepth = 0; // > 0 while the module is inside one of its own window calls
+
+    // B2-a
+    Deferral _deferral;
+    uint64_t _pendingNative = 0;
+    uint32_t _pendingThread = 0;
+    bool _reRequestNoted = false;
 };
 } // namespace ext::window
