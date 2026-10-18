@@ -196,7 +196,7 @@ void AddDeps(Scenario& s, const Stream& st, int frames)
 }
 
 // The plan of this version: two fences, the production templates. `lates` lists the streams (late or not); `frames` frames.
-Scenario BuildNew(const std::vector<bool>& lates, int frames)
+Scenario BuildNew(const std::vector<bool>& lates, int frames, uint32_t consumerFrames = ~0u)
 {
     Scenario s;
     FenceCounter ready, done;
@@ -218,6 +218,8 @@ Scenario BuildNew(const std::vector<bool>& lates, int frames)
         }
         for (Stream& st : streams)
         {
+            if ((consumerFrames >> k & 1u) == 0)
+                continue; // no draw samples the preview in this frame: nothing else orders the D3D11 queue behind the runs
             // the consumer draw of this frame: which result and which wait come from the production functions
             const int buffer = ConsumerBuffer(st.late, static_cast<uint64_t>(k) + 1, static_cast<uint64_t>(k) + 1);
             if (buffer < 0)
@@ -241,7 +243,7 @@ Scenario BuildNew(const std::vector<bool>& lates, int frames)
 }
 
 // The first version, reproduced from the review: one fence signalled from both queues, one colour image, no wait before the copy.
-Scenario BuildOld(const std::vector<bool>& lates, int frames)
+Scenario BuildOld(const std::vector<bool>& lates, int frames, uint32_t consumerFrames = ~0u)
 {
     Scenario s;
     uint64_t counter = 0; // one counter for ready and done values: 1, 2, 3, ...
@@ -269,6 +271,8 @@ Scenario BuildOld(const std::vector<bool>& lates, int frames)
         }
         for (Stream& st : streams)
         {
+            if ((consumerFrames >> k & 1u) == 0)
+                continue;
             const int buffer = ConsumerBuffer(st.late, static_cast<uint64_t>(k) + 1, static_cast<uint64_t>(k) + 1);
             if (buffer < 0)
                 continue;
@@ -334,16 +338,23 @@ Verdict Check(const Scenario& s)
 
 const std::vector<std::vector<bool>> kStreamSets = { { true }, { false }, { true, false }, { true, true }, { false, false }, { false, true, true } };
 
+// Frames in which a draw samples the preview: every frame, none, every other frame, only the first ones. The colour image the late variant
+// overwrites two runs after its last reader is protected by its own wait, not by the consumer waits (which may not exist in a frame).
+const uint32_t kConsumerPatterns[] = { ~0u, 0u, 0x55u, 0xAAu, 0x3u, 0x80u };
+
 void TestNewPlanIsSound()
 {
     for (const auto& lates : kStreamSets)
     {
-        const Verdict v = Check(BuildNew(lates, 8));
-        CHECK(v.schedules == 403);
-        CHECK(v.drainFailures == 0);      // every wait gets its signal: nothing is left blocking the shared queue
-        CHECK(v.decreases == 0);          // fence values never go down
-        CHECK(v.satisfiedByOther == 0);   // a wait is only ever satisfied by the signal of its own value
-        CHECK(v.hazards == 0);            // every data dependency holds in every schedule
+        for (const uint32_t pattern : kConsumerPatterns)
+        {
+            const Verdict v = Check(BuildNew(lates, 8, pattern));
+            CHECK(v.schedules == 403);
+            CHECK(v.drainFailures == 0);      // every wait gets its signal: nothing is left blocking the shared queue
+            CHECK(v.decreases == 0);          // fence values never go down
+            CHECK(v.satisfiedByOther == 0);   // a wait is only ever satisfied by the signal of its own value
+            CHECK(v.hazards == 0);            // every data dependency holds in every schedule
+        }
     }
 }
 
@@ -352,7 +363,7 @@ void TestStructure()
     // each fence has one signaller: ready only the D3D11 context, done only the D3D12 queue; waits are on the other side
     for (const auto& lates : kStreamSets)
     {
-        const Scenario s = BuildNew(lates, 8);
+        const Scenario s = BuildNew(lates, 8, 0x5Fu);
         for (int q = 0; q < 2; ++q)
         {
             uint64_t lastSignal[2] = { 0, 0 };
