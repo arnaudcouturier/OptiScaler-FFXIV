@@ -51,7 +51,7 @@ void DrawNrSection(CharaConfig& cfg)
     else
         ImGui::Text("Preview NR: running");
 
-    ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native image", st.liveStreams,
+    ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native or plain DLSS image", st.liveStreams,
                         st.streams, (unsigned long long) st.runs, (unsigned long long) st.fallbacks);
     ImGui::TextDisabled("UI draws given an NR result: %llu", (unsigned long long) g_stats.nrSwaps.load(std::memory_order_relaxed));
     if (st.lastGpuMs > 0.0 || st.lastCpuMs > 0.0)

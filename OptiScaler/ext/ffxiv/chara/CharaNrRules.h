@@ -567,6 +567,34 @@ template <class Ops> HandoffOutcome RunFrame(Ops& ops, FenceCounter& ready, bool
     return RunHandoff(ops, ready, !late);
 }
 
+// ---- Renders that kept the image ----------------------------------------------------------------------------------------------------
+// A render for which a call ended without a result (not available, still preparing, skipped, failed, or not offered at all) kept the native
+// image (bring-up) or the plain super-resolution image (production). Counted ONCE per call, at the one place a call ends (the module's
+// RunCore wrapper, its failure handlers and NoteProductionDeclined): inner steps pass their outcome up without counting. `production`
+// counts the calls of the production entry (a subset of `all`).
+struct FallbackTally
+{
+    std::atomic<uint64_t> all { 0 };
+    std::atomic<uint64_t> production { 0 };
+
+    void Note(bool fromProduction)
+    {
+        all.fetch_add(1, std::memory_order_relaxed);
+        if (fromProduction)
+            production.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+// The one place a call ends: runs `steps` (which pass their outcome up without counting) and counts the call once when `ran(outcome)` is
+// false.
+template <class Steps, class Ran> auto CountedCall(FallbackTally& tally, bool fromProduction, Steps&& steps, Ran&& ran) -> decltype(steps())
+{
+    auto outcome = steps();
+    if (!ran(outcome))
+        tally.Note(fromProduction);
+    return outcome;
+}
+
 // ---- The late variant ---------------------------------------------------------------------------------------------------------
 // Results alternate between two images. A consumer draw gets the newest result, or in the late variant the one before it. -1: there is
 // no result to show yet. The late variant needs two results of the same chain (since the last history reset): the one before the

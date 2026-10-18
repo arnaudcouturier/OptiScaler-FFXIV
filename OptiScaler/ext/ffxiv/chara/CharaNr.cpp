@@ -131,8 +131,9 @@ struct Module
     uint64_t lastMaintain = 0;
 
     std::atomic<bool> holds { false };
-    std::atomic<uint64_t> runs { 0 }, fallbacks { 0 };                     // both modes
-    std::atomic<uint64_t> productionRuns { 0 }, productionFallbacks { 0 }; // the production entry alone (a subset of the two above)
+    std::atomic<uint64_t> runs { 0 };                                      // both modes
+    FallbackTally fallbacks;                                               // both modes; `fallbacks.production` is the production entry alone
+    std::atomic<uint64_t> productionRuns { 0 };                            // the production entry alone (a subset of `runs`)
     std::atomic<uint64_t> serialCounter { 0 };
     std::atomic<uint32_t> streamCount { 0 }, liveCount { 0 };
     std::atomic<uint64_t> lastGpuUs { 0 }, lastCpuUs { 0 };
@@ -831,11 +832,6 @@ void LogCostIfDue(uint64_t now)
         LOG_INFO("CharaView NR cost: {} runs, CPU recording {:.2f} ms average ({:.2f} max); GPU time not measured yet", cpu.count, cpu.average, cpu.max);
 }
 
-RunOutcome Fallback(RunOutcome why)
-{
-    M().fallbacks.fetch_add(1, std::memory_order_relaxed);
-    return why;
-}
 
 RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequest* production)
 {
@@ -863,7 +859,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     // A free command allocator is needed before anything is queued: none free (many windows open, a slow GPU) is not an error, the
     // native image stays for this render.
     if (!BeginList())
-        return Fallback(RunOutcome::Skipped);
+        return RunOutcome::Skipped;
 
     ID3D11DeviceContext* ctx = req.context;
     if (plan.initGuides)
@@ -882,7 +878,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
         char text[96];
         std::snprintf(text, sizeof(text), "a run failed at the %s step", HandoffStepName(out.failedAt));
         Latch(text);
-        return Fallback(RunOutcome::Failed);
+        return RunOutcome::Failed;
     }
 
     s.doneValue[buffer] = out.done;
@@ -937,15 +933,15 @@ static ImageInfo InfoOf(ID3D11Texture2D* texture)
 // Both modes run through this one function; `production` is null for the bring-up. The stream table, the availability and creation steps,
 // the settle-and-rebuild rule, the model creation and the readiness wait are common; the mode decides the shape the stream is built for
 // and what the hand-off copies (see Stream).
-static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production)
+static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* production)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
     if (req.context == nullptr || req.native == nullptr || req.width == 0 || req.height == 0)
-        return Fallback(RunOutcome::Skipped);
+        return RunOutcome::Skipped;
     if (production != nullptr && (production->colour == nullptr || production->depth == nullptr || production->motion == nullptr ||
                                   production->guides.width == 0 || production->guides.height == 0))
-        return Fallback(RunOutcome::Skipped);
+        return RunOutcome::Skipped;
 
     // Every call that reaches a preview that has a stream is an attempt. The result in the stream is current only while the newest
     // attempt produced it: a render that was skipped, still preparing or failed leaves the older result stale, and a consumer draw must
@@ -955,7 +951,7 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
         ++m.table.At(known).attempts;
 
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
-        return Fallback(RunOutcome::NotAvailable);
+        return RunOutcome::NotAvailable;
 
     int index = m.table.Bind(key, req.width, req.height, req.now);
     if (index == kNoStream)
@@ -967,7 +963,7 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
                      "native image until one is released",
                      kMaxStreams);
         }
-        return Fallback(RunOutcome::Skipped);
+        return RunOutcome::Skipped;
     }
     if (m.table.At(index).attempts == 0)
         m.table.At(index).attempts = 1; // a stream Bind just created
@@ -991,12 +987,12 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
     m.table.At(index).lastLive = req.now;
     switch (DecideRebuild(m.table.At(index), wanted, req.now))
     {
-    case RebuildAction::Settle: UpdateHolds(); return Fallback(RunOutcome::Skipped);
+    case RebuildAction::Settle: UpdateHolds(); return RunOutcome::Skipped;
     case RebuildAction::Rebuild:
     {
         // The old stream goes once the GPU is finished with it.
         if (!GpuDone(m.table.At(index).lastSubmitted))
-            return Fallback(RunOutcome::Skipped);
+            return RunOutcome::Skipped;
         const StreamShape old = m.table.At(index).built;
         LOG_INFO("CharaView NR: stream {} rebuilt: {} {}x{} -> {} {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index,
                  old.production ? "production" : "bring-up", old.width, old.height, wanted.production ? "production" : "bring-up",
@@ -1006,7 +1002,7 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
         m.table.Free(index);
         index = m.table.Bind(key, req.width, req.height, req.now);
         if (index == kNoStream)
-            return Fallback(RunOutcome::Skipped);
+            return RunOutcome::Skipped;
         m.table.At(index).attempts = 1;
         m.table.At(index).lastLive = req.now;
         break;
@@ -1023,7 +1019,7 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
         !ProductionInputsFit(wanted, InfoOf(production->colour), InfoOf(production->depth), InfoOf(production->motion)))
     {
         Latch("the production inputs (super-resolution output, depth, motion) do not match the stream's sizes and formats");
-        return Fallback(RunOutcome::Failed);
+        return RunOutcome::Failed;
     }
     if (!s.gpuObjects)
     {
@@ -1033,24 +1029,32 @@ static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* produc
         if (!formatOk || !CreateStreamGpu(s, wanted, nd.Format))
         {
             Latch(!formatOk ? "the preview image is not B8G8R8A8_UNORM" : "the shared images could not be created");
-            return Fallback(RunOutcome::Failed);
+            return RunOutcome::Failed;
         }
         st.built = wanted;
         st.hasBuilt = true;
     }
     if (s.feature == nullptr)
-        return Fallback(CreateFeatureStep(index, s, st));
+        return CreateFeatureStep(index, s, st);
     if (!s.featureReady)
     {
         if (!GpuDone(s.createDone))
-            return Fallback(RunOutcome::Preparing);
+            return RunOutcome::Preparing;
         s.featureReady = true;
         NoteFeatureReady(s, index);
-        return Fallback(RunOutcome::Preparing); // the first evaluation is on the next render
+        return RunOutcome::Preparing; // the first evaluation is on the next render
     }
     const RunOutcome outcome = Run(index, s, req, production);
     UpdateHolds();
-    return outcome == RunOutcome::Ran ? outcome : Fallback(outcome);
+    return outcome;
+}
+
+// The one place a call of either entry ends: a call that produced no result is counted as a render that kept the image, once (the steps
+// above pass their outcome up without counting).
+static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production)
+{
+    return CountedCall(M().fallbacks, production != nullptr, [&] { return RunCoreSteps(req, production); },
+                       [](RunOutcome outcome) { return outcome == RunOutcome::Ran; });
 }
 
 // One call of either entry. A call that ends without a run breaks the stream's chain (the late variant must not show a result from before
@@ -1076,15 +1080,12 @@ static ProductionResult RunProductionImpl(const ProductionRequest& request)
     result.outcome = RunCore(request.base, &request);
     NoteBringUpEnded(m.table, key, result.outcome == RunOutcome::Ran);
     if (result.outcome != RunOutcome::Ran)
-    {
-        m.productionFallbacks.fetch_add(1, std::memory_order_relaxed);
-        return result;
-    }
+        return result; // RunCore counted it
     const int index = m.table.Find(key);
     if (index == kNoStream || !m.streams[index].production || m.table.At(index).runs == 0)
     {
         result.outcome = RunOutcome::Failed; // cannot happen: a run just finished on this stream
-        m.productionFallbacks.fetch_add(1, std::memory_order_relaxed);
+        m.fallbacks.Note(true); // the run was counted as a run; this render still keeps the plain super-resolution image
         return result;
     }
     const Stream& s = m.streams[index];
@@ -1276,11 +1277,11 @@ static Status GetStatusImpl()
     s.streams = m.streamCount.load(std::memory_order_relaxed);
     s.liveStreams = m.liveCount.load(std::memory_order_relaxed);
     s.runs = m.runs.load(std::memory_order_relaxed);
-    s.fallbacks = m.fallbacks.load(std::memory_order_relaxed);
+    s.fallbacks = m.fallbacks.all.load(std::memory_order_relaxed);
     s.lastGpuMs = static_cast<double>(m.lastGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.lastCpuMs = static_cast<double>(m.lastCpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.productionRuns = m.productionRuns.load(std::memory_order_relaxed);
-    s.productionFallbacks = m.productionFallbacks.load(std::memory_order_relaxed);
+    s.productionFallbacks = m.fallbacks.production.load(std::memory_order_relaxed);
     s.productionGpuMs = static_cast<double>(m.lastProductionGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.productionCpuMs = static_cast<double>(m.lastProductionCpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.videoMemoryMb = m.vramAddedMb.load(std::memory_order_relaxed);
@@ -1301,8 +1302,9 @@ RunOutcome RunBringUp(const RunRequest& req)
     return Guarded([&] { return RunBringUpImpl(req); },
                    []
                    {
+                       M().fallbacks.Note(false); // counted before the latch line, which can throw
                        Latch("an unexpected exception stopped the bring-up");
-                       return Fallback(RunOutcome::Failed);
+                       return RunOutcome::Failed;
                    });
 }
 
@@ -1311,18 +1313,17 @@ ProductionResult RunProduction(const ProductionRequest& request)
     return Guarded([&] { return RunProductionImpl(request); },
                    []
                    {
+                       M().fallbacks.Note(true); // counted before the latch line, which can throw
                        Latch("an unexpected exception stopped the production run");
-                       M().productionFallbacks.fetch_add(1, std::memory_order_relaxed);
                        ProductionResult failed;
-                       failed.outcome = Fallback(RunOutcome::Failed);
+                       failed.outcome = RunOutcome::Failed;
                        return failed;
                    });
 }
 
 void NoteProductionDeclined()
 {
-    M().productionFallbacks.fetch_add(1, std::memory_order_relaxed);
-    M().fallbacks.fetch_add(1, std::memory_order_relaxed);
+    M().fallbacks.Note(true);
 }
 
 ResultView ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)

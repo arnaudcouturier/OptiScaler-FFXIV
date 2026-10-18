@@ -705,6 +705,28 @@ void TestGuardedTeardown()
     CHECK(pending);
 }
 
+
+// A render that kept the image is counted once per call, whatever the layers below did with the outcome: the call is counted where it
+// ends (CountedCall), the production entry is a subset of the total.
+void TestFallbackTally()
+{
+    enum class Out { Failed, Ran, Preparing };
+    const auto ran = [](Out o) { return o == Out::Ran; };
+    FallbackTally t;
+    CHECK(CountedCall(t, false, [] { return Out::Ran; }, ran) == Out::Ran);
+    CHECK(t.all == 0 && t.production == 0); // a run is not a fallback
+    CHECK(CountedCall(t, false, [] { return Out::Preparing; }, ran) == Out::Preparing);
+    CHECK(t.all == 1 && t.production == 0);
+    CHECK(CountedCall(t, true, [] { return Out::Failed; }, ran) == Out::Failed);
+    CHECK(t.all == 2 && t.production == 1);
+    CHECK(CountedCall(t, true, [] { return Out::Ran; }, ran) == Out::Ran);
+    CHECK(t.all == 2 && t.production == 1);
+    t.Note(true); // a render the dispatcher did not offer to production
+    CHECK(t.all == 3 && t.production == 2);
+    t.Note(false);
+    CHECK(t.all == 4 && t.production == 2 && t.production <= t.all);
+}
+
 } // namespace
 
 int main()
@@ -726,5 +748,6 @@ int main()
     TestGuarded();
     TestDoneRepair();
     TestGuardedTeardown();
+    TestFallbackTally();
     return TEST_RESULT("chara_nr_rules");
 }
