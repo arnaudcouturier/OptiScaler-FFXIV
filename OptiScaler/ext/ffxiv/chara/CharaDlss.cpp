@@ -785,14 +785,6 @@ void RunSlot(int index, const DrawView& view)
     };
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
     bool alphaOk = alphaPass(alphaInput);
-    if (nr::RetryAlphaWithSr(alphaInput, alphaOk))
-    {
-        // The alpha pass failed with the NR image: try the SR output before this slot counts as failed (an NR problem must not count
-        // toward the SR latch).
-        LOG_WARN("CharaView NR: the alpha pass failed with the production NR output; the super-resolution output is used");
-        alphaInput = nr::AlphaInput::SrOutput;
-        alphaOk = alphaPass(alphaInput);
-    }
     if (!alphaOk)
     {
         FailSlot(index, "the alpha pass failed");

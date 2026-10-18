@@ -439,12 +439,8 @@ void TestHooks()
         CHECK(ChooseConsumerSource(flood, prod, sr, nr) == expected);
     }
 
-    // The alpha pass takes the NR output only when production produced one, and retries with the SR output when it fails with the NR one
+    // The alpha pass takes the NR output only when production produced one
     CHECK(ChooseAlphaInput(true) == AlphaInput::NrOutput && ChooseAlphaInput(false) == AlphaInput::SrOutput);
-    CHECK(RetryAlphaWithSr(AlphaInput::NrOutput, false));
-    CHECK(!RetryAlphaWithSr(AlphaInput::NrOutput, true));
-    CHECK(!RetryAlphaWithSr(AlphaInput::SrOutput, false)); // a failure with the SR output is a failure of the SR path, no retry
-    CHECK(!RetryAlphaWithSr(AlphaInput::SrOutput, true));
 
     // A render whose production NR ran counts as "NR produced a result": the dispatcher must not withdraw it in the same render
     f = Facts(true, true);

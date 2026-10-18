@@ -218,10 +218,6 @@ enum class AlphaInput : uint8_t
 
 constexpr AlphaInput ChooseAlphaInput(bool productionProduced) { return productionProduced ? AlphaInput::NrOutput : AlphaInput::SrOutput; }
 
-// The alpha pass failed with the NR output: try once more with the SR output before the slot counts as failed (an NR problem must not
-// count toward the SR latch).
-constexpr bool RetryAlphaWithSr(AlphaInput used, bool alphaSucceeded) { return !alphaSucceeded && used == AlphaInput::NrOutput; }
-
 // ---- The debug tint (PreviewDebugTint) ----------------------------------------------------------------------------------------------
 // The tint is the on-screen proof of which image reached the screen: magenta for the super-resolution image (as before), cyan for an
 // image NR produced (the bring-up result and the production output both), none for the native image.
