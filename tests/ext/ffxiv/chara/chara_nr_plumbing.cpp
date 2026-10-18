@@ -329,6 +329,44 @@ void TestBringUpGate()
     CHECK(RunBringUpNow(latched, true, true, SrInCharge(SrUsable(latched), false, false)));
 }
 
+// The cyan tint targets and the helper passes keep the dispatcher's gate and maintenance on until they are released, also with every key off
+// (before, only the slots counted, so a tint-only attempt left up to 16 RGBA16F targets and the helper passes allocated until the hooks went).
+void TestTintAndPassesKeepTheGateOpen()
+{
+    for (int bits = 0; bits < 8; ++bits)
+    {
+        const uint32_t slots = (bits & 1) ? 2 : 0, tint = (bits & 2) ? 3 : 0;
+        const bool passes = (bits & 4) != 0;
+        const bool holds = PlumbingHoldsObjects(slots, tint, passes);
+        CHECK(holds == (bits != 0));
+        // every key off: the gate and the SR maintenance follow what is held
+        CHECK(DispatcherWanted(false, false, false, false, holds, false) == holds);
+        CHECK(PlanMaintenance(false, false, false, false, holds).sr == holds);
+    }
+
+    // the release rule
+    CHECK(ReleaseHelperPasses(true, 0, 0, true));
+    CHECK(!ReleaseHelperPasses(false, 0, 0, true)); // the SR path is enabled: the passes stay
+    CHECK(!ReleaseHelperPasses(true, 1, 0, true));  // a slot still uses them
+    CHECK(!ReleaseHelperPasses(true, 0, 2, true));  // tint targets still exist
+    CHECK(!ReleaseHelperPasses(true, 0, 0, false)); // nothing to release
+
+    // a tint-only run (PreviewNR and the tint on, PreviewDLSS off, then PreviewNR off): the gate stays open until the last tint target is
+    // released and then the passes go with it
+    uint32_t tint = 2;
+    bool passes = true;
+    CHECK(DispatcherWanted(false, false, false, false, PlumbingHoldsObjects(0, tint, passes), false)); // the key is off, the gate is open
+    if (ReleaseHelperPasses(true, 0, tint, passes))
+        passes = false;
+    CHECK(passes);       // tint targets still exist
+    tint = 0;            // aged out (kNrTintUnusedMs)
+    CHECK(DispatcherWanted(false, false, false, false, PlumbingHoldsObjects(0, tint, passes), false)); // the passes keep the gate open one more pass
+    if (ReleaseHelperPasses(true, 0, tint, passes))
+        passes = false;
+    CHECK(!passes);
+    CHECK(!DispatcherWanted(false, false, false, false, PlumbingHoldsObjects(0, tint, passes), false)); // everything released: the gate closes
+}
+
 void TestHooks()
 {
     PlumbingFacts f = Facts(true, true);
@@ -463,5 +501,6 @@ int main()
     TestConsumerSeen();
     TestHooks();
     TestBringUpGate();
+    TestTintAndPassesKeepTheGateOpen();
     return TEST_RESULT("chara_nr_plumbing");
 }

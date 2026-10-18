@@ -60,6 +60,21 @@ constexpr bool DispatcherWanted(bool aaWanted, bool srWanted, bool nrWanted, boo
     return aaWanted || srWanted || nrWanted || nrHoldsResources || srHoldsObjects || debugAids;
 }
 
+// Whether the SR plumbing still holds GPU objects whatever the config says now: preview slots (images and NGX features), the cyan tint
+// targets of the debug tint, or the helper passes (shaders and private state of the copy, guides, alpha and tint passes). The dispatcher's gate
+// and its maintenance stay on while it does, so they are released after PreviewDLSS / PreviewNR / PreviewDebugTint are switched off.
+constexpr bool PlumbingHoldsObjects(uint32_t slotsHeld, uint32_t tintTargets, bool passesReady)
+{
+    return slotsHeld != 0 || tintTargets != 0 || passesReady;
+}
+
+// The helper passes are released once nothing uses them and the SR path is disabled (switched off or latched). While the SR path is
+// enabled they stay (a window reopened later finds them built).
+constexpr bool ReleaseHelperPasses(bool srDisabled, uint32_t slotsHeld, uint32_t tintTargets, bool passesReady)
+{
+    return srDisabled && passesReady && slotsHeld == 0 && tintTargets == 0;
+}
+
 struct MaintenancePlan
 {
     bool sr = false; // call dlss::OnFrameEnd / dlss::Maintain

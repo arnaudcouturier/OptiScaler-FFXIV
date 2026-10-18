@@ -99,6 +99,8 @@ constexpr uint32_t kNrMaxSide = 4096; // larger finisher outputs are not offered
 // The SR latch lives in the object shared with preview NR (nr::SharedLatches()): an SR failure must not stop NR and the reverse.
 bool SrLatched() { return nr::SharedLatches().SrLatched(); }
 std::atomic<uint32_t> g_slotsHeld { 0 }; // slots whose GPU objects still exist (a latched path drains them before it stops)
+std::atomic<uint32_t> g_tintHeld { 0 };   // cyan tint targets that exist (PreviewDebugTint)
+std::atomic<bool> g_passesHeld { false }; // the helper passes (shaders, private state) exist
 std::atomic<uint8_t> g_availability { static_cast<uint8_t>(Availability::ConfigOff) };
 std::atomic<uint64_t> g_nextGateCheck { 0 };
 nr::EdgeTracker g_queryHooks; // whether the SR hooks (including the query hooks) were being fed at the last look
@@ -329,12 +331,20 @@ void Latch(const char* why)
     LOG_WARN("CharaView DLSS: {}; native previews retained for this session", why);
 }
 
+// The tint targets and the helper passes, for HoldsGpuObjects (the dispatcher's gate and maintenance stay on while they exist).
+void UpdateAuxCounts()
+{
+    g_tintHeld.store(static_cast<uint32_t>(g_nrTint.Count()), std::memory_order_relaxed);
+    g_passesHeld.store(g_passes.Ready(), std::memory_order_relaxed);
+}
+
 void UpdateCounts()
 {
     uint32_t held = 0;
     for (size_t i = 0; i < kMaxSlots; ++i)
         held += g_slots.Slot(static_cast<int>(i)).Used() ? 1 : 0;
     g_slotsHeld.store(held, std::memory_order_relaxed);
+    UpdateAuxCounts();
     g_activeSlots.store(static_cast<uint32_t>(g_slots.ActiveFeatures()), std::memory_order_relaxed);
 }
 
@@ -672,6 +682,7 @@ bool EnsureInit(ID3D11DeviceContext* context, bool latchSrOnFailure = true)
             Latch("initialisation failed (private state, shaders or constants)");
         return false;
     }
+    UpdateAuxCounts();
     return true;
 }
 
@@ -1053,6 +1064,7 @@ ComPtr<ID3D11ShaderResourceView> TintBringUpResult(const DrawView& view, uintptr
     ReplayScope own; // the tint pass draws on this context: the draw hooks must not treat it as the game's work
     bool drawn = false;
     ComPtr<ID3D11ShaderResourceView> tinted = g_nrTint.Tinted(g_passes, g_device.Get(), view.context, key, result, serial, view.now, &drawn);
+    UpdateAuxCounts(); // a tint target may have been made (or an entry reset)
     if (tinted == nullptr)
     {
         if (!g_nrTintFailureLogged)
@@ -1259,6 +1271,12 @@ void Cleanup(uint64_t now, bool disabled)
     g_slots.Cleanup(
         now, disabled, [](int i) { return SlotQueryDone(i); }, [](int i) { ReleaseSlotGpu(i); });
     g_nrTint.Release(now, kNrTintUnusedMs); // cyan copies of bring-up results nobody asked for lately
+    // With the SR path disabled and nothing left that uses them, the helper passes go too (they stay while the SR path is enabled).
+    if (nr::ReleaseHelperPasses(disabled, g_slotsHeld.load(std::memory_order_relaxed), static_cast<uint32_t>(g_nrTint.Count()), g_passes.Ready()))
+    {
+        g_passes.Release();
+        g_passesTried = false;
+    }
     UpdateCounts();
 }
 } // namespace
@@ -1303,7 +1321,11 @@ bool SrAvailable()
     return on;
 }
 
-bool HoldsGpuObjects() { return g_slotsHeld.load(std::memory_order_relaxed) != 0; }
+bool HoldsGpuObjects()
+{
+    return nr::PlumbingHoldsObjects(g_slotsHeld.load(std::memory_order_relaxed), g_tintHeld.load(std::memory_order_relaxed),
+                                    g_passesHeld.load(std::memory_order_relaxed));
+}
 
 void Probe(const DrawView& view)
 {
@@ -1498,6 +1520,7 @@ void Detach()
     g_nrTint.Clear();
     g_passes.Release();
     g_passesTried = false;
+    UpdateAuxCounts();
     motion::Release();
     camera::Release();
     diag::Release();
