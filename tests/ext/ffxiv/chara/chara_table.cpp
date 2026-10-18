@@ -300,8 +300,11 @@ void TestResolveFromImage()
     image = MakeImage({ { accessor, manager } });
     r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(accessor + 1, manager), 0x400);
     CHECK(r.state == AccessorState::Inert && Contains(r.reason, "documents"));
+    // the numbers are RVAs: printed in hex, the way the documentation writes them
+    CHECK(r.reason == "the accessor is at RVA 0x1850 and the manager pointer at RVA 0x5000, the matched build documents 0x1851 and 0x5000");
     r = ResolveFromImage(ImageReader { image }, kImageBase, BuildAt(accessor, manager + 8), 0x400);
     CHECK(r.state == AccessorState::Inert && Contains(r.reason, "documents"));
+    CHECK(r.reason == "the accessor is at RVA 0x1850 and the manager pointer at RVA 0x5000, the matched build documents 0x1850 and 0x5008");
     CHECK(r.managerPointerAddress == 0); // nothing usable is handed out
 
     // the load points below the image

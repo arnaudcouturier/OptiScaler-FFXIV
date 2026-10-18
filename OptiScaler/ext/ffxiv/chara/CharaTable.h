@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -384,8 +385,8 @@ Resolution ResolveFromImage(ReadFn&& read, uintptr_t base, const ext::ffxiv::Cha
 
     // A matched build with a different hit means the documentation or the scan is wrong: stay off rather than guess.
     if (matchRva != cv.accessorRva || static_cast<uint32_t>(globalRva) != cv.managerPointerRva)
-        return inert("the accessor is at RVA " + std::to_string(matchRva) + " and the manager pointer at RVA " + std::to_string(globalRva) +
-                     ", the matched build documents " + std::to_string(cv.accessorRva) + " and " + std::to_string(cv.managerPointerRva));
+        return inert(std::format("the accessor is at RVA {:#x} and the manager pointer at RVA {:#x}, the matched build documents {:#x} and {:#x}",
+                                 matchRva, static_cast<uint32_t>(globalRva), cv.accessorRva, cv.managerPointerRva));
 
     r.state = AccessorState::Ready;
     r.reason.clear();
