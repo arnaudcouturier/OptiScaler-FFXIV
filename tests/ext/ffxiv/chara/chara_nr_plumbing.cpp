@@ -60,13 +60,20 @@ void TestIndependence()
     // nothing wanted
     CHECK(!PlumbingActive(Facts(false, false)));
 
-    // the real latch object backs the same rules
+    // the real latch object feeds the same rules the production code uses
     Latches l;
-    CHECK(l.PlumbingAlive(true, true));
+    f = Facts(true, true);
+    f.srLatched = l.SrLatched();
+    f.nrLatched = l.NrLatched();
+    CHECK(SrUsable(f) && NrUsable(f) && PlumbingActive(f));
     l.LatchSr();
-    CHECK(l.NrMayRun(true) && !l.SrMayRun(true) && l.PlumbingAlive(true, true) && l.PlumbingAlive(false, true));
+    f.srLatched = l.SrLatched();
+    f.nrLatched = l.NrLatched();
+    CHECK(!SrUsable(f) && NrUsable(f) && PlumbingActive(f));
     l.LatchNr();
-    CHECK(!l.PlumbingAlive(true, true));
+    f.srLatched = l.SrLatched();
+    f.nrLatched = l.NrLatched();
+    CHECK(!SrUsable(f) && !NrUsable(f) && !PlumbingActive(f));
 }
 
 void TestHolding()

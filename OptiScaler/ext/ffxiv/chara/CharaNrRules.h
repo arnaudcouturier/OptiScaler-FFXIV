@@ -134,7 +134,7 @@ struct StateLog
 
 // ---- The two latches ---------------------------------------------------------------------------------------------------------
 // The super-resolution path and preview NR fail independently: a failed SR feature must not stop NR, and a failed NR must not stop
-// SR. "Plumbing alive" is what keeps the preview dispatcher offering draws: it stays true while either path may still run.
+// SR. What keeps the preview dispatcher offering draws is decided from these flags by PlumbingActive (CharaNrPlumbing.h).
 class Latches
 {
   public:
@@ -143,10 +143,6 @@ class Latches
     bool LatchNr() { return !_nr.exchange(true); }
     bool SrLatched() const { return _sr.load(std::memory_order_relaxed); }
     bool NrLatched() const { return _nr.load(std::memory_order_relaxed); }
-
-    bool SrMayRun(bool srWanted) const { return srWanted && !SrLatched(); }
-    bool NrMayRun(bool nrWanted) const { return nrWanted && !NrLatched(); }
-    bool PlumbingAlive(bool srWanted, bool nrWanted) const { return SrMayRun(srWanted) || NrMayRun(nrWanted); }
 
   private:
     std::atomic<bool> _sr { false };

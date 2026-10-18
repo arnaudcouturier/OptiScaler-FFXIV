@@ -124,10 +124,26 @@ int main()
     // aa: R8G8B8A8_UNORM_SRGB, 4x4
     const auto aaData = Pattern(4 * 4 * 4, 5);
     auto aa = Make(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 4, 4, aaData, 4);
+    // nr: R16G16B16A16_FLOAT, 3x2, the preview NR result: 8 bytes per pixel, half values (0.5 -> 128, 0.875 -> 223, 0.125 -> 32, 0.25 -> 64,
+    // 1.0 and 2.0 -> 255, -1.0 and NaN -> 0). The row copy of Pump must use 8 bytes per pixel (a 4-byte row would cut every row in half).
+    constexpr UINT RW = 3, RH = 2;
+    const uint16_t halves[RW * RH][4] = {
+        { 0x3800, 0x3B00, 0x3000, 0x3C00 }, // 0.5   0.875 0.125 1.0
+        { 0x4000, 0xBC00, 0x7E00, 0x3400 }, // 2.0  -1.0   NaN   0.25
+        { 0x0000, 0x3C00, 0x3800, 0x3800 }, // 0     1.0   0.5   0.5
+        { 0x3400, 0x3400, 0x3400, 0x3400 }, // 0.25 x4
+        { 0x3C00, 0x0000, 0x3C00, 0x0000 }, // 1.0   0     1.0   0
+        { 0x3B00, 0x3800, 0x3000, 0x3B00 }, // 0.875 0.5   0.125 0.875
+    };
+    std::vector<uint8_t> nrData(sizeof(halves));
+    std::memcpy(nrData.data(), halves, sizeof(halves));
+    auto nrImage = Make(DXGI_FORMAT_R16G16B16A16_FLOAT, RW, RH, nrData, 8);
+    const std::vector<uint8_t> nrRgb = { 128, 223, 32, 255, 0, 0, 0, 255, 128, 64, 64, 64, 255, 0, 255, 223, 128, 32 };
+    const std::vector<uint8_t> nrAlpha = { 255, 64, 128, 64, 0, 223 };
     // an unsupported format
     const auto floatData = Pattern(2 * 2 * 8, 3);
     auto floating = Make(DXGI_FORMAT_R16G16_FLOAT, 2, 2, floatData, 8);
-    CHECK(native && aa && floating);
+    CHECK(native && aa && nrImage && floating);
 
     // expected pictures
     std::vector<uint8_t> nativeRgb, nativeAlpha, aaRgb, aaAlpha;
@@ -148,6 +164,7 @@ int main()
     std::vector<dump::Source> sources;
     sources.push_back({ "native", native.Get(), "" });
     sources.push_back({ "aa", aa.Get(), "" });
+    sources.push_back({ "nr", nrImage.Get(), "" });
     sources.push_back({ "dlss", nullptr, "the DLSS path has no evaluated preview image" });
     sources.push_back({ "extra", floating.Get(), "" });
 
@@ -164,17 +181,19 @@ int main()
     if (!outcome)
         return 1;
     CHECK(outcome->result == DumpOutcome::Result::Written);
-    CHECK(outcome->files == 5); // native pair, aa pair, state.txt
+    CHECK(outcome->files == 7); // native pair, aa pair, nr pair, state.txt
     CHECK(!dump::InFlight());
     CHECK(!dump::Pump(g_context.Get(), 1002).has_value());
 
     const fs::path folder = fs::path(outcome->folder);
     CHECK(fs::is_directory(folder) && folder.parent_path() == root);
-    CHECK(CountEntries(folder) == 5);
+    CHECK(CountEntries(folder) == 7);
     CHECK(ReadAll(folder / "native.png") == Png(NW, NH, 3, nativeRgb));
     CHECK(ReadAll(folder / "alpha-native.png") == Png(NW, NH, 1, nativeAlpha));
     CHECK(ReadAll(folder / "aa.png") == Png(4, 4, 3, aaRgb));
     CHECK(ReadAll(folder / "alpha-aa.png") == Png(4, 4, 1, aaAlpha));
+    CHECK(ReadAll(folder / "nr.png") == Png(RW, RH, 3, nrRgb));
+    CHECK(ReadAll(folder / "alpha-nr.png") == Png(RW, RH, 1, nrAlpha));
     const std::string state = ReadText(folder / "state.txt");
     CHECK(state.rfind("probe.on: yes\n", 0) == 0);
     CHECK(state.find("image.native: 5x3 B8G8R8A8_UNORM(87), saved as native.png and alpha-native.png\n") != std::string::npos);
@@ -183,7 +202,7 @@ int main()
     CHECK(state.find("image.extra: not saved, format R16G16_FLOAT(34) is not supported") != std::string::npos);
 
     dump::Status status = dump::GetStatus();
-    CHECK(status.dumps == 1 && status.files == 5 && status.refusals == 0 && !status.inFlight);
+    CHECK(status.dumps == 1 && status.files == 7 && status.refusals == 0 && !status.inFlight);
     CHECK(status.lastFolder == outcome->folder && status.lastMessage == outcome->message);
 
     // ---- the pixel content is the content at copy time (not at pump time) -------------------------------------------------------
@@ -262,7 +281,7 @@ int main()
         CHECK(ReadText(fs::path(st.folder) / "state.txt") == "key: value\n");
     }
 
-    // ---- the session budget: dumps of 5 files each until 40 files are used, then refused with nothing written -----------------------
+    // ---- the session budget: dumps of 7 files each until 40 files are used, then refused with nothing written -----------------------
     dump::ResetSessionForTest();
     fs::remove_all(root, ec);
     int written = 0;
@@ -280,12 +299,12 @@ int main()
         else
             break;
     }
-    CHECK(written == 8); // 8 x 5 = 40 files
+    CHECK(written == 5); // 5 x 7 = 35 files; the sixth would be 42
     CHECK(last.result == DumpOutcome::Result::Refused && last.files == 0 && last.folder.empty());
     CHECK(last.message.find("refused") == 0);
-    CHECK(CountEntries(root) == 8); // no folder for the refused dump
+    CHECK(CountEntries(root) == 5); // no folder for the refused dump
     status = dump::GetStatus();
-    CHECK(status.dumps == 8 && status.refusals == 1 && status.files == 40);
+    CHECK(status.dumps == 5 && status.refusals == 1 && status.files == 35);
     CHECK(status.lastMessage == last.message);
     CHECK(!dump::InFlight());
 

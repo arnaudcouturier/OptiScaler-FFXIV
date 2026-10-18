@@ -89,30 +89,19 @@ void TestStateLog()
 
 void TestLatches()
 {
-    // an SR latch does not stop NR
+    // Each latch is independent of the other and reports only the call that set it (the production decisions read them through
+    // PlumbingFacts, CharaNrPlumbing.h; chara_nr_plumbing feeds this object into them).
     Latches a;
+    CHECK(!a.SrLatched() && !a.NrLatched());
     CHECK(a.LatchSr());
     CHECK(!a.LatchSr()); // only the first call reports
     CHECK(a.SrLatched() && !a.NrLatched());
-    CHECK(!a.SrMayRun(true));
-    CHECK(a.NrMayRun(true));
-    CHECK(a.PlumbingAlive(true, true));            // NR keeps the preview plumbing alive
-    CHECK(a.PlumbingAlive(true, false) == false);  // SR only, and SR is latched: nothing left
-    // an NR latch does not stop SR
     Latches b;
     CHECK(b.LatchNr());
+    CHECK(!b.LatchNr());
     CHECK(b.NrLatched() && !b.SrLatched());
-    CHECK(b.SrMayRun(true));
-    CHECK(!b.NrMayRun(true));
-    CHECK(b.PlumbingAlive(true, true));
-    CHECK(!b.PlumbingAlive(false, true));
-    // both latched: nothing runs
-    CHECK(b.LatchSr());
-    CHECK(!b.PlumbingAlive(true, true));
-    // not wanted means not running, latched or not
-    Latches c;
-    CHECK(!c.SrMayRun(false) && !c.NrMayRun(false) && !c.PlumbingAlive(false, false));
-    CHECK(c.PlumbingAlive(false, true) && c.PlumbingAlive(true, false));
+    CHECK(b.LatchSr()); // the second latch still reports its own first call
+    CHECK(b.SrLatched() && b.NrLatched());
 }
 
 void TestStreams()
