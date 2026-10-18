@@ -105,6 +105,19 @@ void IniFragmentDocumentsTheKeys(const std::string& repo)
     CHECK(ini.find("untested in game") != std::string::npos);
 }
 
+// The menu card cannot be run here (ImGui); its registration and the honest caveat of its tooltip are pinned by text.
+void MenuCardKeepsTheCaveat(const std::string& repo)
+{
+    const std::string card = ReadFile(repo + "/OptiScaler/ext/fg/MenuAutoMfg.cpp");
+    CHECK(!card.empty());
+    CHECK(card.find("\"fg_auto_mfg\", \"Frame Gen\"") != std::string::npos);
+    CHECK(card.find("\"fg_dlssg\"") != std::string::npos); // right after the DLSSG card
+    CHECK(card.find("can still cost one long frame (about 0.2 s)") != std::string::npos);
+    CHECK(card.find("Untested in game") != std::string::npos);
+    CHECK(card.find("kBlackwellArchitecture") != std::string::npos); // hidden on RTX 50
+    CHECK(card.find("FGOutput::DLSSG") != std::string::npos);        // and when DLSS-G is not the active output
+}
+
 // The selector writes the count with set_volatile_value: Save Settings must keep storing what the user chose.
 void VolatileWriteKeepsTheSavedValue()
 {
@@ -139,6 +152,7 @@ int main(int argc, char** argv)
     PostLoadRangeChecks();
     IniFragmentDocumentsTheKeys(argc > 1 ? argv[1] : ".");
     VolatileWriteKeepsTheSavedValue();
+    MenuCardKeepsTheCaveat(argc > 1 ? argv[1] : ".");
     if (g_failures)
     {
         std::printf("dynamic_mfg_config: %d check(s) failed\n", g_failures);
