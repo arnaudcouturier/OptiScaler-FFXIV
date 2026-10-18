@@ -3,7 +3,9 @@
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
+#include "ext/fg/DynamicMfgGate.h"
 #include "ext/fg/FgInternal.h"
+#include "ext/fg/dlssg/MfgUnlock.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
 
@@ -16,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 // D2: the DLSS-G option seams of DLSSG_Common::SetOptions and the observed dynamic-MFG multiplier. These were the
 // DLSSG_Common virtuals AdjustDlssgOptions / AfterDlssgSetOptions and DLSSG_Dx12's overrides (SEAMS 5: free functions
@@ -71,6 +74,42 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
 
 IFGFeature_Dx12* AsDx12(IFGFeature* fg) { return dynamic_cast<IFGFeature_Dx12*>(fg); }
 
+// Force Dynamic MFG sets eDynamic without a support check, and with the Ada unlock the count can be 5x or 6x. Where
+// Streamline reports dynamic MFG as unsupported the mode falls back to the fixed one (the configured count stays); on a
+// card whose ceiling the unlock opened an automatic choice (NVIDIA's dynamic mode, or the selector of DynamicMfg.h)
+// never uses more than 3 generated frames. The manual slider keeps its range. The pure rules: DynamicMfgGate.h.
+void ApplyDlssgGuard(IFGFeature* fg, sl::DLSSGOptions& options, bool autoMfgControls)
+{
+    ext::fg::OptionsGuardIn in;
+    in.dynamicMode = options.mode == sl::DLSSGMode::eDynamic;
+    in.dmfgSupported = fg->GetDMFGSupport();
+    in.adaUnlockActive = MfgUnlock::UnlockedMax() > static_cast<unsigned>(ext::fg::kAutoMaxGenerated);
+    in.autoMfgControls = autoMfgControls;
+    in.generated = static_cast<int>(options.numFramesToGenerate);
+
+    const auto out = ext::fg::GuardDlssgOptions(in);
+    if (out.dynamicToOn)
+    {
+        options.mode = sl::DLSSGMode::eOn;
+        static bool warned = false;
+        if (!std::exchange(warned, true))
+            LOG_WARN("DLSSG: Force Dynamic MFG is on but Streamline reports dynamic multi frame generation as "
+                     "unsupported; using the fixed mode with the configured count");
+    }
+    if (out.ceilingClamped)
+    {
+        // Written back (in memory only) so the menu, the frame counters and Streamline all see the same count.
+        if (auto* config = Config::Instance(); !config->FGFollowsGame())
+            config->FGDLSSGInterpolationCount.set_volatile_value(out.generated);
+        static bool warned = false;
+        if (!std::exchange(warned, true))
+            LOG_WARN("DLSSG: automatic multi frame generation is limited to {}x on this card, {} generated frames were "
+                     "requested; using {}",
+                     ext::fg::kAutoMaxGenerated + 1, options.numFramesToGenerate, out.generated);
+        options.numFramesToGenerate = static_cast<uint32_t>(out.generated);
+    }
+}
+
 // E3: presentation telemetry since the last activation (diagnostics only; the reference build's file-local static too,
 // SetOptions and Activate run on the same serialized thread in practice).
 struct PresentStats
@@ -85,6 +124,8 @@ namespace ext::fg
 {
 void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options)
 {
+    ApplyDlssgGuard(fg, options, false);
+
     if (AsDx12(fg) != nullptr)
         AdjustUiRecomposition(options);
 
