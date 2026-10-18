@@ -8,6 +8,7 @@
 #include "ext/ffxiv/companion/Companion.h"
 #include "ext/ffxiv/companion/CompanionCallbackMap.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/jitter/FfxivJitter.h"
 
 #include <atomic>
 
@@ -85,6 +86,9 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
         lighting->OnUpscaleBoundary(context, color,
                                     !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
     }
+
+    // FFXIV game-jitter probe/correction ([FFXIV] JitterProbe, JitterCorrection; both off by default): ext/ffxiv/jitter/FfxivJitter.h.
+    ext::ffxiv::jitter::OnUpscaleBoundary(parameters);
 }
 
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
