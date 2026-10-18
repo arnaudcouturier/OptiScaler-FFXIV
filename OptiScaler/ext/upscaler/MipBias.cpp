@@ -41,6 +41,18 @@ void Write(const Outcome& o)
         State::Instance().lastMipBiasMax = -100.0f;
     }
 }
+
+// Caller holds the mutex. The config load normally configured the policy long before the first create; if it ran before
+// this file's start-up registration (so its hook call was missed), catch up from the stored settings now.
+void EnsureConfigured()
+{
+    auto& policy = CurrentPolicy();
+    if (policy.configured)
+        return;
+
+    const auto& settings = Cfg().upscaler;
+    Write(Configure(policy, settings.mipBiasAuto.value_or_default(), settings.mipBiasAutoOffset.value_or_default()));
+}
 } // namespace
 
 void OnConfigLoaded(bool enabled, float offset)
@@ -58,6 +70,8 @@ void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigne
                                      : 1.0;
 
     std::scoped_lock lock(PolicyMutex());
+    EnsureConfigured();
+
     const Outcome o = OnCreate(CurrentPolicy(), width, height, outWidth, outHeight, extendedLimits, outputScaling);
     Write(o);
 
@@ -89,12 +103,11 @@ Status CurrentStatus()
     std::scoped_lock lock(PolicyMutex());
     return StatusOf(CurrentPolicy());
 }
-} // namespace ext::upscaler::mipbias
 
-namespace ext
+namespace
 {
-void UpscalerConfig::PostLoad()
-{
-    upscaler::mipbias::OnConfigLoaded(mipBiasAuto.value_or_default(), mipBiasAutoOffset.value_or_default());
-}
-} // namespace ext
+// Registers the config-load hook (the one the upscaler config's post-load step calls) when the DLL's static
+// initialisers run, the way the menu cards register themselves; the config is read later, from Config::Instance().
+[[maybe_unused]] const bool kLoadHookRegistered = (UpscalerConfig::onLoaded = &OnConfigLoaded, true);
+} // namespace
+} // namespace ext::upscaler::mipbias

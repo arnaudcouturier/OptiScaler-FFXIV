@@ -95,6 +95,21 @@ int main(int argc, char** argv)
         const std::string header = ReadAll(root + "/OptiScaler/ext/upscaler/UpscalerConfig.h");
         CHECK(header.find("CustomOptional<bool> mipBiasAuto { false };") != std::string::npos);
         CHECK(header.find("CustomOptional<float> mipBiasAutoOffset { 0.0f };") != std::string::npos);
+
+        // PostLoad reaches the glue through a pointer the glue registers, never through a symbol of MipBias.cpp: the
+        // unit tests that build ExtConfig.cpp (chara_*, hdr_config, hudless_config) link without the glue.
+        CHECK(header.find("static inline LoadedHook onLoaded = nullptr;") != std::string::npos);
+        CHECK(header.find("void PostLoad()\n    {\n        if (onLoaded != nullptr)\n            onLoaded(") !=
+              std::string::npos);
+        CHECK(cfg.find("UpscalerConfig::PostLoad") == std::string::npos);
+
+        const std::string glue = ReadAll(root + "/OptiScaler/ext/upscaler/MipBias.cpp");
+        CHECK(glue.find("(UpscalerConfig::onLoaded = &OnConfigLoaded, true);") != std::string::npos);
+        CHECK(glue.find("UpscalerConfig::PostLoad") == std::string::npos);
+
+        // A create that arrives before the config load's hook was registered still configures the policy first.
+        const size_t ensure = glue.find("EnsureConfigured();\n\n    const Outcome o = OnCreate(");
+        CHECK(ensure != std::string::npos);
     }
 
     // ---- 3. the ini fragment ----------------------------------------------------------------------------------------

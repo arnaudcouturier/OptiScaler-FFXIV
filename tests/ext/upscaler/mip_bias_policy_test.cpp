@@ -273,6 +273,16 @@ int main()
         CHECK(o.action == Action::None);
     }
 
+    // ---- "configured" tells the glue whether the config load reached the policy ---------------------------------------
+    {
+        Policy fresh;
+        CHECK(!fresh.configured);
+        OnCreate(fresh, 2560, 1440, 3840, 2160, false, 1.0); // a create alone never configures (the glue catches up)
+        CHECK(!fresh.configured && !fresh.enabled && fresh.haveSizes);
+        Configure(fresh, false, 0.0);
+        CHECK(fresh.configured);
+    }
+
     // ---- on before any create ---------------------------------------------------------------------------------------
     {
         Game g;

@@ -165,6 +165,7 @@ inline bool ShouldPublish(double oldValue, double newValue)
 // ---- the policy: a small state machine; the glue (MipBias.cpp) turns its Outcomes into writes and log lines -----------
 struct Policy
 {
+    bool configured = false; // Configure ran at least once (the glue catches up if the config load got there first)
     bool enabled = false;  // [Mipmap] MipmapBiasAuto
     double offset = 0.0;   // [Mipmap] MipmapBiasAutoOffset, already clamped
     bool engaged = false;  // the override currently holds this policy's value
@@ -257,6 +258,7 @@ inline void Follow(Outcome& o, Policy& p)
 inline Outcome Configure(Policy& p, bool enabled, double offset)
 {
     Outcome o;
+    p.configured = true;
     p.enabled = enabled;
     p.offset = ClampOffset(offset);
     detail::Describe(o, p);
@@ -454,7 +456,8 @@ template <class Optional> bool Apply(Optional& override_, const Outcome& o)
 // ---- the glue (MipBias.cpp) -----------------------------------------------------------------------------------------
 // Entry points, all thread-safe (one mutex; they run a handful of times per session).
 
-// ExtConfig::PostLoad, through UpscalerConfig::PostLoad: after the ini was read. Runs again on every Config::Reload.
+// ExtConfig::PostLoad, through UpscalerConfig::PostLoad and its onLoaded pointer (registered by MipBias.cpp at start-up):
+// after the ini was read. Runs again on every Config::Reload.
 // Engages the override at once when auto is on. Does not log (it can run before the logger exists).
 void OnConfigLoaded(bool enabled, float offset);
 
