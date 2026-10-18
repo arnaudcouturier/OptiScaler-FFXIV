@@ -5,10 +5,13 @@
 #include "ext/ffxiv/chara/CharaProbeChannel.h"
 #include "ext/ffxiv/chara/CharaProbeCommands.h"
 
+#include <Config.h>
+
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,14 +20,23 @@ namespace fs = std::filesystem;
 
 namespace
 {
-// Same member names and member behaviour as ext::ffxiv::chara::CharaConfig (a CustomOptional<bool> per key).
+// Same member names and member behaviour as ext::ffxiv::chara::CharaConfig (a CustomOptional<bool> per key). The counting fake records
+// HOW the executor changed the value: a toggle must go through set_volatile_value, never a plain assignment.
 struct Flag
 {
     bool value = false;
+    int volatileSets = 0;
+    int plainAssignments = 0;
     Flag& operator=(bool v)
     {
         value = v;
+        ++plainAssignments;
         return *this;
+    }
+    void set_volatile_value(bool v)
+    {
+        value = v;
+        ++volatileSets;
     }
     bool value_or_default() const { return value; }
 };
@@ -67,10 +79,59 @@ struct FakeActions
     }
 };
 
-std::string Run(const std::string& line, FakeConfig& cfg, FakeActions& act)
+template <class Cfg> std::string Run(const std::string& line, Cfg& cfg, FakeActions& act)
 {
     const Command c = ParseLine(line);
     return Execute(c, cfg, act);
+}
+
+// The configuration as the product has it: a CustomOptional<bool> per key (the stub in tests\ext\hdr\stubs\Config.h replicates the real
+// class's volatile behaviour). A command toggle must not reach the ini file: value_for_config() is what Save writes (REVIEW-CHARA-2 M1).
+struct RealConfig
+{
+    CustomOptional<bool> previewDlss { false };
+    CustomOptional<bool> previewAA { false };
+    CustomOptional<bool> previewUpscale { true };
+    CustomOptional<bool> previewDebugTint { false };
+    CustomOptional<bool> previewDebugFlood { false };
+};
+
+void TestCommandsDoNotReachTheIni()
+{
+    RealConfig cfg;
+    FakeActions act;
+
+    // flood on: on in memory, nothing for the ini
+    const std::string text = Run("flood on", cfg, act);
+    CHECK(text.find("ok, PreviewDebugFlood is now on (was off)") == 0 && text.find("in memory only") != std::string::npos);
+    CHECK(cfg.previewDebugFlood.value_or_default());
+    CHECK(!cfg.previewDebugFlood.value_for_config().has_value());
+
+    // every toggle, both ways, on a key at its default
+    for (const char* line : { "tint on", "aa on", "dlss on", "upscale off", "tint off", "aa off", "dlss off", "upscale on", "flood off" })
+        Run(line, cfg, act);
+    CHECK(!cfg.previewDebugTint.value_for_config().has_value() && !cfg.previewAA.value_for_config().has_value());
+    CHECK(!cfg.previewDlss.value_for_config().has_value() && !cfg.previewUpscale.value_for_config().has_value());
+    CHECK(!cfg.previewDebugFlood.value_for_config().has_value());
+
+    // the user's own settings survive a probe command: PreviewDLSS=true in the ini, `dlss off` for this session only
+    RealConfig loaded;
+    loaded.previewDlss.set_from_config(true);   // as the ini loader does
+    loaded.previewUpscale.set_from_config(false);
+    CHECK(loaded.previewDlss.value_or_default() && !loaded.previewUpscale.value_or_default());
+    Run("dlss off", loaded, act);
+    Run("upscale on", loaded, act);
+    CHECK(!loaded.previewDlss.value_or_default() && loaded.previewUpscale.value_or_default()); // the session sees the commands ...
+    CHECK(loaded.previewDlss.value_for_config() == std::optional<bool>(true));  // ... the ini keeps what the user wrote
+    CHECK(loaded.previewUpscale.value_for_config() == std::optional<bool>(false));
+    Run("dlss on", loaded, act);
+    CHECK(loaded.previewDlss.value_for_config() == std::optional<bool>(true));
+
+    // a change from the menu afterwards is the user's choice and is saved
+    loaded.previewDlss = false;
+    CHECK(!loaded.previewDlss.value_for_config().has_value()); // false is the default: nothing written
+    cfg.previewDebugFlood = true;
+    CHECK(cfg.previewDebugFlood.value_for_config() == std::optional<bool>(true));
 }
 
 void TestExecutor()
@@ -102,6 +163,10 @@ void TestExecutor()
         CHECK(cfg.Values() == "00000");
         CHECK(offText.find(std::string("ok, ") + c.key + " is now off (was on)") == 0);
         CHECK(act.calls.empty()); // a toggle never reaches the actions
+        int plain = 0, vol = 0;
+        for (const Flag* f : { &cfg.previewDlss, &cfg.previewAA, &cfg.previewUpscale, &cfg.previewDebugTint, &cfg.previewDebugFlood })
+            plain += f->plainAssignments, vol += f->volatileSets;
+        CHECK(plain == 0 && vol == 2); // on and off, both through set_volatile_value
     }
 
     // upper case, 1/0/true/false, extra spaces
@@ -370,6 +435,7 @@ int main()
     fs::create_directories(root);
 
     TestExecutor();
+    TestCommandsDoNotReachTheIni();
     TestDispose();
     TestPoll(root);
     TestOutput(root);

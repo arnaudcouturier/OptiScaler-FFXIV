@@ -32,6 +32,21 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
     {
     }
 
+    // Same behaviour as the real class (Config.h): the value is changed in memory only; what the ini file would get (value_for_config)
+    // stays what it was before the first volatile change.
+    void set_volatile_value(const T& value)
+    {
+        if (!_volatile)
+        {
+            if (this->has_value())
+                _configValue = this->value();
+            else
+                _configValue = std::nullopt;
+        }
+        _volatile = true;
+        Base::operator=(value);
+    }
+
     void set_from_config(const std::optional<T>& value)
     {
         if (!this->has_value())

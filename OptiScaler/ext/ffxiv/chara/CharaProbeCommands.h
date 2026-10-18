@@ -3,7 +3,9 @@
 // configuration. A template over the configuration type so the tests can run it on a fake with the same member names; the product
 // instantiates it with ext::ffxiv::chara::CharaConfig.
 //
-// Config writes are in memory only: nothing here saves the ini file.
+// Config writes are in memory only: a toggle uses set_volatile_value (CustomOptional, Config.h), which keeps what the ini file would be
+// given (value_for_config) unchanged, so a later "Save Settings" in the menu does not write a probe toggle into FFXIV.ini and does not
+// overwrite the user's own setting. (A plain assignment clears the volatile mark and the next save writes the value.)
 
 #include "ext/ffxiv/chara/CharaProbeRules.h"
 
@@ -22,7 +24,7 @@ template <class Config, class Actions> std::string Execute(const Command& comman
     auto flag = [&command](const char* key, auto& option)
     {
         const bool was = option.value_or_default();
-        option = command.value;
+        option.set_volatile_value(command.value);
         std::string text = std::string("ok, ") + key + " is now " + (command.value ? "on" : "off") + " (was " + (was ? "on" : "off") +
                            "); in memory only, the ini file is not changed";
         return text;
