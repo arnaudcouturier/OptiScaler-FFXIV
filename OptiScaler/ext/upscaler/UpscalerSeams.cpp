@@ -6,6 +6,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/game/Game.h"
 #include "ext/game/GameInterfaces.h"
+#include "ext/upscaler/MipBias.h"
 
 #include <upscalers/IFeature.h>
 
@@ -85,6 +86,10 @@ bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigne
     // EnsureFfxivNativeQuality() at the top of SetInitParameters regardless of whether a preset is forced.
     if (auto* quality = game::Current().quality)
         quality->EnsureHooks();
+
+    // Also unconditional and before every early exit below: the automatic mipmap bias (ext/upscaler/MipBias.h)
+    // follows every upscaler feature create, whether or not a preset is forced, native DLAA included.
+    mipbias::OnFeatureCreate(width, height, outWidth, outHeight);
 
     const bool dlaaRequired = NativeDlaaRequired();
     const int forced = Cfg().upscaler.forcePerfQuality.value_or_default();

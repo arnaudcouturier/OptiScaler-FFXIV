@@ -167,6 +167,8 @@ void UpscalerConfig::Bind(config::Binder& b)
 {
     b.Add("QualityOverrides", "ForcePerfQuality", forcePerfQuality);
     b.Add("Hotfix", "RenderSizeFromWidthHeight", renderSizeFromWidthHeight);
+    b.Add("Mipmap", "MipmapBiasAuto", mipBiasAuto);
+    b.Add("Mipmap", "MipmapBiasAutoOffset", mipBiasAutoOffset);
 }
 
 void ReShadeConfig::Bind(config::Binder& b)
@@ -193,6 +195,7 @@ void ExtConfig::PostLoad()
     nr.PostLoad();
     hdr.PostLoad();
     hudless.PostLoad();
+    upscaler.PostLoad();
 }
 
 ExtConfig& Cfg()

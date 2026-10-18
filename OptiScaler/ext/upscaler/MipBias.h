@@ -412,4 +412,59 @@ inline std::string CreatedLine(float minBias, float maxBias)
 
     return std::format("Created since the last change: min {:.2f} / max {:.2f}", minBias, maxBias);
 }
+
+// ---- applying an Outcome to the override -----------------------------------------------------------------------------
+// `Optional` is upstream's CustomOptional<float, NoDefault> (Config::MipmapBiasOverride) in the product, and a fake with
+// the same members in the test (this header must not include Config.h): set_volatile_value(float), value_for_config(),
+// operator=(std::optional<float>), has_value(), value(). Returns whether the override was written.
+//
+//  - Engage: the override becomes the policy's value. CustomOptional::set_volatile_value keeps the user's ini value
+//    aside the first time (it is what Save() writes, and what value_for_config() returns), so a second Engage (the
+//    config load runs on every Config::Reload) never overwrites it.
+//  - Publish: written only if the override is empty (the user pressed "Reset" in the card above) or differs from the
+//    policy's value by kMinChange or more. A value the user stored with "Set" is replaced the same way; the "Set" value
+//    then becomes the one that is kept aside.
+//  - Restore: the user's ini value goes back, through operator= so that the volatile flag is cleared (reset() would
+//    leave it set). value_for_config() is the saved value while volatile and the current value otherwise, so a value
+//    the user set by hand after auto engaged is kept.
+template <class Optional> bool Apply(Optional& override_, const Outcome& o)
+{
+    switch (o.action)
+    {
+    case Action::Engage:
+        override_.set_volatile_value(static_cast<float>(o.value));
+        return true;
+
+    case Action::Publish:
+        if (override_.has_value() && !ShouldPublish(static_cast<double>(override_.value()), o.value))
+            return false;
+
+        override_.set_volatile_value(static_cast<float>(o.value));
+        return true;
+
+    case Action::Restore:
+        override_ = override_.value_for_config();
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+// ---- the glue (MipBias.cpp) -----------------------------------------------------------------------------------------
+// Entry points, all thread-safe (one mutex; they run a handful of times per session).
+
+// ExtConfig::PostLoad, through UpscalerConfig::PostLoad: after the ini was read. Runs again on every Config::Reload.
+// Engages the override at once when auto is on. Does not log (it can run before the logger exists).
+void OnConfigLoaded(bool enabled, float offset);
+
+// ext::upscaler::ApplyForcedQuality, first statement after EnsureHooks(): every upscaler feature create, with the
+// NGX Width, Height, OutWidth, OutHeight as the game gave them.
+void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight);
+
+// The menu card changed the checkbox or the offset (they are already stored in ext::Cfg().upscaler).
+void OnSettingChanged();
+
+// A copy of the policy for the menu card.
+Status CurrentStatus();
 } // namespace ext::upscaler::mipbias

@@ -36,7 +36,8 @@ ForcedQualityStatus LastQualityAnswer();
 // create descends from the last answer (32px slack) or nothing has been asked yet; otherwise stands down and
 // leaves `pq` untouched. Also ensures the game module's native-quality hooks are installed (lazy, call_once) --
 // this is the only call site that does so for the C1/C5 wave, and it runs unconditionally, before any of the
-// above checks. Returns whether it relabelled `pq`.
+// above checks. Returns whether it relabelled `pq`. Right after the hook install, also unconditional, it hands the
+// create's sizes to the automatic mipmap bias (ext/upscaler/MipBias.h, mipbias::OnFeatureCreate).
 bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigned int height, unsigned int outWidth,
                          unsigned int outHeight, int& pq);
 

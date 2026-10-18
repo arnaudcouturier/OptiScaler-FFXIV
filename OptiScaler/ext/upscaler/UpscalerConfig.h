@@ -22,6 +22,13 @@ struct UpscalerConfig
     CustomOptional<int32_t> forcePerfQuality { -1 };
     CustomOptional<bool> renderSizeFromWidthHeight { false };
 
+    // [Mipmap] MipmapBiasAuto / MipmapBiasAutoOffset (ext/upscaler/MipBias.h): when on, the mipmap bias override follows
+    // log2(render width / display width) of the latest upscaler create, plus the offset (limited to +-3). Default off.
+    // Comment block lives in ext/ini/Mipmap.ini.
+    CustomOptional<bool> mipBiasAuto { false };
+    CustomOptional<float> mipBiasAutoOffset { 0.0f };
+
     void Bind(config::Binder& b);
+    void PostLoad(); // end of config::Load (defined in ext/upscaler/MipBias.cpp): engages the automatic mip bias
 };
 } // namespace ext
