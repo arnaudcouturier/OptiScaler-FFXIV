@@ -17,6 +17,8 @@ struct CharaConfig
     CustomOptional<bool> previewGuideCapture { false }; // [FFXIV] PreviewGuideCapture: diagnostics for the DLSS path
     CustomOptional<bool> previewDebugTint { false };    // [FFXIV] PreviewDebugTint: tints the processed preview image (debug aid)
     CustomOptional<bool> previewNrTrace { false };      // [HDR] PreviewNRTrace: trace log lines for preview NR work
+    CustomOptional<bool> previewProbe { false };        // [FFXIV] PreviewProbe: debug probe that traces how the preview reaches the screen
+    CustomOptional<bool> previewDebugFlood { false };   // [FFXIV] PreviewDebugFlood: replaces the sampled preview by solid magenta (debug aid)
 
     template <class Binder> void Bind(Binder& b)
     {
@@ -26,6 +28,8 @@ struct CharaConfig
         b.Add("FFXIV", "PreviewGuideCapture", previewGuideCapture);
         b.Add("FFXIV", "PreviewDebugTint", previewDebugTint);
         b.Add("HDR", "PreviewNRTrace", previewNrTrace);
+        b.Add("FFXIV", "PreviewProbe", previewProbe);
+        b.Add("FFXIV", "PreviewDebugFlood", previewDebugFlood);
     }
 };
 } // namespace ext::ffxiv::chara
