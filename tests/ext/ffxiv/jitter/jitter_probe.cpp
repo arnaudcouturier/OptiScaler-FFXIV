@@ -314,6 +314,24 @@ void TestLimiterAndEpisodes()
     CHECK(!e.ShouldLog(Guard::ObjectUnreadable)); // another guard in the same episode: still one line per episode
     CHECK(!e.ShouldLog(Guard::None));             // recovery
     CHECK(e.ShouldLog(Guard::ObjectUnreadable));  // a new episode logs again
+
+    // a state that flickers every call cannot flood the log: at most kMaxLines lines in a session, the rest counted
+    EpisodeLog flicker;
+    uint32_t lines = 0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        lines += flicker.ShouldLog(Guard::ObjectNotThisEvaluate) ? 1 : 0;
+        flicker.ShouldLog(Guard::None);
+    }
+    CHECK(lines == EpisodeLog::kMaxLines && flicker.Suppressed() == 1000 - EpisodeLog::kMaxLines);
+    EpisodeLog replaceEpisodes; // the replace episodes of the glue use the same type
+    lines = 0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        lines += replaceEpisodes.Event(true) ? 1 : 0;
+        replaceEpisodes.Event(false);
+    }
+    CHECK(lines == EpisodeLog::kMaxLines);
 }
 
 void TestCorrection()
@@ -355,15 +373,35 @@ void TestCorrection()
         d = decide(ObjectFor(0.3f, -0.2f, s, 1920, 1080), kHd, NgxMatch::Same);
         CHECK(!d.replace && d.consistent && d.guard == Guard::None);
     }
-    // the apply tolerance (0.005 pixel) on both sides, on each axis
-    d = decide({ 0.3f, 0.3f, 2 * 0.2985f / 1920, -2 * 0.3f / 1080, 1 }, kHd, NgxMatch::Same); // ax = 0.2985: 0.0015 away
+    // ONE criterion for the probe and the correction (the ratio within 2% of 1), whatever the size of the jitter: a game the probe calls
+    // consistent is never rewritten, a game it calls different is rewritten on every frame that can tell (no mix of corrected and
+    // uncorrected frames chosen by the Halton value)
+    for (float jitter : { 0.45f, 0.3f, 0.05f, 0.02f })
+    {
+        for (float factor : { 1.019f, 0.981f, 1.0f })
+        {
+            const RawObject o = ObjectFor(jitter, jitter, 2.0f * factor, 1920, 1080);
+            d = decide(o, kHd, NgxMatch::Same);
+            CHECK(Analyse(o, kHd).verdict == Verdict::Consistent && !d.replace && d.consistent);
+        }
+        for (float factor : { 1.03f, 0.97f, 0.95f, 0.5f })
+        {
+            const RawObject o = ObjectFor(jitter, jitter, 2.0f * factor, 1920, 1080);
+            d = decide(o, kHd, NgxMatch::Same);
+            CHECK(Analyse(o, kHd).verdict == Verdict::Differ && d.replace);
+            CHECK(Near(d.ax, jitter * factor, 1e-4) && Near(d.ay, jitter * factor, 1e-4)); // both axes carry the applied values
+        }
+    }
+    // the cases that used to disagree: s = 2 * 0.981 at a large jitter, s = 1.9 at a small one
+    d = decide(ObjectFor(0.45f, 0.45f, 2.0f * 0.981f, 1920, 1080), kHd, NgxMatch::Same);
     CHECK(!d.replace && d.consistent);
-    d = decide({ 0.3f, 0.3f, 2 * 0.2940f / 1920, -2 * 0.3f / 1080, 1 }, kHd, NgxMatch::Same); // 0.006 away
-    CHECK(d.replace && Near(d.ax, 0.294, 1e-4) && Near(d.ay, 0.3, 1e-4));
-    d = decide({ 0.3f, 0.3f, 2 * 0.3f / 1920, -2 * 0.3055f / 1080, 1 }, kHd, NgxMatch::Same); // ay off by 0.0055
+    d = decide(ObjectFor(0.05f, 0.06f, 1.9f, 1920, 1080), kHd, NgxMatch::Same);
     CHECK(d.replace);
-    // the replacement carries both axes' applied values, not just the one that was off
-    CHECK(Near(d.ax, 0.3, 1e-4) && Near(d.ay, 0.3055, 1e-4));
+    // a frame whose jitter is too small on both axes cannot tell: values left alone, flagged so the glue changes no episode
+    d = decide(ObjectFor(0.01f, -0.01f, 1.0f, 1920, 1080), kHd, NgxMatch::Same);
+    CHECK(!d.replace && !d.consistent && d.undetermined && d.guard == Guard::None);
+    d = decide(ObjectFor(0.0f, 0.0f, 1.0f, 1920, 1080), kHd, NgxMatch::Same);
+    CHECK(!d.replace && d.undetermined);
 
     // sign handling: a flipped axis is not corrected (the convention is not understood), on either axis
     RawObject flipY = ObjectFor(0.3f, 0.3f, 1.0f, 1920, 1080);

@@ -20,7 +20,7 @@ struct State
     CounterTracker counter;
     EpisodeLog probeFailures;
     EpisodeLog passThrough;
-    bool replacing = false;
+    EpisodeLog replacing; // runs of evaluates in which the correction replaced the values
     bool buildNoted = false;
     std::uint64_t evaluated = 0, replaced = 0, passed = 0; // since the last status line
 };
@@ -101,6 +101,11 @@ void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
     }
     const RenderSize size = ResolveRenderSize(ctx.subrectW, ctx.subrectH, ctx.widthParam, ctx.heightParam);
 
+    // Probe only: one sample per interval, and nothing is read in between. The correction needs every evaluate.
+    const bool allowed = st.limiter.Allow(GetTickCount64(), ConfigurationKey(ctx));
+    if (!correct && !allowed)
+        return;
+
     auto reader = [](std::uintptr_t address, void* out, std::size_t bytes) { return ext::core::ReadProcessBytes(address, out, bytes); };
     RawObject object;
     const Guard readGuard = ReadChain(reader, build, reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)), object);
@@ -120,23 +125,23 @@ void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
             writable->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, decision.ax);
             writable->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, decision.ay);
             ++st.replaced;
-            if (!st.replacing)
-            {
-                st.replacing = true;
+            if (st.replacing.Event(true))
                 LOG_INFO("{}", FormatCorrection(analysis, decision));
-            }
             st.passThrough.Close();
         }
         else
         {
             ++st.passed;
-            st.replacing = false;
-            if (st.passThrough.ShouldLog(decision.guard))
-                LOG_INFO("{}", FormatPassThrough(decision.guard));
+            if (!decision.undetermined) // a frame too small to tell changes no episode
+            {
+                st.replacing.Event(false);
+                if (st.passThrough.ShouldLog(decision.guard))
+                    LOG_INFO("{}", FormatPassThrough(decision.guard));
+            }
         }
     }
 
-    if (!st.limiter.Allow(GetTickCount64(), ConfigurationKey(ctx)))
+    if (!allowed)
         return;
 
     if (probe)
@@ -157,6 +162,8 @@ void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
     {
         LOG_INFO("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through unchanged",
                  st.evaluated, st.replaced, st.passed);
+        if (st.replacing.Suppressed() != 0 || st.passThrough.Suppressed() != 0)
+            LOG_INFO("Jitter correction: log line budget used up, {} further episodes were not logged", st.replacing.Suppressed() + st.passThrough.Suppressed());
         st.evaluated = st.replaced = st.passed = 0;
     }
 }

@@ -189,7 +189,6 @@ constexpr RenderSize ResolveRenderSize(std::uint32_t subrectW, std::uint32_t sub
 
 inline constexpr float kMinRatioJitter = 1.0f / 64.0f; // below this the ratio of two tiny numbers says nothing
 inline constexpr float kRatioTolerance = 0.02f;        // |ratio - 1| within this counts as consistent (s within 2 +- 0.04)
-inline constexpr float kApplyTolerancePixels = 0.005f; // |applied - reported| within this on both axes: nothing to correct
 inline constexpr float kMaxAppliedPixels = 1.0f;       // an applied jitter above this is not believed
 
 enum class Verdict : std::uint8_t
@@ -266,7 +265,8 @@ inline NgxMatch CompareNgx(const RawObject& o, const std::optional<float>& ngxX,
 struct CorrectionDecision
 {
     bool replace = false;
-    bool consistent = false; // the game already hands NGX what it applies: nothing to do (not a failure)
+    bool consistent = false;   // the game already hands NGX what it applies (ratios within 2% of 1): nothing to do, not a failure
+    bool undetermined = false; // both axes too small this frame to tell: values left alone, not a failure
     Guard guard = Guard::None;
     float ax = 0.0f, ay = 0.0f;
 };
@@ -307,9 +307,15 @@ inline CorrectionDecision DecideCorrection(Guard readGuard, const Analysis& a, N
         d.guard = Guard::SignMismatch;
         return d;
     }
-    if (std::fabs(a.ax - a.object.jx) <= kApplyTolerancePixels && std::fabs(a.ay - a.object.jy) <= kApplyTolerancePixels)
+    // One criterion for the probe and the correction: the verdict of Analyse (ratios within 2% of 1).
+    if (a.verdict == Verdict::Consistent)
     {
         d.consistent = true;
+        return d;
+    }
+    if (a.verdict == Verdict::Undetermined) // both axes too small to tell: leave the values, change no episode
+    {
+        d.undetermined = true;
         return d;
     }
     d.replace = true;
@@ -364,9 +370,13 @@ class SampleLimiter
 class EpisodeLog
 {
   public:
-    bool ShouldLog(Guard g)
+    static constexpr std::uint32_t kMaxLines = 32; // per session: a game that flickers between states cannot flood the log
+
+    bool ShouldLog(Guard g) { return Event(g != Guard::None); }
+    // `active` = this evaluate is inside the episode. True only at the start of an episode, and only while the line budget lasts.
+    bool Event(bool active)
     {
-        if (g == Guard::None)
+        if (!active)
         {
             _open = false;
             return false;
@@ -374,12 +384,20 @@ class EpisodeLog
         if (_open)
             return false;
         _open = true;
+        if (_lines >= kMaxLines)
+        {
+            ++_suppressed;
+            return false;
+        }
+        ++_lines;
         return true;
     }
     void Close() { _open = false; }
+    std::uint32_t Suppressed() const { return _suppressed; }
 
   private:
     bool _open = false;
+    std::uint32_t _lines = 0, _suppressed = 0;
 };
 
 // ---- text ----------------------------------------------------------------------------------------------------------------------
