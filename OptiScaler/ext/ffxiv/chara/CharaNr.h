@@ -68,7 +68,7 @@ Latches& SharedLatches();
 RunOutcome RunBringUp(const RunRequest& request);
 
 // Runs NR on the super-resolution output (between the DLSS evaluate and the alpha pass of CharaDlss.cpp RunSlot), with the real depth
-// and motion guides. `base.width/height` is the size of `colour`; the guides are described by `guides` (MakeProductionGuides).
+// and motion guides. `base.width/height` is the size of `colour`; the guides are described by `guides` (GuidesOf).
 struct ProductionRequest
 {
     RunRequest base;                       // base.native: the preview image (the key); base.width/height: the colour image's size

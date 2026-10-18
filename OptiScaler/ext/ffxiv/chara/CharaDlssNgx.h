@@ -122,23 +122,40 @@ struct EvaluateInputs
     bool reset = false;
 };
 
+// What an evaluate tells the upscaler about its guides (depth, motion vectors and colour all have the render size): the render sub-rectangle
+// and the scale of the motion vectors, which are fractions of the render image. ApplyEvaluate sets exactly these, and the production NR run
+// takes its guides from the same function (CharaNrGuides.h), so the two cannot disagree.
+struct EvaluateGuides
+{
+    uint32_t width = 0; // render sub-rectangle
+    uint32_t height = 0;
+    float mvScaleX = 0.0f; // motion scale: the render size in pixels
+    float mvScaleY = 0.0f;
+};
+
+constexpr EvaluateGuides EvaluateGuidesOf(const EvaluateInputs& in)
+{
+    return EvaluateGuides { in.width, in.height, static_cast<float>(in.width), static_cast<float>(in.height) };
+}
+
 // `R` is the resource handle type of the NGX parameter object (ID3D11Resource*). `S` additionally provides
 // SetResource(name, R).
 template <class S, class R> void ApplyEvaluate(S& s, const EvaluateInputs& in, R color, R output, R depth, R motionVectors)
 {
+    const EvaluateGuides guides = EvaluateGuidesOf(in);
     s.SetResource(kColor, color);
     s.SetResource(kOutput, output);
     s.SetResource(kDepth, depth);
     s.SetResource(kMotionVectors, motionVectors);
     s.SetFloat(kJitterX, in.jitterX);
     s.SetFloat(kJitterY, in.jitterY);
-    s.SetFloat(kMvScaleX, static_cast<float>(in.width));
-    s.SetFloat(kMvScaleY, static_cast<float>(in.height));
+    s.SetFloat(kMvScaleX, guides.mvScaleX);
+    s.SetFloat(kMvScaleY, guides.mvScaleY);
     s.SetFloat(kSharpness, 0.0f);
     s.SetFloat(kPreExposure, 1.0f);
     s.SetFloat(kExposureScale, 1.0f);
-    s.SetUInt(kSubrectWidth, in.width);
-    s.SetUInt(kSubrectHeight, in.height);
+    s.SetUInt(kSubrectWidth, guides.width);
+    s.SetUInt(kSubrectHeight, guides.height);
     s.SetInt(kReset, in.reset ? 1 : 0);
 }
 } // namespace ext::ffxiv::chara::dlss::ngx

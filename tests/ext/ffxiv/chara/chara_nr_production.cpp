@@ -1,13 +1,15 @@
 // Preview NR, production entry (NR on the super-resolution output): the pure parts. What this proves: the model call of a production
-// run (output-size colour, render-size guides, the upscaler's depth convention and motion scale), the recipe of a production run (no
-// zero-motion pass, the same states as the bring-up), the stream shape (a mode change rebuilds the stream, a bring-up consumer is never
-// given a production result) and the checks on the images a production run copies. The decisions of one render (production vs bring-up, the
+// run (output-size colour, render-size guides built by GuidesOf from the same inputs as the super-resolution evaluate, the upscaler's
+// depth convention and motion scale), the recipe of a production run (no zero-motion pass, the same states as the bring-up), the stream
+// shape (a mode change rebuilds the stream, a bring-up consumer is never given a production result) and the checks on the images a
+// production run copies. The decisions of one render (production vs bring-up, the
 // alpha input, the withdrawal) are tested in chara_nr_render.
 // What it cannot prove (the game session does): the D3D12 state tracking of the copied inputs, the model's behaviour for guides smaller
 // than the colour, the image quality on alpha-masked characters.
 #include "check.h"
 
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
+#include "ext/ffxiv/chara/CharaNrGuides.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/ffxiv/chara/CharaNrRules.h"
@@ -57,14 +59,26 @@ struct Fake
     }
 };
 
-FramePlan ProductionPlan(bool reversedZ, bool reset)
+// The inputs of one super-resolution evaluate at the render size (the same object feeds the evaluate and the production plan).
+ngx::EvaluateInputs SrInputs(uint32_t width, uint32_t height, bool reset)
+{
+    ngx::EvaluateInputs in;
+    in.width = width;
+    in.height = height;
+    in.reset = reset;
+    return in;
+}
+
+// A production plan for the render the evaluate `sr` was made for: the colour is the evaluate's output (twice its size), the guides come from the
+// same inputs, the reset follows the evaluate's.
+FramePlan ProductionPlan(const ngx::EvaluateInputs& sr, bool reversedZ)
 {
     FramePlan p;
-    p.width = kOutW;
-    p.height = kOutH;
+    p.width = sr.width * ngx::kOutputScale;
+    p.height = sr.height * ngx::kOutputScale;
     p.initGuides = false; // production never zeroes the motion image: it holds the preview's own motion
-    p.reset = reset;
-    p.guides = MakeProductionGuides(kRenderW, kRenderH, reversedZ);
+    p.reset = sr.reset;
+    p.guides = GuidesOf(sr, reversedZ);
     return p;
 }
 
@@ -93,8 +107,10 @@ struct NgxFake
 
 void TestModelCall()
 {
+    // one render: the super-resolution evaluate and the production plan are made from the same inputs
+    const ngx::EvaluateInputs in = SrInputs(kRenderW, kRenderH, true);
     Fake f;
-    CHECK(RecordRun(f, ProductionPlan(false, true)));
+    CHECK(RecordRun(f, ProductionPlan(in, false)));
     const ModelCall& m = f.call;
     // the model sees the 2x image; depth and motion are the render-size sub-rectangles starting at 0
     CHECK(m.width == kOutW && m.height == kOutH);
@@ -102,9 +118,6 @@ void TestModelCall()
     CHECK(m.depthBaseX == 0 && m.depthBaseY == 0 && m.motionBaseX == 0 && m.motionBaseY == 0);
     // the motion scale is the one the super-resolution evaluate is given
     NgxFake sr;
-    ngx::EvaluateInputs in;
-    in.width = kRenderW;
-    in.height = kRenderH;
     ngx::ApplyEvaluate<NgxFake, const void*>(sr, in, nullptr, nullptr, nullptr, nullptr);
     CHECK(sr.mvX == static_cast<float>(kRenderW) && sr.mvY == static_cast<float>(kRenderH));
     CHECK(m.mvScaleX == sr.mvX && m.mvScaleY == sr.mvY);
@@ -114,7 +127,7 @@ void TestModelCall()
 
     // the depth convention follows the feature's flags
     Fake g;
-    CHECK(RecordRun(g, ProductionPlan(true, false)));
+    CHECK(RecordRun(g, ProductionPlan(SrInputs(kRenderW, kRenderH, false), true)));
     CHECK(g.call.depthInverted == 1 && g.call.reset == 0);
     CHECK((ngx::CreateFlags(true) & ngx::kFlagDepthInverted) != 0 && (ngx::CreateFlags(false) & ngx::kFlagDepthInverted) == 0);
     // and the motion vectors are declared low resolution, which is what makes the guides' own size the reference of the motion scale
@@ -126,11 +139,62 @@ void TestModelCall()
     CHECK(b.depthInverted == 0 && b.mvScaleX == 1.0f && b.mvScaleY == 1.0f);
 }
 
+// The guides as they were computed before GuidesOf existed, from a loose width and height: the oracle of the equivalence sweep.
+GuideSetup OldProductionGuides(uint32_t renderWidth, uint32_t renderHeight, bool reversedZ)
+{
+    return GuideSetup { renderWidth, renderHeight, reversedZ, static_cast<float>(renderWidth), static_cast<float>(renderHeight) };
+}
+
+// GuidesOf is the one place the production NR guides come from, and ApplyEvaluate (the super-resolution evaluate's set-up) uses the same
+// EvaluateGuidesOf. The guides of a production run therefore equal what the evaluate of the same render is given, whatever the size.
+void TestGuidesOf()
+{
+    const uint32_t sizes[][2] = { { 1, 1 },       { 2, 3 },       { 576, 960 },   { 960, 576 },   { 1280, 720 },
+                                  { 1920, 1080 }, { 2048, 2048 }, { 4095, 1 },    { 1, 4096 } };
+    for (const auto& size : sizes)
+        for (const bool reversedZ : { false, true })
+            for (const bool reset : { false, true })
+            {
+                const uint32_t w = size[0], h = size[1];
+                const ngx::EvaluateInputs in = SrInputs(w, h, reset);
+                const GuideSetup got = GuidesOf(in, reversedZ);
+
+                // behaviour is unchanged: field by field the same as the old computation from the loose width and height
+                const GuideSetup old = OldProductionGuides(w, h, reversedZ);
+                CHECK(got.width == old.width && got.height == old.height && got.depthInverted == old.depthInverted &&
+                      got.mvScaleX == old.mvScaleX && got.mvScaleY == old.mvScaleY);
+
+                // what the super-resolution evaluate of this render is given, recorded through its own composition
+                NgxFake sr;
+                ngx::ApplyEvaluate<NgxFake, const void*>(sr, in, nullptr, nullptr, nullptr, nullptr);
+                CHECK(got.mvScaleX == sr.mvX && got.mvScaleY == sr.mvY);
+                CHECK(got.width == sr.subW && got.height == sr.subH);
+                // the convention itself, typed independently of the helper: the render size, in pixels, and not the output size
+                CHECK(got.width == w && got.height == h);
+                CHECK(got.mvScaleX == static_cast<float>(w) && got.mvScaleY == static_cast<float>(h));
+                CHECK(got.depthInverted == reversedZ);
+
+                // the model call of a production run for this render carries them
+                Fake rec;
+                CHECK(RecordRun(rec, ProductionPlan(in, reversedZ)));
+                CHECK(rec.call.guideWidth == sr.subW && rec.call.guideHeight == sr.subH && rec.call.motionWidth == sr.subW &&
+                      rec.call.motionHeight == sr.subH);
+                CHECK(rec.call.mvScaleX == sr.mvX && rec.call.mvScaleY == sr.mvY);
+                CHECK(rec.call.width == w * ngx::kOutputScale && rec.call.height == h * ngx::kOutputScale);
+                CHECK(rec.call.depthInverted == (reversedZ ? 1 : 0) && rec.call.reset == (reset ? 1 : 0));
+
+                // the check above has teeth: inputs at the OUTPUT size (the mistake of passing the colour image's size) give other guides
+                const GuideSetup wrong = GuidesOf(SrInputs(w * ngx::kOutputScale, h * ngx::kOutputScale, reset), reversedZ);
+                CHECK(wrong.mvScaleX != sr.mvX && wrong.mvScaleY != sr.mvY);
+                CHECK(wrong.width != sr.subW && wrong.height != sr.subH);
+            }
+}
+
 void TestRecipe()
 {
     // production: encode -> model -> resolve only; the motion image is never overwritten
     Fake f;
-    CHECK(RecordRun(f, ProductionPlan(false, false)));
+    CHECK(RecordRun(f, ProductionPlan(SrInputs(kRenderW, kRenderH, false), false)));
     CHECK(f.passes == 2 && f.Has("evaluate"));
     CHECK(!f.Has("pass:11")); // DlssNrMode_ZeroMotion
     CHECK(f.constants[0].Mode == DlssNrMode_Encode && f.constants[0].Width == kOutW && f.constants[0].Height == kOutH);
@@ -260,6 +324,7 @@ void TestInputsFit()
 int main()
 {
     TestModelCall();
+    TestGuidesOf();
     TestRecipe();
     TestStreamModes();
     TestInputsFit();

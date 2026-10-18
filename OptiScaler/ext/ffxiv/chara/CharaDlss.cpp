@@ -14,6 +14,7 @@
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaNrGuides.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaTintMap.h"
 #include "ext/ffxiv/chara/CharaNrTint.h"
@@ -696,7 +697,7 @@ struct ProductionCall
     ComPtr<ID3D11ShaderResourceView> view;
     nr::ProductionAnswer answer; // a value-initialised call is a failed one
 };
-ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset); // preview NR production entry, defined below
+ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR production entry, defined below
 
 void RunSlot(int index, const DrawView& view)
 {
@@ -787,7 +788,7 @@ void RunSlot(int index, const DrawView& view)
         PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted,
         [&]
         {
-            ProductionCall call = RunNrProduction(view, g, s, w, h, in.reset);
+            ProductionCall call = RunNrProduction(view, g, s, in);
             nrOutput = std::move(call.view);
             return call.answer;
         },
@@ -902,9 +903,9 @@ const char* ProductionCauseText(nr::RunOutcome outcome)
     }
 }
 
-ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
+ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
 {
-    const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
+    const uint32_t outW = in.width * ngx::kOutputScale, outH = in.height * ngx::kOutputScale;
     if (view.rtvTexture == nullptr || outW > kNrMaxSide || outH > kNrMaxSide)
     {
         // Not offered to NR: counted like any other fallback and logged once (a cause outside the RunOutcome range).
@@ -924,8 +925,8 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
     request.colour = g.output.texture.Get();
     request.depth = g.depth.texture.Get();
     request.motion = g.motion.texture.Get();
-    request.guides = nr::MakeProductionGuides(w, h, s.reversedZ); // what the SR feature of this slot was created with
-    request.superResolutionReset = srReset; // the SR evaluate of this render reset its history: so does the NR model
+    request.guides = nr::GuidesOf(in, s.reversedZ); // the guides the SR evaluate of this render was given; the depth convention its feature was created with
+    request.superResolutionReset = in.reset; // the SR evaluate of this render reset its history: so does the NR model
     nr::ProductionResult result = nr::RunProduction(request);
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr };
     if (nr::ProductionProduced(answer))
@@ -940,9 +941,9 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
 
 // The second line of defence behind the module's own boundary (nr::RunProduction never throws): the request set-up and the log text
 // around it cannot leave the game's Draw hook either. An exception here latches preview NR; the SR output is used.
-ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
+ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
 {
-    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, w, h, srReset); },
+    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, in); },
                        []() -> ProductionCall
                        {
                            if (nr::SharedLatches().LatchNr())
