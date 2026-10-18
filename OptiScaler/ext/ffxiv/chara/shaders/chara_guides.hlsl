@@ -1,8 +1,9 @@
-// Helper passes of the isolated character-preview DLSS path (CharaGuides.cpp). One source, four entry points:
+// Helper passes of the isolated character-preview DLSS path (CharaGuides.cpp). One source, five entry points:
 //   VS      full-screen triangle from the vertex id (vs_5_0)
 //   Copy    native BGRA image -> RGBA8 colour input
 //   Guides  depth copy + signed motion with the engine's camera offset removed (two render targets)
 //   Alpha   upscaled colour + native alpha, shifted by the render jitter
+//   AlphaTint  Alpha with a debug tint (PreviewDebugTint)
 // Resource slots and constant-buffer layouts are fixed; CharaGuides.cpp binds them by these registers.
 //
 // Written from a description of the behaviour of Nickle's depth-jitter-20261013 build (docs/RECONSTRUCTION-NICKLE.md).
@@ -73,4 +74,12 @@ float4 Alpha(VsOut i) : SV_Target
     const float3 colour = Source.SampleLevel(Linear, i.uv, 0).rgb;
     const float alpha = Original.SampleLevel(Linear, i.uv + Jitter * InvSize, 0).a;
     return float4(colour, alpha);
+}
+
+// Debug aid (config key PreviewDebugTint): Alpha with a mild magenta mix, so the upscaled preview can be told from the native one
+// on screen.
+float4 AlphaTint(VsOut i) : SV_Target
+{
+    const float4 c = Alpha(i);
+    return float4(lerp(c.rgb, float3(1.0, 0.0, 1.0), 0.35), c.a);
 }

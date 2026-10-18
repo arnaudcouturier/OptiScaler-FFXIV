@@ -20,7 +20,9 @@ class FxaaPass
     // Returns false (and leaves the context state as it found it) when the pass cannot run; Failure() then says why for
     // permanent failures. The pass must be used from one thread.
     bool Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* source, UINT srcW, UINT srcH, bool srgb, UINT scale,
-                 ID3D11ShaderResourceView** out, DrawFn draw = nullptr);
+                 ID3D11ShaderResourceView** out, DrawFn draw = nullptr, bool tint = false);
+
+    // `tint` selects the debug variant of the filter: the output is mixed with magenta (config key PreviewDebugTint).
 
     // Releases every GPU object and clears a permanent failure.
     void Reset();
@@ -38,6 +40,7 @@ class FxaaPass
     Microsoft::WRL::ComPtr<ID3D11Device> _device;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _ps;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> _psTint;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> _sampler;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> _rasterizer;
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;

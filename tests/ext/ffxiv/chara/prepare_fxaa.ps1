@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $shader = Join-Path $Repo 'OptiScaler\ext\ffxiv\chara\shaders\chara_fxaa.hlsl'
 $fxc = Join-Path $Repo 'OptiScaler\shaders\shader_tools\fxc.exe'
 # The same recipe as ext\ext.props: fxc -nologo -T <profile> -E <entry> -O3, one blob per entry point.
-foreach ($target in @(@('vs_5_0', 'VS'), @('ps_5_0', 'PS'))) {
+foreach ($target in @(@('vs_5_0', 'VS'), @('ps_5_0', 'PS'), @('ps_5_0', 'PSTint'))) {
     $profile = $target[0]; $entry = $target[1]
     $bin = Join-Path $Out "Chara_Fxaa_$entry.bin"
     $header = Join-Path $Out "Chara_Fxaa_$entry.h"

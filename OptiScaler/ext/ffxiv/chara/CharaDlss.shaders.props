@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Character preview DLSS helper shaders (ext\ffxiv\chara\shaders\chara_guides.hlsl). One source, four entry points, each
+  Character preview DLSS helper shaders (ext\ffxiv\chara\shaders\chara_guides.hlsl). One source, five entry points, each
   compiled by fxc -O3 into a header in $(IntDir)ext_gen\ (never committed). The constant-buffer layouts and register
   slots in the .hlsl are mirrored by CharaGuides.cpp; change them together.
 -->
@@ -29,6 +29,12 @@
       <Header>CharaGuides_Alpha_Shader.h</Header>
       <Profile>ps_5_0</Profile>
       <Entry>Alpha</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders/chara_guides.hlsl">
+      <Variable>CharaGuides_AlphaTint_cso</Variable>
+      <Header>CharaGuides_AlphaTint_Shader.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>AlphaTint</Entry>
     </ExtShader>
   </ItemGroup>
 </Project>

@@ -3,7 +3,7 @@
 // A luma-based, alpha-preserving edge filter in the style of FXAA 3.11, written for one job: smooth the staircase edges
 // of a small off-screen image before the UI shows it, optionally while enlarging it 2x.
 //
-// Entry points: VS (vs_5_0) and PS (ps_5_0). One input, one sampler, no constant buffer:
+// Entry points: VS (vs_5_0), PS and PSTint (ps_5_0; PSTint is PS plus a debug tint). One input, one sampler, no constant buffer:
 //   t0 Source      Texture2D<float4>, the preview image
 //   s0 LinearClamp bilinear, clamp
 // The texel size comes from the SOURCE dimensions, also when the render target is larger than the source.
@@ -48,7 +48,7 @@ float Luma(float3 c)
     return dot(c, float3(0.299, 0.587, 0.114));
 }
 
-float4 PS(VSOutput i) : SV_Target
+float4 Filter(VSOutput i)
 {
     float width, height;
     Source.GetDimensions(width, height);
@@ -90,4 +90,17 @@ float4 PS(VSOutput i) : SV_Target
     const float lumaB = Luma(rgbB);
     const float3 rgb = (lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB;
     return float4(rgb, centre.a);
+}
+
+float4 PS(VSOutput i) : SV_Target
+{
+    return Filter(i);
+}
+
+// Debug aid (config key PreviewDebugTint): the same filter, with a mild magenta mix so the processed image can be told from the
+// native one on screen. Alpha is untouched.
+float4 PSTint(VSOutput i) : SV_Target
+{
+    const float4 c = Filter(i);
+    return float4(lerp(c.rgb, float3(1.0, 0.0, 1.0), 0.35), c.a);
 }

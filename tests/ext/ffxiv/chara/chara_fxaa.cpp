@@ -133,6 +133,30 @@ void TestFlatAndSize(Env& e)
     CHECK(pass.OutputWidth() == 48 && pass.OutputHeight() == 16);
 }
 
+// The debug tint (PreviewDebugTint): the same filter, with a magenta mix; alpha untouched. A flat (128,100,77,255) pixel becomes
+// lerp(rgb, (1,0,1), 0.35) = (172, 65, 139).
+void TestDebugTint(Env& e)
+{
+    const UINT n = 16;
+    std::vector<Rgba> flat(n * n, Rgba { 128, 100, 77, 200 });
+    auto tex = MakeTexture(e, n, n, flat);
+    auto srv = MakeSrv(e, tex.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    FxaaPass pass;
+    ID3D11ShaderResourceView* out = nullptr;
+    CHECK(pass.Process(e.context.Get(), srv.Get(), n, n, false, 1, &out, nullptr, true));
+    auto px = Read(e, out, n, n);
+    for (const auto& p : px)
+    {
+        CHECK(p.r >= 171 && p.r <= 173 && p.g >= 64 && p.g <= 66 && p.b >= 138 && p.b <= 140);
+        CHECK(p.a == 200);
+    }
+    // without the tint the same call returns the image unchanged
+    CHECK(pass.Process(e.context.Get(), srv.Get(), n, n, false, 1, &out, nullptr, false));
+    px = Read(e, out, n, n);
+    for (const auto& p : px)
+        CHECK(p == (Rgba { 128, 100, 77, 200 }));
+}
+
 void TestAlphaRule(Env& e)
 {
     const UINT n = 16;
@@ -553,6 +577,7 @@ int main()
         return 1;
     }
     TestFlatAndSize(e);
+    TestDebugTint(e);
     TestAlphaRule(e);
     TestEdgeSmoothing(e);
     TestUpscaled(e);

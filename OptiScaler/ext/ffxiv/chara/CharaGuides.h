@@ -23,6 +23,7 @@ struct Bytecode
 struct Shaders
 {
     Bytecode vs, copy, guides, alpha;
+    Bytecode alphaTint; // optional: the Alpha pass with a debug tint
 };
 
 // Layout of the Settings constant buffer (register b0): Jitter (pixels), InvSize (1 / render size). 16 bytes.
@@ -56,12 +57,13 @@ class Passes
         Scope& operator=(const Scope&) = delete;
         bool Ok() const { return _ok; }
 
-        // Each returns false when the pass could not run.
+        // Each returns false when the pass could not run. `tint` (Alpha): the debug variant, falls back to the plain one when the
+        // tinted shader was not supplied.
         bool Copy(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* target, uint32_t width, uint32_t height);
         bool Guides(ID3D11ShaderResourceView* motion, ID3D11ShaderResourceView* depth, ID3D11RenderTargetView* depthTarget,
                     ID3D11RenderTargetView* motionTarget, uint32_t width, uint32_t height);
         bool Alpha(ID3D11ShaderResourceView* upscaled, ID3D11ShaderResourceView* original, ID3D11RenderTargetView* target,
-                   uint32_t width, uint32_t height);
+                   uint32_t width, uint32_t height, bool tint = false);
 
       private:
         bool Draw(ID3D11PixelShader* ps, ID3D11ShaderResourceView* const (&srvs)[4], ID3D11RenderTargetView* const* targets,
@@ -77,7 +79,7 @@ class Passes
   private:
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> _copy, _guides, _alpha;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> _copy, _guides, _alpha, _alphaTint;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> _sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> _settings;
     DrawTriangleFn _drawTriangle = nullptr;

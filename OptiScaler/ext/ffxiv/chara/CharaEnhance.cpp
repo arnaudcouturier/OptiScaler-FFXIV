@@ -175,7 +175,8 @@ bool Around(const DrawView& view, DrawCall draw)
     }
 
     ID3D11ShaderResourceView* filtered = nullptr;
-    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle) || filtered == nullptr)
+    if (!Pass().Process(context, source.Get(), desc.Width, desc.Height, srgb, scale, &filtered, DrawTriangle,
+                        ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default()) || filtered == nullptr)
     {
         ++g_stats.aaSkipped;
         if (!g_loggedFailure)

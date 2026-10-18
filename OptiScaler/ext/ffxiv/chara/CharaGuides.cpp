@@ -29,7 +29,7 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     }
 
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> copy, guides, alpha;
+    ComPtr<ID3D11PixelShader> copy, guides, alpha, alphaTint;
     if (FAILED(device->CreateVertexShader(shaders.vs.data, shaders.vs.size, nullptr, &vs)) ||
         FAILED(device->CreatePixelShader(shaders.copy.data, shaders.copy.size, nullptr, &copy)) ||
         FAILED(device->CreatePixelShader(shaders.guides.data, shaders.guides.size, nullptr, &guides)) ||
@@ -38,6 +38,9 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
         LOG_ERROR("CharaView DLSS: helper shaders could not be created");
         return false;
     }
+    if (shaders.alphaTint.data != nullptr && shaders.alphaTint.size != 0 &&
+        FAILED(device->CreatePixelShader(shaders.alphaTint.data, shaders.alphaTint.size, nullptr, &alphaTint)))
+        alphaTint.Reset(); // the debug variant is optional
 
     D3D11_SAMPLER_DESC sd {};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -61,6 +64,7 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     _copy = copy;
     _guides = guides;
     _alpha = alpha;
+    _alphaTint = alphaTint;
     _sampler = sampler;
     _settings = settings;
     _drawTriangle = drawTriangle;
@@ -74,6 +78,7 @@ void Passes::Release()
     _copy.Reset();
     _guides.Reset();
     _alpha.Reset();
+    _alphaTint.Reset();
     _sampler.Reset();
     _settings.Reset();
     _drawTriangle = nullptr;
@@ -171,11 +176,11 @@ bool Passes::Scope::Guides(ID3D11ShaderResourceView* motion, ID3D11ShaderResourc
 }
 
 bool Passes::Scope::Alpha(ID3D11ShaderResourceView* upscaled, ID3D11ShaderResourceView* original,
-                          ID3D11RenderTargetView* target, uint32_t width, uint32_t height)
+                          ID3D11RenderTargetView* target, uint32_t width, uint32_t height, bool tint)
 {
     if (upscaled == nullptr || original == nullptr || target == nullptr)
         return false;
     ID3D11ShaderResourceView* const srvs[4] { upscaled, nullptr, nullptr, original };
-    return Draw(_passes._alpha.Get(), srvs, &target, 1, width, height);
+    return Draw(tint && _passes._alphaTint != nullptr ? _passes._alphaTint.Get() : _passes._alpha.Get(), srvs, &target, 1, width, height);
 }
 } // namespace ext::ffxiv::chara::guides

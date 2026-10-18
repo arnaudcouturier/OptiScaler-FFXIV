@@ -199,7 +199,7 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 
 **Seams.** None in upstream files.
 
-**Config.** `[FFXIV] PreviewDLSS` (false), `PreviewAA` (false), `PreviewUpscale` (true, only meaningful with the AA), `PreviewGuideCapture` (false; writes capped diagnostic dumps to `OptiScaler\PreviewDLSSDiagnostics\`), `[HDR] PreviewNRTrace` (false; trace log lines only).
+**Config.** `[FFXIV] PreviewDLSS` (false), `PreviewAA` (false), `PreviewUpscale` (true, only meaningful with the AA), `PreviewGuideCapture` (false; writes capped diagnostic dumps to `OptiScaler\PreviewDLSSDiagnostics\`), `PreviewDebugTint` (false; debug aid, mixes magenta into the AA or DLSS result so it can be seen whether that image is the one on screen), `[HDR] PreviewNRTrace` (false; trace log lines only).
 
 **Menu.** Card "Character preview" in the Upscaling tab, with the counters and status lines.
 

@@ -15,6 +15,7 @@ struct CharaConfig
     CustomOptional<bool> previewAA { false };           // [FFXIV] PreviewAA: spatial AA of the equipment preview
     CustomOptional<bool> previewUpscale { true };       // [FFXIV] PreviewUpscale: the AA output is 2x
     CustomOptional<bool> previewGuideCapture { false }; // [FFXIV] PreviewGuideCapture: diagnostics for the DLSS path
+    CustomOptional<bool> previewDebugTint { false };    // [FFXIV] PreviewDebugTint: tints the processed preview image (debug aid)
     CustomOptional<bool> previewNrTrace { false };      // [HDR] PreviewNRTrace: trace log lines for preview NR work
 
     template <class Binder> void Bind(Binder& b)
@@ -23,6 +24,7 @@ struct CharaConfig
         b.Add("FFXIV", "PreviewAA", previewAA);
         b.Add("FFXIV", "PreviewUpscale", previewUpscale);
         b.Add("FFXIV", "PreviewGuideCapture", previewGuideCapture);
+        b.Add("FFXIV", "PreviewDebugTint", previewDebugTint);
         b.Add("HDR", "PreviewNRTrace", previewNrTrace);
     }
 };

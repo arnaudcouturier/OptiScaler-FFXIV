@@ -273,6 +273,45 @@ void TestAlpha(Passes& passes, float jitterX, float jitterY)
     }
 }
 
+// The debug variant of the alpha pass: the colour is mixed with magenta (35 %), the alpha is the same as in the plain pass.
+void TestAlphaTint(Passes& passes)
+{
+    constexpr UINT w = 4, h = 4;
+    std::vector<uint8_t> original(w * h * 4, 0);
+    for (UINT i = 0; i < w * h; ++i)
+        original[i * 4 + 3] = 200;
+    std::vector<uint8_t> upscaled(w * 2 * h * 2 * 4);
+    for (size_t i = 0; i < upscaled.size(); i += 4)
+    {
+        upscaled[i + 0] = 50;
+        upscaled[i + 1] = 100;
+        upscaled[i + 2] = 150;
+        upscaled[i + 3] = 255;
+    }
+    Tex orig = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w, h, original.data(), w * 4);
+    Tex up = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2, upscaled.data(), w * 2 * 4);
+    Tex plain = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2);
+    Tex tinted = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, w * 2, h * 2);
+
+    Settings settings;
+    settings.invWidth = 1.0f / w;
+    settings.invHeight = 1.0f / h;
+    {
+        Passes::Scope scope(passes, g_context.Get(), settings, nullptr, 0, 0);
+        CHECK(scope.Ok());
+        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), plain.rtv.Get(), w * 2, h * 2));
+        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), tinted.rtv.Get(), w * 2, h * 2, true));
+    }
+    const auto a = Read(plain.texture.Get(), 4, w * 2, h * 2);
+    const auto b = Read(tinted.texture.Get(), 4, w * 2, h * 2);
+    for (size_t i = 0; i < a.size(); i += 4)
+    {
+        CHECK(a[i] == 50 && a[i + 1] == 100 && a[i + 2] == 150 && a[i + 3] == 200);
+        // lerp((50,100,150)/255, (1,0,1), 0.35) = (0.4775, 0.2549, 0.7320) -> (122, 65, 187)
+        CHECK(Near(b[i], 122.0f, 1.5f) && Near(b[i + 1], 65.0f, 1.5f) && Near(b[i + 2], 187.0f, 1.5f) && b[i + 3] == 200);
+    }
+}
+
 // The game's pipeline state must be identical after a Scope, whatever the passes bound.
 void TestStateRestored(Passes& passes)
 {
@@ -370,13 +409,14 @@ int main(int argc, char** argv)
     auto copy = Compile(shader, "Copy", "ps_5_0");
     auto guides = Compile(shader, "Guides", "ps_5_0");
     auto alpha = Compile(shader, "Alpha", "ps_5_0");
-    if (!vs || !copy || !guides || !alpha)
+    auto alphaTint = Compile(shader, "AlphaTint", "ps_5_0");
+    if (!vs || !copy || !guides || !alpha || !alphaTint)
         return 1;
 
     Passes passes;
     CHECK(!passes.Init(g_device.Get(), Shaders {}, DrawTriangle)); // empty bytecode must fail, not crash
     CHECK(!passes.Ready());
-    CHECK(passes.Init(g_device.Get(), Shaders { Of(vs), Of(copy), Of(guides), Of(alpha) }, DrawTriangle));
+    CHECK(passes.Init(g_device.Get(), Shaders { Of(vs), Of(copy), Of(guides), Of(alpha), Of(alphaTint) }, DrawTriangle));
     if (!passes.Ready())
         return 1;
 
@@ -390,6 +430,7 @@ int main(int argc, char** argv)
     TestAlpha(passes, 0.0f, 0.0f);
     TestAlpha(passes, 0.5f, -0.25f);
     TestAlpha(passes, -0.4375f, 0.3125f);
+    TestAlphaTint(passes);
     TestStateRestored(passes);
 
     passes.Release();

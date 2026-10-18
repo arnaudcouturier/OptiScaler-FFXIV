@@ -38,6 +38,7 @@ void TestDefaultsAndBinding()
     CHECK(!defaults.previewAA.value_or_default());
     CHECK(defaults.previewUpscale.value_or_default()); // the one key that defaults to true
     CHECK(!defaults.previewGuideCapture.value_or_default());
+    CHECK(!defaults.previewDebugTint.value_or_default());
     CHECK(!defaults.previewNrTrace.value_or_default());
 
     config::Binder binder;
@@ -52,10 +53,11 @@ void TestDefaultsAndBinding()
         { "FFXIV", "PreviewAA", &defaults.previewAA },
         { "FFXIV", "PreviewUpscale", &defaults.previewUpscale },
         { "FFXIV", "PreviewGuideCapture", &defaults.previewGuideCapture },
+        { "FFXIV", "PreviewDebugTint", &defaults.previewDebugTint },
         { "HDR", "PreviewNRTrace", &defaults.previewNrTrace },
     };
-    CHECK(binder.Table().size() == 5);
-    for (size_t i = 0; i < 5 && i < binder.Table().size(); ++i)
+    CHECK(binder.Table().size() == 6);
+    for (size_t i = 0; i < 6 && i < binder.Table().size(); ++i)
     {
         CHECK(std::string(binder.Table()[i].section) == expected[i].section);
         CHECK(std::string(binder.Table()[i].key) == expected[i].key);
@@ -71,6 +73,7 @@ void TestRoundTrip()
     ini.SetValue("FFXIV", "PreviewAA", "true");
     ini.SetValue("FFXIV", "PreviewUpscale", "false");
     ini.SetValue("FFXIV", "PreviewGuideCapture", "true");
+    ini.SetValue("FFXIV", "PreviewDebugTint", "true");
     ini.SetValue("HDR", "PreviewNRTrace", "true");
     config::Load(ini);
 
@@ -88,6 +91,7 @@ void TestRoundTrip()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewAA", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewUpscale", "")) == "false");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewGuideCapture", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugTint", "")) == "true");
     CHECK(std::string(out.GetValue("HDR", "PreviewNRTrace", "")) == "true");
 
     // the pre-existing FFXIV-companion keys keep working next to them
@@ -118,7 +122,7 @@ void TestFragments(const std::string& repo)
 {
     const std::string ffxiv = ReadFile(repo + "/OptiScaler/ext/ini/FFXIV.ini");
     CHECK(!ffxiv.empty());
-    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture" })
+    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint" })
         CHECK(HasKeyLine(ffxiv, key));
     CHECK(!HasKeyLine(ffxiv, "PreviewNRTrace"));
     CHECK(ffxiv.find("[FFXIV]") == std::string::npos || ffxiv.find("[FFXIV]") == 0); // a leading header would be dropped by the packager

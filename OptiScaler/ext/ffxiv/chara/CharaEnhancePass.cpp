@@ -3,6 +3,7 @@
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
 
 #include <Chara_Fxaa_PS.h>
+#include <Chara_Fxaa_PSTint.h>
 #include <Chara_Fxaa_VS.h>
 
 namespace ext::ffxiv::chara
@@ -18,6 +19,7 @@ void FxaaPass::Reset()
     _rasterizer.Reset();
     _sampler.Reset();
     _ps.Reset();
+    _psTint.Reset();
     _vs.Reset();
     _device.Reset();
     _outWidth = _outHeight = 0;
@@ -35,7 +37,8 @@ bool FxaaPass::Init(ID3D11Device* device)
     }
 
     if (FAILED(device->CreateVertexShader(Chara_Fxaa_VS_cso, sizeof(Chara_Fxaa_VS_cso), nullptr, &_vs)) ||
-        FAILED(device->CreatePixelShader(Chara_Fxaa_PS_cso, sizeof(Chara_Fxaa_PS_cso), nullptr, &_ps)))
+        FAILED(device->CreatePixelShader(Chara_Fxaa_PS_cso, sizeof(Chara_Fxaa_PS_cso), nullptr, &_ps)) ||
+        FAILED(device->CreatePixelShader(Chara_Fxaa_PSTint_cso, sizeof(Chara_Fxaa_PSTint_cso), nullptr, &_psTint)))
     {
         _failure = "the filter shaders could not be created";
         return false;
@@ -124,7 +127,7 @@ bool FxaaPass::EnsureOutput(ID3D11Device* device, UINT width, UINT height, bool 
 }
 
 bool FxaaPass::Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* source, UINT srcW, UINT srcH, bool srgb,
-                       UINT scale, ID3D11ShaderResourceView** out, DrawFn draw)
+                       UINT scale, ID3D11ShaderResourceView** out, DrawFn draw, bool tint)
 {
     if (out != nullptr)
         *out = nullptr;
@@ -172,7 +175,7 @@ bool FxaaPass::Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* s
     context->IASetInputLayout(nullptr);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(_vs.Get(), nullptr, 0);
-    context->PSSetShader(_ps.Get(), nullptr, 0);
+    context->PSSetShader(tint ? _psTint.Get() : _ps.Get(), nullptr, 0);
     context->PSSetSamplers(0, 1, &sampler);
     context->PSSetShaderResources(0, 1, &source);
     context->RSSetState(_rasterizer.Get());

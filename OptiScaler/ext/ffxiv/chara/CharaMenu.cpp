@@ -50,6 +50,12 @@ void DrawCharaCard(ext::menu::Ctx&)
     ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. "
                        "Unsupported layouts retain native rendering. Preview NR and FG are not active.");
 
+    bool tint = cfg.previewDebugTint.value_or_default();
+    if (ImGui::Checkbox("Show preview processing (debug)", &tint))
+        cfg.previewDebugTint = tint;
+    ext::menu::Tooltip("Debug aid, leave off in normal use. Mixes magenta into the preview image that the spatial AA or the DLSS "
+                       "pass produced, so you can see in the game whether the processed image is the one on screen.");
+
     // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
     if (const char* reason = table::InertReason(); reason != nullptr && reason[0] != '\0')
     {
