@@ -54,7 +54,8 @@ struct FakeHost final : IEngineHost
     bool pasteReady = true;
     bool sceneOwns = false;
     std::vector<std::string> log;
-    int calls = 0; // every host query / action
+    int calls = 0;        // every host query / action
+    int pasteQueries = 0; // PasteReady() calls
 
     bool FrameGenActive() override { ++calls; return fgActive; }
     Provider FrameGenProvider() override { ++calls; return provider; }
@@ -64,7 +65,7 @@ struct FakeHost final : IEngineHost
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
     Reason CheckCapture(const FrameImage&) override { ++calls; return check; }
     Reason StageCapture(const FrameImage&) override { ++calls; return stage; }
-    bool PasteReady() override { ++calls; return pasteReady; }
+    bool PasteReady() override { ++calls; ++pasteQueries; return pasteReady; }
     bool SceneHdrOwnsFrame() override { ++calls; return sceneOwns; }
     void Log(const std::string& line) override { log.push_back(line); }
 };
@@ -379,30 +380,72 @@ void TestCoverage()
     Core core(host);
     PasteCounters paste;
     uint64_t trippedAt = 0;
-    std::vector<Reason> reasons;
+    std::vector<Run> runs;
     for (uint64_t i = 1; i <= 140; ++i)
     {
         paste.produced = i;
         paste.coverageSequence = i; // one new readback per present
         paste.coverage = 0.9f;
-        reasons.push_back(Present(core, Mode::UiFree, paste).reason);
-        if (trippedAt == 0 && reasons.back() == Reason::MaskCoverage)
+        runs.push_back(Present(core, Mode::UiFree, paste));
+        if (trippedAt == 0 && runs.back().reason == Reason::MaskCoverage)
             trippedAt = i;
     }
-    // present 1 takes the baseline, then 5 fresh samples over the limit: blocking from present 6 for 120 presents
-    // (6..125), the retry is present 126, the next streak of 5 samples trips again at present 131
+    // present 1 takes the baseline, then 5 fresh samples over the limit: tripped from present 6. The coverage stays over
+    // the release level, so the guard stays tripped. A tripped present keeps asking the source and taking the capture
+    // (it probes), it only does not swap the base.
     assert(trippedAt == 6);
-    for (uint64_t i = 6; i < 126; ++i)
-        assert(reasons[i - 1] == Reason::MaskCoverage);
     for (uint64_t i = 1; i <= 5; ++i)
-        assert(reasons[i - 1] == Reason::None);
-    for (uint64_t i = 126; i <= 130; ++i)
-        assert(reasons[i - 1] == Reason::None); // present 126 is the retry
-    for (uint64_t i = 131; i <= 140; ++i)
-        assert(reasons[i - 1] == Reason::MaskCoverage);
+        assert(runs[i - 1].reason == Reason::None && runs[i - 1].swapped);
+    for (uint64_t i = 6; i <= 140; ++i)
+        assert(runs[i - 1].reason == Reason::MaskCoverage && runs[i - 1].staged && !runs[i - 1].swapped);
     const Status s = core.Snapshot();
     assert(s.coverageTripped);
-    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] == 120 + 10);
+    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] == 135);
+    assert(host.source.takes == 140);
+
+    // Tripped and the readbacks stop (the sequence is frozen): after kStarveFrames probed presents the guard lets go, the
+    // present after that is swapped again
+    FakeHost hostStarve;
+    Core coreStarve(hostStarve);
+    PasteCounters frozen;
+    std::vector<Run> starveRuns;
+    for (uint64_t i = 1; i <= 6; ++i)
+    {
+        frozen.produced = i;
+        frozen.coverageSequence = i;
+        frozen.coverage = 0.9f;
+        starveRuns.push_back(Present(coreStarve, Mode::UiFree, frozen));
+    }
+    assert(starveRuns.back().reason == Reason::MaskCoverage); // tripped at present 6, probing
+    for (uint64_t i = 7; i <= 6 + CoverageGuard::kStarveFrames; ++i)
+        starveRuns.push_back(Present(coreStarve, Mode::UiFree, frozen)); // the same readback again and again
+    for (uint64_t i = 6; i < 6 + CoverageGuard::kStarveFrames; ++i)
+        assert(starveRuns[i - 1].reason == Reason::MaskCoverage); // presents 6..125
+    assert(starveRuns[6 + CoverageGuard::kStarveFrames - 1].reason == Reason::None); // present 126 is swapped
+    assert(starveRuns[6 + CoverageGuard::kStarveFrames - 1].swapped);
+    assert(!coreStarve.Snapshot().coverageTripped);
+
+    // A tripped guard does not count presents without a capture towards starvation
+    FakeHost hostGap;
+    Core coreGap(hostGap);
+    for (uint64_t i = 1; i <= 6; ++i)
+    {
+        frozen.produced = i;
+        frozen.coverageSequence = i;
+        Present(coreGap, Mode::UiFree, frozen);
+    }
+    assert(coreGap.Snapshot().coverageTripped);
+    hostGap.source.result = TakeResult::NotThisFrame;
+    for (int i = 0; i < 3 * CoverageGuard::kStarveFrames; ++i)
+        assert(Present(coreGap, Mode::UiFree, frozen).reason == Reason::NoBoundaryThisFrame);
+    assert(coreGap.Snapshot().coverageTripped);
+    // The only probed present so far is present 6, so one starvation count is in. The boundary comes back: the first
+    // present after the gap probes (the previous one took no capture, it adds nothing), 118 more probing presents bring the
+    // count to 119, the next present reaches kStarveFrames and the guard lets go.
+    hostGap.source.result = TakeResult::Ok;
+    for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+        assert(Present(coreGap, Mode::UiFree, frozen).reason == Reason::MaskCoverage);
+    assert(Present(coreGap, Mode::UiFree, frozen).reason == Reason::None);
 
     // The same stale readback (coverage high, sequence frozen) never blocks, however many presents read it
     FakeHost hostStale;
@@ -529,59 +572,224 @@ struct Replay
     }
 };
 
-// Characterization of the behaviour the guard had before the silent probe: a constant coverage over the limit makes the
-// engine trip, block for exactly kRetryFrames presents, retry with a burst of presents that are swapped for a few
-// frames and trip again. Every burst is two changes of the frame generation base. This is the cause of the flash at
-// fades and the dialogue flicker in cutscenes; later changes replace this test.
-void TestReplayFlappingToday()
+// A tripped guard keeps probing: the source is still asked, a capture is still taken, the paste image is still built (the
+// guard needs its readbacks), and the base is not swapped and no tags are wanted.
+void TestProbeKeepsStaging()
+{
+    Replay replay;
+    replay.coverage = 0.95f;
+    replay.Steps(6);
+    assert(!replay.core.Probing() && replay.core.WantsTags()); // presents 1..6: bootstrap, then swapped
+    for (int i = 0; i < 60; ++i)
+    {
+        const int takes = replay.host.source.takes;
+        const Run r = replay.Step();
+        assert(replay.core.Probing());
+        assert(r.staged && !r.swapped && r.reason == Reason::MaskCoverage);
+        assert(replay.core.Staged() && !replay.core.Swapped());
+        assert(replay.host.source.takes == takes + 1);
+        assert(replay.core.PasteDecision() == PasteAction::Produce);
+        assert(!replay.core.WantsTags());
+        assert(replay.core.Snapshot().coverageTripped);
+    }
+    assert(replay.produced == 66);         // a paste image on every present, probing ones included
+    assert(replay.host.pasteQueries == 6); // a probing present never asks whether the paste is ready
+
+    // The probe is a ui_free matter: the other modes never probe
+    FakeHost host;
+    Core core(host);
+    PasteCounters p;
+    for (uint64_t i = 1; i <= 20; ++i)
+    {
+        p.produced = i;
+        p.coverageSequence = i;
+        p.coverage = 0.99f;
+        Present(core, Mode::Recomposition, p);
+        assert(!core.Probing() && core.PresentReason() == Reason::None && core.WantsTags());
+    }
+}
+
+// What wins on a probing present. Capture failures come before the probe, so the first failure of the present is the
+// one that counts; everything after the capture (paste ready, scene HDR) is not asked while probing.
+void TestProbePrecedence()
+{
+    struct Outcome
+    {
+        Run run;
+        bool probing;
+        PasteAction action;
+        bool tags;
+        int pasteQueries;
+    };
+    auto trippedPresent = [](auto&& setup)
+    {
+        FakeHost host;
+        Core core(host);
+        PasteCounters p;
+        for (uint64_t i = 1; i <= 6; ++i)
+        {
+            p.produced = i;
+            p.coverageSequence = i;
+            p.coverage = 0.9f;
+            Present(core, Mode::UiFree, p);
+        }
+        assert(core.Snapshot().coverageTripped);
+        const int queriesBefore = host.pasteQueries;
+        setup(host);
+        p.produced = 7;
+        p.coverageSequence = 7;
+        const Run r = Present(core, Mode::UiFree, p);
+        return Outcome { r, core.Probing(), core.PasteDecision(), core.WantsTags(), host.pasteQueries - queriesBefore };
+    };
+
+    {
+        const Outcome o = trippedPresent([](FakeHost&) {});
+        assert(o.run.staged && !o.run.swapped && o.run.reason == Reason::MaskCoverage && o.probing &&
+               o.action == PasteAction::Produce && !o.tags && o.pasteQueries == 0);
+    }
+    {
+        // a paste that is not ready, or a scene HDR owner, would change the reason or the base if they were asked
+        const Outcome o = trippedPresent(
+            [](FakeHost& h)
+            {
+                h.pasteReady = false;
+                h.sceneOwns = true;
+            });
+        assert(o.run.reason == Reason::MaskCoverage && o.probing && o.action == PasteAction::Produce);
+    }
+
+    // No boundary, rejected, refused, slot busy: nothing was captured, so it is not a probe and that failure is the
+    // reason of the present
+    const auto noCapture = [](const Outcome& o, Reason reason)
+    {
+        assert(!o.run.staged && !o.run.swapped && !o.probing && o.run.reason == reason);
+        assert(o.action == PasteAction::Invalidate && !o.tags);
+    };
+    noCapture(trippedPresent([](FakeHost& h) { h.source.result = TakeResult::NotThisFrame; }), Reason::NoBoundaryThisFrame);
+    noCapture(trippedPresent([](FakeHost& h) { h.source.result = TakeResult::Rejected; }), Reason::CaptureRejected);
+    noCapture(trippedPresent([](FakeHost& h) { h.check = Reason::SizeMismatch; }), Reason::SizeMismatch);
+    noCapture(trippedPresent([](FakeHost& h) { h.stage = Reason::SlotBusy; }), Reason::SlotBusy);
+    noCapture(trippedPresent([](FakeHost& h) { h.compare = true; }), Reason::DebugTintOn);
+    noCapture(trippedPresent([](FakeHost& h) { h.fgActive = false; }), Reason::NoFrameGeneration);
+    noCapture(trippedPresent([](FakeHost& h) { h.provider = Provider::FsrFg; }), Reason::ProviderUnsupported);
+}
+
+// Constant coverage over the limit. Before the silent probe this tripped, blocked for exactly 120 presents, retried with
+// a burst that swapped the base for a few frames, and tripped again: two changes of the base per ~127 presents (the
+// history of this file has the characterization test of that behaviour). Now the guard trips once, nothing is swapped
+// afterwards and the source is never left idle.
+void TestReplayNoBurst()
 {
     Replay replay;
     replay.coverage = 0.95f;
     replay.Steps(1000);
     const auto& runs = replay.runs;
 
-    // Presents 1 and 2 have no completed image (paste not ready), 3..6 are swapped (5 fresh samples over the limit
-    // arrive at presents 3..7), present 7 is the first blocked one.
+    // presents 1 and 2: no completed image yet, 3..6 swapped, five fresh samples over the limit arrive at 3..7
     assert(runs[0].reason == Reason::PasteNotReady && runs[1].reason == Reason::PasteNotReady);
     for (size_t i = 2; i < 6; ++i)
         assert(runs[i].swapped && runs[i].reason == Reason::None);
-    assert(runs[6].reason == Reason::MaskCoverage && !runs[6].staged);
+    for (size_t i = 6; i < runs.size(); ++i)
+        assert(runs[i].staged && !runs[i].swapped && runs[i].reason == Reason::MaskCoverage);
 
-    // Blocked runs: exactly 120 presents each (the last one is cut off by the end of the replay)
-    std::vector<std::pair<size_t, size_t>> blocked; // first index, length
-    for (size_t i = 0; i < runs.size(); ++i)
-    {
-        if (runs[i].reason != Reason::MaskCoverage)
-            continue;
-        if (!blocked.empty() && blocked.back().first + blocked.back().second == i)
-            ++blocked.back().second;
-        else
-            blocked.push_back({ i, 1 });
-    }
-    assert(blocked.size() == 8);
-    for (size_t k = 0; k + 1 < blocked.size(); ++k)
-        assert(blocked[k].second == static_cast<size_t>(CoverageGuard::kRetryFrames));
-    assert(blocked.back().second < static_cast<size_t>(CoverageGuard::kRetryFrames));
-
-    // Between two blocked runs: one retry burst. The source was idle during the block, so the first present of the burst
-    // has no boundary; the next two have no completed image (every image was withdrawn by the block); then four
-    // swapped presents until the fifth fresh sample over the limit trips the guard again.
-    for (size_t k = 0; k + 1 < blocked.size(); ++k)
-    {
-        const size_t first = blocked[k].first + blocked[k].second;
-        assert(blocked[k + 1].first - first == 7);
-        assert(runs[first].reason == Reason::NoBoundaryThisFrame && !runs[first].staged);
-        assert(runs[first + 1].reason == Reason::PasteNotReady && runs[first + 2].reason == Reason::PasteNotReady);
-        for (size_t j = 3; j < 7; ++j)
-            assert(runs[first + j].swapped && runs[first + j].reason == Reason::None);
-    }
-
-    // The pattern repeats every kRetryFrames + 7 presents, each cycle is two changes of the base
-    assert(blocked[1].first - blocked[0].first == static_cast<size_t>(CoverageGuard::kRetryFrames) + 7);
-    assert(replay.flips >= 2 * (1000 / 127));
-    assert(replay.flips == 2 + 2 * (blocked.size() - 1));
+    assert(replay.flips == 2); // the bootstrap swap and the trip: nothing else
     const Status s = replay.core.Snapshot();
-    assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == blocked.size() - 1);
+    assert(s.captured == 4);
+    assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+    assert(s.reasons[static_cast<size_t>(Reason::PasteNotReady)] == 2);
+    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] == 994);
+    assert(replay.host.source.takes == 1000); // the source never goes idle
+    assert(replay.produced == 1000);
+}
+
+// The release is seamless: the paste images were built all along, so the first swapped present after the 30th clean
+// sample has no reason, and it stays swapped.
+void TestReleaseIsSeamless()
+{
+    Replay replay;
+    replay.coverage = 0.95f;
+    replay.Steps(60); // tripped at present 7
+    replay.coverage = 0.10f;
+    const size_t first = replay.runs.size(); // the first present whose image has the low coverage
+    replay.Steps(100);
+    const auto& runs = replay.runs;
+
+    // that image's readback arrives kLatency presents later; the 30th clean sample releases the guard
+    const size_t release = first + Replay::kLatency + CoverageGuard::kReleaseSamples - 1;
+    for (size_t i = 6; i < release; ++i)
+        assert(runs[i].reason == Reason::MaskCoverage && !runs[i].swapped);
+    for (size_t i = release; i < runs.size(); ++i)
+        assert(runs[i].staged && runs[i].swapped && runs[i].reason == Reason::None);
+
+    assert(replay.flips == 3); // bootstrap swap, trip, release
+    const Status s = replay.core.Snapshot();
+    assert(!s.coverageTripped);
+    assert(s.reasons[static_cast<size_t>(Reason::PasteNotReady)] == 2); // only the bootstrap at the very start
+    assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+}
+
+// Hysteresis: the trip needs five fresh samples in a row over the limit, the release thirty in a row under 0.75 x the
+// limit. A cutscene that sits just under the limit never trips; after a trip it does not flip back and forth either.
+void TestHysteresisBand()
+{
+    // below the limit, with single peaks above it (never five in a row): no trip, no change of the base
+    {
+        const float pattern[] = { 0.50f, 0.55f, 0.66f };
+        Replay replay;
+        for (int i = 0; i < 1000; ++i)
+        {
+            replay.coverage = pattern[i % 3];
+            replay.Step();
+        }
+        assert(replay.flips == 1); // the bootstrap swap
+        assert(replay.core.Snapshot().reasons[static_cast<size_t>(Reason::MaskCoverage)] == 0);
+    }
+    // four in a row over the limit, then one under it, forever: still no trip
+    {
+        Replay replay;
+        for (int i = 0; i < 1000; ++i)
+        {
+            replay.coverage = (i % 5 == 4) ? 0.50f : 0.66f;
+            replay.Step();
+        }
+        assert(replay.flips == 1);
+        assert(replay.core.Snapshot().reasons[static_cast<size_t>(Reason::MaskCoverage)] == 0);
+    }
+    // just under the limit for a long time: no trip
+    {
+        Replay replay;
+        replay.coverage = 0.59f;
+        replay.Steps(1000);
+        assert(replay.flips == 1);
+    }
+
+    // after a trip, coverage that is under the limit but over the release level keeps the guard tripped
+    for (const float held : { 0.50f, 0.55f, 0.46f, 0.59f })
+    {
+        Replay replay;
+        replay.coverage = 0.95f;
+        replay.Steps(40);
+        replay.coverage = held;
+        replay.Steps(1000);
+        for (size_t i = 6; i < replay.runs.size(); ++i)
+            assert(replay.runs[i].reason == Reason::MaskCoverage && !replay.runs[i].swapped);
+        assert(replay.flips == 2);
+    }
+    // 29 clean samples and one in the band, over and over: never released
+    {
+        Replay replay;
+        replay.coverage = 0.95f;
+        replay.Steps(40);
+        for (int cycle = 0; cycle < 30; ++cycle)
+            for (int i = 0; i < 30; ++i)
+            {
+                replay.coverage = (i == 29) ? 0.50f : 0.10f;
+                replay.Step();
+            }
+        for (size_t i = 6; i < replay.runs.size(); ++i)
+            assert(!replay.runs[i].swapped);
+        assert(replay.flips == 2);
+    }
 }
 } // namespace
 
@@ -595,7 +803,11 @@ int main()
     TestNoFrameGenerationGoesOff();
     TestSummary();
     TestCoverage();
-    TestReplayFlappingToday();
+    TestProbeKeepsStaging();
+    TestProbePrecedence();
+    TestReplayNoBurst();
+    TestReleaseIsSeamless();
+    TestHysteresisBand();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
     return 0;
 }

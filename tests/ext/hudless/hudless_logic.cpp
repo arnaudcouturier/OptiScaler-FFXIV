@@ -1,5 +1,5 @@
 // S10 package B: the pure engine logic (ext/hudless/HudlessLogic.h): fallback reasons, the displayed-state tracker with
-// hysteresis, the mask-coverage guard (trip, retry timing, "unknown"), the slot ring with reader fences (never overwrite
+// hysteresis, the mask-coverage guard (trip, release, starvation, "unknown"), the slot ring with reader fences (never overwrite
 // a busy slot, never block) and the exact log line formats of docs/HUDLESS.md section 5.
 #include "ext/hudless/HudlessLogic.h"
 
@@ -129,10 +129,12 @@ void TestCoverageGuard()
     struct Rig
     {
         CoverageGuard g;
-        uint64_t frame = 0, seq = 0;
+        uint64_t seq = 0;
         Rig() { g.Configure(0.60f); }
-        void Fresh(float coverage) { ++frame; g.Update(frame, coverage, ++seq); } // a new readback completed
-        void Stale(float coverage) { ++frame; g.Update(frame, coverage, seq); }   // the same readback read again
+        // a new readback completed / the same readback read again; `probed` = the previous present took a capture
+        // while tripped (the engine only counts those towards starvation)
+        void Fresh(float coverage, bool probed = false) { g.Update(coverage, ++seq, probed); }
+        void Stale(float coverage, bool probed = false) { g.Update(coverage, seq, probed); }
     };
 
     // Trips after 5 consecutive fresh samples over the limit
@@ -145,16 +147,15 @@ void TestCoverageGuard()
     }
     a.Fresh(0.9f); // 5th sample over the limit
     assert(a.g.Blocking() && a.g.Trips() == 1);
-    const uint64_t trippedAt = a.frame;
 
-    // Blocks for kRetryFrames, then retries; the readbacks seen so far are stale until a newer sequence arrives
-    for (int i = 1; i < CoverageGuard::kRetryFrames; ++i)
+    // Tripped, no readback arrives: the guard holds until kStarveFrames PROBED presents went by (the starvation release
+    // is covered in TestCoverageGuardStarvation), then it lets go and the old readback stays stale
+    for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
     {
-        a.Stale(0.9f);
+        a.Stale(0.9f, true);
         assert(a.g.Blocking());
     }
-    a.Stale(0.9f);
-    assert(a.frame == trippedAt + CoverageGuard::kRetryFrames);
+    a.Stale(0.9f, true);
     assert(!a.g.Blocking());
     for (int i = 0; i < 30; ++i)
     {
@@ -228,11 +229,11 @@ void TestCoverageGuard()
     u.Configure(0.60f);
     for (uint64_t i = 1; i <= 20; ++i)
     {
-        u.Update(i, -1.f, 0);
+        u.Update(-1.f, 0);
         assert(!u.Blocking());
         assert(u.Unknown() == (i >= static_cast<uint64_t>(CoverageGuard::kUnknownFrames)));
     }
-    u.Update(21, 0.1f, 100); // a readback completes
+    u.Update(0.1f, 100); // a readback completes
     assert(!u.Unknown());
 
     // A producer that never stamps the sequence (0) is "unknown", whatever the coverage says: fail open
@@ -240,7 +241,7 @@ void TestCoverageGuard()
     unstamped.Configure(0.60f);
     for (uint64_t i = 1; i <= 30; ++i)
     {
-        unstamped.Update(i, 0.99f, 0);
+        unstamped.Update(0.99f, 0);
         assert(!unstamped.Blocking());
     }
     assert(unstamped.Unknown());
@@ -250,7 +251,7 @@ void TestCoverageGuard()
     late.Configure(0.60f);
     for (uint64_t i = 1; i <= 10; ++i)
     {
-        late.Update(i, 0.9f, 500);
+        late.Update(0.9f, 500);
         assert(!late.Blocking());
     }
 
@@ -258,8 +259,222 @@ void TestCoverageGuard()
     CoverageGuard off;
     off.Configure(0.f);
     for (uint64_t i = 1; i <= 50; ++i)
-        off.Update(i, 1.0f, i);
+        off.Update(1.0f, i);
     assert(!off.Blocking() && !off.Unknown());
+}
+
+// A guard (limit 0.60, release level 0.45) tripped by five fresh samples at 0.9; the baseline sample comes first
+struct Tripped
+{
+    CoverageGuard g;
+    uint64_t seq = 0;
+    Tripped()
+    {
+        g.Configure(0.60f);
+        Fresh(0.9f); // baseline
+        for (int i = 0; i < CoverageGuard::kTripFrames; ++i)
+            Fresh(0.9f);
+        assert(g.Blocking() && g.Trips() == 1);
+    }
+    void Fresh(float coverage, bool probed = true) { g.Update(coverage, ++seq, probed); }
+    void Stale(float coverage, bool probed = true) { g.Update(coverage, seq, probed); }
+};
+
+void TestCoverageGuardRelease()
+{
+    static_assert(CoverageGuard::kReleaseSamples == 30 && CoverageGuard::kTripFrames == 5);
+
+    // 29 clean samples do not release, the 30th does
+    {
+        Tripped t;
+        for (int i = 0; i < CoverageGuard::kReleaseSamples - 1; ++i)
+        {
+            t.Fresh(0.40f);
+            assert(t.g.Blocking());
+        }
+        t.Fresh(0.40f);
+        assert(!t.g.Blocking());
+        assert(t.g.Trips() == 1);
+    }
+
+    // The release level is 0.75 x the limit: just under it counts, just over it does not
+    {
+        Tripped t;
+        for (int i = 0; i < 100; ++i)
+            t.Fresh(0.46f);
+        assert(t.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kReleaseSamples; ++i)
+            t.Fresh(0.44f);
+        assert(!t.g.Blocking());
+    }
+
+    // A fresh sample above the release level resets the count (the 30 samples must be consecutive)
+    {
+        Tripped t;
+        for (int i = 0; i < 29; ++i)
+            t.Fresh(0.10f);
+        t.Fresh(0.50f); // one in the band: back to zero
+        for (int i = 0; i < 29; ++i)
+        {
+            t.Fresh(0.10f);
+            assert(t.g.Blocking());
+        }
+        t.Fresh(0.10f);
+        assert(!t.g.Blocking());
+    }
+
+    // The band between the release level and the limit holds the state, however long it lasts; so does a value over the
+    // limit
+    {
+        Tripped t;
+        for (int i = 0; i < 500; ++i)
+        {
+            t.Fresh(0.50f);
+            assert(t.g.Blocking());
+        }
+        for (int i = 0; i < 100; ++i)
+            t.Fresh(i % 2 ? 0.50f : 0.95f);
+        assert(t.g.Blocking() && t.g.Trips() == 1);
+        // 29 clean, one in the band, repeated: never released
+        for (int round = 0; round < 10; ++round)
+        {
+            for (int i = 0; i < 29; ++i)
+                t.Fresh(0.20f);
+            t.Fresh(0.55f);
+        }
+        assert(t.g.Blocking());
+    }
+
+    // Stale repeats of one sequence never count, probed or not (up to the starvation limit)
+    {
+        Tripped t;
+        for (int i = 0; i < 100; ++i)
+        {
+            t.Stale(0.05f, i % 2 == 0);
+            assert(t.g.Blocking());
+        }
+        // and they do not disturb a count in progress
+        Tripped u;
+        for (int i = 0; i < 29; ++i)
+            u.Fresh(0.10f);
+        for (int i = 0; i < 100; ++i)
+            u.Stale(0.9f, false);
+        assert(u.g.Blocking());
+        u.Fresh(0.10f);
+        assert(!u.g.Blocking());
+    }
+
+    // After the release the guard is a fresh guard: five consecutive fresh samples over the limit trip it again; a sample
+    // under the limit (also in the band) resets that streak
+    {
+        Tripped t;
+        for (int i = 0; i < CoverageGuard::kReleaseSamples; ++i)
+            t.Fresh(0.10f);
+        assert(!t.g.Blocking());
+        for (int i = 0; i < 4; ++i)
+            t.Fresh(0.9f);
+        t.Fresh(0.55f);
+        for (int i = 0; i < 4; ++i)
+            t.Fresh(0.9f);
+        assert(!t.g.Blocking());
+        t.Fresh(0.9f);
+        assert(t.g.Blocking() && t.g.Trips() == 2);
+    }
+
+    // A changed limit moves the release level with it
+    {
+        CoverageGuard g;
+        g.Configure(0.40f); // release level 0.30
+        uint64_t seq = 0;
+        g.Update(0.9f, ++seq);
+        for (int i = 0; i < CoverageGuard::kTripFrames; ++i)
+            g.Update(0.9f, ++seq);
+        assert(g.Blocking());
+        for (int i = 0; i < 100; ++i)
+            g.Update(0.35f, ++seq); // below the limit but above 0.75 x the limit
+        assert(g.Blocking());
+        for (int i = 0; i < CoverageGuard::kReleaseSamples; ++i)
+            g.Update(0.25f, ++seq);
+        assert(!g.Blocking());
+    }
+}
+
+void TestCoverageGuardStarvation()
+{
+    // kStarveFrames probed presents without a fresh sample release the guard
+    {
+        Tripped t;
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+        {
+            t.Stale(0.9f, true);
+            assert(t.g.Blocking());
+        }
+        t.Stale(0.9f, true);
+        assert(!t.g.Blocking());
+    }
+
+    // Presents that were not probed (no capture: loading screen, missing boundary) never count
+    {
+        Tripped t;
+        for (int i = 0; i < 100 * CoverageGuard::kStarveFrames; ++i)
+            t.Stale(0.9f, false);
+        assert(t.g.Blocking());
+        // they do not reset a starvation count either: 119 probed, a pause, the 120th probed one releases
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+            t.Stale(0.9f, true);
+        for (int i = 0; i < 1000; ++i)
+            t.Stale(0.9f, false);
+        assert(t.g.Blocking());
+        t.Stale(0.9f, true);
+        assert(!t.g.Blocking());
+    }
+
+    // A fresh sample (also one that does not release: the band, or over the limit) restarts the starvation count
+    {
+        Tripped t;
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+            t.Stale(0.9f, true);
+        t.Fresh(0.50f);
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+        {
+            t.Stale(0.9f, true);
+            assert(t.g.Blocking());
+        }
+        t.Stale(0.9f, true);
+        assert(!t.g.Blocking());
+    }
+
+    // Unknown coverage (no readback at all) counts as starvation too, and never trips
+    {
+        CoverageGuard g;
+        g.Configure(0.60f);
+        uint64_t seq = 0;
+        g.Update(0.9f, ++seq);
+        for (int i = 0; i < CoverageGuard::kTripFrames; ++i)
+            g.Update(0.9f, ++seq);
+        assert(g.Blocking());
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+            g.Update(-1.f, 0, true);
+        assert(g.Blocking());
+        g.Update(-1.f, 0, true);
+        assert(!g.Blocking() && g.Unknown());
+    }
+
+    // After the starvation release the old sequence is still stale, only a newer one counts
+    {
+        Tripped t;
+        for (int i = 0; i < CoverageGuard::kStarveFrames; ++i)
+            t.Stale(0.9f, true);
+        assert(!t.g.Blocking());
+        for (int i = 0; i < 50; ++i)
+            t.Stale(0.9f, true);
+        assert(!t.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kTripFrames - 1; ++i)
+            t.Fresh(0.9f);
+        assert(!t.g.Blocking());
+        t.Fresh(0.9f);
+        assert(t.g.Blocking() && t.g.Trips() == 2);
+    }
 }
 
 void TestSlotRing()
@@ -385,8 +600,10 @@ int main()
     TestReasons();
     TestStateTracker();
     TestCoverageGuard();
+    TestCoverageGuardRelease();
+    TestCoverageGuardStarvation();
     TestSlotRing();
     TestFormats();
-    std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, retry, unknown), slot ring fences, log formats");
+    std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown), slot ring fences, log formats");
     return 0;
 }

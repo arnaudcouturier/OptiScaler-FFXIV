@@ -754,8 +754,9 @@ void Engine::Post(Dx11wDx12SC& sc)
         AddReader(index, Access::Hudless::CopyFence(sc), Access::Hudless::LastCopyValue(sc));
 
     // Tags. Not over HDR10 output: the base is already PQ, a hud-less SDR tag would be converted behind our back (and held
-    // raw by scene HDR), and DLSS-G refuses an SDR UI image there (docs/HUDLESS.md 8).
-    if (fg != nullptr && !HdrOutput() && finalImage != nullptr)
+    // raw by scene HDR), and DLSS-G refuses an SDR UI image there (docs/HUDLESS.md 8). Not on a probing present either
+    // (the tripped guard keeps the normal base): the frame generator then gets what it gets with the mode off.
+    if (fg != nullptr && _core.WantsTags() && !HdrOutput() && finalImage != nullptr)
     {
         adapters::TagContext context;
         context.device = _device12;
@@ -797,7 +798,12 @@ void Engine::Post(Dx11wDx12SC& sc)
     const PasteAction action = _core.PasteDecision();
     bool produced = true;
     if (action == PasteAction::Produce)
-        produced = ProducePaste(sc, slot, finalImage, fg);
+    {
+        // A probing present never asked PasteReady, the only other caller of EnsureHdrStage: under HDR output the
+        // conversion resources of this slot have to be there before the paste image can be built.
+        const bool hdrReady = !_core.Probing() || !HdrOutput() || EnsureHdrStage(index);
+        produced = hdrReady && ProducePaste(sc, slot, finalImage, fg);
+    }
     else if (action == PasteAction::Invalidate)
         UiPaste::Invalidate(ReasonText(_core.PresentReason()));
 

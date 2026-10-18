@@ -54,8 +54,9 @@ struct IEngineHost
 };
 
 // What the paste producer does in PostInteropCopy: exactly one of Produce / Invalidate per ui_free present.
-//   Produce     a capture is staged. Also on PasteNotReady frames (otherwise Ready() would never become true) and on every
-//               frame whose base was swapped (the UI must come back through the paste).
+//   Produce     a capture was taken into a slot. Also on PasteNotReady frames (otherwise Ready() would never become true), on probing
+//               frames (the tripped guard needs the readbacks) and on every frame whose base was swapped (the UI must
+//               come back through the paste).
 //   Invalidate  no usable pair this present (any early fallback), or scene HDR owns the frame: stop pasting, the normal
 //               base carries its own UI. Never chosen for a swapped base.
 enum class PasteAction : uint8_t
@@ -92,8 +93,10 @@ class Core
     // PreInteropCopy. True when a capture is staged in a slot for this present.
     bool BeginPresent(Mode mode, const PasteCounters& paste)
     {
+        const bool probedLast = _probing;
         _staged = false;
         _swapped = false;
+        _probing = false;
         _reason = Reason::None;
         _mode = mode;
         _paste = paste;
@@ -129,7 +132,7 @@ class Core
         if (mode == Mode::UiFree)
         {
             _guard.Configure(_host.CoverageLimit());
-            _guard.Update(_presents, paste.coverage, paste.coverageSequence);
+            _guard.Update(paste.coverage, paste.coverageSequence, probedLast);
             if (paste.coverage >= 0.f && paste.coverageSequence != 0 && paste.coverageSequence != _lastSampledSequence)
             {
                 _lastSampledSequence = paste.coverageSequence;
@@ -158,13 +161,8 @@ class Core
             return Fail(Reason::NoSource);
         }
 
-        if (mode == Mode::UiFree)
-        {
-            if (_host.DebugCompareOn())
-                return Fail(Reason::DebugTintOn);
-            if (_guard.Blocking())
-                return Fail(Reason::MaskCoverage);
-        }
+        if (mode == Mode::UiFree && _host.DebugCompareOn())
+            return Fail(Reason::DebugTintOn);
 
         FrameImage image;
         switch (source->Take(image))
@@ -191,6 +189,15 @@ class Core
         if (const Reason stage = _host.StageCapture(image); stage != Reason::None)
             return Fail(stage);
 
+        // Tripped guard: PROBE. The source is still asked and the capture is still taken, so the paste image keeps being
+        // built and the guard keeps getting the readbacks that decide when it releases; the present just does not swap
+        // the base (and sends no tags). The failures above win over MaskCoverage, the first failure of a present counts.
+        if (mode == Mode::UiFree && _guard.Blocking())
+        {
+            _probing = true;
+            Fail(Reason::MaskCoverage);
+        }
+
         _staged = true;
         return true;
     }
@@ -200,6 +207,8 @@ class Core
     {
         if (!_active || !_staged || _mode != Mode::UiFree || _swapped)
             return _swapped;
+        if (_probing)
+            return false;
         if (!_host.PasteReady())
         {
             Fail(Reason::PasteNotReady);
@@ -285,6 +294,12 @@ class Core
 
     bool Staged() const { return _staged; }
     bool Swapped() const { return _swapped; }
+    // The guard is tripped and this present took a capture only to keep the guard fed: the base is not swapped.
+    bool Probing() const { return _probing; }
+
+    // Whether the host sends the hud-less (and UI) tags of this present to the frame generator. A probing present sends
+    // none, so the frame generator sees the same inputs as with the mode off.
+    bool WantsTags() const { return _active && _staged && !_probing; }
     Mode CurrentMode() const { return _mode; }
     Reason PresentReason() const { return _reason; }
 
@@ -328,5 +343,6 @@ class Core
     bool _active = false;
     bool _staged = false;
     bool _swapped = false;
+    bool _probing = false;
 };
 } // namespace ext::hudless

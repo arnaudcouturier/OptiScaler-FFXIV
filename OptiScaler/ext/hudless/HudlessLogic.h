@@ -298,29 +298,37 @@ class StateTracker
 
 // ---- Mask coverage guard (docs/HUDLESS.md section 5) --------------------------------------------------------------
 // Black/white fades, and presets that change pixels before the capture, make the mask cover most of the screen. The
-// guard falls back after kTripFrames consecutive readbacks over the limit and retries after kRetryFrames.
+// guard TRIPS after kTripFrames consecutive fresh readbacks over the limit and RELEASES after kReleaseSamples consecutive
+// fresh readbacks at or below the release level, limit * kReleaseFraction. While it is tripped the engine does not swap
+// the frame generation base (it "probes": the capture and the paste image keep being built, so the readbacks that decide
+// the release keep arriving). Samples between the release level and the limit hold the tripped state.
 //
 // It is driven by PasteStatus::coverageSequence, the ordinal of the paste image the published coverage was read back
 // from, so it can tell a FRESH readback from the same stale value read again:
 //   - only a new sequence counts as a sample (one per completed readback, which is one per real frame while the producer
 //     keeps up); a present without a new sequence neither adds to nor resets the over-limit streak;
 //   - "unknown" = kUnknownFrames presents in a row without a new sequence (nothing completed a readback, or the producer
-//     stopped producing): it never blocks, and the over-limit streak does not survive it;
-//   - after a retry the sequence seen at that moment is stale (the frames in between were not produced): samples count
-//     again only once a newer sequence arrives. The same baseline is taken when the guard starts, so a readback left over
-//     from an earlier session of the mode is not counted.
+//     stopped producing): it never trips, and the over-limit streak does not survive it;
+//   - STARVATION: while tripped, kStarveFrames probed presents without a fresh sample release the guard (fail open: no
+//     readbacks means nothing can ever release it otherwise). Presents that did not take a capture are not probed and do
+//     not count, so a long loading screen cannot release it;
+//   - the sequence seen when the guard starts is stale: a readback left over from an earlier session of the mode is not
+//     counted.
 // Coverage < 0 or sequence 0 is "unknown yet" and is never a sample.
 class CoverageGuard
 {
   public:
     static constexpr int kTripFrames = 5;
-    static constexpr int kRetryFrames = 120;
+    static constexpr int kReleaseSamples = 30;
+    static constexpr float kReleaseFraction = 0.75f;
+    static constexpr int kStarveFrames = 120;
     static constexpr int kUnknownFrames = 8;
 
     // limit 0 = guard off
     void Configure(float limit)
     {
         _limit = limit;
+        _release = limit * kReleaseFraction;
         if (_limit <= 0.f)
             Reset();
     }
@@ -328,16 +336,18 @@ class CoverageGuard
     void Reset()
     {
         _over = 0;
+        _clean = 0;
+        _starve = 0;
         _unknownRun = 0;
         _tripped = false;
-        _trippedAt = 0;
         _seenSequence = 0;
         _baseSet = false;
     }
 
-    // Once per armed present, before the decision. `frame` counts armed presents, `coverage` is
-    // PasteStatus::coverage (0..1, < 0 unknown), `coverageSequence` PasteStatus::coverageSequence.
-    void Update(uint64_t frame, float coverage, uint64_t coverageSequence)
+    // Once per armed present, before the decision. `coverage` is PasteStatus::coverage (0..1, < 0 unknown),
+    // `coverageSequence` PasteStatus::coverageSequence, `probedLastPresent` tells that the previous present took a capture
+    // while the guard was tripped (it produced a paste image, so a readback was due).
+    void Update(float coverage, uint64_t coverageSequence, bool probedLastPresent = false)
     {
         if (_limit <= 0.f)
             return;
@@ -348,33 +358,37 @@ class CoverageGuard
             _baseSet = true;
         }
 
-        if (_tripped)
-        {
-            if (frame - _trippedAt >= static_cast<uint64_t>(kRetryFrames))
-            {
-                _tripped = false;
-                _over = 0;
-                _unknownRun = 0;
-                _seenSequence = coverageSequence; // readbacks before the retry are stale
-            }
-            return;
-        }
-
         if (coverage < 0.f || coverageSequence == 0 || coverageSequence == _seenSequence)
         {
-            if (++_unknownRun >= kUnknownFrames)
+            if (_unknownRun < kUnknownFrames)
+                ++_unknownRun;
+            if (_unknownRun >= kUnknownFrames)
                 _over = 0;
+            if (_tripped && probedLastPresent && ++_starve >= kStarveFrames)
+                ClearTrip();
             return;
         }
 
         _seenSequence = coverageSequence;
         _unknownRun = 0;
+        _starve = 0;
+
+        if (_tripped)
+        {
+            if (coverage > _release)
+                _clean = 0; // still too much UI area, including the band up to the limit: stay tripped
+            else if (++_clean >= kReleaseSamples)
+                ClearTrip();
+            return;
+        }
+
         if (coverage > _limit)
         {
             if (++_over >= kTripFrames)
             {
                 _tripped = true;
-                _trippedAt = frame;
+                _clean = 0;
+                _starve = 0;
                 ++_trips;
             }
         }
@@ -384,18 +398,29 @@ class CoverageGuard
         }
     }
 
+    // True while tripped: the engine must not swap the frame generation base.
     bool Blocking() const { return _tripped; }
     bool Unknown() const { return _limit > 0.f && _unknownRun >= kUnknownFrames; }
     int Trips() const { return _trips; }
 
   private:
+    void ClearTrip()
+    {
+        _tripped = false;
+        _over = 0;
+        _clean = 0;
+        _starve = 0;
+    }
+
     float _limit = 0.f;
+    float _release = 0.f;
     int _over = 0;
+    int _clean = 0;
+    int _starve = 0;
     int _unknownRun = 0;
     int _trips = 0;
     bool _tripped = false;
     bool _baseSet = false;
-    uint64_t _trippedAt = 0;
     uint64_t _seenSequence = 0;
 };
 
