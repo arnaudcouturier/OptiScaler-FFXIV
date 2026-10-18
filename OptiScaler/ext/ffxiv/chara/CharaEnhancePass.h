@@ -30,6 +30,10 @@ class FxaaPass
     // Text of a permanent failure (missing interface, shader creation failed), null while the pass is usable.
     const char* Failure() const { return _failure; }
 
+    // The private output texture (the image of the last Process), or null before the first one. Owned by the pass; used by the
+    // preview image dump.
+    ID3D11Texture2D* OutputTexture() const { return _output.Get(); }
+
     UINT OutputWidth() const { return _outWidth; }
     UINT OutputHeight() const { return _outHeight; }
 

@@ -306,7 +306,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
     const uint64_t now = GetTickCount64();
     Maintain(now);
-    probe::Update(now); // switches the preview probe on or off (releasing what it holds)
+    probe::Update(now, context); // switches the preview probe on or off (releasing what it holds); while on, pumps the image dump and the command file
 
     const table::Snapshot& snap = table::Current(now);
     if (!snap.ready)

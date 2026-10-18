@@ -8,6 +8,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
@@ -35,6 +38,10 @@ void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t bytes);
 // Looks the buffer up through the swapchain on every call and keeps no reference (a retained reference would make ResizeBuffers
 // fail), so callers cache the answer; it is meant for log lines and debug probes, never for per-draw use. False when unknown.
 bool BackbufferIdentity(uintptr_t* texture, uint32_t* width, uint32_t* height, uint32_t* format);
+
+// Facts about the swapchain, the bridge, ReShade and the scene HDR switches as (key, value) text pairs, for the preview probe's
+// state.txt. Reads state only; never throws.
+std::vector<std::pair<std::string, std::string>> BridgeFacts();
 
 // Present entry (ext::dx11bridge::PresentScope constructor): refreshes the arming cache, runs the per-frame bookkeeping.
 void OnPresentBegin();

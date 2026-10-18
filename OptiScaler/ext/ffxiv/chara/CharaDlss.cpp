@@ -147,6 +147,7 @@ struct PassData
 SlotTable g_slots;
 std::array<SlotGpu, kMaxSlots> g_gpu;
 PassData g_pass;
+int g_lastEvaluatedSlot = kNoSlot; // the slot of the most recent successful evaluation (the preview image dump reads its composed image)
 ComPtr<ID3D11Device> g_device;
 ID3D11DeviceContext* g_context = nullptr; // the immediate context (valid until Detach)
 guides::Passes g_passes;
@@ -649,6 +650,7 @@ void RunSlot(int index, const DrawView& view)
         context->End(g.query.Get());
     }
     g_slots.MarkEvaluated(index, view.now, g_pass.counter);
+    g_lastEvaluatedSlot = index;
     const uint64_t n = g_evaluations.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n % kEvaluationLogEvery == 1 || n <= 3)
         LOG_INFO("CharaView DLSS: evaluations {} (slot {}, {}x{} -> {}x{})", n, index, w, h, w * ngx::kOutputScale,
@@ -1094,6 +1096,17 @@ Counters GetCounters()
     c.evaluations = g_evaluations.load(std::memory_order_relaxed);
     c.fallbacks = g_fallbacks.load(std::memory_order_relaxed);
     return c;
+}
+
+ID3D11Texture2D* ComposedTexture()
+{
+    const int index = g_lastEvaluatedSlot;
+    if (index < 0 || index >= static_cast<int>(kMaxSlots))
+        return nullptr;
+    const SlotState& s = g_slots.Slot(index);
+    if (!s.Used() || !s.everEvaluated || s.failed)
+        return nullptr;
+    return g_gpu[static_cast<size_t>(index)].composed.texture.Get();
 }
 
 const char* StatusNote()

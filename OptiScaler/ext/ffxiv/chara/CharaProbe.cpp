@@ -2,8 +2,13 @@
 
 #include "ext/ffxiv/chara/CharaProbe.h"
 
+#include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaDlssApi.h"
+#include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaProbeDump.h"
+#include "ext/ffxiv/chara/CharaProbeFiles.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaProbeRules.h"
 #include "ext/ffxiv/chara/CharaStats.h"
@@ -12,6 +17,7 @@
 #include "ext/ffxiv/ui/UiDiagFormat.h"
 
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -29,6 +35,9 @@ constexpr uint32_t kMaxSwapLines = 64;       // consumer swap traces over the se
 constexpr uint32_t kScreenClassWidth = 3000; // "3840x2160-class" render target: render-target capable and at least this large
 constexpr uint32_t kScreenClassHeight = 1700;
 constexpr UINT kScanSlots = 8;               // pixel-shader resources compared per draw
+constexpr uint64_t kTickMs = 100;            // dump pump and request handling cadence
+constexpr uint64_t kExtraImageMs = 2000;     // a preview output other than entry 0 is dumped when a draw sampled it this recently
+constexpr size_t kMaxExtraImages = 3;
 
 struct BackbufferInfo
 {
@@ -39,10 +48,67 @@ struct BackbufferInfo
     uint32_t format = 0;
 };
 
+// The last resource a draw was seen sampling for each preview output (table entries 0..7), kept alive for the dump.
+struct Held
+{
+    ComPtr<ID3D11Resource> resource;
+    uint64_t lastSampled = 0;
+};
+
+// One preview or preview-derived texture a draw sampled (pointer values only, no reference).
+struct HitFact
+{
+    UINT slot = 0;
+    uintptr_t texture = 0;
+    int entry = -1;
+    bool derived = false;
+    int sourceEntry = -1;
+    uint32_t hops = 0;
+    DerivedKind kind = DerivedKind::Copy;
+};
+
+// Facts of the last draw that sampled the preview or a texture derived from it.
+struct DrawFacts
+{
+    bool valid = false;
+    uint64_t serial = 0; // OnDraw call number: equal to the serial of a swap means the same draw
+    uint64_t tick = 0;
+    DrawApi api = DrawApi::Draw;
+    bool crcKnown = false;
+    uint32_t crc = 0;
+    uint32_t shaderSize = 0;
+    uint32_t roles = 0;
+    bool haveTarget = false;
+    uintptr_t target = 0;
+    uint32_t targetWidth = 0;
+    uint32_t targetHeight = 0;
+    uint32_t targetFormat = 0;
+    int backbuffer = -1; // 1 the target is the swapchain buffer, 0 it is not, -1 not known
+    int viewportWidth = 0;
+    int viewportHeight = 0;
+    size_t hitCount = 0;
+    std::array<HitFact, 8> hits {};
+};
+
+struct StoredSwap
+{
+    bool valid = false;
+    SwapRecord record;
+    DrawFacts draw;       // the facts of the last sampler draw at the time of the report
+    bool sameDraw = false; // that draw is the one that was swapped
+    uint64_t tick = 0;
+    uint64_t count = 0;
+};
+
 struct State
 {
     bool on = false;    // PreviewProbe: log lines, sink, counters
     bool flood = false; // PreviewDebugFlood: the scan runs on every draw and copies are followed (silently), so the flood reaches copies
+    std::array<Held, 8> held;
+    DrawFacts lastDraw;
+    std::array<StoredSwap, 3> lastSwap; // by SwapKind
+    uint64_t drawSerial = 0;
+    uint64_t lastTick = 0;
     DerivedSet derived;
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
@@ -78,16 +144,9 @@ const char* UsageText(D3D11_USAGE usage)
 
 const char* YesNo(bool v) { return v ? "yes" : "no"; }
 
-std::filesystem::path OutputDirectory()
-{
-    wchar_t path[32768] {};
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&OutputDirectory), &module) ||
-        !GetModuleFileNameW(module, path, 32768))
-        return {};
-    return std::filesystem::path(path).parent_path() / "OptiScaler" / "PreviewDebug";
-}
+// A dump request from the menu thread (or a command): the draw thread starts it from Update. g_onFlag mirrors State::on for the menu.
+std::atomic<bool> g_dumpPending { false };
+std::atomic<bool> g_onFlag { false };
 
 // The swapchain buffer, looked up at most every kBackbufferCacheMs and once per presented frame when the bridge reports frames
 // (a swapchain with several buffers may hand out a different texture each frame). Only the pointer value and the size are kept.
@@ -111,23 +170,32 @@ constexpr bool IsPreviewEntry(int entry) { return entry >= 0 && entry < kPreview
 
 // ---- Consumer swap trace (sink of SwapTrace) -----------------------------------------------------------------------------------
 
-// A trace is taken once per burst of preview activity and kind of swap.
-bool ArmSwap(SwapKind kind)
+// Every swap is traced while the probe is on (state.txt shows the last one of each kind); only the log line is limited to once per
+// burst of preview activity and kind, and to kMaxSwapLines in all.
+bool ArmSwap(SwapKind)
 {
-    State& s = S();
-    if (!s.on || g_stats.probeSwapLines.load(std::memory_order_relaxed) >= kMaxSwapLines)
-        return false;
-    const size_t k = static_cast<size_t>(kind);
-    const uint32_t burst = identify::BurstNumber();
-    if (k >= s.swapSeen.size() || (s.swapSeen[k] && s.swapBurst[k] == burst))
-        return false;
-    s.swapSeen[k] = true;
-    s.swapBurst[k] = burst;
-    return true;
+    return S().on;
 }
 
 void ReportSwap(const SwapRecord& r)
 {
+    State& s = S();
+    const size_t k = static_cast<size_t>(r.kind);
+    if (k >= s.lastSwap.size())
+        return;
+    StoredSwap& stored = s.lastSwap[k];
+    stored.valid = true;
+    stored.record = r;
+    stored.draw = s.lastDraw;
+    stored.sameDraw = s.lastDraw.valid && s.lastDraw.serial == s.drawSerial;
+    stored.tick = GetTickCount64();
+    ++stored.count;
+
+    const uint32_t burst = identify::BurstNumber();
+    if (g_stats.probeSwapLines.load(std::memory_order_relaxed) >= kMaxSwapLines || (s.swapSeen[k] && s.swapBurst[k] == burst))
+        return;
+    s.swapSeen[k] = true;
+    s.swapBurst[k] = burst;
     ++g_stats.probeSwapLines;
     LOG_INFO("CharaView probe: consumer swap [{}]: t{} before {:#x} after-swap {:#x} after-draw {:#x} (replacement {:#x})",
              SwapKindName(r.kind), r.slot, r.before, r.afterSwap, r.afterDraw, r.replacement);
@@ -137,7 +205,8 @@ const SwapSink kSink { &ArmSwap, &ReportSwap };
 
 // ---- Switching ------------------------------------------------------------------------------------------------------------
 
-void ForgetAll()
+// The derived textures, the cached backbuffer and the per-burst trace limits (what the `reset` command forgets too).
+void ForgetDerived()
 {
     State& s = S();
     s.derived.Clear();
@@ -148,12 +217,31 @@ void ForgetAll()
     g_stats.probeDerivedLive.store(0, std::memory_order_relaxed);
 }
 
+// Everything the probe holds: the preview textures kept for the dump, a dump that is in flight and a request that is waiting.
+void ReleaseHeld()
+{
+    State& s = S();
+    for (Held& h : s.held)
+        h = Held {};
+    s.lastDraw = DrawFacts {};
+    s.lastSwap = {};
+    g_dumpPending.store(false, std::memory_order_relaxed);
+    dump::Release();
+}
+
+void ForgetAll()
+{
+    ForgetDerived();
+    ReleaseHeld();
+}
+
 void SwitchOff(const char* why)
 {
     State& s = S();
     g_swapSink.store(nullptr, std::memory_order_relaxed);
     detail::g_live.store(s.flood, std::memory_order_relaxed);
     s.on = false;
+    g_onFlag.store(false, std::memory_order_relaxed);
     LOG_INFO("CharaView probe: off ({}); copy cases logged {}, sampler cases logged {}, consumer swap traces {}, derived textures seen {}",
              why, g_stats.probeCopyLines.load(), g_stats.probeSamplerLines.load(), g_stats.probeSwapLines.load(),
              g_stats.probeDerivedAdded.load());
@@ -296,9 +384,269 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
         LOG_INFO("CharaView probe: the limit of {} copy cases is reached; further new cases are only counted", kCopyCaseCap);
 }
 
+// ---- Preview image dump and state.txt --------------------------------------------------------------------------------------------
+
+std::string PointerText(uintptr_t pointer) { return std::format("{:#x}", pointer); }
+
+std::string TextureText(uintptr_t pointer, uint32_t width, uint32_t height, const std::string& format)
+{
+    return std::format("{} {}x{} format {}", PointerText(pointer), width, height, format);
+}
+
+void AddDrawFacts(StateText& t, const std::string& prefix, const DrawFacts& f, uint64_t now)
+{
+    t.AddBool(prefix + ".valid", f.valid);
+    if (!f.valid)
+        return;
+    t.Add(prefix + ".ageMs", now >= f.tick ? now - f.tick : 0);
+    t.Add(prefix + ".api", DrawApiName(f.api));
+    t.Add(prefix + ".pixelShaderCrc", f.crcKnown ? std::format("{:08X}", f.crc) : std::string("unknown (shader made before the hooks)"));
+    t.Add(prefix + ".pixelShaderBytes", f.crcKnown ? std::to_string(f.shaderSize) : std::string("unknown"));
+    t.Add(prefix + ".roles", std::format("{:#x}", f.roles));
+    t.Add(prefix + ".renderTarget",
+          f.haveTarget ? TextureText(f.target, f.targetWidth, f.targetHeight, FormatText(f.targetFormat)) : std::string("none"));
+    t.Add(prefix + ".renderTargetIsBackbuffer", f.backbuffer < 0 ? "unknown" : (f.backbuffer ? "yes" : "no"));
+    t.Add(prefix + ".viewport", std::format("{}x{}", f.viewportWidth, f.viewportHeight));
+    std::string srvs;
+    for (size_t n = 0; n < f.hitCount; ++n)
+    {
+        const HitFact& h = f.hits[n];
+        if (!srvs.empty())
+            srvs += "; ";
+        srvs += std::format("t{} {} ({})", h.slot, PointerText(h.texture),
+                            h.derived ? std::format("{} of entry {}, hops {}", h.kind == DerivedKind::Draw ? "draw" : "copy", h.sourceEntry, h.hops)
+                                      : std::format("preview entry {}", h.entry));
+    }
+    t.Add(prefix + ".previewResources", srvs.empty() ? std::string("none") : srvs);
+}
+
+// The text of state.txt (also written alone by the `state` command). Draw thread.
+std::string BuildState(uint64_t now)
+{
+    State& s = S();
+    StateText t;
+    t.Add("state.time", LogTimeNow());
+    t.Add("state.tickMs", now);
+    const std::filesystem::path optiscaler = dump::OptiScalerDirectory();
+    t.Add("game.folder", optiscaler.empty() ? std::string("unknown") : Utf8(optiscaler.parent_path()));
+    t.AddBool("probe.on", s.on);
+    t.AddBool("probe.floodActive", s.flood);
+    t.AddBool("probe.copyTracking", s.derived.CopiesEnabled());
+
+    const auto& cfg = ext::Cfg().ffxiv.chara;
+    const auto onOff = [](bool v) { return v ? "on" : "off"; };
+    t.Add("config.FFXIV.PreviewDLSS", onOff(cfg.previewDlss.value_or_default()));
+    t.Add("config.FFXIV.PreviewAA", onOff(cfg.previewAA.value_or_default()));
+    t.Add("config.FFXIV.PreviewUpscale", onOff(cfg.previewUpscale.value_or_default()));
+    t.Add("config.FFXIV.PreviewGuideCapture", onOff(cfg.previewGuideCapture.value_or_default()));
+    t.Add("config.FFXIV.PreviewDebugTint", onOff(cfg.previewDebugTint.value_or_default()));
+    t.Add("config.HDR.PreviewNRTrace", onOff(cfg.previewNrTrace.value_or_default()));
+    t.Add("config.FFXIV.PreviewProbe", onOff(cfg.previewProbe.value_or_default()));
+    t.Add("config.FFXIV.PreviewDebugFlood", onOff(cfg.previewDebugFlood.value_or_default()));
+
+    for (const auto& fact : ext::ffxiv::ui::BridgeFacts())
+        t.Add(fact.first, fact.second);
+
+    const auto count = [](const std::atomic<uint64_t>& v) { return v.load(std::memory_order_relaxed); };
+    t.Add("counters.frames", count(g_stats.frames));
+    t.Add("counters.drawsClassified", count(g_stats.classified));
+    t.Add("counters.passes", count(g_stats.passes));
+    t.Add("counters.passesLive", count(g_stats.passesLive));
+    t.Add("counters.finisherAccepted", count(g_stats.finisherAccepted));
+    t.Add("counters.finisherRejected", count(g_stats.finisherRejected));
+    t.Add("counters.equipShaderSeen", count(g_stats.equipShaderSeen));
+    t.Add("counters.equipMatched", count(g_stats.equipMatched));
+    t.Add("counters.aaDrawsProcessed", count(g_stats.aaProcessed));
+    t.Add("counters.aaSkipped", count(g_stats.aaSkipped));
+    t.Add("counters.deferredSeen", count(g_stats.deferredSeen));
+    t.Add("counters.slotsAcquired", count(g_stats.slotsAcquired));
+    t.Add("counters.consumerSwaps", count(g_stats.consumerSwaps));
+    t.Add("counters.floodSwaps", count(g_stats.floodSwaps));
+    t.Add("counters.tintApplications", count(g_stats.tintApplied));
+    t.Add("counters.probeDrawsScanned", count(g_stats.probeScanned));
+    t.Add("counters.probeSamplerDraws", count(g_stats.probeSamplerDraws));
+    t.Add("counters.probeCopiesSeen", count(g_stats.probeCopies));
+    t.Add("counters.probeCopiesNotFollowed", count(g_stats.probeCopiesRefused));
+    t.Add("counters.probeDerivedAdded", count(g_stats.probeDerivedAdded));
+    t.Add("counters.probeCopyLines", g_stats.probeCopyLines.load(std::memory_order_relaxed));
+    t.Add("counters.probeSamplerLines", g_stats.probeSamplerLines.load(std::memory_order_relaxed));
+    t.Add("counters.probeSwapLines", g_stats.probeSwapLines.load(std::memory_order_relaxed));
+
+    const dlss::Counters dc = dlss::GetCounters();
+    t.Add("dlss.activeSlots", dc.activeSlots);
+    t.Add("dlss.evaluations", dc.evaluations);
+    t.Add("dlss.fallbacks", dc.fallbacks);
+    const char* note = dlss::StatusNote();
+    t.Add("dlss.status", note != nullptr && note[0] != '\0' ? note : "no note");
+    t.AddBool("dlss.composedImageAvailable", dlss::ComposedTexture() != nullptr);
+    t.AddBool("aa.outputImageAvailable", enhance::OutputTexture() != nullptr);
+
+    // The table: pointers only, never dereferenced. The format is known for the entries a draw was seen sampling.
+    const table::Snapshot& snap = table::Current(now);
+    t.AddBool("table.ready", snap.ready);
+    t.Add("table.validEntries", snap.ValidCount());
+    for (size_t i = 0; i < table::kEntries; ++i)
+    {
+        const table::Entry& e = snap.entries[i];
+        const std::string key = "table.entry." + std::to_string(i);
+        if (!e.Valid())
+        {
+            t.Add(key, std::string("empty (") + table::EntryRole(i) + ")");
+            continue;
+        }
+        std::string format = "unknown";
+        if (i < s.held.size() && reinterpret_cast<uintptr_t>(s.held[i].resource.Get()) == e.resource)
+        {
+            ComPtr<ID3D11Texture2D> texture;
+            D3D11_TEXTURE2D_DESC desc {};
+            if (SUCCEEDED(s.held[i].resource.As(&texture)))
+            {
+                texture->GetDesc(&desc);
+                format = FormatText(static_cast<uint32_t>(desc.Format));
+            }
+        }
+        t.Add(key, TextureText(e.resource, e.width, e.height, format) + " (" + table::EntryRole(i) + ")");
+    }
+    for (size_t i = 0; i < s.held.size(); ++i)
+    {
+        const Held& h = s.held[i];
+        if (h.resource == nullptr)
+            continue;
+        ComPtr<ID3D11Texture2D> texture;
+        D3D11_TEXTURE2D_DESC desc {};
+        std::string shape = "not a 2D texture";
+        if (SUCCEEDED(h.resource.As(&texture)))
+        {
+            texture->GetDesc(&desc);
+            shape = std::format("{}x{} format {}", desc.Width, desc.Height, FormatText(static_cast<uint32_t>(desc.Format)));
+        }
+        const bool current = reinterpret_cast<uintptr_t>(h.resource.Get()) == snap.entries[i].resource;
+        t.Add("held.entry." + std::to_string(i),
+              std::format("{} {}, last sampled {} ms ago, {} the table entry now", PointerText(reinterpret_cast<uintptr_t>(h.resource.Get())), shape,
+                          now >= h.lastSampled ? now - h.lastSampled : 0, current ? "same as" : "NOT the same as"));
+    }
+
+    const std::vector<Derived> live = s.derived.Live(now);
+    t.Add("derived.count", live.size());
+    for (size_t i = 0; i < live.size(); ++i)
+    {
+        const Derived& d = live[i];
+        t.Add("derived." + std::to_string(i),
+              std::format("{} {}x{} format {}, from preview entry {}, hops {}, kind {}, first seen {} ms ago, last seen {} ms ago",
+                          PointerText(d.ptr), d.info.width, d.info.height, FormatText(d.info.format), d.sourceEntry, d.hops,
+                          d.kind == DerivedKind::Draw ? "render target of a draw" : "copy", now >= d.firstSeen ? now - d.firstSeen : 0,
+                          now >= d.lastSeen ? now - d.lastSeen : 0));
+    }
+
+    AddDrawFacts(t, "lastSamplerDraw", s.lastDraw, now);
+    for (size_t k = 0; k < s.lastSwap.size(); ++k)
+    {
+        const StoredSwap& sw = s.lastSwap[k];
+        const std::string prefix = std::string("lastSwap.") + SwapKindName(static_cast<SwapKind>(k));
+        t.AddBool(prefix + ".seen", sw.valid);
+        if (!sw.valid)
+            continue;
+        t.Add(prefix + ".count", sw.count);
+        t.Add(prefix + ".ageMs", now >= sw.tick ? now - sw.tick : 0);
+        t.Add(prefix + ".slot", std::format("t{}", sw.record.slot));
+        t.Add(prefix + ".srvBeforeSwap", PointerText(sw.record.before));
+        t.Add(prefix + ".srvAfterSwap", PointerText(sw.record.afterSwap));
+        t.Add(prefix + ".srvAfterDraw", PointerText(sw.record.afterDraw));
+        t.Add(prefix + ".replacementView", PointerText(sw.record.replacement));
+        t.AddBool(prefix + ".drawFactsAreFromTheSwappedDraw", sw.sameDraw);
+        AddDrawFacts(t, prefix + ".draw", sw.draw, now);
+    }
+
+    const dump::Status status = dump::GetStatus();
+    t.Add("output.folder", Utf8(dump::OutputRoot()));
+    t.Add("output.dumpsWritten", status.dumps);
+    t.Add("output.dumpsRefused", status.refusals);
+    t.Add("output.filesWritten", status.files);
+    t.Add("output.bytesWritten", status.bytes);
+    t.Add("output.limits", std::format("{} files, {} per session", kMaxFiles, SizeText(kMaxBytes)));
+    return t.Str();
+}
+
+// Starts the dump of the preview images (draw thread). Returns the result text.
+std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
+{
+    State& s = S();
+    std::vector<ComPtr<ID3D11Texture2D>> keep; // the held resources as textures, alive until Begin has made its copies
+    std::vector<dump::Source> sources;
+
+    const auto asTexture = [&keep](const Held& h) -> ID3D11Texture2D*
+    {
+        ComPtr<ID3D11Texture2D> texture;
+        if (h.resource == nullptr || FAILED(h.resource.As(&texture)))
+            return nullptr;
+        keep.push_back(texture);
+        return texture.Get();
+    };
+
+    {
+        dump::Source source;
+        source.name = "native";
+        source.texture = asTexture(s.held[0]);
+        source.missing = "no draw has been seen sampling preview output entry 0 since the probe was switched on";
+        sources.push_back(std::move(source));
+    }
+    size_t extras = 0;
+    for (size_t e = 1; e < s.held.size() && extras < kMaxExtraImages; ++e)
+    {
+        const Held& h = s.held[e];
+        if (h.resource == nullptr || now < h.lastSampled || now - h.lastSampled > kExtraImageMs)
+            continue;
+        dump::Source source;
+        source.name = "native-" + std::to_string(e);
+        source.texture = asTexture(h);
+        if (source.texture == nullptr)
+            continue;
+        sources.push_back(std::move(source));
+        ++extras;
+    }
+    sources.push_back({ "aa", enhance::OutputTexture(), "the spatial AA has not produced an image" });
+    sources.push_back({ "dlss", dlss::ComposedTexture(), "the DLSS path has no evaluated preview image" });
+
+    std::string why;
+    if (!dump::Begin(context, sources, BuildState(now), now, why))
+        return "refused, " + why;
+    return "ok, saving the preview images; the files are written when the GPU has finished the copies (a few frames)";
+}
+
+void PumpDump(ID3D11DeviceContext* context, uint64_t now)
+{
+    if (!dump::InFlight())
+        return;
+    if (const std::optional<DumpOutcome> outcome = dump::Pump(context, now))
+        LOG_INFO("CharaView probe: preview images: {}", outcome->message);
+}
+
+// Every kTickMs while the probe is on (called from Update on the draw thread, immediate context only).
+void Tick(ID3D11DeviceContext* context, uint64_t now)
+{
+    State& s = S();
+    if (now >= s.lastTick && now - s.lastTick < kTickMs)
+        return;
+    s.lastTick = now;
+    try
+    {
+        PumpDump(context, now);
+        if (g_dumpPending.exchange(false, std::memory_order_relaxed))
+        {
+            const std::string result = StartDump(context, now);
+            dump::SetMessage(result);
+            LOG_INFO("CharaView probe: save preview images: {}", result);
+        }
+    }
+    catch (...)
+    {
+        dump::SetMessage("failed, an error stopped the request");
+    }
+}
+
 } // namespace
 
-void Update(uint64_t now)
+void Update(uint64_t now, ID3D11DeviceContext* context)
 {
     State& s = S();
 
@@ -330,14 +678,16 @@ void Update(uint64_t now)
         ForgetAll();
         detail::g_lastActivity.store(0, std::memory_order_relaxed);
         s.on = true;
+        g_onFlag.store(true, std::memory_order_relaxed);
         s.lastGauge = 0;
+        s.lastTick = 0;
         detail::g_live.store(true, std::memory_order_relaxed);
         g_swapSink.store(&kSink, std::memory_order_relaxed);
-        const std::filesystem::path folder = OutputDirectory();
+        const std::filesystem::path folder = dump::OutputRoot();
         LOG_INFO("CharaView probe: on (copy tracking {}, output folder {}); every distinct copy of the preview and every distinct draw "
                  "that samples it or a copy of it is logged once, with lines that start with \"CharaView probe:\" (at most {} copy and {} "
                  "sampler cases)",
-                 s.derived.CopiesEnabled() ? "on" : "off", folder.empty() ? std::string("unknown") : folder.string(), kCopyCaseCap,
+                 s.derived.CopiesEnabled() ? "on" : "off", folder.empty() ? std::string("unknown") : Utf8(folder), kCopyCaseCap,
                  kSamplerCaseCap);
         return;
     }
@@ -346,6 +696,31 @@ void Update(uint64_t now)
         s.lastGauge = now;
         g_stats.probeDerivedLive.store(static_cast<uint32_t>(s.derived.Count(now)), std::memory_order_relaxed);
     }
+    if (s.on && context != nullptr)
+        Tick(context, now);
+}
+
+bool RequestDump()
+{
+    if (!g_onFlag.load(std::memory_order_relaxed) || dump::InFlight())
+        return false;
+    bool expected = false;
+    return g_dumpPending.compare_exchange_strong(expected, true, std::memory_order_relaxed);
+}
+
+DumpStatus GetDumpStatus()
+{
+    DumpStatus out;
+    out.probeOn = g_onFlag.load(std::memory_order_relaxed);
+    const dump::Status status = dump::GetStatus();
+    out.busy = g_dumpPending.load(std::memory_order_relaxed) || status.inFlight;
+    out.dumps = status.dumps;
+    out.refusals = status.refusals;
+    out.files = status.files;
+    out.bytes = status.bytes;
+    out.lastFolder = status.lastFolder;
+    out.lastMessage = status.lastMessage;
+    return out;
 }
 
 ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now)
@@ -363,7 +738,10 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
         return result;
 
     if (s.on)
+    {
         ++g_stats.probeScanned;
+        ++s.drawSerial;
+    }
     ID3D11ShaderResourceView* views[kScanSlots] {};
     context->PSGetShaderResources(0, kScanSlots, views);
 
@@ -408,8 +786,20 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
         return result;
 
     if (s.on)
+    {
         ++g_stats.probeSamplerDraws;
-
+        // Keep the last resource sampled for each preview output alive for the image dump (a reference per entry 0..7).
+        for (size_t n = 0; n < count; ++n)
+        {
+            const ScanHit& h = result.hits[n];
+            if (h.derived || !IsPreviewEntry(h.entry))
+                continue;
+            Held& held = s.held[static_cast<size_t>(h.entry)];
+            held.lastSampled = now;
+            if (held.resource.Get() != h.resource.Get())
+                held.resource = h.resource;
+        }
+    }
     // The draw samples a preview image: read where it renders. Only draws that matched get here.
     ComPtr<ID3D11RenderTargetView> rtv;
     context->OMGetRenderTargets(1, &rtv, nullptr);
@@ -444,6 +834,31 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
         context->RSGetViewports(&viewportCount, &viewport);
         if (viewportCount < 1)
             viewport = D3D11_VIEWPORT {};
+
+        DrawFacts facts;
+        facts.valid = true;
+        facts.serial = s.drawSerial;
+        facts.tick = now;
+        facts.api = api;
+        facts.crcKnown = shader.known;
+        facts.crc = shader.crc;
+        facts.shaderSize = shader.size;
+        facts.roles = roles;
+        facts.haveTarget = haveTarget;
+        facts.target = rtPointer;
+        facts.targetWidth = rtDesc.Width;
+        facts.targetHeight = rtDesc.Height;
+        facts.targetFormat = static_cast<uint32_t>(rtDesc.Format);
+        facts.backbuffer = bb.valid ? (targetIsBackbuffer ? 1 : 0) : -1;
+        facts.viewportWidth = static_cast<int>(viewport.Width);
+        facts.viewportHeight = static_cast<int>(viewport.Height);
+        facts.hitCount = count;
+        for (size_t n = 0; n < count; ++n)
+        {
+            const ScanHit& h = result.hits[n];
+            facts.hits[n] = { h.slot, h.texture, h.entry, h.derived, h.sourceEntry, h.hops, h.kind };
+        }
+        s.lastDraw = facts;
 
         for (size_t n = 0; n < count; ++n)
         {
@@ -537,10 +952,15 @@ void OnResolve(ID3D11DeviceContext*, ID3D11Resource* dest, UINT destSub, ID3D11R
 
 void Reset()
 {
+    // Not released here: the preview textures kept for the dump, a dump in flight and the session's output budget.
     State& s = S();
-    ForgetAll();
+    ForgetDerived();
+    s.lastDraw = DrawFacts {};
+    s.lastSwap = {};
     s.copyCases.Clear();
     s.samplerCases.Clear();
+    g_stats.tintApplied = 0;
+    g_stats.floodSwaps = 0;
     g_stats.probeScanned = 0;
     g_stats.probeSamplerDraws = 0;
     g_stats.probeCopies = 0;

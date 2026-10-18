@@ -5,6 +5,7 @@
 #include "ext/core/MenuWidgets.h"
 #include "ext/ffxiv/chara/CharaDiag.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
+#include "ext/ffxiv/chara/CharaProbe.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/game/Game.h"
@@ -83,6 +84,22 @@ void DrawCharaCard(ext::menu::Ctx&)
         ImGui::TextDisabled("Probe: %llu copies of the preview followed, %llu draws sampled the preview or a copy",
                             (unsigned long long) g_stats.probeCopies.load(std::memory_order_relaxed),
                             (unsigned long long) g_stats.probeSamplerDraws.load(std::memory_order_relaxed));
+
+        const probe::DumpStatus dumpStatus = probe::GetDumpStatus();
+        ImGui::BeginDisabled(dumpStatus.busy);
+        if (ImGui::Button("Save preview images"))
+            probe::RequestDump();
+        ImGui::EndDisabled();
+        ext::menu::Tooltip("Saves the native preview image, the spatial AA result and the DLSS 2x result (whichever exist) as PNG files, "
+                           "each with its alpha channel as a separate grayscale PNG, plus state.txt, into a new time-stamped folder under "
+                           "OptiScaler\\PreviewDebug next to the game's dxgi.dll. It never waits for the GPU. At most 40 files and 300 MiB "
+                           "per session.");
+        if (dumpStatus.busy)
+            ImGui::TextDisabled("Preview images: saving...");
+        ImGui::TextDisabled("Preview images: %u files written in %u dumps, %u refused by the budget%s%s", dumpStatus.files, dumpStatus.dumps,
+                            dumpStatus.refusals, dumpStatus.lastFolder.empty() ? "" : ", last folder ", dumpStatus.lastFolder.c_str());
+        if (!dumpStatus.lastMessage.empty())
+            ImGui::TextDisabled("Last request: %s", dumpStatus.lastMessage.c_str());
     }
 
     // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.

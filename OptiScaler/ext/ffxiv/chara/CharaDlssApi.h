@@ -72,6 +72,11 @@ void Detach();
 
 Counters GetCounters();
 
+// The composed 2x image (the DLSS result with the native alpha) of the most recently evaluated preview slot, or null when that slot is
+// not live any more (released, failed, not evaluated). Borrowed: valid until the slot is released; draw thread only. Used by the
+// preview image dump.
+ID3D11Texture2D* ComposedTexture();
+
 // One line for the menu while the DLSS path is not fully available (empty when there is nothing to say).
 const char* StatusNote();
 } // namespace ext::ffxiv::chara::dlss

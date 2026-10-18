@@ -234,6 +234,8 @@ bool Around(const DrawView& view, DrawCall draw)
     return true;
 }
 
+ID3D11Texture2D* OutputTexture() { return Pass().OutputTexture(); }
+
 void Detach()
 {
     Pass().Reset();

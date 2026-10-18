@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <d3d11.h>
+#include <string>
 #include <wrl/client.h>
 
 #include "ext/ffxiv/chara/CharaDraw.h"
@@ -38,8 +39,28 @@ inline void NoteActivity(uint64_t now)
 }
 
 // Reads PreviewProbe: on a change, switches the probe on (one INFO line) or off (releases everything, one INFO line). Draw thread,
-// at the start of every dispatched draw; costs one config read and one atomic load.
-void Update(uint64_t now);
+// at the start of every dispatched draw; costs one config read and one atomic load. While the probe is on, about every 100 ms it
+// also finishes a preview image dump that is in flight, starts a requested one and (every 500 ms) polls the command file; those
+// need the immediate context (`context`, null skips them).
+void Update(uint64_t now, ID3D11DeviceContext* context = nullptr);
+
+// "Save preview images" (menu thread or command): asks for the preview images and state.txt to be saved. Executed on the draw thread
+// by Update. False when the probe is off or a request is already waiting or in flight.
+bool RequestDump();
+
+// What the menu shows about the dumps (any thread).
+struct DumpStatus
+{
+    bool probeOn = false;
+    bool busy = false;        // a request is waiting or a dump is in flight
+    uint32_t dumps = 0;       // dumps that wrote files this session
+    uint32_t refusals = 0;    // dumps refused by the output budget
+    uint32_t files = 0;       // files written this session
+    uint64_t bytes = 0;
+    std::string lastFolder;   // empty until a dump was written
+    std::string lastMessage;  // outcome of the last request
+};
+DumpStatus GetDumpStatus();
 
 // One of the first eight pixel-shader resources that is a preview output (table entries 0..7) or a texture derived from one.
 struct ScanHit
