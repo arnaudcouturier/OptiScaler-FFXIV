@@ -71,7 +71,6 @@ int main()
         const bool prevented = c.OnSetFullscreenState(env, Mode::On, Event(true));
         CHECK(prevented);
         CHECK(env.fgOffRequests == 1);
-        CHECK(env.retained == 1 && env.released == 0);
         CHECK(env.replays.empty());
         CHECK_CONTAINS(env.Last(), "held back");
         CHECK_CONTAINS(env.Last(), "handler returns true (prevent)");
@@ -87,7 +86,6 @@ int main()
         CHECK(env.replays[0].fullscreen);
         CHECK(!env.replays[0].fgActiveAtCall);
         CHECK(env.replays[0].thread == 100);
-        CHECK(env.released == 1); // the reference taken for the held call is given back
         CHECK_CONTAINS(env.All(), "replaying SetFullscreenState(TRUE) with a null target: frame generation confirmed off");
         CHECK_CONTAINS(env.All(), "replayed SetFullscreenState(TRUE) returned 0x00000000");
         CHECK(Warnings(env) == 0);
@@ -113,7 +111,6 @@ int main()
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.size() == 1);
         CHECK(replayPassed);
-        CHECK(env.retained == 1 && env.released == 1);
         CHECK(env.fgOffRequests == 1); // the replay was not deferred again
         CHECK(AnyLogContains(env, "state=replaying"));
         CHECK(AnyLogContains(env, "nested=yes"));
@@ -156,10 +153,10 @@ int main()
         CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
         env.current = 100;
 
-        CHECK(env.fgOffRequests == 0 && env.retained == 0 && env.replays.empty());
+        CHECK(env.fgOffRequests == 0 && env.replays.empty());
         // And with everything right again it is held, so the cases above were each decisive.
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
-        CHECK(env.fgOffRequests == 1 && env.retained == 1);
+        CHECK(env.fgOffRequests == 1);
     }
 
     // H1: the FG swapchain is not the window size (the border leftover: 3836x2156 in a 3840x2160 window). The game follow-up
@@ -172,7 +169,7 @@ int main()
         c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3836, 2156);
         env.fg = kActive;
         CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
-        CHECK(env.fgOffRequests == 0 && env.retained == 0);
+        CHECK(env.fgOffRequests == 0);
         CHECK(AnyLogContains(env, "swapchain=3836x2156"));
         CHECK(AnyLogContains(env, "client=3840x2160"));
         CHECK(AnyLogContains(env, "verdict=pass(swapchain size differs from window)"));
@@ -191,6 +188,48 @@ int main()
         CHECK(AnyLogContains(env, "swapchain=3840x2160"));
     }
 
+    // M1: a held call belongs to its swapchain. Another bridge (device recreation) or the destruction of this one drops it;
+    // nothing is replayed on the old pointer and no extra reference exists to leak.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        c.OnResizeDone(env, Mode::On, 0x2000, kHwnd, 3840, 2160); // a new bridge
+        CHECK_CONTAINS(env.All(), "held SetFullscreenState dropped, not replayed: the bridge swapchain changed");
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty());
+        // The machine is free: a new real change on the new bridge is held again.
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true, 0x2000)));
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        c.OnBridgeDestroyed(env, Mode::On, 0x9999); // some other swapchain: the hold stays
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        c.OnBridgeDestroyed(env, Mode::On, kBridge); // the bridge is torn down while the call is held
+        CHECK_CONTAINS(env.All(), "the bridge swapchain is being destroyed");
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty());
+        // The destroyed bridge is forgotten: the same pointer is unknown until a resize reports a bridge again.
+        env.fg = kActive;
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        // Off and probe ignore the destruction.
+        c.OnBridgeDestroyed(env, Mode::Off, kBridge);
+    }
+
     // Probe never holds or prevents; off does nothing.
     {
         FakeEnv env;
@@ -198,7 +237,7 @@ int main()
         Running(c, env);
         CHECK(!c.OnSetFullscreenState(env, Mode::Probe, Event(true)));
         CHECK(AnyLogContains(env, "verdict=defer wouldReturn=true returned=false"));
-        CHECK(env.fgOffRequests == 0 && env.retained == 0);
+        CHECK(env.fgOffRequests == 0);
         for (int i = 0; i < 40; ++i)
             Present(c, env, Mode::Probe, kActive, kActive);
         CHECK(env.replays.empty());
@@ -226,7 +265,7 @@ int main()
         Running(c, env);
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // same direction: replaces, still prevented
-        CHECK(env.fgOffRequests == 1 && env.retained == 1); // not asked or retained twice
+        CHECK(env.fgOffRequests == 1); // not asked or retained twice
         CHECK_CONTAINS(env.All(), "replaces the held call");
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.size() == 1); // one replay, not two
@@ -241,7 +280,6 @@ int main()
         env.exclusive = false;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));   // enter held
         CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(false))); // back to windowed = the state in effect
-        CHECK(env.released == 1); // the held reference is given back
         CHECK_CONTAINS(env.All(), "held call dropped");
         for (int i = 0; i < 10; ++i)
             Present(c, env, Mode::On, kPaused, kPaused);
@@ -249,7 +287,6 @@ int main()
         // A later real change is deferred as usual (the machine is Idle again).
         env.fg = kActive;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
-        CHECK(env.retained == 2);
     }
 
     // Repeated identical requests and the other direction while held.
@@ -310,7 +347,6 @@ int main()
         CHECK(env.replays[0].fgActiveAtCall); // documented: this is the fail-open case
         CHECK_CONTAINS(env.All(), "hard wait limit reached with frame generation still on");
         CHECK(Warnings(env) >= 1);
-        CHECK(env.released == 1);
     }
 
     // The soft limit by presents: frame generation is off at the end of each present but never off for a complete one.
@@ -375,7 +411,6 @@ int main()
         env.fg = kActive;
         env.replayResult = 0;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // held again
-        CHECK(env.retained == 2);
     }
 
     // End to end, leave with frame generation on: held, replayed once it is off (the hook then flips the flag and restyles),

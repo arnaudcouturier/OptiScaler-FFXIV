@@ -34,8 +34,6 @@ struct CountingEnv final : Env
     bool ApplyExStyle(uint64_t, uint32_t) override { ++calls; return false; }
     void RequestFgOff() override { ++calls; }
     uint64_t NowMs() override { ++calls; return 0; }
-    void Retain(uint64_t) override { ++calls; }
-    void Release(uint64_t) override { ++calls; }
     int32_t Replay(uint64_t, bool) override { ++calls; return 0; }
     void Log(const std::string&, bool) override { ++calls; }
 };

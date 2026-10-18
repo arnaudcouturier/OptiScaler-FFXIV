@@ -26,6 +26,7 @@ inline void Publish(Mode mode) noexcept { detail::g_mode.store(static_cast<uint8
 
 // Out-of-line bodies, WindowModule.cpp.
 void ResizeDoneSlow(Dx11wDx12SC& sc) noexcept;
+void DestroySlow(Dx11wDx12SC& sc) noexcept;
 void PresentBeginSlow() noexcept;
 void PresentEndSlow() noexcept;
 bool SetFullscreenStateSlow(uint64_t native, uint64_t hwnd, bool fullscreen, uint64_t target) noexcept;
@@ -35,6 +36,13 @@ inline void OnResizeDone(Dx11wDx12SC& sc) noexcept
 {
     if (CurrentMode() != Mode::Off)
         ResizeDoneSlow(sc);
+}
+
+// ext::dx11bridge::OnDestroy: a bridge swapchain is being destroyed; a call held for it is dropped.
+inline void OnDestroy(Dx11wDx12SC& sc) noexcept
+{
+    if (CurrentMode() != Mode::Off)
+        DestroySlow(sc);
 }
 
 // ext::dx11bridge::PresentScope: entry and exit of the game's Present on the bridge swapchain.

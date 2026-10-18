@@ -91,8 +91,6 @@ struct FakeEnv final : Env
     uint64_t nowMs = 0;
     bool autoOff = true; // RequestFgOff behaves like Deactivate: inactive and paused at once
     int fgOffRequests = 0;
-    int retained = 0;
-    int released = 0;
     std::vector<ReplayCall> replays;
     int32_t replayResult = 0; // S_OK
     std::function<void()> onReplay; // runs inside the call, like the hook and the game's window procedure would
@@ -133,8 +131,6 @@ struct FakeEnv final : Env
         }
     }
     uint64_t NowMs() override { return nowMs; }
-    void Retain(uint64_t) override { ++retained; }
-    void Release(uint64_t) override { ++released; }
     int32_t Replay(uint64_t native, bool fullscreen) override
     {
         replays.push_back({ native, fullscreen, fg.present && fg.active, current });

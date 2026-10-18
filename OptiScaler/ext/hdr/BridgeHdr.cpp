@@ -37,6 +37,8 @@ void ConfigureOutput(Dx11wDx12SC& sc)
 
 void OnDestroy(Dx11wDx12SC& sc)
 {
+    window::OnDestroy(sc); // window mode: drop a call held for this swapchain
+
     if (Access::Bridge::HdrOutput(sc))
         hdr::Deactivate();
 }

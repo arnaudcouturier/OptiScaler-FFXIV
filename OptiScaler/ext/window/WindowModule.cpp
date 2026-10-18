@@ -54,19 +54,8 @@ class LiveEnv final : public Env
     }
     uint64_t NowMs() override { return GetTickCount64(); }
 
-    // The held call keeps the swapchain alive (the bridge swapchain counts its references normally).
-    void Retain(uint64_t native) override
-    {
-        if (native != 0)
-            reinterpret_cast<IUnknown*>(native)->AddRef();
-    }
-    void Release(uint64_t native) override
-    {
-        // Not at shutdown: upstream tears the swapchain down itself and a late Release could run its destructor under the
-        // loader lock.
-        if (native != 0 && !State::Instance().isShuttingDown)
-            reinterpret_cast<IUnknown*>(native)->Release();
-    }
+    // No reference is taken on the held call's swapchain (an extra AddRef would change when upstream tears it down); the hold
+    // is cancelled when the bridge changes or is destroyed, and the replay checks the pointer against the live bridge.
 
     // `native` is ReShade's swapchain->get_native(), checked against the bridge swapchain before the call was held. The call
     // goes straight to it, not through ReShade's wrapper, so the module's own event is not entered again. The target is null
@@ -131,6 +120,21 @@ void ResizeDoneSlow(Dx11wDx12SC& sc) noexcept
         auto& g = G();
         std::lock_guard lock(g.lock);
         g.controller.OnResizeDone(g.env, CurrentMode(), bridge, hwnd, swapWidth, swapHeight);
+    }
+    catch (...)
+    {
+    }
+}
+
+void DestroySlow(Dx11wDx12SC& sc) noexcept
+{
+    try
+    {
+        // Also at shutdown: the pointer is only compared, never used.
+        const uint64_t bridge = reinterpret_cast<uint64_t>(static_cast<IDXGISwapChain*>(&sc));
+        auto& g = G();
+        std::lock_guard lock(g.lock);
+        g.controller.OnBridgeDestroyed(g.env, CurrentMode(), bridge);
     }
     catch (...)
     {

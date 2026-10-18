@@ -46,9 +46,6 @@ class Env
     // The existing feature API, exactly what upstream's hook does first: fgChanged = true, UpdateTarget(), Deactivate().
     virtual void RequestFgOff() = 0;
     virtual uint64_t NowMs() = 0;
-    // Keeps the swapchain alive while a call is held (AddRef) and lets go of it (Release).
-    virtual void Retain(uint64_t native) = 0;
-    virtual void Release(uint64_t native) = 0;
     // IDXGISwapChain::SetFullscreenState(fullscreen, nullptr) on `native` (the swapchain ReShade passed, NOT through ReShade's
     // wrapper). Returns the HRESULT.
     virtual int32_t Replay(uint64_t native, bool fullscreen) = 0;
@@ -71,6 +68,10 @@ class Controller
             return;
         Announce(env, mode);
 
+        // A held call belongs to the swapchain it was made on: another bridge (device recreation) drops it, unreplayed.
+        if (_bridge != 0 && bridge != _bridge)
+            DropHold(env, "the bridge swapchain changed");
+
         _bridge = bridge;
         _hwnd = hwnd;
         _swapW = swapWidth;
@@ -88,6 +89,20 @@ class Controller
         // A bridge resize deactivates frame generation (Streamline applies "off" inside the next present), so what the gate
         // counted before it says nothing about the new state.
         _gate.Reset();
+    }
+
+    // A bridge swapchain is being destroyed (ext::dx11bridge::OnDestroy): a call held for it is dropped, unreplayed, and the
+    // module forgets it, so nothing is ever replayed on a dead pointer.
+    void OnBridgeDestroyed(Env& env, Mode mode, uint64_t bridge)
+    {
+        if (mode == Mode::Off || bridge == 0 || bridge != _bridge)
+            return;
+        DropHold(env, "the bridge swapchain is being destroyed");
+        _bridge = 0;
+        _hwnd = 0;
+        _swapW = 0;
+        _swapH = 0;
+        _fixArmed = false;
     }
 
     // Entry and exit of the game's Present on the bridge swapchain (ext::dx11bridge::PresentScope).
@@ -181,7 +196,6 @@ class Controller
                     // The latest request asks for the state that is in effect: the held call is moot, a replay would only
                     // cost another frame generation outage. Drop it; this call passes (a no-op for the window).
                     _deferral.Cancel();
-                    env.Release(_pendingNative);
                     _pendingNative = 0;
                     action = "latest request equals the state in effect: held call dropped, this call passes";
                 }
@@ -199,7 +213,6 @@ class Controller
                     _pendingNative = ev.native;
                     _pendingThread = f.currentThread;
                     _deferral.Begin(ev.fullscreen, env.NowMs());
-                    env.Retain(ev.native);
                     env.RequestFgOff();
                     _gate.Reset();
                     prevent = true;
@@ -289,6 +302,17 @@ class Controller
         return f;
     }
 
+    // Drops a held call without replaying it (nothing else to release: no reference is taken on the swapchain).
+    void DropHold(Env& env, const char* why)
+    {
+        if (_deferral.State() != DeferState::Pending)
+            return;
+        _deferral.Cancel();
+        _pendingNative = 0;
+        _reRequestNoted = false;
+        env.Log(std::format("Window: held SetFullscreenState dropped, not replayed: {}", why), false);
+    }
+
     // B2-a. Runs at the end of every game present while a call is held. The replay never runs while frame generation is
     // active: the pause after a Deactivate is only about ten frames, so the feature can come back during the wait; each
     // present that finds it active asks it off again. Only the hard limit replays regardless (fail open).
@@ -313,6 +337,13 @@ class Controller
         if (result == WaitResult::Wait)
             return;
 
+        // Replay only on the live bridge swapchain the call was made on, never on a stale pointer.
+        if (_pendingNative == 0 || _pendingNative != _bridge)
+        {
+            DropHold(env, "the held swapchain is not the live bridge");
+            return;
+        }
+
         const bool fullscreen = _deferral.PendingFullscreen();
         const uint64_t native = _pendingNative;
         const uint32_t presents = _deferral.Presents();
@@ -330,7 +361,6 @@ class Controller
         ++_actionDepth;
         const int32_t hr = env.Replay(native, fullscreen);
         --_actionDepth;
-        env.Release(native);
         _deferral.EndReplay();
         env.Log(std::format("Window: replayed SetFullscreenState({}) returned {:#010x}", fullscreen ? "TRUE" : "FALSE",
                             static_cast<uint32_t>(hr)),
