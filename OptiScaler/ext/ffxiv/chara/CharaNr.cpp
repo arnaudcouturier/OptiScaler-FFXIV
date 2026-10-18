@@ -227,11 +227,8 @@ void RepairDone()
         return;
     // The queue is a non-owning pointer into the bridge. After a device change or a bridge restart it may be the old one (gone): never
     // signal through it. The old objects are then released once the done fence reports them complete, which Maintain retries.
-    if (m.releasePending || m.queue != Dx11WithDx12::GetD3D12CommandQueue())
-        return;
-    const uint64_t value = m.done.Next();
-    if (SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)))
-        m.doneBroken = false;
+    const bool queueUsable = !m.releasePending && m.queue == Dx11WithDx12::GetD3D12CommandQueue();
+    RepairDoneStep(m.done, m.doneBroken, queueUsable, [&](uint64_t value) { return SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)); });
 }
 
 // Resets the shared list on an allocator whose earlier work finished. False: none is free (not an error).
@@ -270,11 +267,7 @@ bool ExecuteList()
 bool SignalDone(uint64_t& value)
 {
     Module& m = M();
-    value = m.done.Next();
-    if (SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), value)))
-        return true;
-    m.doneBroken = true;
-    return false;
+    return SignalDoneStep(m.done, m.doneBroken, value, [&](uint64_t v) { return SUCCEEDED(m.queue->Signal(m.doneFence12.Get(), v)); });
 }
 
 // A list without a hand-off (the model creation): executes it and signals the done fence. `value` is non-zero as soon as the list ran.
@@ -1186,6 +1179,10 @@ static void MaintainImpl(uint64_t now)
     if (now >= m.lastMaintain && now - m.lastMaintain < 100)
         return;
     m.lastMaintain = now;
+
+    // A done signal that failed behind a list that ran leaves the done fence below the value of that list. Streams and the final release
+    // below decide from the fence alone, so they would wait for it forever: repair it first (cheap; it does nothing unless it is broken).
+    RepairDone();
 
     // The objects of a previous bridge device that the GPU was still using when it changed: released as soon as it is done.
     if (m.releasePending && ReleaseAll(false))

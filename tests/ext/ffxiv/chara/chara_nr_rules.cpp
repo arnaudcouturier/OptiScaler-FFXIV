@@ -611,6 +611,69 @@ void TestGuarded()
     other.join();
     CHECK(lockFree);
 }
+
+// The done fence after a signal that fails behind a list that ran. A fake queue: the signals it accepts complete in order, a rejected one
+// never does.
+struct FakeDoneQueue
+{
+    uint64_t completed = 0; // GetCompletedValue of the done fence
+    bool rejectNext = false;
+    bool Signal(uint64_t value)
+    {
+        if (rejectNext)
+        {
+            rejectNext = false;
+            return false;
+        }
+        completed = value; // queued behind everything before it: the fence catches up to this value
+        return true;
+    }
+};
+
+void TestDoneRepair()
+{
+    FakeDoneQueue q;
+    FenceCounter done;
+    bool broken = false;
+    StreamState st;
+    st.key = 0x1000;
+    st.lastLive = 100;
+    const auto signal = [&](uint64_t v) { return q.Signal(v); };
+    const auto action = [&](bool gpuDone)
+    {
+        // a stream whose window closed long ago, so only the GPU decides
+        return DecideStream(FactsOf(st, false, 100000, LingerMs(5), gpuDone));
+    };
+
+    // run 1: signalled, completes
+    uint64_t v1 = 0;
+    CHECK(SignalDoneStep(done, broken, v1, signal) && v1 == 1 && !broken && q.completed == 1);
+    st.lastSubmitted = v1;
+    CHECK(action(q.completed >= st.lastSubmitted) == StreamAction::Release);
+
+    // run 2: the list ran, its done signal is rejected. The value was taken, the fence is broken, the stream waits for the GPU.
+    q.rejectNext = true;
+    uint64_t v2 = 0;
+    CHECK(!SignalDoneStep(done, broken, v2, signal));
+    CHECK(v2 == 2 && broken && q.completed == 1);                         // the value is kept for the caller, the fence stays below it
+    st.lastSubmitted = v2;                                                // the caller records the list as submitted whether or not its signal was accepted
+    CHECK(st.HasGpuWork());
+    CHECK(action(q.completed >= st.lastSubmitted) == StreamAction::WaitGpu); // forever, without a repair
+
+    // a repair through a queue that may be gone signals nothing and takes no value
+    CHECK(!RepairDoneStep(done, broken, false, signal) && broken && done.last == 2);
+    // a repair whose signal is rejected too keeps the fence broken and still only grows the values
+    q.rejectNext = true;
+    CHECK(!RepairDoneStep(done, broken, true, signal) && broken && done.last == 3 && q.completed == 1);
+    // the repair signals a newer value behind everything queued: the fence catches up and the stream can go
+    CHECK(RepairDoneStep(done, broken, true, signal) && !broken && done.last == 4 && q.completed == 4);
+    CHECK(q.completed > v2);
+    CHECK(action(q.completed >= st.lastSubmitted) == StreamAction::Release);
+
+    // an intact fence is left alone: no value is taken, nothing is signalled
+    CHECK(!RepairDoneStep(done, broken, true, signal) && done.last == 4 && q.completed == 4);
+}
+
 } // namespace
 
 int main()
@@ -630,5 +693,6 @@ int main()
     TestFactsOf();
     TestCost();
     TestGuarded();
+    TestDoneRepair();
     return TEST_RESULT("chara_nr_rules");
 }

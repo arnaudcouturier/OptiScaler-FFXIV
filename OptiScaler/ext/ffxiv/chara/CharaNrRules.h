@@ -479,6 +479,33 @@ struct FenceCounter
     uint64_t Next() { return ++last; } // values only ever grow, also across failures
 };
 
+// ---- The done signal ------------------------------------------------------------------------------------------------------------
+// The done fence value of a list is taken BEFORE its signal is queued (a caller that tracks the list has the value even when the signal
+// fails), and values only grow. A signal that fails behind a list that ran leaves the fence below that value for good: the fence is
+// "broken", nothing waiting for the value (allocator reuse, the release of the stream) would ever be satisfied, and the next repair signals
+// a newer value behind everything queued before it, which catches the fence up.
+// `signal(value)` queues the signal on the D3D12 queue and returns whether it was accepted.
+template <class Signal> bool SignalDoneStep(FenceCounter& done, bool& broken, uint64_t& value, Signal&& signal)
+{
+    value = done.Next();
+    if (signal(value))
+        return true;
+    broken = true;
+    return false;
+}
+
+// Repairs a broken done fence. `queueUsable` is false when the queue pointer may be gone (a device change or a bridge restart): then
+// nothing is signalled and the old objects are released once the fence reports them complete. True when the fence was repaired.
+template <class Signal> bool RepairDoneStep(FenceCounter& done, bool& broken, bool queueUsable, Signal&& signal)
+{
+    if (!broken || !queueUsable)
+        return false;
+    if (!signal(done.Next()))
+        return false;
+    broken = false;
+    return true;
+}
+
 struct HandoffOutcome
 {
     bool ok = false;
