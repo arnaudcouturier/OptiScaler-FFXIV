@@ -499,7 +499,7 @@ std::string BuildState(uint64_t now)
     t.Add("dlss.status", note != nullptr && note[0] != '\0' ? note : "no note");
     t.AddBool("dlss.composedImageAvailable", dlss::ComposedTexture() != nullptr);
     t.AddBool("aa.outputImageAvailable", enhance::OutputTexture() != nullptr);
-    t.AddBool("nr.resultImageAvailable", nr::ResultTexture(now) != nullptr);
+    t.AddBool("nr.resultImageAvailable", nr::ResultTexture(now, false) != nullptr);
     {
         const nr::Status ns = nr::GetStatus();
         t.Add("nr.state", ns.availability == nr::Availability::Available ? "available" : ns.reason[0] != 0 ? ns.reason : "off");
@@ -640,7 +640,10 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
     }
     sources.push_back({ "aa", enhance::OutputTexture(), "the spatial AA has not produced an image" });
     sources.push_back({ "dlss", dlss::ComposedTexture(), "the DLSS path has no evaluated preview image" });
-    sources.push_back({ "nr", nr::ResultTexture(now), "preview NR has no current result" });
+    // The NR result is shared with the D3D12 queue: the wait (late variant) is queued on this context now, before the copy that Begin
+    // issues, and the reference keeps the image alive until then.
+    const ComPtr<ID3D11Texture2D> nrResult = nr::ResultTexture(now, true);
+    sources.push_back({ "nr", nrResult.Get(), "preview NR has no current result" });
 
     std::string why;
     if (!dump::Begin(context, sources, BuildState(now), now, why))

@@ -177,7 +177,8 @@ struct Planes
     std::vector<uint8_t> alpha; // width * height
 };
 
-// Converts `height` rows of `width` 4-byte pixels (rows `rowPitch` bytes apart) into an RGB plane and an alpha plane. False (and
+// Converts `height` rows of `width` pixels of the format's layout (4 bytes for the 8-bit formats, 8 for R16G16B16A16_FLOAT; rows `rowPitch` bytes apart)
+// into an RGB plane and an alpha plane. False (and
 // `out` untouched) for an unsupported format, an invalid size or a buffer that is too small.
 inline bool ConvertPixels(uint32_t format, uint32_t width, uint32_t height, const uint8_t* data, size_t dataSize, size_t rowPitch,
                           Planes& out)

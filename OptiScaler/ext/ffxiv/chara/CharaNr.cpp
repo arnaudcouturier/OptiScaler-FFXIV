@@ -1015,7 +1015,18 @@ struct ConsumerOps
     bool WaitResult(uint64_t done) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), done)); }
 };
 
-static ID3D11ShaderResourceView* ResultForImpl(uintptr_t key, uint64_t now)
+// Queues the D3D11 wait a consumer needs before it reads result buffer `buffer` of stream `index` (the late variant; the default variant
+// waited inline after the run). False: the wait could not be queued, preview NR is latched.
+static bool WaitForResult(Module& m, const Stream& s, int buffer)
+{
+    ConsumerOps ops { m };
+    if (ConsumerWait(ops, s.late, s.doneValue[buffer]))
+        return true;
+    Latch("the D3D11 wait on the previous result failed");
+    return false;
+}
+
+static ComPtr<ID3D11ShaderResourceView> ResultForImpl(uintptr_t key, uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1030,18 +1041,12 @@ static ID3D11ShaderResourceView* ResultForImpl(uintptr_t key, uint64_t now)
         return nullptr;
     Stream& s = m.streams[index];
     const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
-    if (buffer < 0)
+    if (buffer < 0 || !WaitForResult(m, s, buffer))
         return nullptr;
-    ConsumerOps ops { m };
-    if (!ConsumerWait(ops, s.late, s.doneValue[buffer]))
-    {
-        Latch("the D3D11 wait on the previous result failed");
-        return nullptr;
-    }
-    return s.result[buffer].srv.Get();
+    return s.result[buffer].srv; // a reference of its own: the view outlives the lock (see CharaNr.h)
 }
 
-static ID3D11Texture2D* ResultTextureImpl(uint64_t now)
+static ComPtr<ID3D11Texture2D> ResultTextureImpl(uint64_t now, bool waitForResult)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -1059,8 +1064,11 @@ static ID3D11Texture2D* ResultTextureImpl(uint64_t now)
     if (best == kNoStream)
         return nullptr;
     const StreamState& st = m.table.At(best);
-    const int buffer = ConsumerBuffer(m.streams[best].late, st.runs, st.chain);
-    return buffer < 0 ? nullptr : m.streams[best].result[buffer].t11();
+    const Stream& s = m.streams[best];
+    const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
+    if (buffer < 0 || (waitForResult && !WaitForResult(m, s, buffer)))
+        return nullptr;
+    return s.result[buffer].t11(); // ComPtr: takes its own reference
 }
 
 static void MaintainImpl(uint64_t now)
@@ -1181,10 +1189,10 @@ RunOutcome RunBringUp(const RunRequest& req)
                    });
 }
 
-ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
+ComPtr<ID3D11ShaderResourceView> ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
 {
     return Guarded([&] { return ResultForImpl(key, now); },
-                   []() -> ID3D11ShaderResourceView*
+                   []() -> ComPtr<ID3D11ShaderResourceView>
                    {
                        Latch("an unexpected exception while looking up a result");
                        return nullptr;
@@ -1196,10 +1204,10 @@ void Invalidate(uintptr_t key)
     Guarded([&] { InvalidateImpl(key); }, [] { Latch("an unexpected exception while withdrawing a result"); });
 }
 
-ID3D11Texture2D* ResultTexture(uint64_t now)
+ComPtr<ID3D11Texture2D> ResultTexture(uint64_t now, bool waitForResult)
 {
-    return Guarded([&] { return ResultTextureImpl(now); },
-                   []() -> ID3D11Texture2D*
+    return Guarded([&] { return ResultTextureImpl(now, waitForResult); },
+                   []() -> ComPtr<ID3D11Texture2D>
                    {
                        Latch("an unexpected exception while looking up the result texture");
                        return nullptr;

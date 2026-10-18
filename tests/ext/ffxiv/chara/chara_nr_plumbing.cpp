@@ -316,6 +316,19 @@ void TestHooks()
     CHECK(ChooseConsumerSource(false, false, true) == ConsumerSource::NrResult);
     CHECK(ChooseConsumerSource(false, true, false) == ConsumerSource::SrResult);
     CHECK(ChooseConsumerSource(false, false, false) == ConsumerSource::Native);
+
+    // The NR result is asked for by ONE rule, for an image with an SR slot and for one without (before, the no-slot branch of the consumer
+    // repeated it inline and dropping its flood term passed every test): NR may run, no flood, SR result not there, a preview output.
+    for (int bits = 0; bits < 16; ++bits)
+    {
+        const bool nrOn = (bits & 1) != 0, floodOn = (bits & 2) != 0, srReady = (bits & 4) != 0, previewOutput = (bits & 8) != 0;
+        CHECK(WantNrResult(nrOn, floodOn, srReady, previewOutput) == (nrOn && !floodOn && !srReady && previewOutput));
+    }
+    CHECK(WantNrResult(true, false, false, true));
+    CHECK(!WantNrResult(true, true, false, true));   // the flood test wins, with or without an SR slot
+    CHECK(!WantNrResult(true, false, true, true));   // the SR result wins
+    CHECK(!WantNrResult(true, false, false, false)); // not a preview output
+    CHECK(!WantNrResult(false, false, false, true)); // NR cannot run
 }
 } // namespace
 

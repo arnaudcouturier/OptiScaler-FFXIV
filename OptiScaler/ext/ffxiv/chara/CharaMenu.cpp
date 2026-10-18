@@ -137,7 +137,7 @@ void DrawCharaCard(ext::menu::Ctx&)
         if (ImGui::Button("Save preview images"))
             probe::RequestDump();
         ImGui::EndDisabled();
-        ext::menu::Tooltip("Saves the native preview image, the spatial AA result and the DLSS 2x result (whichever exist) as PNG files, "
+        ext::menu::Tooltip("Saves the native preview image, the spatial AA result, the DLSS 2x result and the preview NR result (whichever exist) as PNG files, "
                            "each with its alpha channel as a separate grayscale PNG, plus state.txt, into a new time-stamped folder under "
                            "OptiScaler\\PreviewDebug next to the game's dxgi.dll. It never waits for the GPU. At most 40 files and 300 MiB "
                            "per session.");

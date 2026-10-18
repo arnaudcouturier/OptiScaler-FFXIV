@@ -408,6 +408,8 @@ private:
 // Output budget
 // ---------------------------------------------------------------------------------------------------------------------
 
+// Every image is two files (the picture and its alpha channel) and a dump adds state.txt: native, AA, DLSS and NR together are 9 files, so
+// 40 files allow four such dumps (five before the NR result existed).
 inline constexpr uint32_t kMaxFiles = 40;
 inline constexpr uint64_t kMaxBytes = 300ull * 1024 * 1024;
 

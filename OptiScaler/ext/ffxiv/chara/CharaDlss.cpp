@@ -946,6 +946,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
     bool any = false;
     bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
     bool anyNr = false;   // at least one slot got the preview NR result
+    ComPtr<ID3D11ShaderResourceView> nrHold[kSrvSlots]; // the NR results in use, alive until after the draw and the restore
     const bool floodOn = flood::On();
     for (UINT i = 0; i < kSrvSlots; ++i)
     {
@@ -961,7 +962,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         ComPtr<ID3D11Resource> resource;
         original[i]->GetResource(&resource);
         const uintptr_t key = reinterpret_cast<uintptr_t>(resource.Get());
-        if (nrOn && IsPreviewOutput(view, key))
+        const bool previewOutput = nrOn && IsPreviewOutput(view, key); // only NR cares which images are preview outputs
+        if (previewOutput)
             g_consumed.Record(key, view.now);
         int index = sr ? g_slots.Find(key) : kNoSlot;
         if (sr && index == kNoSlot && g_slots.RecentContains(key, view.now))
@@ -983,46 +985,41 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
                 }
             }
         }
-        if (index == kNoSlot)
+
+        // The SR result of this image, if it has a slot that evaluated. An image without a slot has none.
+        bool srReady = false;
+        const SlotGpu* g = nullptr;
+        if (index != kNoSlot)
         {
-            // No SR slot: the preview NR result (native size, original alpha) replaces the image when the stream has a current one.
-            // The flood test wins (it is applied by the dispatcher for a draw this function leaves alone).
-            if (nrOn && !floodOn && IsPreviewOutput(view, key))
+            g_slots.Touch(index, view.now);
+            const SlotState& s = g_slots.Slot(index);
+            g = &g_gpu[static_cast<size_t>(index)];
+            if (floodOn && flood::CanReplace(sd))
             {
-                if (ID3D11ShaderResourceView* result = nr::ResultFor(context, key, view.now))
+                // The flood test bypasses the "evaluated and not failed" condition: any image that has a slot gets the magenta one.
+                if (ID3D11ShaderResourceView* magenta = flood::View(context, sd.Format))
                 {
-                    replaced[i] = result;
-                    anyNr = true;
+                    replaced[i] = magenta;
+                    flooded = true;
+                    continue;
                 }
             }
-            continue;
+            srReady = s.everEvaluated && !s.failed && g->composed.srv != nullptr;
         }
 
-        g_slots.Touch(index, view.now);
-        const SlotState& s = g_slots.Slot(index);
-        const SlotGpu& g = g_gpu[static_cast<size_t>(index)];
-        if (floodOn && flood::CanReplace(sd))
-        {
-            // The flood test bypasses the "evaluated and not failed" condition: any image that has a slot gets the magenta one.
-            if (ID3D11ShaderResourceView* magenta = flood::View(context, sd.Format))
-            {
-                replaced[i] = magenta;
-                flooded = true;
-                continue;
-            }
-        }
-        const bool srReady = s.everEvaluated && !s.failed && g.composed.srv != nullptr;
-        ID3D11ShaderResourceView* nrResult = nullptr;
-        if (!srReady && nrOn && !floodOn && IsPreviewOutput(view, key))
-            nrResult = nr::ResultFor(context, key, view.now);
-        switch (nr::ChooseConsumerSource(floodOn, srReady, nrResult != nullptr))
+        // One decision for both cases (with and without an SR slot): the preview NR result (native size, original alpha) replaces the image
+        // when the stream has a current one and the SR result is not there. The flood test wins (the dispatcher applies it to a draw this
+        // function leaves alone). The result is held with its own reference until the draw has been issued.
+        if (nr::WantNrResult(nrOn, floodOn, srReady, previewOutput))
+            nrHold[i] = nr::ResultFor(context, key, view.now);
+        switch (nr::ChooseConsumerSource(floodOn, srReady, nrHold[i] != nullptr))
         {
         case nr::ConsumerSource::SrResult: // SR wins over NR
-            replaced[i] = g.composed.srv.Get();
+            replaced[i] = g->composed.srv.Get();
             any = true;
             break;
         case nr::ConsumerSource::NrResult:
-            replaced[i] = nrResult;
+            replaced[i] = nrHold[i].Get();
             anyNr = true;
             break;
         default: break;

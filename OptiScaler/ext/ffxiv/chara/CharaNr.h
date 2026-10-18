@@ -23,6 +23,7 @@
 #include <cstdint>
 
 #include <d3d11.h>
+#include <wrl/client.h>
 
 #include "ext/ffxiv/chara/CharaNrRules.h"
 
@@ -66,16 +67,19 @@ RunOutcome RunBringUp(const RunRequest& request);
 RunOutcome RunProduction(const RunRequest& request);
 
 // The result image a UI draw should sample instead of `key` (the preview image's texture pointer), or null when the stream has no
-// result that is current. In the late variant this issues the D3D11 wait on the previous run's completion.
-ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* context, uintptr_t key, uint64_t now);
+// result that is current. In the late variant this issues the D3D11 wait on the previous run's completion. The view is returned with its
+// own reference: a shutdown on another thread cannot free it while the draw that uses it is still being issued.
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ResultFor(ID3D11DeviceContext* context, uintptr_t key, uint64_t now);
 
 // A render of the preview image `key` happened and preview NR produced no result for it: the older result of that image is withdrawn
 // (ResultFor answers null until the next run). Called by the dispatcher for every finisher whose bring-up did not produce a result.
 void Invalidate(uintptr_t key);
 
-// The NR result texture (R16G16B16A16_FLOAT, native size) of the stream that ran most recently, or null when none is current. Borrowed:
-// valid until the stream is released; draw thread only. Used by the preview image dump (nr.png).
-ID3D11Texture2D* ResultTexture(uint64_t now);
+// The NR result texture (R16G16B16A16_FLOAT, native size) of the stream that ran most recently, or null when none is current, with its own
+// reference. `waitForResult`: issue the same D3D11 wait as ResultFor (the late variant is not ordered by an inline wait), for a caller that
+// copies from the texture right away (the dump); false for a caller that only asks whether a result exists. Draw thread only. Used by the
+// preview image dump (nr.png).
+Microsoft::WRL::ComPtr<ID3D11Texture2D> ResultTexture(uint64_t now, bool waitForResult);
 
 void Maintain(uint64_t now);
 void OnFrameEnd();

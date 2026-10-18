@@ -96,6 +96,14 @@ constexpr ConsumerSource ChooseConsumerSource(bool floodOn, bool srResultReady, 
     return ConsumerSource::Native;
 }
 
+// Whether the consumer asks the NR module for a result for one sampled image: NR may run, the flood test is not replacing the image,
+// the SR result is not already there (it wins) and the image is one of the preview renderer's outputs. The one rule for an image with an
+// SR slot and for one without (the consumer used to repeat it inline for the second case).
+constexpr bool WantNrResult(bool nrOn, bool floodOn, bool srResultReady, bool previewOutput)
+{
+    return nrOn && !floodOn && !srResultReady && previewOutput;
+}
+
 // NR bring-up runs after the finisher wrote the native image: the finisher check passed, NR may run and a UI draw sampled this
 // preview image recently (a live window; a finisher output nobody shows gets no model). It does not wait for the SR guides.
 // `srResultWins`: the SR path evaluated this render, so the consumer will draw the SR result and an NR result would be thrown away
