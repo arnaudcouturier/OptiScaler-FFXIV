@@ -26,6 +26,9 @@ struct Stats
     std::atomic<uint64_t> depthOnlyTable { 0 };     // depth-only draws (no render target) into a depth texture of the table
     std::array<std::atomic<uint32_t>, 4> tagged {}; // shaders tagged so far: geometry, finisher, equipment display, UI
     std::atomic<uint64_t> passes { 0 };
+    std::atomic<uint64_t> passesLive { 0 };        // passes of the DLSS path that were jittered and replayed (a preview slot existed)
+    std::atomic<uint64_t> slotsAcquired { 0 };     // preview slots claimed by a UI draw
+    std::atomic<uint64_t> consumerSwaps { 0 };     // UI draws that got the processed (composed) preview image
     std::atomic<uint64_t> frames { 0 };
 
     // Spatial AA

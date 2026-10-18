@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
@@ -33,6 +34,12 @@ struct State
     uint64_t burstShapeOnly = 0;
     uint64_t burstPasses = 0;
     uint32_t shapeOnlyLines = 0;
+    dlss::BurstLimiter lines;                  // pass started / finisher accepted lines: once per burst, at most 24 each
+    uint64_t startEvaluations = 0;       // DLSS counters when the burst started
+    uint64_t startPassesLive = 0;
+    uint64_t startSlots = 0;
+    uint64_t startSwaps = 0;
+    std::array<uint64_t, 12> startFinish {};
     std::vector<uint64_t> shapeOnlyKeys;
     uint64_t burstDepthOnly = 0;
     std::array<bool, kFinisherVerdicts> verdictLogged {};
@@ -113,6 +120,24 @@ void LogEndOfBurst(uint64_t now)
              "UI {}; accepted finishers so far: {}",
              ReasonCounts(s.burstVerdict), s.burstOffTable, s.burstShapeOnly, s.burstDepthOnly, g_stats.tagged[0].load(), g_stats.tagged[1].load(),
              g_stats.tagged[2].load(), g_stats.tagged[3].load(), DownstreamCounts());
+    {
+        // What the DLSS path did in this burst (differences of the session counters).
+        std::string finishes;
+        for (size_t i = 0; i < s.startFinish.size(); ++i)
+        {
+            const uint64_t n = g_stats.finishVerdict[i].load() - s.startFinish[i];
+            if (n != 0)
+                finishes += std::string(finishes.empty() ? "" : ", ") + dlss::FinishVerdictName(static_cast<dlss::FinishVerdict>(i)) + " " + std::to_string(n);
+        }
+        const uint64_t evaluations = dlss::GetCounters().evaluations - s.startEvaluations;
+        const uint64_t live = g_stats.passesLive.load() - s.startPassesLive;
+        const uint64_t slots = g_stats.slotsAcquired.load() - s.startSlots;
+        const uint64_t swaps = g_stats.consumerSwaps.load() - s.startSwaps;
+        if (!finishes.empty() || evaluations != 0 || live != 0 || slots != 0 || swaps != 0)
+            LOG_INFO("CharaView: DLSS path in that burst: passes jittered and replayed {}, preview slots acquired {}, finish outcomes: {}, "
+                     "evaluations {}, UI draws given the processed image {}",
+                     live, slots, finishes.empty() ? std::string("none") : finishes, evaluations, swaps);
+    }
     s.inActivity = false;
 }
 
@@ -170,6 +195,12 @@ void Observe(const DrawView& v)
         s.burstVerdict = {};
         s.burstOffTable = s.burstDepthOnly = 0;
         s.burstShapeOnly = s.burstPasses = 0;
+        s.startEvaluations = dlss::GetCounters().evaluations;
+        s.startPassesLive = g_stats.passesLive.load();
+        s.startSlots = g_stats.slotsAcquired.load();
+        s.startSwaps = g_stats.consumerSwaps.load();
+        for (size_t i = 0; i < s.startFinish.size(); ++i)
+            s.startFinish[i] = g_stats.finishVerdict[i].load();
         ++s.bursts;
         LOG_INFO("CharaView: preview render activity started (burst {})", s.bursts);
         if (!s.loggedActiveTable && v.table != nullptr)
@@ -181,7 +212,12 @@ void Observe(const DrawView& v)
     s.lastActivity = v.now;
     ++s.burst[static_cast<size_t>(v.kind)];
     if (v.passStarted)
+    {
         ++s.burstPasses;
+        if (s.lines.ShouldLog(0, s.bursts))
+            LOG_INFO("CharaView: pass started (pass {}, {}x{}, first draw is a {} into table entry {}, via {})", v.pass != nullptr ? v.pass->counter : 0u,
+                     v.facts.targetWidth, v.facts.targetHeight, DrawKindName(v.kind), v.facts.rtv0Entry, DrawApiName(v.api));
+    }
 
     // One line per new signature.
     const uint64_t sig = Signature(v);
@@ -215,6 +251,9 @@ void OnFinisher(const DrawView& view)
     {
         ++g_stats.finisherAccepted;
         ++s.burstFinisherOk;
+        if (s.lines.ShouldLog(1, s.bursts))
+            LOG_INFO("CharaView: finisher accepted (pass {} {}x{}, table entry {}, via {}, {})", view.pass != nullptr ? view.pass->counter : 0u,
+                     view.facts.targetWidth, view.facts.targetHeight, view.facts.rtv0Entry, DrawApiName(view.api), ShaderText(view.pixelShader));
         return;
     }
 
@@ -312,6 +351,9 @@ void ObserveShader(const DrawView& view)
              renders ? "renders into" : "samples", entry, table::EntryRole(static_cast<size_t>(entry)), ShaderText(view.pixelShader),
              DrawKindName(view.kind), view.roles, DrawApiName(view.api));
 }
+
+uint32_t BurstNumber() { return g_state.bursts; }
+
 
 void Maintain(uint64_t nowMs)
 {

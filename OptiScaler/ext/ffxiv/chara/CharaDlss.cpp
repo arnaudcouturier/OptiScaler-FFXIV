@@ -9,6 +9,7 @@
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
+#include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
@@ -151,7 +152,11 @@ ComPtr<ID3D11Texture2D> g_depthTexture;
 ComPtr<ID3D11ShaderResourceView> g_depthSrv;
 bool g_reversedZ = false;
 bool g_loggedNoPrepass = false;
-std::array<bool, 4> g_waitLogged {};
+BurstLimiter g_lines; // log lines of the path: once per reason per burst of preview activity (reasons: FinishVerdict values, then kLine*)
+constexpr size_t kLineSlotAcquired = 10;
+constexpr size_t kLinePassLive = 11;
+constexpr size_t kLineSwap = 12;
+constexpr size_t kLineMotionTarget = 13;
 
 // ---- Gate ----------------------------------------------------------------------------------------------------------------
 bool EntryPointsPresent()
@@ -407,8 +412,8 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     g.handle = handle;
     g.ngxGeneration = g_ngxGeneration.load(std::memory_order_acquire);
     g_slots.Slot(index).hasFeature = true;
-    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; {}", w, h, w * ngx::kOutputScale,
-             h * ngx::kOutputScale, PointerSet(context));
+    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; {}", w, h, w * ngx::kOutputScale,
+             h * ngx::kOutputScale, static_cast<unsigned>(result), PointerSet(context));
     UpdateCounts();
     return true;
 }
@@ -441,9 +446,21 @@ void BeginPass(const DrawView& view)
             g_pass.jitter = PassJitter(g_pass.counter);
         // The signed-motion target is ensured and cleared at the start of every pass.
         if (!motion::EnsureTarget(g_device.Get(), g_pass.width, g_pass.height))
+        {
             g_pass.live = false;
+            if (g_lines.ShouldLog(kLineMotionTarget, identify::BurstNumber()))
+                LOG_WARN("CharaView DLSS: the signed-motion target ({}x{}) could not be created; this pass is not followed", g_pass.width,
+                         g_pass.height);
+        }
         else
             motion::ClearTarget(view.context);
+    }
+    if (g_pass.live)
+    {
+        ++g_stats.passesLive;
+        if (g_lines.ShouldLog(kLinePassLive, identify::BurstNumber()))
+            LOG_INFO("CharaView DLSS: pass {} ({}x{}) is followed: a preview slot exists, jitter {:.4f}/{:.4f}", g_pass.counter, g_pass.width,
+                     g_pass.height, g_pass.jitter.x, g_pass.jitter.y);
     }
 }
 
@@ -626,7 +643,7 @@ void RunSlot(int index, const DrawView& view)
     }
     g_slots.MarkEvaluated(index, view.now, g_pass.counter);
     const uint64_t n = g_evaluations.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n % kEvaluationLogEvery == 1)
+    if (n % kEvaluationLogEvery == 1 || n <= 3)
         LOG_INFO("CharaView DLSS: evaluations {} (slot {}, {}x{} -> {}x{})", n, index, w, h, w * ngx::kOutputScale,
                  h * ngx::kOutputScale);
 
@@ -683,6 +700,15 @@ void Finish(const DrawView& view)
         diag::Trace(diag::TraceCategory::Finish, view.now,
                     std::format("finish verdict {} for pass {}x{} (slot {}, replayed {}, camera {})", static_cast<int>(verdict),
                                 g_pass.width, g_pass.height, index, g_pass.replayed, g_pass.cameraCaptured));
+    if (verdict != FinishVerdict::Proceed && g_lines.ShouldLog(static_cast<size_t>(verdict), identify::BurstNumber()))
+    {
+        LOG_INFO("CharaView DLSS: finish step stopped: {} (pass {}, {}x{}, slot {}, motion replay {}, camera copy {}, depth texture {}, "
+                 "depth view {})",
+                 IsWaiting(verdict) ? WaitingText(verdict) : FinishVerdictName(verdict), g_pass.counter, g_pass.width, g_pass.height,
+                 index == kNoSlot ? std::string("none") : std::to_string(index), g_pass.replayed ? "done" : "missing",
+                 g_pass.cameraCaptured ? "done" : "missing", g_depthTexture != nullptr ? "known" : "missing",
+                 g_depthSrv != nullptr ? "known" : "missing");
+    }
     switch (verdict)
     {
     case FinishVerdict::NoSlot: return;
@@ -700,12 +726,6 @@ void Finish(const DrawView& view)
     {
         g_slots.ClearEvaluated(index);
         CountFallback();
-        bool& logged = g_waitLogged[static_cast<size_t>(verdict) - static_cast<size_t>(FinishVerdict::WaitingForMotion)];
-        if (!logged)
-        {
-            logged = true;
-            LOG_INFO("CharaView DLSS: {}", WaitingText(verdict));
-        }
         return;
     }
     case FinishVerdict::Rebuild:
@@ -767,7 +787,14 @@ bool Consume(const DrawView& view, DrawCall draw)
                 texture->GetDesc(&td);
                 index = g_slots.AcquireForConsumer(key, view.now, td.Width, td.Height);
                 if (index != kNoSlot)
+                {
                     UpdateCounts();
+                    ++g_stats.slotsAcquired;
+                    if (g_lines.ShouldLog(kLineSlotAcquired, identify::BurstNumber()))
+                        LOG_INFO("CharaView DLSS: preview slot {} acquired by a UI draw that samples the preview texture {}x{} (the next "
+                                 "pass of that preview is followed)",
+                                 index, td.Width, td.Height);
+                }
             }
         }
         if (index == kNoSlot)
@@ -786,6 +813,9 @@ bool Consume(const DrawView& view, DrawCall draw)
     bool handled = false;
     if (any)
     {
+        ++g_stats.consumerSwaps;
+        if (g_lines.ShouldLog(kLineSwap, identify::BurstNumber()))
+            LOG_INFO("CharaView DLSS: a UI draw is given the 2x preview image (consumer swaps so far {})", g_stats.consumerSwaps.load());
         if (diag::TraceEnabled())
             diag::Trace(diag::TraceCategory::Consumer, view.now, "a UI draw got the composed preview image");
         context->PSSetShaderResources(0, kSrvSlots, replaced);

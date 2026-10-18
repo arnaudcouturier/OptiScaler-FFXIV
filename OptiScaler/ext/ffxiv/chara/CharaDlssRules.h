@@ -46,6 +46,27 @@ enum class FinishVerdict : uint8_t
 
 constexpr bool IsWaiting(FinishVerdict v) { return v >= FinishVerdict::WaitingForMotion; }
 
+// Decides which log lines of the DLSS path are written: each reason once per burst of preview activity, and at most
+// `maxLines` times over the session, so a stalled path shows where it stalls without a line per draw.
+class BurstLimiter
+{
+  public:
+    static constexpr size_t kReasons = 16;
+
+    bool ShouldLog(size_t reason, uint32_t burst, uint32_t maxLines = 24)
+    {
+        if (reason >= kReasons || _lines[reason] >= maxLines || (_lines[reason] != 0 && _burst[reason] == burst))
+            return false;
+        _burst[reason] = burst;
+        ++_lines[reason];
+        return true;
+    }
+
+  private:
+    uint32_t _burst[kReasons] {};
+    uint32_t _lines[kReasons] {};
+};
+
 // What may be done with the NGX objects (feature handle, parameter object) a slot holds. They belong to the NGX instance that
 // created them: once NGX was shut down and initialised again (the generation changed) they must neither be used nor released
 // through the driver, because the new instance does not know them. They are dropped without a driver call (the shutdown

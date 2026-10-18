@@ -23,6 +23,9 @@ void Observe(const DrawView& view);
 void OnFinisher(const DrawView& view);
 
 // A draw with the finisher shader that renders outside the preview renderer's outputs (not a preview draw).
+// The number of the current preview activity burst (0 before the first). Used to write a log line once per burst.
+uint32_t BurstNumber();
+
 void OnOffTableFinisher(const DrawView& view);
 
 // A draw that only has the shape of the finisher while the tagged finisher shader is known (see DrawFacts::finisherTagKnown): counted

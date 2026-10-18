@@ -204,6 +204,22 @@ void TestNgxGeneration()
     CHECK(DecideFeatureUse(true, 3, 3, true, true, true) == FeatureUse::Forget);
     CHECK(DecideFeatureUse(true, 3, 3, false, false, false) == FeatureUse::Forget);
 }
+
+void TestBurstLimiter()
+{
+    dlss::BurstLimiter lines;
+    CHECK(lines.ShouldLog(4, 1));  // first time in burst 1
+    CHECK(!lines.ShouldLog(4, 1)); // the same reason in the same burst
+    CHECK(lines.ShouldLog(5, 1));  // another reason
+    CHECK(lines.ShouldLog(4, 2));  // the next burst
+    CHECK(!lines.ShouldLog(4, 2));
+    CHECK(!lines.ShouldLog(dlss::BurstLimiter::kReasons, 1)); // out of range: never
+    uint32_t written = 0;
+    for (uint32_t burst = 10; burst < 100; ++burst)
+        written += lines.ShouldLog(7, burst, 8) ? 1 : 0;
+    CHECK(written == 8); // capped over the session
+    CHECK(lines.ShouldLog(0, 0)); // burst 0 (before any burst) still logs the first line
+}
 } // namespace
 
 int main()
@@ -214,5 +230,6 @@ int main()
     TestLifecycle();
     TestLatchDrain();
     TestJitterFeed();
+    TestBurstLimiter();
     return TEST_RESULT("chara_dlss_lifecycle");
 }
