@@ -73,6 +73,10 @@ struct Doubles
     }
 } d;
 
+// The dispatcher reads this clock instead of the system tick count (installed in main): the gaps between draws are exact.
+uint64_t g_fakeNow = 5000000;
+uint64_t FakeClock() { return g_fakeNow; }
+
 // The table the preview renderer would expose (kept apart from the doubles: resetting the doubles must not empty the table).
 using SnapshotT = ext::ffxiv::chara::table::Snapshot;
 SnapshotT g_snapshot;
@@ -688,6 +692,54 @@ void TestPassAcrossRenders(Scene& s)
     Config(false, false, false);
 }
 
+// A pass the bridge's frame callback never closes (no bridge): it ends with the last geometry draw, found by the maintenance that runs
+// every 100 ms of draw activity once the geometry has been silent for more than 100 ms. Driven by a fake clock, so the gaps are exact and
+// a loaded machine cannot change the outcome.
+void TestPassIdleEnd(Scene& s)
+{
+    Doubles_Off();
+    Config(true, false, false);
+    d.srCanRun = d.active = true;
+    d.aroundHandles = true;
+    g_fakeNow += 1000; // a fresh maintenance window
+    OnFrameEnd();      // the next geometry draw starts a new pass whatever state the earlier tests left
+    BindGBuffer(s);
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(Last().kind == DrawKind::GBuffer && Last().passStarted);
+    const uint32_t first = Last().counter;
+
+    g_fakeNow += 10; // the second draw of the same render
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(!Last().passStarted && Last().counter == first);
+
+    // 60 ms of silence, then geometry again (a long render): the same pass
+    g_fakeNow += 60;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(!Last().passStarted && Last().counter == first);
+
+    // 150 ms without a geometry draw and no frame callback: the pass ended; the next geometry draw starts a new one
+    g_fakeNow += 150;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(Last().passStarted && Last().counter == first + 1);
+
+    // exactly at the limit (100 ms) the pass is still alive, 101 ms ends it
+    g_fakeNow += 100;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(!Last().passStarted && Last().counter == first + 1);
+    g_fakeNow += 101;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(Last().passStarted && Last().counter == first + 2);
+
+    // the finisher of a pass that went idle meanwhile finds no pass (rejected: there is nothing to finish)
+    g_fakeNow += 150;
+    BindFinisher(s);
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(Last().kind == DrawKind::Finisher && !Last().finisherAccepted);
+
+    Config(false, false, false);
+    Doubles_Off();
+}
+
 void TestMaintenanceAfterSwitchOff(Scene& s)
 {
     // PreviewDLSS and PreviewNR are off, slots still hold GPU objects: the gate stays open and the SR cleanup runs (the old gate closed
@@ -845,6 +897,7 @@ void TestTeardownWithKeysOff(Scene& s)
 
 int main()
 {
+    detail::g_clock = &FakeClock; // before any draw
     Scene scene;
     if (!SetUp(scene))
     {
@@ -857,6 +910,7 @@ int main()
     TestFloodWiring(scene);
     TestDebugAidsAndTheQuietPath(scene);
     TestPassAcrossRenders(scene);
+    TestPassIdleEnd(scene);
     TestMaintenanceAfterSwitchOff(scene);
     TestDetachFromAnotherThread(scene);
     TestTeardownWithKeysOff(scene);

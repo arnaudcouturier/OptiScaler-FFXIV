@@ -45,6 +45,9 @@ inline DetachGate g_detach;                 // the unhook path asks, the draw th
 // The dispatcher has run for a draw on the immediate context at least once. Until then the feature has created nothing (every object is made
 // by a module that the dispatcher calls), so a teardown request has nothing to release and must not wake the gate.
 inline std::atomic<bool> g_entered { false };
+// Tests only: a clock in milliseconds that replaces GetTickCount64 in the dispatcher (null = the system tick count). Set before any draw and
+// never changed while draws run.
+inline uint64_t (*g_clock)() = nullptr;
 } // namespace detail
 
 inline bool DlssWanted() { return ext::Cfg().ffxiv.chara.previewDlss.value_or_default(); }

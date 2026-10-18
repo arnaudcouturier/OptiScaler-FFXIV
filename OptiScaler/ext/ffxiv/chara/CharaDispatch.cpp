@@ -352,7 +352,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         return;
     }
 
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = detail::g_clock != nullptr ? detail::g_clock() : GetTickCount64();
     Maintain(now);
     probe::Update(now, context); // switches the preview probe on or off (releasing what it holds); while on, pumps the image dump and the command file
 
