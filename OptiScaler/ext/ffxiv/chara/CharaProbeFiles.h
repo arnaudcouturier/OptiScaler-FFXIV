@@ -228,12 +228,41 @@ inline bool ConvertPixels(uint32_t format, uint32_t width, uint32_t height, cons
 // A dump folder
 // ---------------------------------------------------------------------------------------------------------------------
 
+// How old a preview image is, in words for the state file. A texture that holds the preview is copied exactly as it is: when the window
+// is closed, or the renderer idle, it still holds the last picture, and a file named native.png would pass it off as the current one.
+// `lastRendered`: the tick of the last draw that rendered into a preview texture or was geometry of the preview renderer (0: none seen
+// since the probe was switched on); `lastSampled`: the tick of the last draw that sampled this texture (0: none).
+inline constexpr uint64_t kStaleImageMs = 10000;
+
+inline std::string ImageAgeText(uint64_t now, uint64_t lastRendered, uint64_t lastSampled)
+{
+    std::string text;
+    bool stale = false;
+    if (lastRendered != 0 && now >= lastRendered)
+    {
+        const uint64_t ago = now - lastRendered;
+        text = "the preview renderer last rendered " + std::to_string(ago) + " ms ago";
+        stale = ago > kStaleImageMs;
+    }
+    else
+    {
+        text = "the preview renderer has not been seen rendering since the probe was switched on";
+        stale = true;
+    }
+    if (lastSampled != 0 && now >= lastSampled)
+        text += ", a draw last sampled this texture " + std::to_string(now - lastSampled) + " ms ago";
+    if (stale)
+        text += " (older than " + std::to_string(kStaleImageMs / 1000) + " s or unknown: probably not the picture on screen now)";
+    return text;
+}
+
 // One image of a dump: the pixels as read back (tightly packed rows) or the reason there are none.
 struct DumpImage
 {
     std::string name; // "native", "native-3", "aa", "dlss": the file names are <name>.png and alpha-<name>.png
     bool present = false;
     std::string note; // why there is no picture (when !present)
+    std::string age;  // how old the picture is (images that copy a texture which may no longer be updated); empty: not known
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t format = 0;
@@ -289,7 +318,7 @@ inline DumpPlan MakePlan(const std::vector<DumpImage>& images, const std::string
         plan.files.push_back({ "alpha-" + img.name + ".png", alpha, i, true });
         plan.bytes += rgb + alpha;
         lines += key + std::to_string(img.width) + "x" + std::to_string(img.height) + " " + img.formatText + ", saved as " + img.name +
-                 ".png and alpha-" + img.name + ".png\n";
+                 ".png and alpha-" + img.name + ".png" + (img.age.empty() ? std::string() : "; " + img.age) + "\n";
     }
     plan.stateText = stateText + lines;
     plan.files.push_back({ "state.txt", plan.stateText.size(), static_cast<size_t>(-1), false });

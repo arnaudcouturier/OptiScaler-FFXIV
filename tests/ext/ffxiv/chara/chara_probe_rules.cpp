@@ -722,8 +722,36 @@ void TestPng()
 }
 } // namespace
 
+// The per-draw scan is skipped without a COM call when it cannot find anything; the probe alone behaves as before, the flood test no longer
+// scans while no preview output exists and no copy is followed.
+void TestScanGate()
+{
+    // nothing on: never
+    for (int bits = 0; bits < 8; ++bits)
+        CHECK(!ScanCanFindAnything(false, false, (bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0));
+    // a followed copy is alive: always (probe or flood on)
+    for (int bits = 0; bits < 4; ++bits)
+    {
+        CHECK(ScanCanFindAnything(true, false, (bits & 1) != 0, true, (bits & 2) != 0));
+        CHECK(ScanCanFindAnything(false, true, (bits & 1) != 0, true, (bits & 2) != 0));
+    }
+    // the probe alone: the renderer's activity decides, the table does not
+    CHECK(ScanCanFindAnything(true, false, true, false, false));
+    CHECK(ScanCanFindAnything(true, false, true, false, true));
+    CHECK(!ScanCanFindAnything(true, false, false, false, true));
+    CHECK(!ScanCanFindAnything(true, false, false, false, false));
+    // the flood test: a preview output that exists is enough (it stays on screen without re-rendering) ...
+    CHECK(ScanCanFindAnything(false, true, false, false, true));
+    CHECK(ScanCanFindAnything(true, true, false, false, true));
+    // ... and with no preview output and no copy there is nothing to sample: no scan
+    CHECK(!ScanCanFindAnything(false, true, false, false, false));
+    CHECK(!ScanCanFindAnything(false, true, true, false, false)); // renderer activity without an output image: still nothing to flood
+    CHECK(!ScanCanFindAnything(true, true, true, false, false));
+}
+
 int main()
 {
+    TestScanGate();
     TestChainAndHopCap();
     TestRefusals();
     TestExpiryAndRefresh();

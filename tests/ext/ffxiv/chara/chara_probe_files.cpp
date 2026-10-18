@@ -201,8 +201,39 @@ void TestPlan()
     CHECK(plan.stateText.find("image.odd: not saved, the size 16385x2 is not valid\n") != std::string::npos);
     CHECK(plan.stateText.find("image.native-2: not saved, no image available\n") != std::string::npos);
 
+    // the age of an image is part of its state line
+    {
+        std::vector<DumpImage> aged;
+        DumpImage native = MakeImage("native", 87, "B8G8R8A8_UNORM(87)", PaddedImage(3, 2, 3));
+        native.age = ImageAgeText(20000, 19900, 19950);
+        aged.push_back(native);
+        aged.push_back(MakeImage("aa", 87, "B8G8R8A8_UNORM(87)", PaddedImage(3, 2, 3))); // no age: the line is as before
+        const DumpPlan ap = MakePlan(aged, "");
+        CHECK(ap.stateText.find("image.native: 3x2 B8G8R8A8_UNORM(87), saved as native.png and alpha-native.png; the preview renderer last rendered 100 ms ago, a draw last sampled this texture 50 ms ago\n") != std::string::npos);
+        CHECK(ap.stateText.find("image.aa: 3x2 B8G8R8A8_UNORM(87), saved as aa.png and alpha-aa.png\n") != std::string::npos);
+    }
+
     const DumpPlan none = MakePlan({}, "");
     CHECK(none.files.size() == 1 && none.files[0].fileName == "state.txt" && none.bytes == 0);
+}
+
+// The age text: fresh images are described plainly, old or unknown ones carry a warning.
+void TestImageAge()
+{
+    const std::string fresh = ImageAgeText(50000, 49900, 49990);
+    CHECK(fresh == "the preview renderer last rendered 100 ms ago, a draw last sampled this texture 10 ms ago");
+    // exactly the limit is still fresh, one millisecond more is not
+    CHECK(ImageAgeText(60000, 50000, 0).find("older than") == std::string::npos);
+    CHECK(ImageAgeText(60001, 50000, 0).find("older than 10 s or unknown: probably not the picture on screen now") != std::string::npos);
+    // never seen rendering: unknown, with the warning
+    const std::string never = ImageAgeText(5000, 0, 4000);
+    CHECK(never.find("has not been seen rendering since the probe was switched on") != std::string::npos);
+    CHECK(never.find("last sampled this texture 1000 ms ago") != std::string::npos);
+    CHECK(never.find("probably not the picture on screen now") != std::string::npos);
+    // a clock that went backwards says nothing wrong
+    const std::string odd = ImageAgeText(1000, 5000, 6000);
+    CHECK(odd.find("-") == std::string::npos && odd.find("has not been seen rendering") != std::string::npos);
+    CHECK(kStaleImageMs == 10000);
 }
 
 void TestFolderNames(const fs::path& root)
@@ -330,6 +361,7 @@ int main()
     TestConvert();
     TestConvertHalf();
     TestPlan();
+    TestImageAge();
     TestFolderNames(root);
     TestWriteDump(root);
     TestBudgetRefusal(root);

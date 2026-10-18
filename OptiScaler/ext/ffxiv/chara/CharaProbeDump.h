@@ -23,6 +23,7 @@ struct Source
     std::string name; // file name stem: "native", "native-3", "aa", "dlss"
     ID3D11Texture2D* texture = nullptr;
     std::string missing;
+    std::string age; // how old the picture is (ImageAgeText); written to the image line of state.txt
 };
 
 // <game folder>\OptiScaler (the folder of the module that holds this code), and its PreviewDebug sub folder. Empty when unknown.

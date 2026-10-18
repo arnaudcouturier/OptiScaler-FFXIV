@@ -30,6 +30,11 @@ inline std::atomic<uint64_t> g_lastActivity { 0 };   // GetTickCount64() of the 
 // the same way the probe does, but writes none of the probe's log lines.)
 inline bool Live() { return detail::g_live.load(std::memory_order_relaxed); }
 
+// A copy of a preview output is being followed (the probe or the flood test is on and a derived texture is alive): a draw may sample it
+// even when the preview renderer is idle and the table holds no preview output. The dispatcher classifies every draw only while the table
+// holds a valid image or this is true.
+bool HasFollowedCopies(uint64_t now);
+
 // Cheap: remembers that the preview renderer is active (called for every draw that renders into a table entry and for geometry
 // draws). The per-draw scan only runs for a short time after it.
 inline void NoteActivity(uint64_t now)

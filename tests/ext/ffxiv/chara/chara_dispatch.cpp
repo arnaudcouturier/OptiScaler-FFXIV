@@ -52,7 +52,8 @@ struct Doubles
     // records
     int dlssAround = 0, dlssProbe = 0, dlssMaintain = 0, dlssFrameEnd = 0, dlssDetach = 0;
     int nrMaintain = 0, nrFrameEnd = 0, nrDetach = 0;
-    int probeUpdate = 0, probeDetach = 0;
+    int probeUpdate = 0, probeDetach = 0, probeOnDraw = 0;
+    bool followedCopies = false;
     std::thread::id detachThread;
     std::vector<SeenDraw> seen;
 
@@ -61,7 +62,7 @@ struct Doubles
     {
         dlssAround = dlssProbe = dlssMaintain = dlssFrameEnd = dlssDetach = 0;
         nrMaintain = nrFrameEnd = nrDetach = 0;
-        probeUpdate = probeDetach = 0;
+        probeUpdate = probeDetach = probeOnDraw = 0;
         seen.clear();
     }
 } d;
@@ -139,7 +140,12 @@ void Detach() { ++d.nrDetach; }
 namespace probe
 {
 void Update(uint64_t, ID3D11DeviceContext*) { ++d.probeUpdate; }
-ScanResult OnDraw(ID3D11DeviceContext*, DrawApi, const table::Snapshot&, uint64_t) { return {}; }
+ScanResult OnDraw(ID3D11DeviceContext*, DrawApi, const table::Snapshot&, uint64_t)
+{
+    ++d.probeOnDraw;
+    return {};
+}
+bool HasFollowedCopies(uint64_t) { return d.followedCopies; }
 void OnCopy(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*) {}
 void OnCopyRegion(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*) {}
 void OnResolve(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT) {}
@@ -332,6 +338,34 @@ void TestGateAndEarlyExits(Scene& s)
     }
     CHECK(Draw(nullptr) == 1);
     CHECK(d.dlssAround == 0);
+}
+
+// The debug aids (probe, flood test) no longer keep the full per-draw path alive when there is nothing to find: no preview output in the
+// table and no followed copy. With a followed copy, or a table that holds a preview, the scan runs as before.
+void TestDebugAidsAndTheQuietPath(Scene& s)
+{
+    BindConsumer(s, s.ui.Get(), s.outputSrv.Get());
+    probe::detail::g_live.store(true);
+
+    Doubles_Off();
+    Config(false, false, false);
+    table::Snapshot saved = g_snapshot;
+    g_snapshot = {};
+    g_snapshot.ready = true;
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.probeOnDraw == 0); // empty table, no copy followed: nothing to scan
+
+    d.followedCopies = true; // a copy of the preview is alive: a draw may sample it
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.probeOnDraw == 1);
+
+    d.followedCopies = false;
+    g_snapshot = saved; // the preview exists
+    CHECK(Draw(s.context.Get()) == 1);
+    CHECK(d.probeOnDraw == 2);
+
+    probe::detail::g_live.store(false);
+    Doubles_Off();
 }
 
 void TestRoutes(Scene& s)
@@ -540,6 +574,7 @@ int main()
     }
     TestGateAndEarlyExits(scene);
     TestRoutes(scene);
+    TestDebugAidsAndTheQuietPath(scene);
     TestPassAcrossRenders(scene);
     TestMaintenanceAfterSwitchOff(scene);
     TestDetachFromAnotherThread(scene);

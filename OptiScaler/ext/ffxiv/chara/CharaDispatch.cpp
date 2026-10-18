@@ -360,11 +360,12 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
                  g_stats.tagged[1].load(), g_stats.tagged[2].load(), g_stats.tagged[3].load());
     }
 
-    // Nothing of the preview renderer exists (the table holds no valid image) and no debug aid is looking: no draw can be a preview
-    // draw, so the per-draw classification (about ten COM calls) is skipped. What it would have produced for an ignored draw is kept:
+    // Nothing of the preview renderer exists (the table holds no valid image) and no followed copy of it is alive: no draw can be a
+    // preview draw or sample one, so the per-draw classification (about ten COM calls) and the probe scan are skipped, with the probe or the
+    // flood test on or off. What it would have produced for an ignored draw is kept:
     // the counters and the one-time table line. Not kept: the diagnostics about the finisher shader drawing outside the preview
     // outputs appear once a preview image exists instead of before. No timing was measured; this only removes work.
-    if (!ClassificationNeeded(snap.AnyValid(), probe::Live()))
+    if (!ClassificationNeeded(snap.AnyValid(), probe::HasFollowedCopies(now)))
     {
         identify::NoteQuietDraw(snap);
         draw();

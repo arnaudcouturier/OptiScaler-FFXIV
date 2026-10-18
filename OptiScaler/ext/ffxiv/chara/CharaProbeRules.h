@@ -265,6 +265,24 @@ private:
     uint64_t refused_ = 0;
 };
 
+// Whether the per-draw scan of the probe / flood test can find anything at all, decided without a single COM call. The scan looks for
+// draws that sample a preview output (table entries 0..7) or a followed copy of one.
+//   * nothing is on: no;
+//   * a followed copy is alive: yes (it may be sampled whatever the renderer does);
+//   * the flood test is on: yes while a preview output exists (a preview that stopped re-rendering is still on screen), no when the
+//     table holds no preview output and no copy is followed: there is nothing a draw could sample;
+//   * the probe alone: only while the preview renderer is active (as before).
+constexpr bool ScanCanFindAnything(bool probeOn, bool floodOn, bool rendererActive, bool followedCopyAlive, bool previewOutputExists)
+{
+    if (!probeOn && !floodOn)
+        return false;
+    if (followedCopyAlive)
+        return true;
+    if (floodOn)
+        return previewOutputExists;
+    return rendererActive;
+}
+
 inline constexpr size_t kCopyCaseCap = 48;
 inline constexpr size_t kSamplerCaseCap = 64;
 

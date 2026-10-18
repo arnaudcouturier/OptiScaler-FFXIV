@@ -127,6 +127,7 @@ bool Begin(ID3D11DeviceContext* context, const std::vector<Source>& sources, std
         Item item;
         DumpImage& img = item.image;
         img.name = source.name;
+        img.age = source.age;
         if (source.texture == nullptr)
         {
             img.note = source.missing.empty() ? "no texture" : source.missing;

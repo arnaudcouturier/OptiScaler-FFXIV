@@ -175,6 +175,17 @@ const BackbufferInfo& Backbuffer(uint64_t now)
 
 constexpr bool IsPreviewEntry(int entry) { return entry >= 0 && entry < kPreviewEntries; }
 
+// Whether the table holds a valid preview output (entries 0..7): pointers only, no COM call.
+bool AnyPreviewOutput(const table::Snapshot& snapshot)
+{
+    for (int i = 0; i < kPreviewEntries; ++i)
+    {
+        if (snapshot.entries[static_cast<size_t>(i)].Valid())
+            return true;
+    }
+    return false;
+}
+
 // ---- Consumer swap trace (sink of SwapTrace) -----------------------------------------------------------------------------------
 
 // Every swap is traced while the probe is on (state.txt shows the last one of each kind); only the log line is limited to once per
@@ -609,6 +620,7 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
         source.name = "native";
         source.texture = asTexture(s.held[0]);
         source.missing = "no draw has been seen sampling preview output entry 0 since the probe was switched on";
+        source.age = ImageAgeText(now, detail::g_lastActivity.load(std::memory_order_relaxed), s.held[0].lastSampled);
         sources.push_back(std::move(source));
     }
     size_t extras = 0;
@@ -620,6 +632,7 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
         dump::Source source;
         source.name = "native-" + std::to_string(e);
         source.texture = asTexture(h);
+        source.age = ImageAgeText(now, detail::g_lastActivity.load(std::memory_order_relaxed), h.lastSampled);
         if (source.texture == nullptr)
             continue;
         sources.push_back(std::move(source));
@@ -838,6 +851,12 @@ DumpStatus GetDumpStatus()
     return out;
 }
 
+bool HasFollowedCopies(uint64_t now)
+{
+    State& s = S();
+    return (s.on || s.flood) && !s.derived.Empty(now);
+}
+
 ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapshot& snapshot, uint64_t now)
 {
     ScanResult result;
@@ -845,11 +864,12 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
     if ((!s.on && !s.flood) || context == nullptr)
         return result;
 
-    // One cheap check before any COM call: the probe scans only while the preview renderer is active or copies of it are alive.
-    // The flood test scans every draw (a preview that stopped re-rendering is still on screen).
+    // One cheap check before any COM call (ScanCanFindAnything): the probe scans only while the preview renderer is active or copies of
+    // it are alive. The flood test also scans while a preview output exists (a preview that stopped re-rendering is still on screen), but
+    // no longer when the table holds none and no copy is followed: no draw can sample what does not exist.
     const uint64_t activity = detail::g_lastActivity.load(std::memory_order_relaxed);
     const bool recent = activity != 0 && now >= activity && now - activity <= kActivityMs;
-    if (!s.flood && !recent && s.derived.Empty(now))
+    if (!ScanCanFindAnything(s.on, s.flood, recent, !s.derived.Empty(now), AnyPreviewOutput(snapshot)))
         return result;
 
     if (s.on)
