@@ -105,6 +105,12 @@ constexpr bool RunBringUpNow(const PlumbingFacts& f, bool finisherAccepted, bool
     return finisherAccepted && consumerRecent && NrUsable(f) && !srResultWins;
 }
 
+// A finisher of a preview image went by and preview NR produced no result for that render (the finisher was rejected, the bring-up was
+// not run for it: nobody shows this preview, the SR result wins, a pre-condition failed; or it ran and returned without a result): an
+// older NR result of that image must not be shown for it. Only needed while the module holds anything; with nothing held there is no
+// result to withdraw and the call costs nothing.
+constexpr bool InvalidateNow(const PlumbingFacts& f, bool nrProducedResult) { return !nrProducedResult && f.nrHoldsResources; }
+
 // Which preview images a UI draw sampled lately (the liveness signal for NR, independent of the SR slots).
 class ConsumerSeen
 {

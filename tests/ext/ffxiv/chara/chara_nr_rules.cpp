@@ -396,6 +396,60 @@ void TestResultCurrent()
     CHECK(!never.ResultIsCurrent());
 }
 
+// REVIEW-NR-2 M2: a render of the image for which the module produced nothing (the dispatcher never reached the bring-up: finisher rejected,
+// nobody shows the window, the SR result won) withdraws the older result; the late variant does not reach back over it either.
+void TestRenderWithoutResult()
+{
+    StreamTable table;
+    const uintptr_t key = 0x1000;
+    const int index = table.Bind(key, 576, 960, 100);
+    StreamState& st = table.At(index);
+
+    // two runs of the same chain (the late variant needs both)
+    for (int render = 0; render < 2; ++render)
+    {
+        ++st.attempts;
+        st.everRan = true;
+        st.ranAttempt = st.attempts;
+        ++st.runs;
+        st.chain = st.chain + 1;
+    }
+    CHECK(st.ResultIsCurrent() && ConsumerBuffer(false, st.runs, st.chain) >= 0 && ConsumerBuffer(true, st.runs, st.chain) >= 0);
+
+    // the next render's finisher is rejected: the dispatcher marks the image, no bring-up call was made
+    CHECK(InvalidateResult(table, key));
+    CHECK(!st.ResultIsCurrent());                // ResultFor / ResultTexture answer null for this render
+    CHECK(ConsumerBuffer(true, st.runs, st.chain) == -1); // and the late variant does not show the run before it either
+    CHECK(ConsumerBuffer(false, st.runs, st.chain) >= 0); // (the chain only matters to the late variant; ResultIsCurrent guards the rest)
+
+    // the next render runs again: current again, but the late variant needs a second run of the new chain
+    ++st.attempts;
+    st.ranAttempt = st.attempts;
+    ++st.runs;
+    st.chain = st.chain + 1;
+    CHECK(st.ResultIsCurrent());
+    CHECK(ConsumerBuffer(true, st.runs, st.chain) == -1); // would be the run from before the rejected render
+    ++st.attempts;
+    st.ranAttempt = st.attempts;
+    ++st.runs;
+    st.chain = st.chain + 1;
+    CHECK(ConsumerBuffer(true, st.runs, st.chain) == ResultBufferForRun(st.runs - 2)); // two runs after the gap: shown again
+
+    // an image without a stream is not marked; marking never creates one
+    CHECK(!InvalidateResult(table, 0x2000));
+    CHECK(table.UsedCount() == 1);
+
+    // a bring-up call that ended without a run breaks the chain (but is not counted again: it counted itself when it started)
+    const uint64_t attemptsBefore = st.attempts;
+    st.chain = 5;
+    NoteBringUpEnded(table, key, true);
+    CHECK(st.chain == 5);
+    NoteBringUpEnded(table, key, false);
+    CHECK(st.chain == 0 && st.attempts == attemptsBefore);
+    NoteBringUpEnded(table, 0x2000, false); // unknown image: nothing happens
+    CHECK(table.UsedCount() == 1);
+}
+
 // A size, preset, style or variant change must hold still before the stream is rebuilt.
 void TestRebuild()
 {
@@ -551,6 +605,7 @@ int main()
     TestFrame();
     TestConsumerBuffer();
     TestResultCurrent();
+    TestRenderWithoutResult();
     TestRebuild();
     TestFactsOf();
     TestCost();

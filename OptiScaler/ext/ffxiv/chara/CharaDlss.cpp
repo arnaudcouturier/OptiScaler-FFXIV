@@ -1260,8 +1260,13 @@ bool Around(const DrawView& view, DrawCall draw)
         // (the first render after opening is native). It only reads the native image, so running it after the SR step changes nothing.
         const bool live = view.rtvTexture != nullptr &&
                           g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
+        bool nrProducedResult = false;
         if (nr::RunBringUpNow(facts, view.finisherAccepted, live, srResultWins))
-            RunNrBringUp(view);
+            nrProducedResult = RunNrBringUp(view);
+        // A render that has no NR result (rejected finisher, nobody shows the window, the SR result won, a skipped or failed bring-up)
+        // withdraws the older result of this image: the UI draw must not show an older render for up to a quarter of a second.
+        if (nr::InvalidateNow(facts, nrProducedResult) && view.rtvTexture != nullptr)
+            nr::Invalidate(reinterpret_cast<uintptr_t>(view.rtvTexture));
         return true;
     }
     case DrawKind::Consumer: return Consume(view, draw, sr, nrOn);

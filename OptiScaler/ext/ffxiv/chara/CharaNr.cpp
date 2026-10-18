@@ -886,7 +886,7 @@ bool Available() { return static_cast<Availability>(M().availabilitySnapshot.loa
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
 
-static RunOutcome RunBringUpImpl(const RunRequest& req)
+static RunOutcome RunBringUpCore(const RunRequest& req)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -983,11 +983,29 @@ static RunOutcome RunBringUpImpl(const RunRequest& req)
     return outcome == RunOutcome::Ran ? outcome : Fallback(outcome);
 }
 
+// One bring-up call. A call that ends without a run breaks the stream's chain (the late variant must not show a result from before this
+// render; the attempt itself was counted when the call reached the stream, see RunBringUpCore).
+static RunOutcome RunBringUpImpl(const RunRequest& req)
+{
+    Module& m = M();
+    std::lock_guard lock(m.mutex);
+    const RunOutcome outcome = RunBringUpCore(req);
+    NoteBringUpEnded(m.table, reinterpret_cast<uintptr_t>(req.native), outcome == RunOutcome::Ran);
+    return outcome;
+}
+
 RunOutcome RunProduction(const RunRequest&)
 {
     // Not implemented yet. Planned position: between the super-resolution evaluate and the alpha pass (CharaDlss.cpp RunSlot), with the
     // SR output as the colour image and the real depth and motion guides, writing the result image that the alpha pass reads.
     return RunOutcome::NotImplemented;
+}
+
+static void InvalidateImpl(uintptr_t key)
+{
+    Module& m = M();
+    std::lock_guard lock(m.mutex);
+    (void) InvalidateResult(m.table, key);
 }
 
 // The consumer's side of the hand-off: the late variant waits (GPU side) for the run that wrote the image it is about to read.
@@ -1171,6 +1189,11 @@ ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_
                        Latch("an unexpected exception while looking up a result");
                        return nullptr;
                    });
+}
+
+void Invalidate(uintptr_t key)
+{
+    Guarded([&] { InvalidateImpl(key); }, [] { Latch("an unexpected exception while withdrawing a result"); });
 }
 
 ID3D11Texture2D* ResultTexture(uint64_t now)

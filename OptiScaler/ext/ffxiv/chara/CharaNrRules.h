@@ -193,6 +193,15 @@ struct StreamState
     // The newest bring-up call for this stream produced the result that is there. A call that was skipped, still preparing or failed
     // makes the older result stale: it belongs to an earlier render and must not be drawn for this one.
     bool ResultIsCurrent() const { return everRan && ranAttempt != 0 && ranAttempt == attempts; }
+    // A render of this preview image happened and the module produced no result for it (the finisher was rejected, the bring-up was not
+    // run or returned without a result): whatever result the stream holds belongs to an earlier render and must not be shown for this
+    // one (REVIEW-NR-2 M2). It also breaks the chain: the late variant shows the run before the newest, which must not reach back over
+    // this render.
+    void NoteRenderWithoutResult()
+    {
+        ++attempts;
+        chain = 0;
+    }
 };
 
 // A size, preset, style or variant change must hold still before the stream is rebuilt: a window dragged to a new size reports a new
@@ -283,6 +292,29 @@ class StreamTable
   private:
     std::array<StreamState, kMaxStreams> _streams {};
 };
+
+// ---- Renders without a result --------------------------------------------------------------------------------------------------
+// The dispatcher calls these for a finisher whose bring-up did not produce a result (CharaNr.h Invalidate), and the bring-up itself for
+// a call that did not run. `key` is the preview image's texture pointer. True: a stream of that key exists and was marked.
+inline bool InvalidateResult(StreamTable& table, uintptr_t key)
+{
+    const int index = table.Find(key);
+    if (index == kNoStream)
+        return false;
+    table.At(index).NoteRenderWithoutResult();
+    return true;
+}
+
+// A bring-up call that reached the stream (it counted as an attempt when it started) and ended without a run: the chain is broken so the
+// late variant does not show a run from before this render.
+inline void NoteBringUpEnded(StreamTable& table, uintptr_t key, bool ran)
+{
+    if (ran)
+        return;
+    const int index = table.Find(key);
+    if (index != kNoStream)
+        table.At(index).chain = 0;
+}
 
 enum class StreamAction : uint8_t
 {

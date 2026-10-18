@@ -298,6 +298,18 @@ void TestHooks()
     f = Facts(true, false);
     CHECK(!RunProductionNow(f, true));
 
+    // A finisher without an NR result withdraws the older result, but only while the module holds something (nothing to withdraw
+    // otherwise, and the call is skipped on the hot path)
+    f = Facts(false, true);
+    f.nrHoldsResources = true;
+    CHECK(InvalidateNow(f, false));   // rejected finisher, bring-up not run, skipped or failed
+    CHECK(!InvalidateNow(f, true));   // NR produced the result for this render
+    f.nrHoldsResources = false;
+    CHECK(!InvalidateNow(f, false));  // nothing exists
+    f = Facts(false, false);
+    f.nrHoldsResources = true;        // PreviewNR switched off while models are still released
+    CHECK(InvalidateNow(f, false));
+
     // consumer priority: the flood beats everything, SR beats NR
     CHECK(ChooseConsumerSource(true, true, true) == ConsumerSource::Flood);
     CHECK(ChooseConsumerSource(false, true, true) == ConsumerSource::SrResult);
