@@ -40,7 +40,7 @@ game draws scene -> [boundary: first UI draw] source snapshots the bound scene R
   UiFreeFrame         decision: use the hud-less copy as the FG base? (all guards of section 5 pass)
   PostInteropCopy     on the FG queue: tag HudlessColor (+ UIColor in recomposition), build the paste image
   FG swapchain Present, then for EVERY output present (real and generated):
-  BeforeOverlay       UiPaste::Paste draws the newest completed paste image over the backbuffer
+  BeforeOverlay       UiPaste::Paste draws the newest completed paste image over the backbuffer (while the paste is visible, section 5)
 ```
 
 `recomposition` mode skips the base swap and the paste: DLSS-G receives HudlessColor + UIColor and recomposes the UI itself (it still interpolates the UI layer; documented limitation of that mode).
@@ -77,7 +77,7 @@ Existing fork-owned files that gain a few lines: `ext/ffxiv/lighting/FfxivLighti
 
 ### 4.2 GPU API (header committed)
 
-`UiPaste::{Produce, Invalidate, Ready, Release, Paste, SetDebugTint, SetSteadyTiming, Snapshot}` and `UiImage::{Build, Release}` with `MaskParams` / `PasteStatus`. Semantics follow the oracle's `UiPaste` (section 7) with two additions: `PasteStatus::coverage` (share of pixels flagged, from a one-counter readback that is read two frames later without stalling) and an explicit `hdrFinalImage`.
+`UiPaste::{Produce, Invalidate, Ready, Release, Paste, SetPasteEnabled, SetDebugTint, SetSteadyTiming, Snapshot}` and `UiImage::{Build, Release}` with `MaskParams` / `PasteStatus`. Semantics follow the oracle's `UiPaste` (section 7) with three additions: `PasteStatus::coverage` (share of pixels flagged, from a one-counter readback that is read two frames later without stalling), an explicit `hdrFinalImage`, and `SetPasteEnabled(bool)`, an output-side gate (on at start): while it is off `Paste` returns at once, draws nothing and counts no skip, and `Produce` / `Invalidate` are not affected (section 5, paste hold).
 
 ### 4.3 Engine entry points (B owns the exact signatures; they are registered in `SEAMS-catalog.md`)
 
@@ -107,15 +107,22 @@ useHudless = mode == ui_free
           && slot free (reader fence completed)          // never block the game thread
           && paste ready (UiPaste::Ready)
           && !frameOwnedBySceneHdr                        // section 8
-          && coverageGuardOk
+          && coverageGuardOk                              // not tripped; a tripped guard still takes the capture (below)
 otherwise: today's path, exactly (full-frame FG), reason recorded
 ```
 
 Fallback reasons (enum + text, all counted): `ModeOff`, `NoFrameGeneration`, `ProviderUnsupported`, `NoSource`, `NoBoundaryThisFrame`, `CaptureRejected`, `SizeMismatch`, `FormatUnsupported`, `MsaaOrArray`, `SlotBusy`, `PasteNotReady`, `SceneHdrOwnsFrame`, `MaskCoverage`, `DebugTintOn`.
 
-**Coverage guard:** the mask pass counts flagged pixels; if coverage exceeds `CoverageGuard` (initial 0.60) for 5 consecutive real frames the engine falls back with `MaskCoverage` and retries after 120 frames. Reason: black/white fades and, if ReShade presets turn out to run before the capture, preset-changed pixels would make the mask cover most of the screen. The value is a starting guess that D1/D2 calibrate. If nothing completes a mask readback within 8 frames the guard reads "unknown" and does not block.
+**Coverage guard:** the mask pass counts flagged pixels (the readback arrives one or two real frames late, and only a readback that is new counts as a sample). Reason: black/white fades and, if ReShade presets turn out to run before the capture, preset-changed pixels would make the mask cover most of the screen. The limit is `CoverageGuard` (initial 0.60, a starting guess that D1/D2 calibrate); the guard has four parts:
 
-**Never** produce a black, partial or flickering frame: every failure path leaves the normal backbuffer copy as the FG base and calls `UiPaste::Invalidate`.
+- **Trip.** 5 consecutive fresh samples over the limit: the engine falls back to the normal base with `MaskCoverage`.
+- **Silent probe.** While tripped the engine does not stop. Every present still asks the source, takes the capture and builds the paste image, so coverage keeps being measured and the source stays armed. The present only does not swap the base and sends no hud-less tag (section 9.1); its reason is `MaskCoverage` unless a capture step failed first (`NoBoundaryThisFrame`, `CaptureRejected`, `SizeMismatch`, `SlotBusy`, ... : the first failure of a present wins, so these now take precedence over `MaskCoverage` during a trip). `paste built` therefore counts nearly every present of a black screen, not only the captured ones. Under HDR output the probe prepares the slot's PQ conversion resources itself, because the usual caller (`PasteReady`) is skipped.
+- **Release.** After 30 consecutive fresh samples at or below 0.75 x the limit (0.45 at the default; no config key). A fresh sample above that level restarts the count, including samples between 0.45 and 0.60, which keep the guard tripped. Because the images were built all along, the first swapped present after the release already has a completed paste image (no `PasteNotReady`). Consequence: a cutscene whose mask sits between 0.45 and 0.60 stays on the normal base after the first trip, like `Mode = off`.
+- **Fail open.** 120 probed presents without a fresh sample release the guard (the producer stopped, so nothing could ever release it otherwise). Presents that took no capture (no boundary, loading screens) are not counted. If nothing completes a readback within 8 presents the guard reads "unknown" and never trips.
+
+**Paste hold.** When the base goes from the hud-less image back to the normal one (the guard trips, the boundary is lost, a swap is refused), the first output of that present is generated from the previous hud-less frame and the new normal frame; in a fade these differ everywhere. The paste hides that blend only while the ring is valid, so the paste stays visible (`Core::PasteVisible()`, `UiPaste::SetPasteEnabled`) for `kLeaveHold = 2` presents after the last swapped one. A present without a capture in that window gets `PasteAction::Hold`: the ring is neither produced nor invalidated. After the window it is `Invalidate` as before, and probing presents are not drawn (they still build images for the guard). A session that never swapped never holds, a swap the host undid grants no hold, and a mode change resets it.
+
+**Never** produce a black, partial or flickering frame: every failure path leaves the normal backbuffer copy as the FG base. The paste ring is invalidated (`UiPaste::Invalidate`) except during the two-present hold and while probing, where the ring stays valid but the paste is switched off once the hold is over.
 
 ### Periodic summary log (judging sessions from the log)
 
@@ -144,7 +151,7 @@ Per pixel `p` of the real frame, with `F` = final image, `H` = UI-free image:
 - paste image: `isUi` -> `(F.rgb, 1.0)`; else if cleanup is on and the previous paste image had alpha > 0.75 here -> `(F.rgb, 0.5)` (clears ghosts of UI that just closed); else `(0,0,0,0)`.
 - Paste draw: full-screen triangle over the backbuffer, `discard` when alpha <= 0, output alpha 1, **no blend state** (pasted pixels overwrite).
 - Recomposition mode: `UiImage` writes `(F.rgb, 1)` or `(0,0,0,0)`, alpha strictly 0 or 1 (valid for premultiplied and straight consumers), R8G8B8A8_UNORM.
-- Known limit: full-screen black/white fades differ from the UI-free frame everywhere and read as UI (coverage guard falls back; harmless). Nameplates can look displaced at low FPS because the held UI and the generated scene represent different times (oracle doc, unverified here).
+- Known limit: full-screen black/white fades differ from the UI-free frame everywhere and read as UI (the coverage guard trips and the engine keeps the normal base while it probes; section 5). Nameplates can look displaced at low FPS because the held UI and the generated scene represent different times (oracle doc, unverified here).
 
 ## 8. HDR
 
@@ -161,6 +168,7 @@ The user's HDR setup is OptiHDR with scene HDR (`[HDR] Mode = 1`, `FfxivHDR`, NR
 ### 9.1 DLSS-G (full engine)
 
 - Tags: `HudlessColor` -> `kBufferTypeHUDLessColor`, `UIColor` -> `kBufferTypeUIColorAndAlpha` (`DLSSG_Dx12.cpp` ~924-965), lifecycle `eOnlyValidNow` unless UntilPresent. `SetResource` gates (`FGDisableHudless`, `FGDisableUI`, ...) stay.
+- Which presents are tagged (`Core::WantsTags`): in `ui_free` only the presents whose base really was swapped to the hud-less image; a `PasteNotReady`, probing (section 5) or otherwise fallen-back present sends no tag, so DLSS-G gets the same inputs as with `Mode = off` instead of a normal base next to a hud-less tag that differs from it everywhere during a fade. `recomposition` tags every present that has a capture (the tags are that mode). Before this rule every present with a capture was tagged. What DLSS-G does with the tag set changing from present to present is not verified here.
 - Recomposition is a Streamline option read at feature **creation**: `AdjustUiRecomposition` (`ext/fg/dlssg/DlssgSeams.cpp`) now reads the engine (`Mode == recomposition`, last hud-less format) instead of the `HudlessLink` stub, which is deleted. Changing mode afterwards applies after a game restart (logged, as today).
 - `ui_free`: base swap + paste as in section 2. The oracle's menu showed a recomposition checkbox that contradicted `ui_free`; here one mode combo replaces both (section 11).
 - Config note: `[DLSSG] UIRecomposition` stays; it only matters in `recomposition` mode.
@@ -212,7 +220,7 @@ MaskThreshold = 0.008      ; advanced: 0.001 .. 1.0
 MaskDilation = 1           ; advanced: 0 .. 4
 PasteCleanup = true        ; advanced: clear ghosts of UI that just closed
 SteadyTiming = false       ; advanced: paste the UI of one real frame behind (steadier, slightly older)
-CoverageGuard = 0.60       ; advanced: fall back when more than this share of pixels is flagged (0 = off)
+CoverageGuard = 0.60       ; advanced: fall back when more than this share of pixels is flagged; back after 30 readbacks at or below 0.75 x this (0 = off)
 ShowDetectedUi = false     ; debug tint on the pasted area
 Diagnostics = false        ; D1 / diagnostic builds only (bound by A's UiConfig, the rest by B's HudlessConfig)
 ReShadePresets = auto      ; auto | on | off: apply the user's ReShade presets in place at the UI boundary (S10 E); auto = a ReShade runtime exists and >= 1 technique is enabled
@@ -240,9 +248,9 @@ Menu card "HUD-less diagnostics": run folder path, counters, the snapshot button
 | Test | Class | Package |
 |---|---|---|
 | `hudless_api_headers` (committed in W6-0) | cpu | W6-0 |
-| Mask / paste shaders on WARP: threshold, dilation, cleanup, unchanged scene, alpha levels, SDR + PQ, coverage counter (oracle `external_hudless_warp.cpp` is the data source) | warp | C |
+| Mask / paste shaders on WARP: threshold, dilation, cleanup, unchanged scene, alpha levels, SDR + PQ, coverage counter, the paste gate (oracle `external_hudless_warp.cpp` is the data source) | warp | C |
 | Paste ring: producer never reuses a busy slot, consumer picks newest completed <= 250 ms, never goes back in time | cpu | C |
-| Engine state machine with a fake `IHudlessSource` and fake provider: every fallback reason, hysteresis, coverage guard, retry timing | cpu | B |
+| Engine state machine with a fake `IHudlessSource` and fake provider: every fallback reason, hysteresis, coverage guard (trip, release, starvation, probing), paste hold, tag gating; replays that close the producer / source feedback loop (no retry bursts, seamless release, cutscene with lost-boundary runs) | cpu | B |
 | Slot ring + reader-fence logic (no GPU) | cpu | B |
 | Index predictor == consumer resync branch (table test) | cpu | B |
 | Config binder / defaults / clamps | cpu | B |
@@ -273,7 +281,8 @@ Every fork piece lives under `ext/`; the upstream-file edits are the seams liste
 ## 15a. Status and known limits
 
 - Opt-in: `[HudLess] Mode = off` by default. Tested in SDR with DLSS-G 2x to 4x on an RTX 4090: the engine stays Active on 96 to 100 % of presents in normal scenes and falls back (by design) on title screens, loading screens and fades. The maintainer saw no visible difference against Mode off, so treat the benefit as unproven.
-- HDR output with `ui_free` is untested. FSR-FG and XeFG only receive tags and are untested.
+- HDR output with `ui_free` is untested. FSR-FG and XeFG only receive tags and are untested. The paste producer cannot start under HDR output as the code stands (**inferred from reading, not run**): its first image needs the slot's PQ conversion resources, which are only prepared once a paste image already exists (`PasteReady`); only the probing path prepares them itself.
+- Guard rework (silent probe, release at 0.75 x the limit after 30 samples, two-present paste hold, hud-less tag only on swapped presents; section 5) is covered by CPU and WARP tests only and has not been seen in a game session. It targets a flash at the start and end of fades and loading screens and a flicker of cutscene text boxes that appeared with `Mode = ui_free` and not with `Mode = off`; whether it removes both is not confirmed. Probing builds the capture and the paste image on every present during a fade (**inferred**: about the GPU cost of an Active present).
 - One GPU hang (`DXGI_ERROR_DEVICE_HUNG`) happened shortly after the Mode was switched off, on and off again within about seven seconds, at 6x frame generation (the experimental RTX 40 MFG unlock). The same switching at 2x to 4x ran 24 times without a problem. The cause was not isolated.
 - The capture is refused, with a one-line reason in `OptiScaler.log` (`HudLess: the UI-free capture was refused: ...`), if the capture and the bridge copy differ in device, size or format.
 
