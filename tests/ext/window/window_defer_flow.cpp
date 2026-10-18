@@ -270,6 +270,85 @@ int main()
         CHECK(env.replays.size() == 1);
     }
 
+    // M6: at the hard limit on a thread that does not own the window the hold is dropped with a warning, never replayed there.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.autoOff = false;
+        env.owner = 5; // the presenting thread is not the window thread
+        for (int i = 0; i < 24; ++i)
+            Present(c, env, Mode::On, kActive, kActive);
+        CHECK(env.replays.empty());
+        CHECK_CONTAINS(env.All(), "does not own the window");
+        CHECK(Warnings(env) >= 1);
+        env.owner = 100;
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // the machine is free again
+    }
+
+    // L1: a second call from another thread while one is held passes; the held call is still replayed on its own thread.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.current = 7;
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        CHECK_CONTAINS(env.All(), "threads differ: passes");
+        env.current = 100;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+    }
+
+    // L2: a present that runs inside the replay's own window call must not run the border fix there.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        env.exclusive = true;
+        Present(c, env, Mode::On, kActive, kActive);
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(false)));
+        env.onReplay = [&]
+        {
+            env.exclusive = false;
+            env.window.style = 0x90000000u;
+            env.window.exstyle = 0x300u;
+            Present(c, env, Mode::On, kPaused, kPaused); // the game presents from the window procedure
+        };
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+        CHECK(env.applied.empty());
+    }
+
+    // L4: a log that throws during the replay must not leave the machine stuck in Replaying.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.throwOn = "replaying SetFullscreenState";
+        bool threw = false;
+        try
+        {
+            Present(c, env, Mode::On, kPaused, kPaused);
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        env.throwOn.clear();
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // held again: not stuck
+    }
+
     // Probe never holds or prevents; off does nothing.
     {
         FakeEnv env;
@@ -443,8 +522,8 @@ int main()
         CHECK(env.replays.empty());
         for (int i = 0; i < 4; ++i)
             Present(c, env, Mode::On, kPaused, kPaused);
-        CHECK(env.replays.size() == 1); // hard limit, fail open
-        CHECK(env.replays[0].thread == 7);
+        CHECK(env.replays.empty()); // M6: the hard limit on a thread that does not own the window drops the hold, no replay
+        CHECK_CONTAINS(env.All(), "does not own the window");
         CHECK(Warnings(env) >= 1);
     }
 

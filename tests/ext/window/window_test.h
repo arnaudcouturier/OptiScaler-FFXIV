@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -95,6 +96,7 @@ struct FakeEnv final : Env
     int32_t replayResult = 0; // S_OK
     std::function<void()> onReplay; // runs inside the call, like the hook and the game's window procedure would
 
+    std::string throwOn; // a log line containing this text throws (to test cleanup)
     std::vector<std::string> logs;
     std::vector<bool> warns;
 
@@ -140,6 +142,8 @@ struct FakeEnv final : Env
     }
     void Log(const std::string& line, bool warn) override
     {
+        if (!throwOn.empty() && line.find(throwOn) != std::string::npos)
+            throw std::runtime_error("log");
         logs.push_back(line);
         warns.push_back(warn);
     }

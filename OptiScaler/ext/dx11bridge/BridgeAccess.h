@@ -1,6 +1,6 @@
 #pragma once
 // ext::Access::Bridge: the fork's window into the private state of Dx11wDx12SC (with_dx12/dx11_with_dx12_sc.h, friend
-// `ext::Access`). A nested class of the friend has its rights. Included only by ext/dx11bridge/*.cpp and ext/hdr/*.cpp;
+// `ext::Access`). A nested class of the friend has its rights. Included only by fork code under ext/ (dx11bridge, hdr, window);
 // upstream files never see it.
 
 #include "ext/Seams.h"

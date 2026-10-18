@@ -182,6 +182,40 @@ int main()
         CHECK(env.window.clientWidth == 3840 && env.window.clientHeight == 2160);
     }
 
+    // L5: an armed fix also expires by presents (600) and by wall time (30 s) since arming, even if frame generation never goes
+    // off; a later off period then applies nothing.
+    {
+        FakeEnv env;
+        Controller c;
+        MakeBorderBug(env);
+        env.fg = kActive;
+        EnterThenLeave(c, env, Mode::On);
+        CHECK(c.FixArmed());
+        for (int i = 0; i < 600; ++i)
+            Present(c, env, Mode::On, kActive, kActive);
+        CHECK(c.FixArmed());
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(!c.FixArmed());
+        CHECK_CONTAINS(env.All(), "border fix expired");
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        MakeBorderBug(env);
+        env.fg = kActive;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 31000; // exactly 30 s
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(c.FixArmed());
+        env.nowMs = 31001;
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(!c.FixArmed());
+    }
+
     // Not armed without the true -> false change: a first resize with the flag already false, and an enter.
     {
         FakeEnv env;

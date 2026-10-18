@@ -59,6 +59,10 @@ class Controller
     // How many checks (presents with frame generation confirmed off) an armed border fix waits for the game to show a
     // frame-less window with an edge before it gives up and leaves the window as it is.
     static constexpr uint32_t kFixMaxChecks = 120;
+    // ... and it expires this many presents or ms after it was armed, whichever comes first (frame generation can stay on for
+    // hours, so gated checks alone never end it). Evaluated at presents only.
+    static constexpr uint32_t kFixMaxPresents = 600;
+    static constexpr uint64_t kFixMaxMs = 30000;
     // The replay needs this many COMPLETE presents with frame generation off, counted from the request, and at least this many
     // ms since the request: Streamline applies eOff inside a present and its pacer is a separate worker, so one present is too
     // short a proof.
@@ -145,8 +149,21 @@ class Controller
         // does not run in the same present (the replay's restyle may be followed by the game's own style write).
         if (_deferral.State() == DeferState::Pending)
             StepDeferral(env, fg);
-        else if (_fixArmed)
+        else if (_fixArmed && _deferral.State() == DeferState::Idle) // not inside the replay's own window call
+        {
+            // The armed fix also expires by presents and by wall time since arming (checked at presents): FG can stay on for
+            // hours, and a stale fix would then restyle the window at an arbitrary later off period.
+            const uint64_t now = env.NowMs();
+            if (++_fixPresents > kFixMaxPresents || (now >= _fixArmedMs && now - _fixArmedMs > kFixMaxMs))
+            {
+                _fixArmed = false;
+                env.Log(std::format("Window: border fix expired: armed {} presents / {} ms ago without a chance to apply",
+                                    _fixPresents, now >= _fixArmedMs ? now - _fixArmedMs : 0),
+                        false);
+                return;
+            }
             TryFix(env, fg);
+        }
     }
 
     // ReShade set_fullscreen_state, before the call. True = prevent the call.
@@ -210,6 +227,10 @@ class Controller
                     _deferral.Cancel();
                     _pendingNative = 0;
                     action = "latest request equals the state in effect: held call dropped, this call passes";
+                }
+                else if (!in.threadsAgree)
+                {
+                    action = "owner, calling and presenting threads differ: passes";
                 }
                 else
                 {
@@ -282,6 +303,8 @@ class Controller
             {
                 _fixArmed = true;
                 _fixChecks = 0;
+                _fixPresents = 0;
+                _fixArmedMs = env.NowMs();
                 _fixWaitNoted = false;
                 env.Log(std::format("Window: border fix armed (SCExclusiveFullscreen true -> false, seen at a {}); it runs after "
                                     "a complete present with frame generation off",
@@ -315,15 +338,30 @@ class Controller
         return f;
     }
 
+    // While alive: the module is inside its own replay (depth > 0). On every exit, a throwing log included, Replaying ends.
+    struct ReplayGuard
+    {
+        ReplayGuard(Deferral& d, int& depth) : _d(d), _depth(depth) { ++_depth; }
+        ~ReplayGuard()
+        {
+            --_depth;
+            _d.EndReplay();
+        }
+        ReplayGuard(const ReplayGuard&) = delete;
+        ReplayGuard& operator=(const ReplayGuard&) = delete;
+        Deferral& _d;
+        int& _depth;
+    };
+
     // Drops a held call without replaying it (nothing else to release: no reference is taken on the swapchain).
-    void DropHold(Env& env, const char* why)
+    void DropHold(Env& env, const char* why, bool warn = false)
     {
         if (_deferral.State() != DeferState::Pending)
             return;
         _deferral.Cancel();
         _pendingNative = 0;
         _reRequestNoted = false;
-        env.Log(std::format("Window: held SetFullscreenState dropped, not replayed: {}", why), false);
+        env.Log(std::format("Window: held SetFullscreenState dropped, not replayed: {}", why), warn);
     }
 
     // DLSS-G confirmed off AND enough complete off presents AND enough time since the request (M3).
@@ -359,6 +397,18 @@ class Controller
         if (result == WaitResult::Wait)
             return;
 
+        // At the hard limit the replay is the fail-open path, but never on a thread that is not the window's owner thread: a
+        // window call from another thread is a cross-thread SendMessage. Drop the hold with a warning instead.
+        if (result == WaitResult::ReplayAtHardLimit)
+        {
+            const uint32_t owner = env.OwnerThread(_hwnd);
+            if (owner == 0 || owner != env.CurrentThread())
+            {
+                DropHold(env, "hard wait limit reached on a thread that does not own the window", true);
+                return;
+            }
+        }
+
         // Replay only on the live bridge swapchain the call was made on, never on a stale pointer.
         if (_pendingNative == 0 || _pendingNative != _bridge)
         {
@@ -376,14 +426,13 @@ class Controller
         _pendingNative = 0;
         _reRequestNoted = false;
 
+        ReplayGuard logGuard(_deferral, _actionDepth); // a throwing log must not leave Replaying stuck
+        int32_t hr = 0;
         env.Log(std::format("Window: replaying SetFullscreenState({}) with a null target: {} (after {} presents, {} ms, {} "
                             "earlier call(s) replaced)",
                             fullscreen ? "TRUE" : "FALSE", WaitResultName(result), presents, waited, replaced),
                 result == WaitResult::ReplayAtHardLimit);
-        ++_actionDepth;
-        const int32_t hr = env.Replay(native, fullscreen);
-        --_actionDepth;
-        _deferral.EndReplay();
+        hr = env.Replay(native, fullscreen);
         env.Log(std::format("Window: replayed SetFullscreenState({}) returned {:#010x}", fullscreen ? "TRUE" : "FALSE",
                             static_cast<uint32_t>(hr)),
                 hr < 0);
@@ -470,6 +519,8 @@ class Controller
     // B1-a
     bool _fixArmed = false;
     uint32_t _fixChecks = 0;
+    uint32_t _fixPresents = 0;
+    uint64_t _fixArmedMs = 0;
     bool _fixWaitNoted = false;
     bool _ownerSkipLogged = false;
     int _actionDepth = 0; // > 0 while the module is inside one of its own window calls

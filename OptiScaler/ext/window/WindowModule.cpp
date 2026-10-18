@@ -18,6 +18,31 @@ namespace ext::window
 {
 namespace
 {
+std::recursive_mutex& ModuleLock();
+
+// Entry points hold the module lock once per call (re-entrant calls on the same thread nest). `t_lockDepth` says how often
+// this thread holds it, so a call out can give it up completely: the controller has settled its state before every call
+// out, and a window call that waits for another thread must not do so while holding the lock.
+thread_local int t_lockDepth = 0;
+struct LockDepth
+{
+    LockDepth() { ++t_lockDepth; }
+    ~LockDepth() { --t_lockDepth; }
+};
+struct Unlocked
+{
+    Unlocked()
+    {
+        for (int i = 0; i < t_lockDepth; ++i)
+            ModuleLock().unlock();
+    }
+    ~Unlocked()
+    {
+        for (int i = 0; i < t_lockDepth; ++i)
+            ModuleLock().lock();
+    }
+};
+
 class LiveEnv final : public Env
 {
   public:
@@ -40,11 +65,16 @@ class LiveEnv final : public Env
     uint32_t CurrentThread() override { return GetCurrentThreadId(); }
     uint32_t OwnerThread(uint64_t hwnd) override { return win32::OwnerThread(hwnd); }
     WindowInfo ReadWindow(uint64_t hwnd) override { return win32::Read(hwnd); }
-    bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override { return win32::ApplyExStyle(hwnd, exstyle); }
+    bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
+    {
+        Unlocked unlocked;
+        return win32::ApplyExStyle(hwnd, exstyle);
+    }
 
     // What upstream's hkSetFullscreenState does first when frame generation is active: fgChanged, UpdateTarget, Deactivate.
     void RequestFgOff() override
     {
+        Unlocked unlocked;
         if (auto* fg = State::Instance().currentFG)
         {
             State::Instance().fgChanged = true;
@@ -63,6 +93,7 @@ class LiveEnv final : public Env
     // and is never dereferenced.
     int32_t Replay(uint64_t native, bool fullscreen) override
     {
+        Unlocked unlocked;
         if (native == 0)
             return E_POINTER;
         return static_cast<int32_t>(
@@ -94,6 +125,8 @@ Global& G()
     return *g;
 }
 
+std::recursive_mutex& ModuleLock() { return G().lock; }
+
 bool Live() { return !State::Instance().isShuttingDown; }
 } // namespace
 
@@ -119,6 +152,7 @@ void ResizeDoneSlow(Dx11wDx12SC& sc) noexcept
         }
         auto& g = G();
         std::lock_guard lock(g.lock);
+        LockDepth depth;
         g.controller.OnResizeDone(g.env, CurrentMode(), bridge, hwnd, swapWidth, swapHeight);
     }
     catch (...)
@@ -134,6 +168,7 @@ void DestroySlow(Dx11wDx12SC& sc) noexcept
         const uint64_t bridge = reinterpret_cast<uint64_t>(static_cast<IDXGISwapChain*>(&sc));
         auto& g = G();
         std::lock_guard lock(g.lock);
+        LockDepth depth;
         g.controller.OnBridgeDestroyed(g.env, CurrentMode(), bridge);
     }
     catch (...)
@@ -149,6 +184,7 @@ void PresentBeginSlow() noexcept
             return;
         auto& g = G();
         std::lock_guard lock(g.lock);
+        LockDepth depth;
         g.controller.OnPresentBegin(g.env, CurrentMode());
     }
     catch (...)
@@ -164,6 +200,7 @@ void PresentEndSlow() noexcept
             return;
         auto& g = G();
         std::lock_guard lock(g.lock);
+        LockDepth depth;
         g.controller.OnPresentEnd(g.env, CurrentMode());
     }
     catch (...)
@@ -184,6 +221,7 @@ bool SetFullscreenStateSlow(uint64_t native, uint64_t hwnd, bool fullscreen, uin
         ev.target = target;
         auto& g = G();
         std::lock_guard lock(g.lock);
+        LockDepth depth;
         return g.controller.OnSetFullscreenState(g.env, CurrentMode(), ev);
     }
     catch (...)
