@@ -53,15 +53,14 @@ struct IEngineHost
     virtual void Log(const std::string& line) = 0;
 };
 
-// What the paste producer does in PostInteropCopy: exactly one of Produce / Invalidate per ui_free present.
-//   Produce     a capture was taken into a slot. Also on PasteNotReady frames (otherwise Ready() would never become true), on probing
-//               frames (the tripped guard needs the readbacks) and on every frame whose base was swapped (the UI must
-//               come back through the paste).
+// What the paste producer does in PostInteropCopy: exactly one of Produce / Invalidate / Hold per ui_free present.
+//   Produce     a capture was taken into a slot. Also on PasteNotReady frames (otherwise Ready() would never become true),
+//               on probing frames (the tripped guard needs the readbacks) and on every frame whose base was swapped (the
+//               UI must come back through the paste).
 //   Invalidate  no usable pair this present (any early fallback), or scene HDR owns the frame: stop pasting, the normal
 //               base carries its own UI. Never chosen for a swapped base.
 //   Hold        the same as Invalidate for the first kLeaveHold presents after a swapped one: the ring stays valid, so the
-//               outputs of those presents still carry the last UI image (see PasteVisible()). Exactly one of
-//               Produce / Invalidate / Hold per ui_free present.
+//               outputs of those presents still carry the last UI image (see PasteVisible()).
 enum class PasteAction : uint8_t
 {
     None, // not ui_free

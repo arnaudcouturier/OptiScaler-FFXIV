@@ -817,7 +817,11 @@ void Engine::Post(Dx11wDx12SC& sc)
 
     if (!produced)
     {
-        UiPaste::SetPasteEnabled(false); // the ring is empty from here on: no output should count as a skipped paste
+        // The ring is empty from here on. On a base that is not swapped nothing was supposed to be pasted from it, so the
+        // gate closes and no output counts as a skipped paste. On a swapped base the paste IS missing: leave the gate
+        // alone so every output that shows no UI keeps counting as skipped.
+        if (!_core.Swapped())
+            UiPaste::SetPasteEnabled(false);
         UiPaste::Invalidate("the paste producer could not run");
         _core.Fail(Reason::PasteNotReady);
     }
