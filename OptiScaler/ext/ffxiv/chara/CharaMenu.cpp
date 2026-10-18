@@ -30,7 +30,8 @@ void DrawNrSection(CharaConfig& cfg)
         cfg.previewNr = nrOn;
     ext::menu::Tooltip("Runs the DLSS NR model on each open character preview window (new work). Needs an NVIDIA card, the DirectX 11 on 12 "
                        "bridge, and nvngx_dlssnr.dll with nvngx.dll_dlssnr.dll. It works alone or together with Preview DLSS (the DLSS "
-                       "result is shown when both produced one) and takes the draw before the spatial AA. Every open window costs "
+                       "result is shown when both produced one). The spatial AA still takes the equipment preview while NR has no result "
+                       "for a draw. Every open window costs "
                        "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
                        "native preview stays.");
 
@@ -80,14 +81,17 @@ void DrawCharaCard(ext::menu::Ctx&)
         ImGui::Text("Preview diagnostics: %u files, %llu bytes", ext::ffxiv::chara::diag::FilesWritten(),
                     (unsigned long long) ext::ffxiv::chara::diag::BytesWritten());
 
-    ImGui::BeginDisabled(dlss);
+    // Not greyed out: the AA is used whenever neither Preview DLSS nor Preview NR produces the equipment image (see the tooltip).
     bool aa = cfg.previewAA.value_or_default();
     if (ImGui::Checkbox("Preview spatial AA", &aa))
         cfg.previewAA = aa;
+    ext::menu::Tooltip("Spatial anti-aliasing of the equipment preview image. It is used when neither Preview DLSS nor Preview NR "
+                       "produces that image: with both off, while the DLSS path cannot run, and with Preview NR on whenever NR has no "
+                       "result for a draw yet (the first frames after opening a window, renders it skipped, a preview it cannot process). "
+                       "When Preview DLSS runs, its result is shown instead.");
     bool upscale = cfg.previewUpscale.value_or_default();
     if (ImGui::Checkbox("2x preview upscaling", &upscale))
         cfg.previewUpscale = upscale;
-    ImGui::EndDisabled();
 
     ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. "
                        "Unsupported layouts retain native rendering. Frame generation does not apply to the preview.");

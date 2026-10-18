@@ -415,20 +415,25 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         identify::ObserveShader(view);
     identify::Observe(view);
 
-    // Route: (PreviewDLSS or PreviewNR) and a path that can run ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see
-    // CharaRoute.h). With PreviewDLSS on but its path unable to run, the spatial AA still takes the equipment display draw.
+    // Route: (PreviewDLSS or a usable PreviewNR) and a path that can run ? Dlss : PreviewAA ? Enhance : native. The draw API plays no
+    // part (see CharaRoute.h). With PreviewDLSS on but its path unable to run, the spatial AA still takes the equipment display draw.
     bool handled = false;
     const bool dlssWanted = DlssWanted();
     const bool nrWanted = nr::Wanted();
+    const bool aaWanted = AaWanted();
     if (dlssWanted)
         dlss::Probe(view);
-    const Route route = ChooseRoute(dlssWanted, (dlssWanted || nrWanted) && dlss::CanRun(), AaWanted(), view.roles, api, nrWanted);
+    const bool nrUsable = nrWanted && dlss::NrCanRun();
+    const Route route = ChooseRoute(dlssWanted, (dlssWanted || nrWanted) && dlss::CanRun(), aaWanted, view.roles, api, nrUsable);
     switch (route)
     {
     case Route::Dlss: handled = dlss::Around(view, draw); break;
     case Route::Enhance: handled = enhance::Around(view, draw); break;
     case Route::Native: break;
     }
+    // The plumbing was offered the draw and left it alone (it never ran it): the AA is not lost for that.
+    if (FallBackToAa(route, handled, dlssWanted, aaWanted, view.roles))
+        handled = enhance::Around(view, draw);
     if (!handled)
     {
         // A draw no module took: the flood test gives it the magenta image in place of the preview (or a copy of it), unless it

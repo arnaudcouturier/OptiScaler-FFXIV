@@ -162,6 +162,38 @@ void TestUnavailable()
     f = Facts(true, true);
     f.nrAvailable = false;
     CHECK(SrUsable(f) && !NrUsable(f) && PlumbingActive(f));
+
+    // Leftover objects keep the plumbing alive while NR cannot run (NR latched or unavailable but its models are not released yet; the
+    // SR slots of a PreviewDLSS that was just switched off): the route must not claim the draw for NR (REVIEW-NR-2 M1 a). The NR branch
+    // of the route reads "NR usable", never the bare key or "plumbing alive".
+    f = Facts(false, true);
+    f.nrAvailable = false;
+    f.nrHoldsResources = true;
+    CHECK(PlumbingActive(f) && !NrUsable(f));
+    CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, NrUsable(f)) == Route::Enhance);
+    CHECK(ChooseRoute(false, PlumbingActive(f), false, RoleEquipDisplay, api, NrUsable(f)) == Route::Native);
+    f = Facts(false, true);
+    f.nrLatched = true;
+    f.srSlotsHeld = 2;
+    CHECK(PlumbingActive(f) && !NrUsable(f) && !PathCanRun(f));
+    CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, NrUsable(f)) == Route::Enhance);
+    // and the bare key would have taken the draw away from the AA
+    CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, f.nrWanted) == Route::Dlss);
+}
+
+// The route was Dlss and the module left the draw alone: the AA takes the equipment display draw when PreviewDLSS is off (REVIEW-NR-2 M1 b).
+void TestFallBackToAa()
+{
+    const uint32_t equip = RoleEquipDisplay;
+    CHECK(FallBackToAa(Route::Dlss, false, false, true, equip));      // declined, AA on, DLSS off, equipment draw: the AA
+    CHECK(!FallBackToAa(Route::Dlss, true, false, true, equip));      // the plumbing ran the draw
+    CHECK(!FallBackToAa(Route::Dlss, false, true, true, equip));      // PreviewDLSS on: the equipment draw stays native (specification)
+    CHECK(!FallBackToAa(Route::Dlss, false, false, false, equip));    // AA off
+    CHECK(!FallBackToAa(Route::Dlss, false, false, true, RoleUi));    // not the equipment display draw
+    CHECK(!FallBackToAa(Route::Dlss, false, false, true, RoleNone));
+    CHECK(!FallBackToAa(Route::Native, false, false, true, equip));   // other routes: the draw was not offered to the plumbing
+    CHECK(!FallBackToAa(Route::Enhance, false, false, true, equip));  // the AA already had its turn
+    CHECK(FallBackToAa(Route::Dlss, false, false, true, equip | RoleUi));
 }
 
 void TestConsumerSeen()
@@ -284,6 +316,7 @@ int main()
     TestRouteFallbackToAa();
     TestRoute();
     TestUnavailable();
+    TestFallBackToAa();
     TestConsumerSeen();
     TestHooks();
     return TEST_RESULT("chara_nr_plumbing");

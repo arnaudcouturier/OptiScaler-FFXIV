@@ -1128,6 +1128,8 @@ bool Active()
 
 bool CanRun() { return nr::PathCanRun(RefreshedFacts()); }
 
+bool NrCanRun() { return nr::NrUsable(PlumbingNow()); }
+
 bool SrAvailable()
 {
     const bool on = nr::SrHooksNeeded(PlumbingNow());

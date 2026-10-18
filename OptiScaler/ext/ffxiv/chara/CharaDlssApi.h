@@ -44,6 +44,10 @@ bool Active();
 // only while this is true; Active() is also true while a latched or switched-off path only drains its objects.
 bool CanRun();
 
+// Preview NR specifically can do work for a draw now (wanted, not latched, available). The dispatcher passes this, not the bare key, to the
+// route decision: with the key on but NR unusable the equipment draw goes to the spatial AA.
+bool NrCanRun();
+
 // The SR path itself may do work (wanted, not latched, gate open) or still holds objects. The SR-only hooks (copy, clear, query)
 // check this instead of Active(), which is also true for preview NR alone.
 bool SrAvailable();

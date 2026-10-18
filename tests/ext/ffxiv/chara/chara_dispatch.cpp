@@ -43,6 +43,7 @@ struct Doubles
 {
     // answers
     bool canRun = false;
+    bool nrCanRun = false; // preview NR specifically can run (wanted, not latched, available)
     bool active = false;
     bool srAvailable = false;
     bool dlssHolds = false;
@@ -91,6 +92,7 @@ namespace dlss
 {
 bool Active() { return d.active; }
 bool CanRun() { return d.canRun; }
+bool NrCanRun() { return d.nrCanRun; }
 bool SrAvailable() { return d.srAvailable; }
 bool HoldsGpuObjects() { return d.dlssHolds; }
 void Probe(const DrawView&) { ++d.dlssProbe; }
@@ -396,7 +398,7 @@ void TestRoutes(Scene& s)
     Doubles_Off();
     Config(false, false, true);
     d.nrWanted = true;
-    d.canRun = d.active = true;
+    d.nrCanRun = d.canRun = d.active = true;
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(d.dlssAround == 1);
 
@@ -431,6 +433,83 @@ void TestRoutes(Scene& s)
     CHECK(g_stats.aaProcessed == processed + 1 && d.dlssAround == 1);
     g_snapshot = saved;
     Config(false, false, false);
+}
+
+// REVIEW-NR-2 M1: PreviewAA on, PreviewDLSS off, preview NR usable but with no result for this draw (the first renders, a skipped render,
+// a finisher that is always rejected). The equipment display draw is offered to the NR plumbing, which declines it without running it;
+// the spatial AA takes it, and the native draw still runs exactly once.
+void TestNrWithoutResultFallsBackToAa(Scene& s)
+{
+    table::Snapshot saved = g_snapshot;
+    g_snapshot.entries[0] = { reinterpret_cast<uintptr_t>(s.aaSource.Get()), 64, 64 }; // the equipment output: a 64x64 RGBA image
+    BindConsumer(s, s.equip.Get(), s.aaSrv.Get());
+    const DrawApi indexed = DrawApi::DrawIndexed;
+
+    // (b) NR usable, no result: the plumbing declines, the AA runs (it ran the draw once)
+    Doubles_Off();
+    Config(false, true, true);
+    d.nrWanted = d.nrCanRun = d.canRun = d.active = true;
+    d.aroundHandles = false;
+    auto processed = g_stats.aaProcessed.load();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1);                    // the plumbing was offered the draw first (NR before AA) ...
+    CHECK(g_stats.aaProcessed == processed + 1); // ... and the AA took it after the plumbing declined
+
+    // NR has a result: the plumbing ran the draw, the AA does not run
+    d.aroundHandles = true;
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
+
+    // the AA is off: the declined draw is native, once
+    d.aroundHandles = false;
+    Config(false, false, true);
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
+
+    // a UI draw (not the equipment display) that the plumbing declines is not the AA's: native, once
+    Config(false, true, true);
+    BindConsumer(s, s.ui.Get(), s.aaSrv.Get());
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
+
+    // PreviewDLSS wanted as well: the equipment draw that the plumbing declines stays native (the specification; the DLSS result is just
+    // not ready yet), no AA
+    BindConsumer(s, s.equip.Get(), s.aaSrv.Get());
+    Config(true, true, true);
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
+
+    // (a) NR is wanted but cannot run (latched or unavailable) while leftover objects keep the plumbing alive: the draw is not offered to
+    // the plumbing at all and the AA takes it
+    Doubles_Off();
+    Config(false, true, true);
+    d.nrWanted = true;
+    d.nrCanRun = false;
+    d.canRun = false;
+    d.active = true;
+    d.nrHolds = true;
+    processed = g_stats.aaProcessed.load();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 0 && g_stats.aaProcessed == processed + 1);
+
+    // the route reads "NR usable", not the bare key: even if the plumbing claims it can run (here through a path that is not NR) the
+    // key alone does not take the draw away from the AA
+    Doubles_Off();
+    Config(false, true, true);
+    d.nrWanted = true;
+    d.nrCanRun = false;
+    d.canRun = true;
+    d.active = true;
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 0 && g_stats.aaProcessed == processed + 2);
+
+    g_snapshot = saved;
+    Config(false, false, false);
+    Doubles_Off();
 }
 
 void TestPassAcrossRenders(Scene& s)
@@ -601,6 +680,7 @@ int main()
     }
     TestGateAndEarlyExits(scene);
     TestRoutes(scene);
+    TestNrWithoutResultFallsBackToAa(scene);
     TestDebugAidsAndTheQuietPath(scene);
     TestPassAcrossRenders(scene);
     TestMaintenanceAfterSwitchOff(scene);
