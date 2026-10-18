@@ -5,6 +5,7 @@
 #include "ext/core/MenuWidgets.h"
 #include "ext/ffxiv/chara/CharaDiag.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaProbe.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
@@ -20,6 +21,46 @@ namespace
 using namespace ext::ffxiv::chara;
 
 bool Visible(const ext::menu::Ctx&) { return ext::game::Current().lighting != nullptr; }
+
+// Preview Neural Rendering (new work, not part of the build the other preview features were reconstructed from).
+void DrawNrSection(CharaConfig& cfg)
+{
+    bool nrOn = cfg.previewNr.value_or_default();
+    if (ImGui::Checkbox("Preview Neural Rendering (NR, experimental)", &nrOn))
+        cfg.previewNr = nrOn;
+    ext::menu::Tooltip("Runs the DLSS NR model on each open character preview window (new work). Needs an NVIDIA card, the DirectX 11 on 12 "
+                       "bridge, and nvngx_dlssnr.dll with nvngx.dll_dlssnr.dll. It works alone or together with Preview DLSS (the DLSS "
+                       "result is shown when both produced one) and takes the draw before the spatial AA. Every open window costs "
+                       "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
+                       "native preview stays.");
+
+    const nr::Status st = nr::GetStatus();
+    if (!nrOn && st.streams == 0)
+        return;
+
+    if (!nrOn)
+        ImGui::TextDisabled("Preview NR: off, releasing %u model(s)", st.streams);
+    else if (st.availability != nr::Availability::Available)
+        ImGui::TextWrapped("Preview NR: unavailable: %s.", st.reason[0] != 0 ? st.reason : "not ready");
+    else if (st.runs == 0 && st.streams == 0)
+        ImGui::TextDisabled("Preview NR: ready, waiting for a character preview window");
+    else if (st.runs == 0)
+        ImGui::TextDisabled("Preview NR: preparing the model (the first result comes a few frames later)");
+    else
+        ImGui::Text("Preview NR: running");
+
+    ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native image", st.liveStreams,
+                        st.streams, (unsigned long long) st.runs, (unsigned long long) st.fallbacks);
+    ImGui::TextDisabled("UI draws given an NR result: %llu", (unsigned long long) g_stats.nrSwaps.load(std::memory_order_relaxed));
+    if (st.lastGpuMs > 0.0 || st.lastCpuMs > 0.0)
+        ImGui::TextDisabled("Last NR run: GPU %.2f ms, CPU %.2f ms (recording and submitting)", st.lastGpuMs, st.lastCpuMs);
+    if (st.videoMemoryMb != 0)
+        ImGui::TextDisabled("Video memory added by the NR models: about %llu MB", (unsigned long long) st.videoMemoryMb);
+    else if (st.streams != 0)
+        ImGui::TextDisabled("Video memory added by the NR models: not measured");
+    if (st.late)
+        ImGui::TextDisabled("Showing the previous frame's NR result (PreviewNRLate)");
+}
 
 void DrawCharaCard(ext::menu::Ctx&)
 {
@@ -49,7 +90,9 @@ void DrawCharaCard(ext::menu::Ctx&)
     ImGui::EndDisabled();
 
     ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. "
-                       "Unsupported layouts retain native rendering. Preview NR and FG are not active.");
+                       "Unsupported layouts retain native rendering. Frame generation does not apply to the preview.");
+
+    DrawNrSection(cfg);
 
     bool tint = cfg.previewDebugTint.value_or_default();
     if (ImGui::Checkbox("Show preview processing (debug)", &tint))

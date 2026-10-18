@@ -125,9 +125,12 @@ enum class PixelLayout : uint8_t
     Unsupported,
     Rgba, // R8G8B8A8_TYPELESS / _UNORM / _UNORM_SRGB
     Bgra, // B8G8R8A8_TYPELESS / _UNORM / _UNORM_SRGB
+    Rgba16F, // R16G16B16A16_FLOAT (the preview NR result): 8 bytes per pixel, values clamped to 0..1 and scaled to 8 bits (no gamma change)
 };
 
-// DXGI_FORMAT values: 27 28 29 R8G8B8A8, 90 87 91 B8G8R8A8.
+constexpr size_t BytesPerPixel(PixelLayout layout) { return layout == PixelLayout::Rgba16F ? 8 : 4; }
+
+// DXGI_FORMAT values: 27 28 29 R8G8B8A8, 90 87 91 B8G8R8A8, 10 R16G16B16A16_FLOAT.
 constexpr PixelLayout LayoutOfFormat(uint32_t format)
 {
     switch (format)
@@ -138,8 +141,34 @@ constexpr PixelLayout LayoutOfFormat(uint32_t format)
     case 90:
     case 87:
     case 91: return PixelLayout::Bgra;
+    case 10: return PixelLayout::Rgba16F;
     default: return PixelLayout::Unsupported;
     }
+}
+
+// Half-precision float to a clamped 8-bit value (NaN and negative give 0, values of 1 or more give 255).
+constexpr uint8_t HalfToByte(uint16_t h)
+{
+    const uint32_t sign = h >> 15;
+    const uint32_t exponent = (h >> 10) & 0x1F;
+    const uint32_t mantissa = h & 0x3FF;
+    if (sign != 0 || (exponent == 0x1F && mantissa != 0)) // negative or NaN
+        return 0;
+    if (exponent == 0x1F) // +infinity
+        return 255;
+    float value = 0.0f;
+    if (exponent == 0)
+        value = static_cast<float>(mantissa) / 1024.0f / 16384.0f; // subnormal: mantissa * 2^-24
+    else
+    {
+        value = 1.0f + static_cast<float>(mantissa) / 1024.0f;
+        int e = static_cast<int>(exponent) - 15;
+        while (e > 0) { value *= 2.0f; --e; }
+        while (e < 0) { value *= 0.5f; ++e; }
+    }
+    if (value >= 1.0f)
+        return 255;
+    return static_cast<uint8_t>(value * 255.0f + 0.5f);
 }
 
 struct Planes
@@ -157,7 +186,7 @@ inline bool ConvertPixels(uint32_t format, uint32_t width, uint32_t height, cons
     if (layout == PixelLayout::Unsupported || data == nullptr || width == 0 || height == 0 || width > kMaxPngDimension ||
         height > kMaxPngDimension)
         return false;
-    const size_t rowBytes = static_cast<size_t>(width) * 4;
+    const size_t rowBytes = static_cast<size_t>(width) * BytesPerPixel(layout);
     if (rowPitch < rowBytes || dataSize < static_cast<size_t>(height - 1) * rowPitch + rowBytes)
         return false;
 
@@ -171,6 +200,18 @@ inline bool ConvertPixels(uint32_t format, uint32_t width, uint32_t height, cons
         const uint8_t* in = data + static_cast<size_t>(y) * rowPitch;
         uint8_t* rgb = planes.rgb.data() + static_cast<size_t>(y) * width * 3;
         uint8_t* alpha = planes.alpha.data() + static_cast<size_t>(y) * width;
+        if (layout == PixelLayout::Rgba16F)
+        {
+            for (uint32_t x = 0; x < width; ++x, in += 8)
+            {
+                const auto half = [in](size_t channel) { return static_cast<uint16_t>(in[channel * 2] | (in[channel * 2 + 1] << 8)); };
+                rgb[x * 3 + 0] = HalfToByte(half(0));
+                rgb[x * 3 + 1] = HalfToByte(half(1));
+                rgb[x * 3 + 2] = HalfToByte(half(2));
+                alpha[x] = HalfToByte(half(3));
+            }
+            continue;
+        }
         for (uint32_t x = 0; x < width; ++x, in += 4)
         {
             rgb[x * 3 + 0] = in[redAt];
@@ -234,7 +275,7 @@ inline DumpPlan MakePlan(const std::vector<DumpImage>& images, const std::string
         if (LayoutOfFormat(img.format) == PixelLayout::Unsupported)
         {
             lines += key + "not saved, format " + img.formatText +
-                     " is not supported (only B8G8R8A8 and R8G8B8A8 formats are converted)\n";
+                     " is not supported (only B8G8R8A8, R8G8B8A8 and R16G16B16A16_FLOAT formats are converted)\n";
             continue;
         }
         const uint64_t rgb = PngSize(img.width, img.height, 3);

@@ -89,10 +89,61 @@ void TestEvaluate()
     ngx::ApplyEvaluate<Fake, const void*>(g, in, &color, &output, &depth, &mv);
     CHECK(g.Is<int>("Reset", 0));
 }
+
+void TestPresetHints()
+{
+    // names: the six keys of the main DLSS path, in the order the PreSR hints use
+    CHECK(std::string(ngx::kPresetHintNames[0]) == "DLSS.Hint.Render.Preset.DLAA");
+    CHECK(std::string(ngx::kPresetHintNames[1]) == "DLSS.Hint.Render.Preset.UltraQuality");
+    CHECK(std::string(ngx::kPresetHintNames[2]) == "DLSS.Hint.Render.Preset.Quality");
+    CHECK(std::string(ngx::kPresetHintNames[3]) == "DLSS.Hint.Render.Preset.Balanced");
+    CHECK(std::string(ngx::kPresetHintNames[4]) == "DLSS.Hint.Render.Preset.Performance");
+    CHECK(std::string(ngx::kPresetHintNames[5]) == "DLSS.Hint.Render.Preset.UltraPerformance");
+
+    // override off: what the game asked for, whatever the configuration holds
+    ngx::PresetSource off;
+    off.forAll = 5;
+    off.perQuality[4] = 7;
+    for (uint32_t i = 0; i < ngx::kPresetHintCount; ++i)
+        off.game[i] = 10 + i;
+    const ngx::PresetHints fromGame = ngx::ComposePresetHints(off);
+    for (uint32_t i = 0; i < ngx::kPresetHintCount; ++i)
+        CHECK(fromGame.value[i] == 10 + i);
+
+    // override on, one preset for all (wins over the per-quality keys)
+    ngx::PresetSource all = off;
+    all.overrideOn = true;
+    const ngx::PresetHints forAll = ngx::ComposePresetHints(all);
+    for (uint32_t i = 0; i < ngx::kPresetHintCount; ++i)
+        CHECK(forAll.value[i] == 5);
+
+    // override on, per quality: only the keys that are set replace the game's value
+    ngx::PresetSource per = off;
+    per.overrideOn = true;
+    per.forAll.reset();
+    const ngx::PresetHints perQuality = ngx::ComposePresetHints(per);
+    CHECK(perQuality.value[4] == 7 && perQuality.value[0] == 10 && perQuality.value[5] == 15);
+
+    // the legacy "latest" sentinel (0x00FFFFFF) becomes the runtime default (0), in both sources
+    ngx::PresetSource latest;
+    latest.game[0] = 0x00FFFFFFu;
+    latest.overrideOn = true;
+    latest.perQuality[1] = 0x00FFFFFFu;
+    const ngx::PresetHints mapped = ngx::ComposePresetHints(latest);
+    CHECK(mapped.value[0] == 0 && mapped.value[1] == 0);
+
+    // applied as six unsigned values, nothing else
+    Fake f;
+    ngx::ApplyPresetHints(f, perQuality);
+    CHECK(f.calls.size() == 6);
+    CHECK(f.Is<uint32_t>("DLSS.Hint.Render.Preset.Performance", 7u));
+    CHECK(f.Is<uint32_t>("DLSS.Hint.Render.Preset.DLAA", 10u));
+}
 } // namespace
 
 int main()
 {
+    TestPresetHints();
     TestFlags();
     TestCreate();
     TestEvaluate();

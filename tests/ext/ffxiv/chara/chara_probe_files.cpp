@@ -91,7 +91,7 @@ void TestConvert()
 {
     CHECK(LayoutOfFormat(27) == PixelLayout::Rgba && LayoutOfFormat(28) == PixelLayout::Rgba && LayoutOfFormat(29) == PixelLayout::Rgba);
     CHECK(LayoutOfFormat(90) == PixelLayout::Bgra && LayoutOfFormat(87) == PixelLayout::Bgra && LayoutOfFormat(91) == PixelLayout::Bgra);
-    for (uint32_t f : { 0u, 2u, 10u, 24u, 26u, 88u, 92u, 93u })
+    for (uint32_t f : { 0u, 2u, 24u, 26u, 88u, 92u, 93u })
         CHECK(LayoutOfFormat(f) == PixelLayout::Unsupported);
 
     // B8G8R8A8 bytes are blue, green, red, alpha: the red plane value is byte 2
@@ -125,7 +125,7 @@ void TestConvert()
     Planes keep;
     keep.rgb = { 1, 2, 3 };
     keep.alpha = { 9 };
-    CHECK(!ConvertPixels(10, 3, 2, rgba.data(), rgba.size(), 16, keep));    // unsupported format
+    CHECK(!ConvertPixels(2, 3, 2, rgba.data(), rgba.size(), 16, keep));    // unsupported format
     CHECK(!ConvertPixels(28, 0, 2, rgba.data(), rgba.size(), 16, keep));    // empty
     CHECK(!ConvertPixels(28, 3, 0, rgba.data(), rgba.size(), 16, keep));
     CHECK(!ConvertPixels(28, 3, 2, nullptr, rgba.size(), 16, keep));
@@ -136,6 +136,42 @@ void TestConvert()
     CHECK(!ConvertPixels(28, kMaxPngDimension + 1, 1, rgba.data(), rgba.size(), 16, keep) && keep.rgb.size() == 3);
 }
 
+// The preview NR result is R16G16B16A16_FLOAT (DXGI 10): half-float values become clamped 8-bit values, rows may be padded.
+void TestConvertHalf()
+{
+    // 0x0000 = 0, 0x3800 = 0.5, 0x3C00 = 1, 0x4000 = 2, 0xBC00 = -1, 0x7C00 = +inf, 0x7E00 = NaN, 0x0001 = smallest subnormal, 0x3B00 = 0.875
+    CHECK(HalfToByte(0x0000) == 0 && HalfToByte(0x3800) == 128 && HalfToByte(0x3C00) == 255 && HalfToByte(0x4000) == 255);
+    CHECK(HalfToByte(0xBC00) == 0 && HalfToByte(0x7C00) == 255 && HalfToByte(0x7E00) == 0 && HalfToByte(0x0001) == 0);
+    CHECK(HalfToByte(0x3B00) == 223);
+    CHECK(LayoutOfFormat(10) == PixelLayout::Rgba16F && BytesPerPixel(PixelLayout::Rgba16F) == 8 && BytesPerPixel(PixelLayout::Bgra) == 4);
+
+    // 2x2 image, rows 20 bytes apart (padding 4 bytes); channel order R G B A, little endian
+    const uint16_t px[4][4] = { { 0x3C00, 0x0000, 0x3800, 0x3C00 }, { 0x0000, 0x3C00, 0x0000, 0x3800 },
+                                { 0x3800, 0x3800, 0x3800, 0x0000 }, { 0x4000, 0xBC00, 0x3C00, 0x3C00 } };
+    std::vector<uint8_t> data(20 + 16, 0xEE);
+    for (int i = 0; i < 4; ++i)
+    {
+        uint8_t* at = data.data() + (i / 2) * 20 + (i % 2) * 8;
+        for (int c = 0; c < 4; ++c)
+        {
+            at[c * 2] = static_cast<uint8_t>(px[i][c] & 0xFF);
+            at[c * 2 + 1] = static_cast<uint8_t>(px[i][c] >> 8);
+        }
+    }
+    Planes planes;
+    CHECK(ConvertPixels(10, 2, 2, data.data(), data.size(), 20, planes));
+    CHECK(planes.rgb.size() == 12 && planes.alpha.size() == 4);
+    const uint8_t expectRgb[12] = { 255, 0, 128, 0, 255, 0, 128, 128, 128, 255, 0, 255 };
+    const uint8_t expectAlpha[4] = { 255, 128, 0, 255 };
+    for (int i = 0; i < 12; ++i)
+        CHECK(planes.rgb[i] == expectRgb[i]);
+    for (int i = 0; i < 4; ++i)
+        CHECK(planes.alpha[i] == expectAlpha[i]);
+    // a buffer sized for 4-byte pixels is too small for this format
+    Planes untouched;
+    CHECK(!ConvertPixels(10, 2, 2, data.data(), 12, 20, untouched));
+    CHECK(!ConvertPixels(10, 2, 2, data.data(), data.size(), 12, untouched)); // pitch below the row size
+}
 void TestPlan()
 {
     std::vector<DumpImage> images;
@@ -144,7 +180,7 @@ void TestPlan()
     missing.name = "aa";
     missing.note = "the spatial AA has not produced an image";
     images.push_back(missing);
-    images.push_back(MakeImage("dlss", 10, "R16G16B16A16_FLOAT(10)", PaddedImage(1, 2, 3)));
+    images.push_back(MakeImage("dlss", 2, "R32G32B32A32_FLOAT(2)", PaddedImage(1, 2, 3)));
     DumpImage bad = MakeImage("odd", 28, "R8G8B8A8_UNORM(28)", PaddedImage(1, 2, 3));
     bad.width = kMaxPngDimension + 1;
     images.push_back(bad);
@@ -161,7 +197,7 @@ void TestPlan()
     CHECK(plan.stateText.rfind("key: value\n", 0) == 0);
     CHECK(plan.stateText.find("image.native: 3x2 B8G8R8A8_UNORM(87), saved as native.png and alpha-native.png\n") != std::string::npos);
     CHECK(plan.stateText.find("image.aa: not saved, the spatial AA has not produced an image\n") != std::string::npos);
-    CHECK(plan.stateText.find("image.dlss: not saved, format R16G16B16A16_FLOAT(10) is not supported") != std::string::npos);
+    CHECK(plan.stateText.find("image.dlss: not saved, format R32G32B32A32_FLOAT(2) is not supported") != std::string::npos);
     CHECK(plan.stateText.find("image.odd: not saved, the size 16385x2 is not valid\n") != std::string::npos);
     CHECK(plan.stateText.find("image.native-2: not saved, no image available\n") != std::string::npos);
 
@@ -292,6 +328,7 @@ int main()
 
     TestText();
     TestConvert();
+    TestConvertHalf();
     TestPlan();
     TestFolderNames(root);
     TestWriteDump(root);

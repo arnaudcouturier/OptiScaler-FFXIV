@@ -29,6 +29,87 @@ void QuarantineGpuSubmission(UINT count, ID3D12CommandList* const* lists);
 void NotifyGpuReset(ID3D12CommandList* commands);
 bool EnsureGpuHooks(ID3D12Device* device);
 
+// ---- Preview seam (ext/ffxiv/chara/CharaNr.cpp) ----------------------------------------------------------------------------
+// The character preview runs its own NR model instances and needs three things that live in this module's private state: the
+// loaded forwarder's function table, the model file and the driver core's capability block. Nothing else of g_nr is exposed, and
+// the main NR path does not change behaviour. The capability block is shared with the main pass: a caller sets the extras to null
+// resources (the forwarder's set_extras) before every create and every evaluate.
+using PfnPreviewCreate = void*(__cdecl*)(const wchar_t*, const wchar_t*, ID3D12Device*, ID3D12GraphicsCommandList*, void*,
+                                         unsigned int, unsigned int, int, float, int, float, float, float, int, int);
+using PfnPreviewEvaluate = int(__cdecl*)(ID3D12GraphicsCommandList*, void*, void*, ID3D12Resource*, ID3D12Resource*,
+                                         ID3D12Resource*, ID3D12Resource*, unsigned int, unsigned int, unsigned int, unsigned int,
+                                         unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, int,
+                                         float, int, float, float, float, int, float, float);
+using PfnPreviewRelease = void(__cdecl*)(void*);
+using PfnPreviewSetExtras = void(__cdecl*)(void*, float, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned int,
+                                           unsigned int, unsigned int, unsigned int);
+
+struct PreviewBackend
+{
+    PfnPreviewCreate create = nullptr;
+    PfnPreviewEvaluate evaluate = nullptr;
+    PfnPreviewRelease release = nullptr;
+    PfnPreviewSetExtras setExtras = nullptr; // may be null (an older forwarder)
+    void* capabilityParams = nullptr;
+    std::wstring modelPath;
+    std::wstring dataPath;
+    const char* (*lastModelError)() = nullptr; // may be null
+};
+
+enum class PreviewBackendStatus
+{
+    Ready,
+    ForwarderMissing,
+    ModelMissing,
+    CapabilityFailed,
+};
+
+// Loads the forwarder (once), finds the model file and obtains the capability block on `device`. Safe to call repeatedly.
+PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend& out);
+
+// The tuning the main NR pass creates its first model pass with ([DlssNr] preset, intensity, style, structure, tone, skin, mask).
+struct PreviewTuning
+{
+    int preset = 0;
+    float intensity = 1.0f;
+    int style = 0;
+    float structure = 1.0f;
+    float tone = 1.0f;
+    float skin = -1.0f;
+    bool autoMask = true;
+};
+PreviewTuning CurrentPreviewTuning();
+
+// True while the graphics bridge is shutting down (the main NR is suspended).
+bool PreviewBackendSuspended();
+
+// Held around create, set_extras, BeginEvaluate/evaluate/EndEvaluate of a preview model: the main pass holds the same lock around its
+// own evaluate, and the native wrapper keeps per-evaluate state that two threads must not interleave.
+class PreviewEvaluateScope
+{
+  public:
+    PreviewEvaluateScope();
+    ~PreviewEvaluateScope();
+    PreviewEvaluateScope(const PreviewEvaluateScope&) = delete;
+    PreviewEvaluateScope& operator=(const PreviewEvaluateScope&) = delete;
+
+  private:
+    void* _impl = nullptr;
+};
+
+// The state envelope every NR compute pass runs in (root-signature tracking off, restored afterwards), for a caller-owned list.
+class PreviewStateEnvelope
+{
+  public:
+    explicit PreviewStateEnvelope(ID3D12GraphicsCommandList* commands);
+    ~PreviewStateEnvelope();
+    PreviewStateEnvelope(const PreviewStateEnvelope&) = delete;
+    PreviewStateEnvelope& operator=(const PreviewStateEnvelope&) = delete;
+
+  private:
+    void* _impl = nullptr;
+};
+
 // FFXIV bridge lifecycle: stop new work and retire completed PreSR generations
 // before calling the driver's NGX shutdown. Never call from DllMain. A genuine
 // NGX reinitialization can resume without changing the user's saved NR setting.

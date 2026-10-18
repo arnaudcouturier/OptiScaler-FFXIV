@@ -20,6 +20,7 @@ enum class SwapKind : uint8_t
     Aa,    // the spatial AA result replaced the image a UI draw samples
     Dlss,  // the composed DLSS image replaced it
     Flood, // the debug magenta replaced it
+    Nr,    // the preview NR result replaced it
 };
 
 inline constexpr const char* SwapKindName(SwapKind k)
@@ -28,6 +29,7 @@ inline constexpr const char* SwapKindName(SwapKind k)
     {
     case SwapKind::Aa: return "AA";
     case SwapKind::Dlss: return "DLSS";
+    case SwapKind::Nr: return "NR";
     default: return "flood";
     }
 }

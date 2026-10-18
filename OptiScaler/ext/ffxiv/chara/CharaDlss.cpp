@@ -13,6 +13,8 @@
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
+#include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
 #include "ext/ffxiv/chara/CharaStats.h"
@@ -72,6 +74,12 @@ static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Exposure_Scale) == ngx::
 static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width) == ngx::kSubrectWidth);
 static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height) == ngx::kSubrectHeight);
 static_assert(std::string_view(NVSDK_NGX_Parameter_Reset) == ngx::kReset);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA) == ngx::kPresetHintNames[0]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality) == ngx::kPresetHintNames[1]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality) == ngx::kPresetHintNames[2]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced) == ngx::kPresetHintNames[3]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance) == ngx::kPresetHintNames[4]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance) == ngx::kPresetHintNames[5]);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes == ngx::kFlagMotionLowRes);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_DepthInverted == ngx::kFlagDepthInverted);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure == ngx::kFlagAutoExposure);
@@ -83,9 +91,11 @@ constexpr uint64_t kGateRefreshMs = 100;
 constexpr uint64_t kEvaluationLogEvery = 300;
 constexpr uint32_t kMaxSlotFailures = 4; // this many failed slots end the path for the session
 constexpr UINT kSrvSlots = 8;
+constexpr uint32_t kNrMaxSide = 4096; // larger finisher outputs are not offered to preview NR
 
 // ---- Gate state (any thread) -------------------------------------------------------------------------------------------
-std::atomic<bool> g_latched { false };
+// The SR latch lives in the object shared with preview NR (nr::SharedLatches()): an SR failure must not stop NR and the reverse.
+bool SrLatched() { return nr::SharedLatches().SrLatched(); }
 std::atomic<uint32_t> g_slotsHeld { 0 }; // slots whose GPU objects still exist (a latched path drains them before it stops)
 std::atomic<uint8_t> g_availability { static_cast<uint8_t>(Availability::ConfigOff) };
 std::atomic<uint64_t> g_nextGateCheck { 0 };
@@ -145,6 +155,8 @@ struct PassData
 };
 
 SlotTable g_slots;
+nr::ConsumerSeen g_consumed; // preview images a UI draw sampled lately: the liveness signal that gates NR bring-up
+constexpr uint64_t kNrLiveWindowMs = 1000;
 std::array<SlotGpu, kMaxSlots> g_gpu;
 PassData g_pass;
 int g_lastEvaluatedSlot = kNoSlot; // the slot of the most recent successful evaluation (the preview image dump reads its composed image)
@@ -161,6 +173,7 @@ constexpr size_t kLineSlotAcquired = 10;
 constexpr size_t kLinePassLive = 11;
 constexpr size_t kLineSwap = 12;
 constexpr size_t kLineMotionTarget = 13;
+constexpr size_t kLineNrSwap = 14;
 
 // ---- Gate ----------------------------------------------------------------------------------------------------------------
 bool EntryPointsPresent()
@@ -174,7 +187,7 @@ GateFacts GatherFacts()
 {
     GateFacts f;
     f.configOn = ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
-    f.latched = g_latched.load(std::memory_order_relaxed);
+    f.latched = SrLatched();
     f.ngxModuleLoaded = NVNGXProxy::NVNGXModule() != nullptr;
     f.dlssEnabledInConfig = Config::Instance()->DLSSEnabled.value_or_default();
     f.dx11Initialised = NVNGXProxy::IsDx11Inited();
@@ -185,6 +198,20 @@ GateFacts GatherFacts()
     return f;
 }
 
+// The facts the pure plumbing rules (CharaNrPlumbing.h) decide on. The SR gate result is the cached one (Refresh keeps it current).
+nr::PlumbingFacts PlumbingNow()
+{
+    nr::PlumbingFacts f;
+    f.srWanted = ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
+    f.nrWanted = nr::Wanted();
+    f.srLatched = SrLatched();
+    f.nrLatched = nr::Latched();
+    f.nrAvailable = nr::Available();
+    f.srGateOpen = static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available;
+    f.nrHoldsResources = nr::HoldsResources();
+    f.srSlotsHeld = g_slotsHeld.load(std::memory_order_relaxed);
+    return f;
+}
 void ReportAvailability(Availability a)
 {
     std::lock_guard lock(g_logMutex);
@@ -285,7 +312,7 @@ void CheckDevice(const DrawView& view)
 }
 void Latch(const char* why)
 {
-    if (g_latched.exchange(true))
+    if (!nr::SharedLatches().LatchSr())
         return;
     LOG_WARN("CharaView DLSS: {}; native previews retained for this session", why);
 }
@@ -379,6 +406,31 @@ std::string PointerSet(ID3D11DeviceContext* context)
                        g_drawDeviceNative.load(std::memory_order_relaxed));
 }
 
+// The render-preset hints of the main game's DLSS: the configuration's override when it is on, otherwise the values the game
+// requested for its own feature (State keeps them while the override is off).
+ngx::PresetHints CurrentPresetHints()
+{
+    const Config& cfg = *Config::Instance();
+    const State& state = State::Instance();
+    ngx::PresetSource source;
+    source.overrideOn = cfg.RenderPresetOverride.value_or_default();
+    source.forAll = static_cast<const std::optional<uint32_t>&>(cfg.RenderPresetForAll);
+    const std::optional<uint32_t>* perQuality[ngx::kPresetHintCount] = {
+        &cfg.RenderPresetDLAA, &cfg.RenderPresetUltraQuality, &cfg.RenderPresetQuality,
+        &cfg.RenderPresetBalanced, &cfg.RenderPresetPerformance, &cfg.RenderPresetUltraPerformance,
+    };
+    const uint32_t game[ngx::kPresetHintCount] = {
+        state.dlssRenderPresetDLAA, state.dlssRenderPresetUltraQuality, state.dlssRenderPresetQuality,
+        state.dlssRenderPresetBalanced, state.dlssRenderPresetPerformance, state.dlssRenderPresetUltraPerformance,
+    };
+    for (size_t i = 0; i < ngx::kPresetHintCount; ++i)
+    {
+        source.perQuality[i] = *perQuality[i];
+        source.game[i] = game[i];
+    }
+    return ngx::ComposePresetHints(source);
+}
+
 // Creates the NGX feature of a slot. A failure here ends the path for the session (the driver cannot do it).
 bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t h, bool reversedZ)
 {
@@ -399,6 +451,7 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     }
     ParamSetter setter { params };
     ngx::ApplyCreate(setter, w, h, reversedZ);
+    ngx::ApplyPresetHints(setter, CurrentPresetHints());
 
     NVSDK_NGX_Handle* handle = nullptr;
     const NVSDK_NGX_Result result = create(context, NVSDK_NGX_Feature_SuperSampling, params, &handle);
@@ -416,8 +469,11 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     g.handle = handle;
     g.ngxGeneration = g_ngxGeneration.load(std::memory_order_acquire);
     g_slots.Slot(index).hasFeature = true;
-    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; {}", w, h, w * ngx::kOutputScale,
-             h * ngx::kOutputScale, static_cast<unsigned>(result), PointerSet(context));
+    const ngx::PresetHints hints = CurrentPresetHints();
+    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; render presets "
+             "DLAA {} / UltraQuality {} / Quality {} / Balanced {} / Performance {} / UltraPerformance {}; {}",
+             w, h, w * ngx::kOutputScale, h * ngx::kOutputScale, static_cast<unsigned>(result), hints.value[0], hints.value[1],
+             hints.value[2], hints.value[3], hints.value[4], hints.value[5], PointerSet(context));
     UpdateCounts();
     return true;
 }
@@ -560,6 +616,8 @@ bool EnsureInit(ID3D11DeviceContext* context)
     return true;
 }
 
+void RunNrProduction(const DrawView& view, uint32_t w, uint32_t h); // preview NR production entry, defined below
+
 void RunSlot(int index, const DrawView& view)
 {
     ReplayScope own; // the upscaler may copy or clear on this context: the hooks must not treat that as the game's work
@@ -636,6 +694,10 @@ void RunSlot(int index, const DrawView& view)
         return;
     }
 
+    // Preview NR, production entry: the SR evaluate succeeded.
+    if (nr::RunProductionNow(PlumbingNow(), true))
+        RunNrProduction(view, w * ngx::kOutputScale, h * ngx::kOutputScale);
+
     const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
     if (!scope.Alpha(g.output.srv.Get(), g.nativeSrv.Get(), g.composed.rtv.Get(), w * ngx::kOutputScale, h * ngx::kOutputScale, tinted))
     {
@@ -676,6 +738,52 @@ void RunSlot(int index, const DrawView& view)
         diag::Trace(diag::TraceCategory::Guides, view.now,
                     std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} reversedZ {} pass {}", index, w, h, g_pass.jitter.x,
                                 g_pass.jitter.y, in.reset, g_reversedZ, g_pass.counter));
+}
+
+// ---- Preview NR hooks -----------------------------------------------------------------------------------------------------
+// Bring-up entry: right after the finisher wrote the native image. The module copies it to its shared colour image and queues the
+// NR list on the bridge's D3D12 queue (colour only, synthetic guides). Draw thread, immediate context. Failures stay inside the
+// module (it latches NR, not the SR path).
+void RunNrBringUp(const DrawView& view)
+{
+    ID3D11Texture2D* texture = view.rtvTexture;
+    const uint32_t w = view.facts.targetWidth, h = view.facts.targetHeight;
+    if (texture == nullptr || w == 0 || h == 0 || w > kNrMaxSide || h > kNrMaxSide)
+        return;
+    ReplayScope own; // the module copies on this context: the copy hooks must not treat that as the game's work
+    nr::RunRequest request;
+    request.context = view.context;
+    request.native = texture;
+    request.width = w;
+    request.height = h;
+    request.now = view.now;
+    const nr::RunOutcome outcome = nr::RunBringUp(request);
+    if (outcome == nr::RunOutcome::Ran)
+        ++g_stats.nrRuns;
+    if (diag::TraceEnabled() && outcome != nr::RunOutcome::Ran)
+        diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR bring-up outcome {} for {}x{}", static_cast<int>(outcome), w, h));
+}
+
+// Production entry: between the SR evaluate and the alpha pass of RunSlot, with the real guides. Only invoked when the SR evaluate
+// succeeded (nr::RunProductionNow). The module does not implement it yet and answers NotImplemented, which is not a failure.
+void RunNrProduction(const DrawView& view, uint32_t w, uint32_t h)
+{
+    nr::RunRequest request;
+    request.context = view.context;
+    request.native = view.rtvTexture;
+    request.width = w;
+    request.height = h;
+    request.now = view.now;
+    (void)nr::RunProduction(request);
+}
+
+// True when `key` is one of the preview renderer's output textures (table entries 0..7): only those can be replaced by an NR result.
+bool IsPreviewOutput(const DrawView& view, uintptr_t key)
+{
+    if (view.table == nullptr)
+        return false;
+    const int entry = table::IndexOfPointer(*view.table, key);
+    return entry >= 0 && entry <= 7;
 }
 
 void Finish(const DrawView& view)
@@ -764,7 +872,7 @@ void Finish(const DrawView& view)
 
 // ---- Consumer ------------------------------------------------------------------------------------------------------------
 // A UI draw that samples a preview image: the composed image replaces it for this one draw.
-bool Consume(const DrawView& view, DrawCall draw)
+bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
 {
     ID3D11DeviceContext* context = view.context;
     ID3D11ShaderResourceView* original[kSrvSlots] {};
@@ -773,6 +881,7 @@ bool Consume(const DrawView& view, DrawCall draw)
     ID3D11ShaderResourceView* replaced[kSrvSlots] {};
     bool any = false;
     bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
+    bool anyNr = false;   // at least one slot got the preview NR result
     const bool floodOn = flood::On();
     for (UINT i = 0; i < kSrvSlots; ++i)
     {
@@ -788,8 +897,10 @@ bool Consume(const DrawView& view, DrawCall draw)
         ComPtr<ID3D11Resource> resource;
         original[i]->GetResource(&resource);
         const uintptr_t key = reinterpret_cast<uintptr_t>(resource.Get());
-        int index = g_slots.Find(key);
-        if (index == kNoSlot && g_slots.RecentContains(key, view.now))
+        if (nrOn && IsPreviewOutput(view, key))
+            g_consumed.Record(key, view.now);
+        int index = sr ? g_slots.Find(key) : kNoSlot;
+        if (sr && index == kNoSlot && g_slots.RecentContains(key, view.now))
         {
             ComPtr<ID3D11Texture2D> texture;
             D3D11_TEXTURE2D_DESC td {};
@@ -809,7 +920,19 @@ bool Consume(const DrawView& view, DrawCall draw)
             }
         }
         if (index == kNoSlot)
+        {
+            // No SR slot: the preview NR result (native size, original alpha) replaces the image when the stream has a current one.
+            // The flood test wins (it is applied by the dispatcher for a draw this function leaves alone).
+            if (nrOn && !floodOn && IsPreviewOutput(view, key))
+            {
+                if (ID3D11ShaderResourceView* result = nr::ResultFor(context, key, view.now))
+                {
+                    replaced[i] = result;
+                    anyNr = true;
+                }
+            }
             continue;
+        }
 
         g_slots.Touch(index, view.now);
         const SlotState& s = g_slots.Slot(index);
@@ -824,19 +947,36 @@ bool Consume(const DrawView& view, DrawCall draw)
                 continue;
             }
         }
-        if (s.everEvaluated && !s.failed && g.composed.srv != nullptr)
+        const bool srReady = s.everEvaluated && !s.failed && g.composed.srv != nullptr;
+        ID3D11ShaderResourceView* nrResult = nullptr;
+        if (!srReady && nrOn && !floodOn && IsPreviewOutput(view, key))
+            nrResult = nr::ResultFor(context, key, view.now);
+        switch (nr::ChooseConsumerSource(floodOn, srReady, nrResult != nullptr))
         {
+        case nr::ConsumerSource::SrResult: // SR wins over NR
             replaced[i] = g.composed.srv.Get();
             any = true;
+            break;
+        case nr::ConsumerSource::NrResult:
+            replaced[i] = nrResult;
+            anyNr = true;
+            break;
+        default: break;
         }
     }
 
     bool handled = false;
-    if (any || flooded)
+    if (any || anyNr || flooded)
     {
         // A flooded draw is counted as a flood swap only: it did not get the composed image.
         if (flooded)
             ++g_stats.floodSwaps;
+        else if (!any)
+        {
+            ++g_stats.nrSwaps;
+            if (g_lines.ShouldLog(kLineNrSwap, identify::BurstNumber()))
+                LOG_INFO("CharaView NR: a UI draw is given the preview NR result (NR swaps so far {})", g_stats.nrSwaps.load());
+        }
         else
         {
             ++g_stats.consumerSwaps;
@@ -856,7 +996,7 @@ bool Consume(const DrawView& view, DrawCall draw)
                 break;
             }
         }
-        probe::SwapTrace trace(context, flooded ? probe::SwapKind::Flood : probe::SwapKind::Dlss, tracedSlot, replaced[tracedSlot]);
+        probe::SwapTrace trace(context, flooded ? probe::SwapKind::Flood : any ? probe::SwapKind::Dlss : probe::SwapKind::Nr, tracedSlot, replaced[tracedSlot]);
         context->PSSetShaderResources(0, kSrvSlots, replaced);
         trace.Applied();
         draw();
@@ -907,25 +1047,26 @@ bool Implemented() { return true; }
 
 bool Active()
 {
-    // A latched path stays active while GPU objects remain, so the maintenance calls keep releasing them.
-    if (g_latched.load(std::memory_order_relaxed))
-        return g_slotsHeld.load(std::memory_order_relaxed) != 0;
-
-
+    // "Plumbing alive": true while the SR path or preview NR may run, and while any GPU object of either still exists (a latched
+    // or switched-off path is drained by the maintenance calls). An SR latch or a closed SR gate does not stop NR and the reverse.
     const uint64_t now = GetTickCount64();
-    if (now >= g_nextGateCheck.load(std::memory_order_relaxed))
+    const bool srWanted = ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
+    if (srWanted && !SrLatched() && now >= g_nextGateCheck.load(std::memory_order_relaxed))
         Refresh(now);
-    const bool active = static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available;
-    if (active && !g_wasActive.exchange(true))
+    const nr::PlumbingFacts facts = PlumbingNow();
+    const bool srUsable = nr::SrUsable(facts);
+    if (srUsable && !g_wasActive.exchange(true))
         motion::MarkQueriesBlind(); // queries opened before the hooks saw them are unknown until the next frame end
-    else if (!active)
+    else if (!srUsable)
         g_wasActive.store(false, std::memory_order_relaxed);
-    return active;
+    return nr::PlumbingActive(facts);
 }
+
+bool SrAvailable() { return nr::SrHooksNeeded(PlumbingNow()); }
 
 void Probe(const DrawView& view)
 {
-    if (!g_latched.load(std::memory_order_relaxed))
+    if (!SrLatched())
         CheckDevice(view);
 }
 
@@ -948,19 +1089,29 @@ void OnNgxShutdown()
 
 bool Around(const DrawView& view, DrawCall draw)
 {
-    if (g_latched.load(std::memory_order_relaxed))
-        return false;
     ID3D11DeviceContext* context = view.context;
-    CheckDevice(view);
-    if (view.now >= g_nextGateCheck.load(std::memory_order_relaxed))
-        Refresh(view.now);
-    if (static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) != Availability::Available)
+    // The SR gate (NGX device comparison, availability) only matters while the SR path is wanted and not latched.
+    if (ext::Cfg().ffxiv.chara.previewDlss.value_or_default() && !SrLatched())
+    {
+        CheckDevice(view);
+        if (view.now >= g_nextGateCheck.load(std::memory_order_relaxed))
+            Refresh(view.now);
+    }
+    // The two paths are independent: either may run alone (nr::PlumbingFacts / CharaNrPlumbing.h).
+    nr::PlumbingFacts facts = PlumbingNow();
+    bool sr = nr::SrUsable(facts);
+    const bool nrOn = nr::NrUsable(facts);
+    if (view.kind == DrawKind::Ignore || (!sr && !nrOn))
         return false;
-    if (view.kind == DrawKind::Ignore || !EnsureInit(context))
-        return false;
+    if (sr && !EnsureInit(context))
+    {
+        sr = false; // EnsureInit latched the SR path; NR carries on
+        if (!nrOn)
+            return false;
+    }
     g_context = context;
 
-    if ((view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer) &&
+    if (sr && (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer) &&
         (view.passStarted || g_pass.counter != (view.pass != nullptr ? view.pass->counter : 0)))
         BeginPass(view);
 
@@ -968,7 +1119,7 @@ bool Around(const DrawView& view, DrawCall draw)
     {
     case DrawKind::Prepass:
     {
-        if (!g_pass.live)
+        if (!sr || !g_pass.live)
             return false;
         {
             JitterScope shift(context, g_pass.jitter);
@@ -979,7 +1130,7 @@ bool Around(const DrawView& view, DrawCall draw)
     }
     case DrawKind::GBuffer:
     {
-        if (!g_pass.live)
+        if (!sr || !g_pass.live)
             return false;
         if (!g_pass.prepassSeen && !g_pass.jitterZeroed)
         {
@@ -1003,6 +1154,15 @@ bool Around(const DrawView& view, DrawCall draw)
     case DrawKind::Finisher:
     {
         draw(); // the native image first
+        // Preview NR: bring-up entry. It needs only the native image, not the SR guides, so it does not wait for them and does not
+        // care whether the SR path is latched or failed.
+        // A live window only: a UI draw must have sampled this preview image lately (the first render after opening is native).
+        const bool live = view.rtvTexture != nullptr &&
+                          g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
+        if (nr::RunBringUpNow(facts, view.finisherAccepted, live))
+            RunNrBringUp(view);
+        if (!sr)
+            return true;
         if (!view.finisherAccepted)
         {
             // The native image of this render was written but will not be upscaled: stop showing the older composed one.
@@ -1019,7 +1179,7 @@ bool Around(const DrawView& view, DrawCall draw)
         Finish(view);
         return true;
     }
-    case DrawKind::Consumer: return Consume(view, draw);
+    case DrawKind::Consumer: return Consume(view, draw, sr, nrOn);
     default: return false;
     }
 }
@@ -1055,14 +1215,14 @@ void OnVertexShaderCreated(ID3D11Device*, ID3D11VertexShader*, const void*, SIZE
 void OnFrameEnd()
 {
     motion::OnFrameEnd();
-    const bool disabled = g_latched.load(std::memory_order_relaxed) || !ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
+    const bool disabled = SrLatched() || !ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
     Cleanup(GetTickCount64(), disabled);
 }
 
 void Maintain(uint64_t nowMs)
 {
     motion::OnMaintain(nowMs); // lifts the open-query gate when no frame callback exists
-    const bool disabled = g_latched.load(std::memory_order_relaxed) || !ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
+    const bool disabled = SrLatched() || !ext::Cfg().ffxiv.chara.previewDlss.value_or_default();
     Cleanup(nowMs, disabled);
 }
 
@@ -1114,7 +1274,7 @@ const char* StatusNote()
     // The gate is only refreshed while the dispatcher asks: with the feature off there is nothing to say.
     if (!ext::Cfg().ffxiv.chara.previewDlss.value_or_default())
         return "";
-    if (g_latched.load(std::memory_order_relaxed))
+    if (SrLatched())
         return ReasonText(Availability::Latched);
     const auto a = static_cast<Availability>(g_availability.load(std::memory_order_relaxed));
     return ReasonText(a);

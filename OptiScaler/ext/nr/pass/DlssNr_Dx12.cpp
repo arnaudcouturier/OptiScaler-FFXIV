@@ -3710,6 +3710,50 @@ bool EnsureGpuHooks(ID3D12Device* device)
     return handle >= 0 && ext::restrack::EnsureHooks(device);
 }
 
+PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend& out)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    if (!EnsureForwarder())
+        return PreviewBackendStatus::ForwarderMissing;
+    const auto model = FindSelectedModel();
+    if (!model.has_value())
+        return PreviewBackendStatus::ModelMissing;
+    if (!EnsureCapabilityParams(device))
+        return PreviewBackendStatus::CapabilityFailed;
+    out.create = g_nr.create;
+    out.evaluate = g_nr.evaluate;
+    out.release = g_nr.release;
+    out.setExtras = g_nr.setExtras;
+    out.capabilityParams = g_nr.capabilityParams;
+    out.modelPath = model->wstring();
+    out.dataPath = State::Instance().NVNGX_ApplicationDataPath;
+    out.lastModelError = g_nr.lastModelError;
+    return PreviewBackendStatus::Ready;
+}
+
+PreviewTuning CurrentPreviewTuning()
+{
+    const ext::NrConfig& nr = ext::Cfg().nr;
+    const auto tuning = PassTuning(nr, 0);
+    PreviewTuning t;
+    t.preset = static_cast<int>(PassPreset(nr, 0));
+    t.intensity = tuning.intensity;
+    t.style = static_cast<int>(PassStyle(nr, 0));
+    t.structure = tuning.structure;
+    t.tone = tuning.tone;
+    t.skin = tuning.skin;
+    t.autoMask = tuning.autoMask;
+    return t;
+}
+
+bool PreviewBackendSuspended() { return g_bridgeSuspended.load(); }
+
+PreviewEvaluateScope::PreviewEvaluateScope() : _impl(new std::unique_lock<std::recursive_mutex>(g_nrMutex)) {}
+PreviewEvaluateScope::~PreviewEvaluateScope() { delete static_cast<std::unique_lock<std::recursive_mutex>*>(_impl); }
+
+PreviewStateEnvelope::PreviewStateEnvelope(ID3D12GraphicsCommandList* commands) : _impl(new ScopedNrStateEnvelope(commands)) {}
+PreviewStateEnvelope::~PreviewStateEnvelope() { delete static_cast<ScopedNrStateEnvelope*>(_impl); }
+
 void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
