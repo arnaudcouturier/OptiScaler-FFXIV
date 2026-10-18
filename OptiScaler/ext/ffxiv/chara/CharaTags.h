@@ -56,6 +56,46 @@ inline uint32_t RoleOf(ID3D11PixelShader* shader)
     return roles;
 }
 
+// Every pixel shader the hooks see carries its CRC-32 and DXBC size (not only the ones with a role), so a draw's shader can be
+// named in the log: a shader of the preview that matches no CRC list shows up with the values the list needs.
+inline constexpr GUID kShaderInfoTag { 0x2b8e4d17, 0x93a1, 0x4c6f, { 0xa0, 0x5d, 0x71, 0xe6, 0x3c, 0x9b, 0x48, 0x02 } };
+
+struct ShaderInfo
+{
+    uint32_t crc = 0;
+    uint32_t size = 0;
+    bool known = false; // false: the shader was created before the hooks (or never went through them)
+};
+
+struct ShaderInfoData
+{
+    uint32_t crc;
+    uint32_t size;
+};
+
+inline bool SetShaderInfo(ID3D11PixelShader* shader, uint32_t crc, uint32_t size)
+{
+    if (shader == nullptr)
+        return false;
+    const ShaderInfoData data { crc, size };
+    return SUCCEEDED(shader->SetPrivateData(kShaderInfoTag, sizeof(data), &data));
+}
+
+inline ShaderInfo GetShaderInfo(ID3D11PixelShader* shader)
+{
+    ShaderInfo info;
+    if (shader == nullptr)
+        return info;
+    ShaderInfoData data {};
+    UINT size = sizeof(data);
+    if (FAILED(shader->GetPrivateData(kShaderInfoTag, &size, &data)) || size != sizeof(data))
+        return info;
+    info.crc = data.crc;
+    info.size = data.size;
+    info.known = true;
+    return info;
+}
+
 // Writes the role bits (a no-op for 0). Returns whether anything was written.
 inline bool SetRoles(ID3D11PixelShader* shader, uint32_t roles)
 {

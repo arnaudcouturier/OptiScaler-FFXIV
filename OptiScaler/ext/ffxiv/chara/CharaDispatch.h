@@ -71,7 +71,7 @@ void OnDetached();
 void Detach();
 
 // CreatePixelShader succeeded; `crc` is the CRC-32 of the DXBC. Call after the other shader tags were written.
-void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc);
+void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize);
 
 // Hook forwarders. All of them return immediately unless the isolated DLSS path is on and active.
 void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* source, bool full);

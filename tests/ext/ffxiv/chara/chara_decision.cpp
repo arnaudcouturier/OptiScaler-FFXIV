@@ -178,10 +178,27 @@ void TestFinisherRules()
     auto f = Finisher();
     CHECK(IsFinisher(f));
 
-    // the tag alone is enough, whatever the target
-    auto tagged = DrawFacts {};
-    tagged.psFinisher = true;
-    CHECK(Classify(tagged) == DrawKind::Finisher);
+    // the tag is enough for any of the preview renderer's outputs, whatever else the draw looks like
+    for (int entry = 0; entry <= 7; ++entry)
+    {
+        auto tagged = DrawFacts {};
+        tagged.psFinisher = true;
+        tagged.rtv0Entry = entry;
+        CHECK(Classify(tagged) == DrawKind::Finisher && !IsOffTableFinisher(tagged));
+    }
+
+    // the first in-game test saw the finisher shader draw into a 960x540 target that is not in the table: not a preview draw
+    for (int entry : { kEntryNone, 8, 13, 18, 19 })
+    {
+        auto offTable = DrawFacts {};
+        offTable.psFinisher = true;
+        offTable.rtv0Entry = entry;
+        offTable.rtv0Present = true;
+        offTable.targetWidth = 960;
+        offTable.targetHeight = 540;
+        CHECK(IsOffTableFinisher(offTable) && !IsFinisher(offTable) && Classify(offTable) == DrawKind::Ignore);
+    }
+    CHECK(!IsOffTableFinisher(DrawFacts {})); // no finisher shader, nothing to report
 
     // fallback for a shader created before the hooks: shape of the draw
     auto early = Finisher();
@@ -278,7 +295,7 @@ void TestExhaustive()
                 DrawKind expected = DrawKind::Ignore;
                 if (prepass || gbuffer)
                     expected = geometryOk ? (prepass ? DrawKind::Prepass : DrawKind::GBuffer) : DrawKind::Ignore;
-                else if (f.psFinisher)
+                else if (f.psFinisher && rtvEntry >= 0 && rtvEntry <= 7)
                     expected = DrawKind::Finisher;
                 else if (ui)
                     expected = DrawKind::Consumer;
@@ -338,6 +355,65 @@ void TestFinisherCheck()
     CHECK(!FinisherAccepted(c));
 }
 
+// The first failing condition, in the order the check lists them; every reason has a name for the log.
+void TestFinisherVerdict()
+{
+    FinisherCheck ok;
+    ok.rtv0Present = true;
+    ok.passActive = true;
+    ok.targetWidth = ok.passWidth = 576;
+    ok.targetHeight = ok.passHeight = 960;
+    ok.targetFormat = kFormatB8G8R8A8Unorm;
+    ok.viewportWidth = 576;
+    ok.viewportHeight = 960;
+    CHECK(CheckFinisher(ok) == FinisherVerdict::Accepted);
+
+    auto c = ok;
+    c.rtv0Present = false;
+    CHECK(CheckFinisher(c) == FinisherVerdict::NoRenderTarget);
+    c = ok;
+    c.depthOrStencilTest = true;
+    CHECK(CheckFinisher(c) == FinisherVerdict::DepthOrStencilTest);
+    c = ok;
+    c.passActive = false;
+    CHECK(CheckFinisher(c) == FinisherVerdict::NoPass);
+    c = ok;
+    c.targetWidth = 288;
+    CHECK(CheckFinisher(c) == FinisherVerdict::SizeMismatch);
+    c = ok;
+    c.passHeight = 480;
+    CHECK(CheckFinisher(c) == FinisherVerdict::SizeMismatch);
+    c = ok;
+    c.targetFormat = 91; // B8G8R8A8_UNORM_SRGB
+    CHECK(CheckFinisher(c) == FinisherVerdict::FormatMismatch);
+    c = ok;
+    c.viewportX = 0.75f;
+    CHECK(CheckFinisher(c) == FinisherVerdict::ViewportOrigin);
+    c = ok;
+    c.viewportY = -1.0f;
+    CHECK(CheckFinisher(c) == FinisherVerdict::ViewportOrigin);
+    c = ok;
+    c.viewportWidth = 288;
+    CHECK(CheckFinisher(c) == FinisherVerdict::ViewportSize);
+
+    // several failures: the earlier condition is the one reported
+    c = ok;
+    c.passActive = false;
+    c.targetFormat = 28;
+    c.viewportWidth = 1;
+    CHECK(CheckFinisher(c) == FinisherVerdict::NoPass);
+    c.passActive = true;
+    c.targetWidth = 100;
+    CHECK(CheckFinisher(c) == FinisherVerdict::SizeMismatch);
+
+    // the boolean and the reason always agree
+    for (const auto& probe : { ok, c })
+        CHECK(FinisherAccepted(probe) == (CheckFinisher(probe) == FinisherVerdict::Accepted));
+
+    for (size_t i = 0; i < kFinisherVerdicts; ++i)
+        CHECK(std::string(FinisherVerdictName(static_cast<FinisherVerdict>(i))) != "?");
+}
+
 void TestPassState()
 {
     PassState pass;
@@ -375,6 +451,7 @@ int main()
     TestConsumerRules();
     TestExhaustive();
     TestFinisherCheck();
+    TestFinisherVerdict();
     TestPassState();
     TestNames();
     return TEST_RESULT("chara_decision");

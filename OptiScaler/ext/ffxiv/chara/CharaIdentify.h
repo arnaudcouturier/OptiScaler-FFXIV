@@ -18,8 +18,20 @@ namespace ext::ffxiv::chara::identify
 // One classified draw (view.kind is set). Called before the draw runs.
 void Observe(const DrawView& view);
 
-// The outcome of the finisher check after the native finisher draw ran.
-void OnFinisher(bool accepted);
+// The outcome of the finisher check (view.finisherVerdict / view.finisherCheck): counted per reason, and the values the check
+// read are logged once for the first rejection of each reason.
+void OnFinisher(const DrawView& view);
+
+// A draw with the finisher shader that renders outside the preview renderer's outputs (not a preview draw).
+void OnOffTableFinisher(const DrawView& view);
+
+// A depth-only draw (no render target) into a depth texture of the table, whether or not it satisfies the prepass rule: one
+// line per distinct combination of depth entry, vertex-shader cb0 size, viewport match, sample count and draw API (at most 12).
+void ObserveDepthOnly(const DrawView& view);
+
+// A draw that renders into a table entry or samples one: the CRC-32 and size of its pixel shader are logged once per shader
+// (at most 64 lines), so a shader list that does not match this game build can be corrected from the log.
+void ObserveShader(const DrawView& view);
 
 // Called at least every 100 ms of draw activity: closes an activity burst that went quiet.
 void Maintain(uint64_t nowMs);

@@ -117,7 +117,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
     {
         const UINT crc=Crc(code,size); // hashed once: the scene-stage tag and the UI boundary stamp share it
         ext::hdr::FfxivSceneHdr::Tag(*out,crc);
-        ext::ffxiv::chara::OnShaderCreated(*out,crc); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
+        ext::ffxiv::chara::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
     }
     return hr;

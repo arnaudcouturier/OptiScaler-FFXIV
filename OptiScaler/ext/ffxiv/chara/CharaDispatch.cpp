@@ -32,7 +32,6 @@ uint64_t g_seenFrame = 0;
 uint64_t g_lastMaintain = 0;
 bool g_loggedTags = false;
 
-std::array<std::atomic<uint32_t>, 4> g_tagged {}; // geometry, finisher, equipment display, UI
 
 constexpr uint64_t kMaintainMs = 100;
 constexpr uint64_t kPassIdleMs = 100; // a pass with no geometry draw for this long is over (no frame callback)
@@ -148,6 +147,9 @@ bool Gather(ID3D11DeviceContext* context, uint64_t now, const table::Snapshot& s
     if (rtv != nullptr)
     {
         f.rtv0Present = true;
+        D3D11_RENDER_TARGET_VIEW_DESC viewDesc {};
+        rtv->GetDesc(&viewDesc);
+        f.rtvFormat = static_cast<uint32_t>(viewDesc.Format);
         if (g.rtvResource != nullptr && SUCCEEDED(g.rtvResource.As(&g.rtvTexture)))
         {
             g.rtvTexture->GetDesc(&rtvDesc);
@@ -200,6 +202,9 @@ bool Gather(ID3D11DeviceContext* context, uint64_t now, const table::Snapshot& s
                                   v.viewport.Height == static_cast<float>(f.targetHeight);
     }
 
+    if (prepassCandidate)
+        identify::ObserveDepthOnly(v);
+
     // UI draws: does the shader sample a preview image?
     if ((v.roles & (RoleUi | RoleEquipDisplay)) != 0)
         f.srvEntry = FirstPreviewSrv(context, snap, 8, nullptr);
@@ -229,8 +234,8 @@ bool Gather(ID3D11DeviceContext* context, uint64_t now, const table::Snapshot& s
     return true;
 }
 
-// The finisher check reads the state the draw runs with; it is evaluated before the draw.
-bool EvaluateFinisher(ID3D11DeviceContext* context, const DrawView& v)
+// The finisher check reads the state the draw runs with; it is evaluated before the draw. Fills the verdict and the values read.
+void EvaluateFinisher(ID3D11DeviceContext* context, DrawView& v)
 {
     FinisherCheck c;
     c.rtv0Present = v.facts.rtv0Present;
@@ -262,7 +267,9 @@ bool EvaluateFinisher(ID3D11DeviceContext* context, const DrawView& v)
             c.depthOrStencilTest = desc.DepthEnable || desc.StencilEnable;
         }
     }
-    return FinisherAccepted(c);
+    v.finisherCheck = c;
+    v.finisherVerdict = CheckFinisher(c);
+    v.finisherAccepted = v.finisherVerdict == FinisherVerdict::Accepted;
 }
 } // namespace
 
@@ -308,8 +315,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     if (!g_loggedTags)
     {
         g_loggedTags = true;
-        LOG_INFO("CharaView: shaders tagged so far: geometry {}, finisher {}, equipment display {}, UI {}", g_tagged[0].load(),
-                 g_tagged[1].load(), g_tagged[2].load(), g_tagged[3].load());
+        LOG_INFO("CharaView: shaders tagged so far: geometry {}, finisher {}, equipment display {}, UI {}", g_stats.tagged[0].load(),
+                 g_stats.tagged[1].load(), g_stats.tagged[2].load(), g_stats.tagged[3].load());
     }
 
     DrawView view;
@@ -333,7 +340,11 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
             ++g_stats.passes;
     }
     if (view.kind == DrawKind::Finisher)
-        view.finisherAccepted = EvaluateFinisher(context, view);
+        EvaluateFinisher(context, view);
+    else if (view.kind == DrawKind::Ignore && IsOffTableFinisher(view.facts))
+        identify::OnOffTableFinisher(view);
+    if (view.facts.rtv0Entry >= 0 || view.facts.srvEntry >= 0)
+        identify::ObserveShader(view);
     identify::Observe(view);
 
     // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see CharaRoute.h).
@@ -341,7 +352,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     const bool dlssWanted = DlssWanted();
     if (dlssWanted)
         dlss::Probe(view);
-    switch (ChooseRoute(dlssWanted, dlssWanted && dlss::Active(), AaWanted(), view.roles, api))
+    const Route route = ChooseRoute(dlssWanted, dlssWanted && dlss::Active(), AaWanted(), view.roles, api);
+    switch (route)
     {
     case Route::Dlss: handled = dlss::Around(view, draw); break;
     case Route::Enhance: handled = enhance::Around(view, draw); break;
@@ -352,7 +364,9 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
     if (view.kind == DrawKind::Finisher)
     {
-        identify::OnFinisher(view.finisherAccepted);
+        identify::OnFinisher(view);
+        if (view.finisherAccepted && route != Route::Dlss)
+            ++(dlssWanted ? g_stats.finisherNoDlss : g_stats.finisherNotWanted); // the check passed, the DLSS path did not see it
         if (!view.finisherAccepted)
             g_pass.End();
     }
@@ -377,10 +391,11 @@ void Detach()
     g_pass.End();
 }
 
-void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc)
+void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize)
 {
     if (shader == nullptr)
         return;
+    SetShaderInfo(shader, crc, dxbcSize);
 
     uint32_t roles = RoleOfCrc(crc);
     UINT ui = 0;
@@ -390,17 +405,19 @@ void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc)
     if (roles == RoleNone || !SetRoles(shader, roles))
         return;
 
-    if (roles & RoleGeometry)
-        ++g_tagged[0];
-    if (roles & RoleFinisher)
-        ++g_tagged[1];
+    // The first shader of each role is named in the log: shaders are created whenever the game first needs them, which can be
+    // after the first preview draw, so the one-time "tagged so far" summary alone can read 0 for a role that is tagged later.
+    if ((roles & RoleGeometry) && g_stats.tagged[0]++ == 0)
+        LOG_INFO("CharaView: first geometry shader tagged (CRC {:08X}, {} bytes)", crc, dxbcSize);
+    if ((roles & RoleFinisher) && g_stats.tagged[1]++ == 0)
+        LOG_INFO("CharaView: finisher shader tagged (CRC {:08X}, {} bytes)", crc, dxbcSize);
     if (roles & RoleEquipDisplay)
     {
-        ++g_tagged[2];
-        LOG_INFO("CharaView: equipment display shader tagged");
+        ++g_stats.tagged[2];
+        LOG_INFO("CharaView: equipment display shader tagged (CRC {:08X}, {} bytes)", crc, dxbcSize);
     }
     if (roles & RoleUi)
-        ++g_tagged[3];
+        ++g_stats.tagged[3];
 }
 
 void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* source, bool full)

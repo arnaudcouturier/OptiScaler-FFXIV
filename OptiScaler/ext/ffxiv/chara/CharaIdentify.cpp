@@ -1,10 +1,15 @@
 #include "pch.h"
 
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaDlssRules.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
+#include "ext/ffxiv/chara/CharaTags.h"
 
 #include <array>
+#include <format>
+#include <string>
+#include <vector>
 
 namespace ext::ffxiv::chara::identify
 {
@@ -23,6 +28,15 @@ struct State
     std::array<uint64_t, 5> burst {};
     uint64_t burstFinisherOk = 0;
     uint64_t burstFinisherRejected = 0;
+    std::array<uint64_t, kFinisherVerdicts> burstVerdict {};
+    uint64_t burstOffTable = 0;
+    uint64_t burstDepthOnly = 0;
+    std::array<bool, kFinisherVerdicts> verdictLogged {};
+    uint32_t offTableLines = 0;
+    std::vector<uint64_t> offTableKeys;
+    std::vector<uint64_t> depthOnlySignatures;
+    std::vector<uint64_t> shaderKeys;
+    uint32_t shaderLines = 0;
     uint32_t bursts = 0;
     std::array<uint64_t, kMaxSignatures> signatures {};
     size_t signatureCount = 0;
@@ -49,6 +63,39 @@ uint64_t Signature(const DrawView& v)
     return h | 1; // never 0 (0 marks an empty slot)
 }
 
+constexpr size_t kMaxDepthOnlyLines = 12;
+constexpr uint32_t kMaxShaderLines = 64;
+constexpr uint32_t kMaxOffTableLines = 4;
+
+// "no render target 2, depth or stencil test on 1, ..." for the non-zero counts (accepted excluded), or "none".
+std::string ReasonCounts(const std::array<uint64_t, kFinisherVerdicts>& counts)
+{
+    std::string text;
+    for (size_t i = 1; i < kFinisherVerdicts; ++i)
+    {
+        if (counts[i] == 0)
+            continue;
+        if (!text.empty())
+            text += ", ";
+        text += std::string(FinisherVerdictName(static_cast<FinisherVerdict>(i))) + " " + std::to_string(counts[i]);
+    }
+    return text.empty() ? std::string("none") : text;
+}
+
+// What the DLSS path did with the accepted finishers so far (cumulative over the session).
+std::string DownstreamCounts()
+{
+    std::string text = "PreviewDLSS off " + std::to_string(g_stats.finisherNotWanted.load()) + ", path unavailable " +
+                       std::to_string(g_stats.finisherNoDlss.load());
+    for (size_t i = 0; i < g_stats.finishVerdict.size(); ++i)
+    {
+        const uint64_t n = g_stats.finishVerdict[i].load();
+        if (n != 0)
+            text += std::string(", ") + dlss::FinishVerdictName(static_cast<dlss::FinishVerdict>(i)) + " " + std::to_string(n);
+    }
+    return text;
+}
+
 void LogEndOfBurst(uint64_t now)
 {
     State& s = g_state;
@@ -57,7 +104,40 @@ void LogEndOfBurst(uint64_t now)
              now >= s.activityStart ? now - s.activityStart : 0, s.burst[static_cast<size_t>(DrawKind::Prepass)],
              s.burst[static_cast<size_t>(DrawKind::GBuffer)], s.burst[static_cast<size_t>(DrawKind::Finisher)],
              s.burstFinisherOk, s.burstFinisherRejected, s.burst[static_cast<size_t>(DrawKind::Consumer)]);
+    LOG_INFO("CharaView: that burst: finisher rejections by reason: {}; finisher-shader draws outside the preview outputs {}; "
+             "depth-only draws into a table depth texture {}; shaders tagged so far: geometry {}, finisher {}, equipment display {}, "
+             "UI {}; accepted finishers so far: {}",
+             ReasonCounts(s.burstVerdict), s.burstOffTable, s.burstDepthOnly, g_stats.tagged[0].load(), g_stats.tagged[1].load(),
+             g_stats.tagged[2].load(), g_stats.tagged[3].load(), DownstreamCounts());
     s.inActivity = false;
+}
+
+uint64_t Mix(uint64_t h, uint64_t value)
+{
+    h ^= value;
+    h *= 1099511628211ull;
+    return h;
+}
+
+bool Remember(std::vector<uint64_t>& seen, uint64_t key)
+{
+    for (const uint64_t k : seen)
+    {
+        if (k == key)
+            return false;
+    }
+    seen.push_back(key);
+    return true;
+}
+
+std::string ShaderText(ID3D11PixelShader* shader)
+{
+    if (shader == nullptr)
+        return "no pixel shader";
+    const ShaderInfo info = GetShaderInfo(shader);
+    if (!info.known)
+        return "pixel shader CRC not recorded (created before the hooks)";
+    return std::format("pixel shader CRC {:08X}, {} bytes", info.crc, info.size);
 }
 } // namespace
 
@@ -83,6 +163,8 @@ void Observe(const DrawView& v)
         s.activityStart = v.now;
         s.burst = {};
         s.burstFinisherOk = s.burstFinisherRejected = 0;
+        s.burstVerdict = {};
+        s.burstOffTable = s.burstDepthOnly = 0;
         ++s.bursts;
         LOG_INFO("CharaView: preview render activity started (burst {})", s.bursts);
         if (!s.loggedActiveTable && v.table != nullptr)
@@ -116,19 +198,95 @@ void Observe(const DrawView& v)
              d >= 0 ? std::to_string(d) : std::string("none"), t >= 0 ? std::to_string(t) : std::string("none"), v.roles);
 }
 
-void OnFinisher(bool accepted)
+void OnFinisher(const DrawView& view)
 {
     State& s = g_state;
-    if (accepted)
+    const size_t reason = static_cast<size_t>(view.finisherVerdict);
+    ++g_stats.finisherVerdict[reason];
+    ++s.burstVerdict[reason];
+    if (view.finisherVerdict == FinisherVerdict::Accepted)
     {
         ++g_stats.finisherAccepted;
         ++s.burstFinisherOk;
+        return;
     }
-    else
-    {
-        ++g_stats.finisherRejected;
-        ++s.burstFinisherRejected;
-    }
+
+    ++g_stats.finisherRejected;
+    ++s.burstFinisherRejected;
+    if (s.verdictLogged[reason])
+        return;
+    s.verdictLogged[reason] = true;
+
+    const FinisherCheck& c = view.finisherCheck;
+    LOG_INFO("CharaView: finisher rejected (first time for this reason): {}. Target {}x{} texture format {} view format {}, render "
+             "target {}, depth or stencil test {}, pass {} ({}x{}), viewport origin {:.2f}/{:.2f} size {:.1f}x{:.1f}, table entry {}, "
+             "via {}, {}",
+             FinisherVerdictName(view.finisherVerdict), c.targetWidth, c.targetHeight, c.targetFormat, view.facts.rtvFormat,
+             c.rtv0Present ? "yes" : "no", c.depthOrStencilTest ? "yes" : "no", c.passActive ? "active" : "not active", c.passWidth,
+             c.passHeight, c.viewportX, c.viewportY, c.viewportWidth, c.viewportHeight, view.facts.rtv0Entry, DrawApiName(view.api),
+             ShaderText(view.pixelShader));
+}
+
+void OnOffTableFinisher(const DrawView& view)
+{
+    State& s = g_state;
+    ++g_stats.finisherOffTable;
+    ++s.burstOffTable;
+    if (s.offTableLines >= kMaxOffTableLines)
+        return;
+    const uint64_t key = Mix(Mix(Mix(1, view.facts.targetWidth), view.facts.targetHeight), view.facts.rtvFormat);
+    if (!Remember(s.offTableKeys, key))
+        return;
+    ++s.offTableLines;
+    LOG_INFO("CharaView: the finisher shader drew outside the preview outputs (not counted as a preview finisher): target {}x{} view "
+             "format {}, table entry {}, via {}, {}",
+             view.facts.targetWidth, view.facts.targetHeight, view.facts.rtvFormat, view.facts.rtv0Entry, DrawApiName(view.api),
+             ShaderText(view.pixelShader));
+}
+
+void ObserveDepthOnly(const DrawView& view)
+{
+    State& s = g_state;
+    const DrawFacts& f = view.facts;
+    ++g_stats.depthOnlyTable;
+    ++s.burstDepthOnly;
+    if (s.depthOnlySignatures.size() >= kMaxDepthOnlyLines)
+        return;
+
+    const uint32_t cbBucket = f.vsCb0Bytes == 0 ? 0u : f.vsCb0Bytes < kCameraBlockBytes ? 1u : 2u;
+    uint64_t key = Mix(2, static_cast<uint64_t>(static_cast<int64_t>(f.dsvEntry) + 2));
+    key = Mix(key, cbBucket);
+    key = Mix(key, f.viewportMatchesTarget ? 1u : 0u);
+    key = Mix(key, f.samples);
+    key = Mix(key, static_cast<uint64_t>(view.api));
+    if (!Remember(s.depthOnlySignatures, key))
+        return;
+
+    LOG_INFO("CharaView depth-only draw {}: via {}, depth entry {} ({}), {}x{}, {} samples, vertex-shader cb0 {} bytes (the prepass "
+             "rule needs at least {}), viewport matches the target {}, prepass rule {}",
+             s.depthOnlySignatures.size(), DrawApiName(view.api), f.dsvEntry,
+             f.dsvEntry >= 0 ? table::EntryRole(static_cast<size_t>(f.dsvEntry)) : "none", f.targetWidth, f.targetHeight, f.samples,
+             f.vsCb0Bytes, kCameraBlockBytes, f.viewportMatchesTarget ? "yes" : "no",
+             IsPrepass(f) && GeometryAccepted(f) ? "satisfied" : "not satisfied");
+}
+
+void ObserveShader(const DrawView& view)
+{
+    State& s = g_state;
+    if (s.shaderLines >= kMaxShaderLines || view.pixelShader == nullptr)
+        return;
+
+    const ShaderInfo info = GetShaderInfo(view.pixelShader);
+    const uint64_t key = info.known ? Mix(Mix(3, info.crc), info.size) : Mix(4, reinterpret_cast<uintptr_t>(view.pixelShader));
+    const bool renders = view.facts.rtv0Entry >= 0;
+    if (!Remember(s.shaderKeys, Mix(key, renders ? 1u : 2u)))
+        return;
+
+    ++s.shaderLines;
+    const int entry = renders ? view.facts.rtv0Entry : view.facts.srvEntry;
+    LOG_INFO("CharaView shader {}/{}: {} table entry {} ({}), {}, classified as {}, roles {:#x}, via {}", s.shaderLines, kMaxShaderLines,
+             renders ? "renders into" : "samples", entry, table::EntryRole(static_cast<size_t>(entry)), ShaderText(view.pixelShader),
+             DrawKindName(view.kind), view.roles, DrawApiName(view.api));
 }
 
 void Maintain(uint64_t nowMs)

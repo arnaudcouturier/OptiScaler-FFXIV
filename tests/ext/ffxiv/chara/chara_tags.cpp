@@ -131,6 +131,34 @@ void TestPrivateData()
     // the tag GUID is not one of the GUIDs other modules use on shaders
     CHECK(kRoleTag.Data1 == 0x6f0c9a35);
 }
+
+// Every pixel shader carries its CRC and size, independent of the role bits.
+void TestShaderInfo()
+{
+    FakeShader shader;
+    CHECK(!GetShaderInfo(&shader).known);          // created before the hooks
+    CHECK(!GetShaderInfo(nullptr).known);
+    CHECK(!SetShaderInfo(nullptr, 1, 2));
+
+    CHECK(SetShaderInfo(&shader, 0xFDB2F4FCu, 4321));
+    const ShaderInfo info = GetShaderInfo(&shader);
+    CHECK(info.known && info.crc == 0xFDB2F4FCu && info.size == 4321);
+
+    // independent of the role mask, and the two do not disturb each other
+    CHECK(SetRoles(&shader, RoleFinisher));
+    CHECK(RoleOf(&shader) == RoleFinisher);
+    CHECK(GetShaderInfo(&shader).crc == 0xFDB2F4FCu);
+    CHECK(SetShaderInfo(&shader, 7, 8));
+    CHECK(GetShaderInfo(&shader).crc == 7 && GetShaderInfo(&shader).size == 8 && RoleOf(&shader) == RoleFinisher);
+    CHECK(shader.items.size() == 2);
+
+    // a value of the wrong size is not shader info
+    FakeShader odd;
+    const uint8_t one = 1;
+    odd.SetPrivateData(kShaderInfoTag, 1, &one);
+    CHECK(!GetShaderInfo(&odd).known);
+    CHECK(std::memcmp(&kShaderInfoTag, &kRoleTag, sizeof(GUID)) != 0);
+}
 } // namespace
 
 int main()
@@ -138,5 +166,6 @@ int main()
     TestLists();
     TestRoleBits();
     TestPrivateData();
+    TestShaderInfo();
     return TEST_RESULT("chara_tags");
 }

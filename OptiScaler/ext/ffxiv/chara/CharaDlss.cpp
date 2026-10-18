@@ -656,6 +656,7 @@ void Finish(const DrawView& view)
     f.guides.cameraCaptured = g_pass.cameraCaptured;
 
     const FinishVerdict verdict = DecideFinish(f);
+    ++g_stats.finishVerdict[static_cast<size_t>(verdict)];
     if (diag::TraceEnabled() && verdict != FinishVerdict::Proceed)
         diag::Trace(diag::TraceCategory::Finish, view.now,
                     std::format("finish verdict {} for pass {}x{} (slot {}, replayed {}, camera {})", static_cast<int>(verdict),

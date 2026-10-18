@@ -46,6 +46,24 @@ enum class FinishVerdict : uint8_t
 
 constexpr bool IsWaiting(FinishVerdict v) { return v >= FinishVerdict::WaitingForMotion; }
 
+constexpr const char* FinishVerdictName(FinishVerdict v)
+{
+    switch (v)
+    {
+    case FinishVerdict::Proceed: return "evaluated";
+    case FinishVerdict::Rebuild: return "slot rebuilt";
+    case FinishVerdict::TooLarge: return "too large";
+    case FinishVerdict::NoSlot: return "no slot yet";
+    case FinishVerdict::Failed: return "slot failed";
+    case FinishVerdict::Stale: return "slot not used recently";
+    case FinishVerdict::WaitingForMotion: return "guides: no motion";
+    case FinishVerdict::WaitingForDepth: return "guides: no depth";
+    case FinishVerdict::WaitingForDepthView: return "guides: no depth view";
+    case FinishVerdict::WaitingForCamera: return "guides: no camera";
+    }
+    return "?";
+}
+
 constexpr const char* WaitingText(FinishVerdict v)
 {
     switch (v)
