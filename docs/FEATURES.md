@@ -203,6 +203,8 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 
 **Menu.** Card "Character preview" in the Upscaling tab, with the counters and status lines.
 
+**Probe output.** While PreviewProbe is on, the button "Save preview images" (or the command `dump`) writes `native.png`, `aa.png`, `dlss.png` (whichever exist), each with `alpha-<name>.png` (the alpha channel as a grayscale picture), and `state.txt` (one `key: value` per line) into a new `OptiScaler\PreviewDebug\<yyyyMMdd-HHmmss>\` folder; at most 40 files and 300 MiB per session. About twice a second the probe reads `OptiScaler\chara-probe.cmd` (one command per line: `tint|flood|aa|dlss|upscale|copies on|off`, `dump`, `state`, `reset`, `help`; at most 4 KiB), runs it, deletes it and appends the results to `OptiScaler\chara-probe.out` (capped at 256 KiB). Commands change the settings in memory only; the ini file is not touched.
+
 **Safety.** It fails open: any doubt leaves the native image. It reads the game's `.text` once, read-only, for an 18-byte code pattern that must match exactly once at the documented addresses; otherwise the feature switches itself off for the session with one log line. The DLSS pass uses the driver's real D3D11 NGX and latches off for the session if feature creation fails. Known limit: switching `PreviewDLSS` off at run time frees the preview GPU objects only at the next game start (a few tens of MB).
 
 ## Items recovered from Nickle's build

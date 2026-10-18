@@ -7,6 +7,8 @@
 #include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaProbeChannel.h"
+#include "ext/ffxiv/chara/CharaProbeCommands.h"
 #include "ext/ffxiv/chara/CharaProbeDump.h"
 #include "ext/ffxiv/chara/CharaProbeFiles.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
@@ -20,6 +22,8 @@
 #include <atomic>
 #include <filesystem>
 #include <format>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace ext::ffxiv::chara::probe
@@ -109,6 +113,8 @@ struct State
     std::array<StoredSwap, 3> lastSwap; // by SwapKind
     uint64_t drawSerial = 0;
     uint64_t lastTick = 0;
+    uint64_t lastPoll = 0;
+    std::optional<CommandChannel> channel; // chara-probe.cmd / chara-probe.out, while the probe is on
     DerivedSet derived;
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
@@ -242,6 +248,7 @@ void SwitchOff(const char* why)
     detail::g_live.store(s.flood, std::memory_order_relaxed);
     s.on = false;
     g_onFlag.store(false, std::memory_order_relaxed);
+    s.channel.reset();
     LOG_INFO("CharaView probe: off ({}); copy cases logged {}, sampler cases logged {}, consumer swap traces {}, derived textures seen {}",
              why, g_stats.probeCopyLines.load(), g_stats.probeSamplerLines.load(), g_stats.probeSwapLines.load(),
              g_stats.probeDerivedAdded.load());
@@ -613,12 +620,97 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
     return "ok, saving the preview images; the files are written when the GPU has finished the copies (a few frames)";
 }
 
+// One timestamped line (or more) to chara-probe.out.
+void WriteOut(const std::vector<std::string>& lines)
+{
+    State& s = S();
+    if (s.channel)
+        s.channel->AppendOutput(lines);
+}
+
 void PumpDump(ID3D11DeviceContext* context, uint64_t now)
 {
     if (!dump::InFlight())
         return;
     if (const std::optional<DumpOutcome> outcome = dump::Pump(context, now))
+    {
         LOG_INFO("CharaView probe: preview images: {}", outcome->message);
+        WriteOut({ LogTimeNow() + " dump: " + outcome->message });
+    }
+}
+
+// What the commands do (see CharaProbeCommands.h). Draw thread.
+struct ProbeActions
+{
+    uint64_t now = 0;
+
+    std::string SetCopies(bool on)
+    {
+        S().derived.SetCopiesEnabled(on);
+        return std::string("ok, copy tracking is now ") + (on ? "on" : "off") +
+               (on ? "" : "; new copies are not followed (textures already derived stay until they expire)");
+    }
+
+    std::string RequestDump()
+    {
+        bool expected = false;
+        if (dump::InFlight() || !g_dumpPending.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+            return "refused, a dump is already waiting or in progress";
+        return "ok, dump requested; a line with the result follows when the files are written";
+    }
+
+    std::string RequestState()
+    {
+        const DumpOutcome outcome = dump::WriteStateOnly(BuildState(now));
+        dump::SetMessage(outcome.message);
+        return outcome.message;
+    }
+
+    std::string ResetAll()
+    {
+        Reset();
+        return "ok, derived textures, logged cases and counters were forgotten";
+    }
+};
+
+// Polls chara-probe.cmd (about every kCommandPollMs), runs its commands and answers in chara-probe.out. Draw thread.
+void PollCommands(uint64_t now)
+{
+    State& s = S();
+    if (!s.channel || (now >= s.lastPoll && now - s.lastPoll < kCommandPollMs))
+        return;
+    s.lastPoll = now;
+
+    FILETIME ft {};
+    GetSystemTimeAsFileTime(&ft);
+    const uint64_t fileNow = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    const CommandChannel::Polled polled = s.channel->Poll(fileNow);
+    if (polled.state != CommandChannel::Polled::State::Commands)
+        return;
+
+    std::vector<std::string> lines;
+    const auto note = [&lines](const std::string& text) { lines.push_back(LogTimeNow() + " chara-probe.cmd: " + text); };
+    if (polled.disposition == Disposition::Renamed)
+        note("the file could not be deleted and was renamed to chara-probe.cmd.done");
+    else if (polled.disposition == Disposition::Kept)
+        note("the file could not be deleted or renamed; it will not run again until it changes");
+    if (polled.parsed.truncatedBytes)
+        note("the file is longer than " + std::to_string(kMaxCommandBytes) + " bytes; the rest was ignored");
+    if (polled.parsed.truncatedLines)
+        note("more than " + std::to_string(kMaxCommandLines) + " lines; the rest was ignored");
+    if (polled.parsed.commands.empty())
+        note("no commands in the file");
+
+    ProbeActions actions;
+    actions.now = now;
+    for (const Command& command : polled.parsed.commands)
+    {
+        const std::string result = Execute(command, ext::Cfg().ffxiv.chara, actions);
+        const std::string echo = command.text.empty() ? std::string("(empty)") : command.text;
+        lines.push_back(LogTimeNow() + " " + echo + ": " + result);
+        LOG_INFO("CharaView probe: command \"{}\": {}", echo, result);
+    }
+    WriteOut(lines);
 }
 
 // Every kTickMs while the probe is on (called from Update on the draw thread, immediate context only).
@@ -631,11 +723,14 @@ void Tick(ID3D11DeviceContext* context, uint64_t now)
     try
     {
         PumpDump(context, now);
+        PollCommands(now);
         if (g_dumpPending.exchange(false, std::memory_order_relaxed))
         {
             const std::string result = StartDump(context, now);
             dump::SetMessage(result);
             LOG_INFO("CharaView probe: save preview images: {}", result);
+            if (result.rfind("ok", 0) != 0) // a started dump reports when it finishes; a refused one says so here
+                WriteOut({ LogTimeNow() + " dump: " + result });
         }
     }
     catch (...)
@@ -681,13 +776,18 @@ void Update(uint64_t now, ID3D11DeviceContext* context)
         g_onFlag.store(true, std::memory_order_relaxed);
         s.lastGauge = 0;
         s.lastTick = 0;
+        s.lastPoll = 0;
+        s.channel.reset();
+        if (const std::filesystem::path folder = dump::OptiScalerDirectory(); !folder.empty())
+            s.channel.emplace(folder);
         detail::g_live.store(true, std::memory_order_relaxed);
         g_swapSink.store(&kSink, std::memory_order_relaxed);
         const std::filesystem::path folder = dump::OutputRoot();
         LOG_INFO("CharaView probe: on (copy tracking {}, output folder {}); every distinct copy of the preview and every distinct draw "
-                 "that samples it or a copy of it is logged once, with lines that start with \"CharaView probe:\" (at most {} copy and {} "
+                 "that samples it or a copy of it is logged once, with lines that start with \"CharaView probe:\"; commands are read from {} and answered in {} (at most {} copy and {} "
                  "sampler cases)",
-                 s.derived.CopiesEnabled() ? "on" : "off", folder.empty() ? std::string("unknown") : Utf8(folder), kCopyCaseCap,
+                 s.derived.CopiesEnabled() ? "on" : "off", folder.empty() ? std::string("unknown") : Utf8(folder),
+                 s.channel ? Utf8(s.channel->CommandPath()) : std::string("nowhere"), s.channel ? Utf8(s.channel->OutputPath()) : std::string("nowhere"), kCopyCaseCap,
                  kSamplerCaseCap);
         return;
     }
