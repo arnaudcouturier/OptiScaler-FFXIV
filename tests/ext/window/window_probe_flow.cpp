@@ -31,6 +31,7 @@ struct CountingEnv final : Env
     uint32_t CurrentThread() override { ++calls; return 1; }
     uint32_t OwnerThread(uint64_t) override { ++calls; return 1; }
     WindowInfo ReadWindow(uint64_t) override { ++calls; return {}; }
+    bool ApplyExStyle(uint64_t, uint32_t) override { ++calls; return false; }
     void Log(const std::string&, bool) override { ++calls; }
 };
 } // namespace
@@ -112,6 +113,14 @@ int main()
         c.OnPresentEnd(env, Mode::Probe);
         c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
         CHECK_CONTAINS(env.Last(), "fg=paused fgOffConfirmed=yes");
+        // A resize deactivates frame generation (Streamline applies "off" inside the next present): what was confirmed before
+        // it no longer counts, the next line says no until a complete present has gone by.
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        CHECK_CONTAINS(env.Last(), "fgOffConfirmed=no");
+        c.OnPresentBegin(env, Mode::Probe);
+        c.OnPresentEnd(env, Mode::Probe);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        CHECK_CONTAINS(env.Last(), "fgOffConfirmed=yes");
         // Not for another output.
         env.dlssg = false;
         c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);

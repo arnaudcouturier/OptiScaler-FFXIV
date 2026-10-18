@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,14 @@ inline WindowInfo BorderlessWindow()
     return w;
 }
 
+struct ApplyCall
+{
+    uint64_t hwnd = 0;
+    uint32_t exstyle = 0;
+    bool fgActiveAtCall = false;
+    uint32_t thread = 0;
+};
+
 struct FakeEnv final : Env
 {
     bool forceBorderless = true;
@@ -64,6 +73,11 @@ struct FakeEnv final : Env
     uint32_t current = 100;
     uint32_t owner = 100;
     WindowInfo window = BorderlessWindow();
+
+    // Window call of the border fix
+    bool applyResult = true;
+    std::vector<ApplyCall> applied;
+    std::function<void()> onApply; // runs inside the call, like the game's window procedure would
 
     std::vector<std::string> logs;
     std::vector<bool> warns;
@@ -75,6 +89,22 @@ struct FakeEnv final : Env
     uint32_t CurrentThread() override { return current; }
     uint32_t OwnerThread(uint64_t) override { return owner; }
     WindowInfo ReadWindow(uint64_t) override { return window; }
+    bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
+    {
+        applied.push_back({ hwnd, exstyle, fg.present && fg.active, current });
+        if (applyResult)
+        {
+            window.exstyle = exstyle;
+            if ((exstyle & (kExStyleClientEdge | kExStyleWindowEdge)) == 0)
+            {
+                window.clientWidth = window.right - window.left;
+                window.clientHeight = window.bottom - window.top;
+            }
+        }
+        if (onApply)
+            onApply();
+        return applyResult;
+    }
     void Log(const std::string& line, bool warn) override
     {
         logs.push_back(line);

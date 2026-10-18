@@ -79,6 +79,29 @@ constexpr bool ThreadsAgree(uint32_t ownerThread, uint32_t callThread, uint32_t 
     return ownerThread != 0 && ownerThread == callThread && ownerThread == presentThread;
 }
 
+// ---- the border rule ---------------------------------------------------------------------------------------------------
+
+// winuser.h values, repeated here so this header needs no SDK header (WindowWin32.cpp static_asserts them).
+inline constexpr uint32_t kStyleCaption = 0x00C00000u;     // WS_CAPTION = WS_BORDER | WS_DLGFRAME
+inline constexpr uint32_t kStyleThickFrame = 0x00040000u;  // WS_THICKFRAME
+inline constexpr uint32_t kExStyleWindowEdge = 0x00000100u; // WS_EX_WINDOWEDGE
+inline constexpr uint32_t kExStyleClientEdge = 0x00000200u; // WS_EX_CLIENTEDGE
+
+// B1-a. Upstream's leave branch writes WS_EX_OVERLAPPEDWINDOW (= window edge + client edge) while the game keeps its own
+// frame-less style, so the client area shrinks by 2 px on every side. A frame-less window never carries an edge: if the
+// style has neither a caption nor a sizing frame and the extended style has one of the two edge bits, those bits are
+// cleared and the new extended style is returned. Any frame bit at all (a real windowed mode) or no edge bit: nullopt, the
+// window is left alone.
+constexpr std::optional<uint32_t> ClearEdge(uint32_t style, uint32_t exstyle)
+{
+    if ((style & (kStyleCaption | kStyleThickFrame)) != 0)
+        return std::nullopt;
+    const uint32_t edges = exstyle & (kExStyleClientEdge | kExStyleWindowEdge);
+    if (edges == 0)
+        return std::nullopt;
+    return exstyle & ~edges;
+}
+
 // ---- the mode switch decision ------------------------------------------------------------------------------------------
 
 // With ForceBorderless the hook maps SetFullscreenState(TRUE) to FALSE and flips SCExclusiveFullscreen; the window is

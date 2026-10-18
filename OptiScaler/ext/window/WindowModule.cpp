@@ -40,6 +40,7 @@ class LiveEnv final : public Env
     uint32_t CurrentThread() override { return GetCurrentThreadId(); }
     uint32_t OwnerThread(uint64_t hwnd) override { return win32::OwnerThread(hwnd); }
     WindowInfo ReadWindow(uint64_t hwnd) override { return win32::Read(hwnd); }
+    bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override { return win32::ApplyExStyle(hwnd, exstyle); }
 
     // The log macro puts the function name in front of the text; the module's own prefix "Window:" follows it.
     void Log(const std::string& line, bool warn) override
