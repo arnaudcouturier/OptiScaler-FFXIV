@@ -222,6 +222,9 @@ enum class ResultKind : uint8_t
     BringUp,    // the NR result of the native image (native size, original alpha): UI draws sample it instead of the native image
     Production, // the raw NR output of the super-resolution image (2x, before the alpha pass): only the SR path's alpha pass reads it
 };
+// The probe's image note (CharaProbeFiles.h NrImageNote) takes these values as plain integers: reordering the enum would swap its two texts.
+static_assert(static_cast<int>(ResultKind::None) == 0 && static_cast<int>(ResultKind::BringUp) == 1 && static_cast<int>(ResultKind::Production) == 2,
+              "NrImageNote(int) relies on the values of ResultKind");
 
 inline ResultKind ResultKindOf(const StreamState& st)
 {

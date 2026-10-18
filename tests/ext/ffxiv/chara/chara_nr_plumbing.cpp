@@ -2,6 +2,7 @@
 
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaRoute.h"
+#include "ext/ffxiv/chara/CharaTintMap.h"
 
 using namespace ext::ffxiv::chara;
 using namespace ext::ffxiv::chara::nr;
@@ -367,6 +368,20 @@ void TestTintAndPassesKeepTheGateOpen()
     CHECK(!DispatcherWanted(false, false, false, false, PlumbingHoldsObjects(0, tint, passes), false)); // everything released: the gate closes
 }
 
+// The mapping from the tint decision to the helper pass's tint (it used to be an inline conversion where swapping cyan and magenta passed every test).
+void TestGuideTintMapping()
+{
+    CHECK(ToGuideTint(TintKind::None) == guides::Tint::None);
+    CHECK(ToGuideTint(TintKind::Sr) == guides::Tint::Sr);
+    CHECK(ToGuideTint(TintKind::Nr) == guides::Tint::Nr);
+    // end to end, as the alpha pass takes it: NR colour cyan, plain SR colour magenta, no tint when the debug tint is off
+    CHECK(ToGuideTint(AlphaTintFor(true, AlphaInput::NrOutput)) == guides::Tint::Nr);
+    CHECK(ToGuideTint(AlphaTintFor(true, AlphaInput::SrOutput)) == guides::Tint::Sr);
+    CHECK(ToGuideTint(AlphaTintFor(false, AlphaInput::NrOutput)) == guides::Tint::None);
+    CHECK(ToGuideTint(AlphaTintFor(false, AlphaInput::SrOutput)) == guides::Tint::None);
+    CHECK(guides::Tint::Sr != guides::Tint::Nr);
+}
+
 void TestHooks()
 {
     PlumbingFacts f = Facts(true, true);
@@ -498,5 +513,6 @@ int main()
     TestHooks();
     TestBringUpGate();
     TestTintAndPassesKeepTheGateOpen();
+    TestGuideTintMapping();
     return TEST_RESULT("chara_nr_plumbing");
 }

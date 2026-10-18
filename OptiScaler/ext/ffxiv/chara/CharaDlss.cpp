@@ -15,6 +15,7 @@
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
+#include "ext/ffxiv/chara/CharaTintMap.h"
 #include "ext/ffxiv/chara/CharaNrTint.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
@@ -188,6 +189,9 @@ constexpr size_t kLineSwap = 12;
 constexpr size_t kLineMotionTarget = 13;
 constexpr size_t kLineNrSwap = 14;
 constexpr size_t kLineProductionSwap = 15;
+// The last reason must still fit the limiter: the next reason added past it would silently never be logged.
+static_assert(kLineProductionSwap < BurstLimiter::kReasons, "a log reason does not fit the BurstLimiter");
+static_assert(static_cast<size_t>(FinishVerdict::WaitingForCamera) < kLineSlotAcquired, "a finish verdict collides with the kLine* reasons");
 
 // ---- Gate ----------------------------------------------------------------------------------------------------------------
 bool EntryPointsPresent()
@@ -780,7 +784,7 @@ void RunSlot(int index, const DrawView& view)
     {
         ID3D11ShaderResourceView* colour = input == nr::AlphaInput::NrOutput ? nrOutput.Get() : g.output.srv.Get();
         const nr::TintKind kind = nr::AlphaTintFor(tinted, input);
-        const guides::Tint tint = kind == nr::TintKind::Nr ? guides::Tint::Nr : kind == nr::TintKind::Sr ? guides::Tint::Sr : guides::Tint::None;
+        const guides::Tint tint = ToGuideTint(kind);
         return scope.Alpha(colour, g.nativeSrv.Get(), g.composed.rtv.Get(), outW, outH, tint);
     };
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
@@ -875,6 +879,10 @@ bool RunNrBringUp(const DrawView& view)
 // output. Anything else (the model is still being built, no list free, the module is switched off or failed) returns an empty view and the
 // alpha pass keeps the SR output: counted by the module, logged here once per cause.
 constexpr unsigned kProductionCauseDeclined = 8; // above every RunOutcome value
+// The cause number of a RunOutcome is its value: every outcome stays below the number of the declined cause, which stays inside the CauseLog.
+static_assert(static_cast<unsigned>(nr::RunOutcome::Skipped) < kProductionCauseDeclined, "a RunOutcome value reaches the declined cause number");
+static_assert(static_cast<unsigned>(nr::RunOutcome::Failed) < kProductionCauseDeclined, "a RunOutcome value reaches the declined cause number");
+static_assert(kProductionCauseDeclined < nr::CauseLog::kCauses, "the declined cause does not fit the CauseLog");
 const char* ProductionCauseText(nr::RunOutcome outcome)
 {
     switch (outcome)
