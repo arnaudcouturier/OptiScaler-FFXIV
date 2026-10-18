@@ -116,9 +116,21 @@ void ResizeDoneSlow(Dx11wDx12SC& sc) noexcept
             return;
         const uint64_t bridge = reinterpret_cast<uint64_t>(static_cast<IDXGISwapChain*>(&sc));
         const uint64_t hwnd = reinterpret_cast<uint64_t>(ext::Access::Bridge::Window(sc));
+        // Size of the FG swapchain the game's follow-up ResizeBuffers would (not) resize: the hold needs it equal to the window.
+        uint32_t swapWidth = 0;
+        uint32_t swapHeight = 0;
+        if (auto* fgChain = ext::Access::Bridge::FgSwapChain(sc))
+        {
+            DXGI_SWAP_CHAIN_DESC1 desc {};
+            if (SUCCEEDED(fgChain->GetDesc1(&desc)))
+            {
+                swapWidth = desc.Width;
+                swapHeight = desc.Height;
+            }
+        }
         auto& g = G();
         std::lock_guard lock(g.lock);
-        g.controller.OnResizeDone(g.env, CurrentMode(), bridge, hwnd);
+        g.controller.OnResizeDone(g.env, CurrentMode(), bridge, hwnd, swapWidth, swapHeight);
     }
     catch (...)
     {

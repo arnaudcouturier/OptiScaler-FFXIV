@@ -21,6 +21,8 @@ int main()
         f.window.bottom = 2160;
         f.window.clientWidth = 3836;
         f.window.clientHeight = 2156;
+        f.swapWidth = 3836;
+        f.swapHeight = 2156;
         f.fg = FgSnapshot { true, false, true };
         f.fgOffConfirmed = true;
         f.dlssgOutput = true;
@@ -39,7 +41,7 @@ int main()
         CHECK_CONTAINS(line, "style=0x16cf0000");
         CHECK_CONTAINS(line, "exstyle=0x00000200");
         CHECK_CONTAINS(line, "window=0,0 3840x2160");
-        CHECK_CONTAINS(line, "client=3836x2156");
+        CHECK_CONTAINS(line, "client=3836x2156 swapchain=3836x2156");
         CHECK_CONTAINS(line, "fg=paused");
         CHECK_CONTAINS(line, "fgOffConfirmed=yes");
         CHECK_CONTAINS(line, "output=DLSS-G");
@@ -64,6 +66,7 @@ int main()
         f.fixArmed = true;
         const std::string line = FormatProbeLine(f);
         CHECK_CONTAINS(line, "window=unreadable");
+        CHECK_CONTAINS(line, "swapchain=unknown");
         CHECK_CONTAINS(line, "sameThread=no");
         CHECK_CONTAINS(line, "fixArmed=yes");
         CHECK_CONTAINS(line, "nested=yes");

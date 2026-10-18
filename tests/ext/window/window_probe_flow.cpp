@@ -47,7 +47,7 @@ int main()
     {
         CountingEnv env;
         Controller c;
-        c.OnResizeDone(env, Mode::Off, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Off, kBridge, kHwnd, 3840, 2160);
         c.OnPresentBegin(env, Mode::Off);
         c.OnPresentEnd(env, Mode::Off);
         CHECK(!c.OnSetFullscreenState(env, Mode::Off, Event(true)));
@@ -58,11 +58,11 @@ int main()
     {
         FakeEnv env;
         Controller c;
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK(env.logs.size() == 2);
         CHECK_CONTAINS(env.logs[0], "Window: module active, mode=probe");
         CHECK(env.logs[1].rfind("Window: resize-done ", 0) == 0);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK(env.logs.size() == 3);
         for (bool warn : env.warns)
             CHECK(!warn);
@@ -77,9 +77,9 @@ int main()
         env.window.clientHeight = 2156;
         env.exclusive = true;
         Controller c;
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         env.exclusive = false;
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         const std::string line = env.Last();
         CHECK_CONTAINS(line, "style=0x16cf0000");
         CHECK_CONTAINS(line, "exstyle=0x00000200");
@@ -97,10 +97,10 @@ int main()
         c.OnPresentBegin(env, Mode::Probe);
         c.OnPresentEnd(env, Mode::Probe);
         CHECK(c.PresentThread() == 77);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "ownerTid=77 currentTid=77 presentTid=77 sameThread=yes");
         env.owner = 5; // the window belongs to another thread
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "sameThread=no");
     }
 
@@ -111,24 +111,24 @@ int main()
         Controller c;
         c.OnPresentBegin(env, Mode::Probe);
         c.OnPresentEnd(env, Mode::Probe);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fg=active fgOffConfirmed=no");
         env.fg = FgSnapshot { true, false, true }; // Deactivate: paused, inactive
         c.OnPresentBegin(env, Mode::Probe);
         c.OnPresentEnd(env, Mode::Probe);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fg=paused fgOffConfirmed=yes");
         // A resize deactivates frame generation (Streamline applies "off" inside the next present): what was confirmed before
         // it no longer counts, the next line says no until a complete present has gone by.
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fgOffConfirmed=no");
         c.OnPresentBegin(env, Mode::Probe);
         c.OnPresentEnd(env, Mode::Probe);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fgOffConfirmed=yes");
         // Not for another output.
         env.dlssg = false;
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "output=other");
         CHECK_CONTAINS(env.Last(), "fgOffConfirmed=no");
     }
@@ -140,7 +140,7 @@ int main()
         Controller c;
         c.OnPresentBegin(env, Mode::Probe); // the present thread is known
         c.OnPresentEnd(env, Mode::Probe);
-        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd); // the bridge is known
+        c.OnResizeDone(env, Mode::Probe, kBridge, kHwnd, 3840, 2160); // the bridge is known
         const size_t before = env.logs.size();
         const bool prevented = c.OnSetFullscreenState(env, Mode::Probe, Event(true));
         CHECK(!prevented);

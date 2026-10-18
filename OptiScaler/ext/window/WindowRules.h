@@ -117,6 +117,7 @@ struct DeferInputs
     bool requestedFullscreen = false;
     bool threadsAgree = false;     // ThreadsAgree(owner, handler thread, present thread)
     bool swapchainIsBridge = false; // the call's swapchain is the bridge swapchain the module knows
+    bool sizeMatchesWindow = false; // the FG swapchain is as large as the window rect: the follow-up ResizeBuffers is a same-size no-op
 };
 
 enum class DeferVerdict : uint8_t
@@ -128,6 +129,7 @@ enum class DeferVerdict : uint8_t
     NoWindowChange,     // a re-assertion of the current state: no restyle, no stall
     ThreadMismatch,     // owner thread, call thread and present thread are not one thread
     UnknownSwapchain,   // not the bridge swapchain, or none known yet
+    SizeMismatch,       // swapchain size differs from the window rect: the game follow-up ResizeBuffers would flush Streamline unprotected
 };
 
 constexpr DeferVerdict DecideDefer(const DeferInputs& in)
@@ -144,6 +146,8 @@ constexpr DeferVerdict DecideDefer(const DeferInputs& in)
         return DeferVerdict::ThreadMismatch;
     if (!in.swapchainIsBridge)
         return DeferVerdict::UnknownSwapchain;
+    if (!in.sizeMatchesWindow)
+        return DeferVerdict::SizeMismatch;
     return DeferVerdict::Defer;
 }
 
@@ -165,6 +169,8 @@ constexpr const char* VerdictName(DeferVerdict v)
         return "pass(threads differ)";
     case DeferVerdict::UnknownSwapchain:
         return "pass(not the bridge swapchain)";
+    case DeferVerdict::SizeMismatch:
+        return "pass(swapchain size differs from window)";
     }
     return "pass(?)";
 }

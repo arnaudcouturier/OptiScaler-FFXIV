@@ -17,6 +17,7 @@ DeferInputs Deferred()
     in.requestedFullscreen = true;
     in.threadsAgree = true;
     in.swapchainIsBridge = true;
+    in.sizeMatchesWindow = true;
     return in;
 }
 } // namespace
@@ -71,6 +72,14 @@ int main()
         DeferInputs in = Deferred();
         in.swapchainIsBridge = false;
         CHECK(DecideDefer(in) == DeferVerdict::UnknownSwapchain);
+    }
+    {
+        // The FG swapchain is not the window size: the game follow-up ResizeBuffers would be a real flush, the hold cannot
+        // cover it, so the call passes.
+        DeferInputs in = Deferred();
+        in.sizeMatchesWindow = false;
+        CHECK(DecideDefer(in) == DeferVerdict::SizeMismatch);
+        CHECK(std::string(VerdictName(DeferVerdict::SizeMismatch)).find("size differs") != std::string::npos);
     }
 
     // Defaults are the fail-open state.

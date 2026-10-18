@@ -64,7 +64,8 @@ class Controller
     static constexpr uint32_t kFixMaxChecks = 120;
 
     // Bridge swapchain resize finished (ext::dx11bridge::OnResizeDone). `bridge` identifies the bridge swapchain.
-    void OnResizeDone(Env& env, Mode mode, uint64_t bridge, uint64_t hwnd)
+    // `swapWidth/swapHeight` = the bridge's FG swapchain size after this resize.
+    void OnResizeDone(Env& env, Mode mode, uint64_t bridge, uint64_t hwnd, uint32_t swapWidth, uint32_t swapHeight)
     {
         if (mode == Mode::Off)
             return;
@@ -72,6 +73,8 @@ class Controller
 
         _bridge = bridge;
         _hwnd = hwnd;
+        _swapW = swapWidth;
+        _swapH = swapHeight;
 
         const bool nested = _actionDepth > 0;
         const int prev = SampleExclusive(env, mode, "bridge resize");
@@ -137,6 +140,13 @@ class Controller
         in.requestedFullscreen = ev.fullscreen;
         in.threadsAgree = ThreadsAgree(f.ownerThread, f.currentThread, f.presentThread);
         in.swapchainIsBridge = _bridge != 0 && ev.native == _bridge;
+        // The game's own follow-up ResizeBuffers is only a same-size no-op (Dx11wDx12SC skips the FG swapchain resize, so no
+        // Streamline flush) when the FG swapchain already has the window's size. The hold cannot cover a size-changing one.
+        const bool sizeMatches = _swapW != 0 && f.window.valid && f.window.right - f.window.left == static_cast<int32_t>(_swapW) &&
+                                 f.window.bottom - f.window.top == static_cast<int32_t>(_swapH);
+        in.sizeMatchesWindow = true;
+        const bool wouldHold = DecideDefer(in) == DeferVerdict::Defer;
+        in.sizeMatchesWindow = sizeMatches;
 
         f.hasCall = true;
         f.callFullscreen = ev.fullscreen;
@@ -144,6 +154,11 @@ class Controller
         f.nativeSwapchain = ev.native;
         f.bridgeSwapchain = _bridge;
         f.verdict = DecideDefer(in);
+        if (wouldHold && f.verdict == DeferVerdict::SizeMismatch && _deferral.State() == DeferState::Idle)
+            env.Log(std::format("Window: the follow-up ResizeBuffers is not protected: the FG swapchain is {}x{} but the window rect is {}x{}; "
+                                "the call passes through, nothing is held",
+                                _swapW, _swapH, f.window.right - f.window.left, f.window.bottom - f.window.top),
+                    true);
 
         const DeferState before = _deferral.State();
         f.deferState = DeferStateName(before);
@@ -267,6 +282,8 @@ class Controller
         f.ownerThread = env.OwnerThread(hwnd);
         f.currentThread = env.CurrentThread();
         f.presentThread = _presentThread;
+        f.swapWidth = _swapW;
+        f.swapHeight = _swapH;
         f.fixArmed = _fixArmed;
         f.nested = _actionDepth > 0;
         return f;
@@ -389,6 +406,8 @@ class Controller
     }
 
     bool _announced = false;
+    uint32_t _swapW = 0; // size of the FG swapchain at the last resize
+    uint32_t _swapH = 0;
     uint64_t _bridge = 0;
     uint64_t _hwnd = 0;
     bool _haveExclusive = false;

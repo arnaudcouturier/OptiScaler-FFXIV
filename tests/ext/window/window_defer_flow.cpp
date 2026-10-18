@@ -39,7 +39,7 @@ void Running(Controller& c, FakeEnv& env)
 {
     env.fg = kActive;
     Present(c, env, Mode::On, kActive, kActive); // the present thread is recorded
-    c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // the bridge is recorded
+    c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // the bridge is recorded
     env.fg = kActive;
 }
 
@@ -108,7 +108,7 @@ int main()
         {
             replayPassed = !c.OnSetFullscreenState(env, Mode::On, Event(true)); // ReShade would call the handler again
             env.exclusive = true;                                              // the hook flips SCExclusiveFullscreen
-            c.OnResizeDone(env, Mode::On, kBridge, kHwnd);                     // and the game resizes
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);                     // and the game resizes
         };
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.size() == 1);
@@ -160,6 +160,35 @@ int main()
         // And with everything right again it is held, so the cases above were each decisive.
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         CHECK(env.fgOffRequests == 1 && env.retained == 1);
+    }
+
+    // H1: the FG swapchain is not the window size (the border leftover: 3836x2156 in a 3840x2160 window). The game follow-up
+    // ResizeBuffers would be a real resize and flush Streamline unprotected, so nothing is held: the call passes, with a warning,
+    // and the probe line shows both sizes. Once the sizes agree the same call is held.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3836, 2156);
+        env.fg = kActive;
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        CHECK(env.fgOffRequests == 0 && env.retained == 0);
+        CHECK(AnyLogContains(env, "swapchain=3836x2156"));
+        CHECK(AnyLogContains(env, "client=3840x2160"));
+        CHECK(AnyLogContains(env, "verdict=pass(swapchain size differs from window)"));
+        CHECK(AnyLogContains(env, "the follow-up ResizeBuffers is not protected"));
+        CHECK(Warnings(env) == 1);
+        // Probe mode logs the same and still holds nothing.
+        CHECK(!c.OnSetFullscreenState(env, Mode::Probe, Event(true)));
+        // An unknown swapchain size (the desc could not be read) is also a pass.
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 0, 0);
+        env.fg = kActive;
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        // Sizes agree again: held.
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        CHECK(AnyLogContains(env, "swapchain=3840x2160"));
     }
 
     // Probe never holds or prevents; off does nothing.
@@ -372,7 +401,7 @@ int main()
             env.window.clientWidth = 3836;
             env.window.clientHeight = 2156;
             if (gameResizes)
-                c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+                c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
         };
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.size() == 1 && !env.replays[0].fgActiveAtCall);

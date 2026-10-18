@@ -27,6 +27,8 @@ struct ProbeFields
     Mode mode = Mode::Off;
     uint64_t hwnd = 0;
     WindowInfo window;
+    uint32_t swapWidth = 0;  // size of the bridge's FG swapchain at the last resize (0 = unknown)
+    uint32_t swapHeight = 0;
     FgSnapshot fg;
     bool fgOffConfirmed = false;
     bool dlssgOutput = false;
@@ -65,6 +67,11 @@ inline std::string FormatProbeLine(const ProbeFields& f)
     {
         out += " window=unreadable";
     }
+
+    if (f.swapWidth != 0)
+        out += std::format(" swapchain={}x{}", f.swapWidth, f.swapHeight);
+    else
+        out += " swapchain=unknown";
 
     out += std::format(" fg={} fgOffConfirmed={} output={} exclusive={}", FgStateName(f.fg), f.fgOffConfirmed ? "yes" : "no",
                        f.dlssgOutput ? "DLSS-G" : "other", f.exclusive ? 1 : 0);

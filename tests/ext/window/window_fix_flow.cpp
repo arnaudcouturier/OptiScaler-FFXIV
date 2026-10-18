@@ -37,9 +37,9 @@ void MakeBorderBug(FakeEnv& env)
 void EnterThenLeave(Controller& c, FakeEnv& env, Mode mode)
 {
     env.exclusive = true;
-    c.OnResizeDone(env, mode, kBridge, kHwnd);
+    c.OnResizeDone(env, mode, kBridge, kHwnd, 3840, 2160);
     env.exclusive = false;
-    c.OnResizeDone(env, mode, kBridge, kHwnd);
+    c.OnResizeDone(env, mode, kBridge, kHwnd, 3840, 2160);
 }
 
 int Warnings(const FakeEnv& env)
@@ -80,7 +80,7 @@ int main()
         Present(c, env, Mode::On, kOff, kOff);
         Present(c, env, Mode::On, kOff, kOff);
         CHECK(env.applied.size() == 1);
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fixArmed=no");
     }
 
@@ -158,7 +158,7 @@ int main()
         MakeBorderBug(env);
         env.fg = kOff;
         env.exclusive = false;
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // the startup resize: flag false
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // the startup resize: flag false
         env.exclusive = true;                           // the hook's enter, no resize after it
         Present(c, env, Mode::On, kOff, kOff);
         Present(c, env, Mode::On, kOff, kOff);
@@ -166,7 +166,7 @@ int main()
         env.exclusive = false; // the hook's leave
         if (resizeAfterLeave)
         {
-            c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
             CHECK_CONTAINS(env.Last(), "exclusive=0 prevExclusive=1"); // the present's sample is the previous value
             CHECK_CONTAINS(env.All(), "seen at a bridge resize");
             CHECK(env.applied.empty());
@@ -189,15 +189,15 @@ int main()
         MakeBorderBug(env);
         env.fg = kOff;
         env.exclusive = false;
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // first sight: no previous value
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // first sight: no previous value
         Present(c, env, Mode::On, kOff, kOff);
         CHECK(env.applied.empty());
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // false -> false is no leave
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // false -> false is no leave
         Present(c, env, Mode::On, kOff, kOff);
         CHECK(env.applied.empty());
         CHECK(!c.FixArmed());
         env.exclusive = true;
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // enter
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // enter
         Present(c, env, Mode::On, kOff, kOff);
         CHECK(env.applied.empty());
     }
@@ -213,7 +213,7 @@ int main()
         EnterThenLeave(c, env, Mode::On);
         Present(c, env, Mode::On, kOff, kOff);
         env.exclusive = true;
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
         CHECK_CONTAINS(env.Last(), "fixArmed=no");
         MakeBorderBug(env);
         Present(c, env, Mode::On, kOff, kOff);
@@ -313,7 +313,7 @@ int main()
         EnterThenLeave(c, env, Mode::On);
         env.onApply = [&]
         {
-            c.OnResizeDone(env, Mode::On, kBridge, kHwnd); // WM_SIZE -> game -> ResizeBuffers -> OnResizeDone
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // WM_SIZE -> game -> ResizeBuffers -> OnResizeDone
         };
         Present(c, env, Mode::On, kOff, kOff);
         env.onApply = nullptr;
@@ -325,7 +325,7 @@ int main()
         Present(c, env, Mode::On, kOff, kOff);
         CHECK(env.applied.size() == 1);
         // Outside a window call of the module the flag is not set.
-        c.OnResizeDone(env, Mode::On, kBridge, kHwnd);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
         CHECK(env.Last().find("nested=yes") == std::string::npos);
     }
 
