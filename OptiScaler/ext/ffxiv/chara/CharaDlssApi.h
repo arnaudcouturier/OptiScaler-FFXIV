@@ -37,6 +37,10 @@ bool Implemented();
 // Implemented, switched on in the config and not failed for this session.
 bool Active();
 
+// The SR path itself may do work (wanted, not latched, gate open) or still holds objects. The SR-only hooks (copy, clear, query)
+// check this instead of Active(), which is also true for preview NR alone.
+bool SrAvailable();
+
 // Called for every draw the dispatcher classified while [FFXIV] PreviewDLSS is on, also when Active() is false: it keeps the
 // NGX-device comparison current, which is what lets an unavailable path become available again.
 void Probe(const DrawView& view);

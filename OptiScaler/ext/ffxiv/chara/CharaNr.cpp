@@ -875,6 +875,27 @@ ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* /*context*/, uintptr_t 
     return s.result[buffer].srv.Get();
 }
 
+ID3D11Texture2D* ResultTexture(uint64_t now)
+{
+    Module& m = M();
+    std::lock_guard lock(m.mutex);
+    if (!m.inited || m.availability != Availability::Available)
+        return nullptr;
+    int best = kNoStream;
+    for (size_t i = 0; i < kMaxStreams; ++i)
+    {
+        const StreamState& st = m.table.At(static_cast<int>(i));
+        if (!st.Used() || !st.everRan || now < st.lastRun || now - st.lastRun > kLiveMs)
+            continue;
+        if (best == kNoStream || st.lastRun > m.table.At(best).lastRun)
+            best = static_cast<int>(i);
+    }
+    if (best == kNoStream)
+        return nullptr;
+    const int buffer = ConsumerBuffer(Late(), m.table.At(best).runs);
+    return buffer < 0 ? nullptr : m.streams[best].result[buffer].t11();
+}
+
 void Maintain(uint64_t now)
 {
     Module& m = M();

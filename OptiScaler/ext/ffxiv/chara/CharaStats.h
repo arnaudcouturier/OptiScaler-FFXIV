@@ -41,6 +41,8 @@ struct Stats
     // Debug aids
     std::atomic<uint64_t> tintApplied { 0 };     // processed preview images that were made with the debug tint (PreviewDebugTint)
     std::atomic<uint64_t> floodSwaps { 0 };      // draws that were given the solid magenta image (PreviewDebugFlood)
+    std::atomic<uint64_t> nrSwaps { 0 };         // UI draws that were given the preview NR result
+    std::atomic<uint64_t> nrRuns { 0 };          // finisher outputs the dispatcher handed to preview NR that produced a result
 
     // Preview probe (PreviewProbe). Written by the draw thread, read by the menu.
     std::atomic<uint64_t> probeScanned { 0 };       // draws whose first eight pixel-shader resources were compared with the preview textures

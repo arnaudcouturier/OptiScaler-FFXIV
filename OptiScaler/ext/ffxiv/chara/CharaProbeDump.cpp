@@ -245,7 +245,7 @@ std::optional<DumpOutcome> Pump(ID3D11DeviceContext* context, uint64_t nowMs)
             DumpImage& img = item.image;
             if (isMapped[i])
             {
-                const size_t rowBytes = static_cast<size_t>(img.width) * 4;
+                const size_t rowBytes = static_cast<size_t>(img.width) * BytesPerPixel(LayoutOfFormat(img.format));
                 img.rowPitch = rowBytes;
                 img.data.resize(rowBytes * img.height);
                 for (uint32_t y = 0; y < img.height; ++y)

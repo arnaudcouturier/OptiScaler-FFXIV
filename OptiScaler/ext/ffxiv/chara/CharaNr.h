@@ -67,6 +67,10 @@ RunOutcome RunProduction(const RunRequest& request);
 // result that is current. In the late variant this issues the D3D11 wait on the previous run's completion.
 ID3D11ShaderResourceView* ResultFor(ID3D11DeviceContext* context, uintptr_t key, uint64_t now);
 
+// The NR result texture (R16G16B16A16_FLOAT, native size) of the stream that ran most recently, or null when none is current. Borrowed:
+// valid until the stream is released; draw thread only. Used by the preview image dump (nr.png).
+ID3D11Texture2D* ResultTexture(uint64_t now);
+
 void Maintain(uint64_t now);
 void OnFrameEnd();
 // The graphics bridge is shutting down (any thread): everything is released before the driver's NGX shutdown.

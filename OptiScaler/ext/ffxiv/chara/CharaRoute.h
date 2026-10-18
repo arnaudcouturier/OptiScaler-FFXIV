@@ -22,10 +22,18 @@ enum class Route : uint8_t
     Enhance,
 };
 
-constexpr Route ChooseRoute(bool dlssWanted, bool dlssActive, bool aaWanted, uint32_t roles, DrawApi /*api*/)
+// `dlssActive` is the plumbing of CharaDlss.cpp being alive (dlss::Active()): true while the SR path or preview NR may run.
+// `nrWanted` ([FFXIV] PreviewNR) offers the draws to that plumbing also when PreviewDLSS is off. An active NR path takes the draw
+// before the spatial AA (NR replaces the native image the AA would filter); when NR cannot run the AA is used as before.
+constexpr Route ChooseRoute(bool dlssWanted, bool dlssActive, bool aaWanted, uint32_t roles, DrawApi /*api*/, bool nrWanted = false)
 {
-    if (dlssWanted)
-        return dlssActive ? Route::Dlss : Route::Native;
+    if (dlssWanted || nrWanted)
+    {
+        if (dlssActive)
+            return Route::Dlss;
+        if (dlssWanted)
+            return Route::Native;
+    }
     if (aaWanted && (roles & RoleEquipDisplay) != 0)
         return Route::Enhance;
     return Route::Native;

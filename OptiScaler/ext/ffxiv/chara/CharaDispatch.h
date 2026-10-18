@@ -2,7 +2,7 @@
 // Entry points of the character preview feature (CharaView) for the hook layer (ext/ffxiv/lighting/FfxivLightingCapture.h)
 // and the once-per-frame seam (ext/Seams.cpp). Everything attaches there; no upstream file is involved.
 //
-// Per draw the dispatcher routes:  PreviewDLSS ? Dlss : PreviewAA ? Enhance (spatial AA) : the native draw.
+// Per draw the dispatcher routes:  (PreviewDLSS or PreviewNR) and the plumbing alive ? Dlss (SR and/or NR) : PreviewAA ? Enhance (spatial AA) : the native draw.
 // Any doubt (accessor not verified, table empty, resource or format not understood, a deferred context) runs the native
 // draw untouched.
 //
@@ -14,6 +14,8 @@
 #include <type_traits>
 
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaDraw.h"
 #include "ext/ffxiv/chara/CharaProbe.h"
 
@@ -50,8 +52,10 @@ inline bool Wanted()
     if (detail::g_inert.load(std::memory_order_relaxed))
         return false;
     const auto& c = ext::Cfg().ffxiv.chara;
-    return c.previewAA.value_or_default() || c.previewDlss.value_or_default() || c.previewProbe.value_or_default() ||
-           c.previewDebugFlood.value_or_default() || probe::Live();
+    // PreviewNR keeps the gate open while it holds models after the key was switched off, so maintenance can free them.
+    return nr::DispatcherWanted(c.previewAA.value_or_default(), c.previewDlss.value_or_default(), c.previewNr.value_or_default(),
+                                nr::HoldsResources(),
+                                c.previewProbe.value_or_default() || c.previewDebugFlood.value_or_default() || probe::Live());
 }
 
 void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw);

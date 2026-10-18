@@ -50,6 +50,10 @@ struct Gathered
     ComPtr<ID3D11Texture2D> dsvTexture;
 };
 
+// The hooks only the super-resolution path needs (copy, clear, query, vertex shader events): on while the SR path may run or still
+// holds objects. Preview NR alone does not need them.
+bool SrHooksOn() { return dlss::SrAvailable(); }
+
 void Maintain(uint64_t now)
 {
     const uint64_t serial = g_frameSerial.load(std::memory_order_relaxed);
@@ -58,8 +62,11 @@ void Maintain(uint64_t now)
         g_seenFrame = serial;
         ++g_stats.frames;
         g_pass.End();
-        if (DlssWanted() && dlss::Active())
+        const nr::MaintenancePlan plan = nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources());
+        if (plan.sr)
             dlss::OnFrameEnd();
+        if (plan.nr)
+            nr::OnFrameEnd();
     }
 
     if (now >= g_lastMaintain && now - g_lastMaintain < kMaintainMs)
@@ -69,8 +76,11 @@ void Maintain(uint64_t now)
     if (g_pass.active && now >= g_lastGeometry && now - g_lastGeometry > kPassIdleMs)
         g_pass.End(); // no frame callback (no bridge): the pass ended with the last geometry draw
     identify::Maintain(now);
-    if (DlssWanted() && dlss::Active())
+    const nr::MaintenancePlan plan = nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources());
+    if (plan.sr)
         dlss::Maintain(now);
+    if (plan.nr)
+        nr::Maintain(now); // also with PreviewNR off while models exist: that is how they are freed
 }
 
 void CountDeferred(ID3D11DeviceContext* context, DrawApi api)
@@ -368,9 +378,10 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see CharaRoute.h).
     bool handled = false;
     const bool dlssWanted = DlssWanted();
+    const bool nrWanted = nr::Wanted();
     if (dlssWanted)
         dlss::Probe(view);
-    const Route route = ChooseRoute(dlssWanted, dlssWanted && dlss::Active(), AaWanted(), view.roles, api);
+    const Route route = ChooseRoute(dlssWanted, (dlssWanted || nrWanted) && dlss::Active(), AaWanted(), view.roles, api, nrWanted);
     switch (route)
     {
     case Route::Dlss: handled = dlss::Around(view, draw); break;
@@ -412,6 +423,7 @@ void Detach()
 {
     probe::Detach();
     enhance::Detach();
+    nr::Detach(); // before the SR path: the NR module owns D3D12 objects that wait for the GPU
     dlss::Detach();
     g_pass.End();
 }
@@ -451,7 +463,7 @@ void OnCopy(ID3D11DeviceContext* context, ID3D11Resource* dest, ID3D11Resource* 
         return;
     if (probe::Live())
         probe::OnCopy(context, dest, source); // before the DLSS gate: the probe does not depend on DLSS
-    if (!DlssWanted() || !dlss::Active())
+    if (!SrHooksOn())
         return;
     dlss::OnCopy(context, dest, source, full);
 }
@@ -463,7 +475,7 @@ void OnCopyRegion(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destS
         return;
     if (probe::Live())
         probe::OnCopyRegion(context, dest, destSub, x, y, z, source, sourceSub, box);
-    if (!DlssWanted() || !dlss::Active())
+    if (!SrHooksOn())
         return;
     const bool full = !destSub && !sourceSub && !x && !y && !z && !box; // the whole of subresource 0
     dlss::OnCopy(context, dest, source, full);
@@ -479,28 +491,28 @@ void OnResolve(ID3D11DeviceContext* context, ID3D11Resource* dest, UINT destSub,
 
 void OnClearRenderTargetView(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const FLOAT color[4])
 {
-    if (t_busy || t_replay || context != g_immediate || !DlssWanted() || !dlss::Active())
+    if (t_busy || t_replay || context != g_immediate || !SrHooksOn())
         return;
     dlss::OnClearRenderTarget(context, view, color);
 }
 
 void OnQueryBegin(ID3D11DeviceContext* context, ID3D11Asynchronous* query)
 {
-    if (context != g_immediate || !DlssWanted() || !dlss::Active())
+    if (context != g_immediate || !SrHooksOn())
         return;
     dlss::OnQueryBegin(context, query);
 }
 
 void OnQueryEnd(ID3D11DeviceContext* context, ID3D11Asynchronous* query)
 {
-    if (context != g_immediate || !DlssWanted() || !dlss::Active())
+    if (context != g_immediate || !SrHooksOn())
         return;
     dlss::OnQueryEnd(context, query);
 }
 
 void OnVertexShaderCreated(ID3D11Device* device, ID3D11VertexShader* shader, const void* bytecode, SIZE_T size)
 {
-    if (!DlssWanted() || !dlss::Active())
+    if (!SrHooksOn())
         return;
     dlss::OnVertexShaderCreated(device, shader, bytecode, size);
 }

@@ -7,6 +7,7 @@
 #include "ext/ffxiv/chara/CharaEnhance.h"
 #include "ext/ffxiv/chara/CharaFlood.h"
 #include "ext/ffxiv/chara/CharaIdentify.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaProbeChannel.h"
 #include "ext/ffxiv/chara/CharaProbeCommands.h"
 #include "ext/ffxiv/chara/CharaProbeDump.h"
@@ -110,7 +111,7 @@ struct State
     bool flood = false; // PreviewDebugFlood: the scan runs on every draw and copies are followed (silently), so the flood reaches copies
     std::array<Held, 8> held;
     DrawFacts lastDraw;
-    std::array<StoredSwap, 3> lastSwap; // by SwapKind
+    std::array<StoredSwap, 4> lastSwap; // by SwapKind
     uint64_t drawSerial = 0;
     uint64_t lastTick = 0;
     uint64_t lastPoll = 0;
@@ -123,8 +124,8 @@ struct State
     uint64_t backbufferStamp = 0;
     uint64_t backbufferFrame = 0; // g_stats.frames when the answer was taken: a new frame asks again
     uint64_t lastGauge = 0;
-    std::array<bool, 3> swapSeen {};
-    std::array<uint32_t, 3> swapBurst {};
+    std::array<bool, 4> swapSeen {};
+    std::array<uint32_t, 4> swapBurst {};
 };
 
 // Never destroyed: the process may unload this module under the loader lock, where releasing objects is not safe.
@@ -487,6 +488,19 @@ std::string BuildState(uint64_t now)
     t.Add("dlss.status", note != nullptr && note[0] != '\0' ? note : "no note");
     t.AddBool("dlss.composedImageAvailable", dlss::ComposedTexture() != nullptr);
     t.AddBool("aa.outputImageAvailable", enhance::OutputTexture() != nullptr);
+    t.AddBool("nr.resultImageAvailable", nr::ResultTexture(now) != nullptr);
+    {
+        const nr::Status ns = nr::GetStatus();
+        t.Add("nr.state", ns.availability == nr::Availability::Available ? "available" : ns.reason[0] != 0 ? ns.reason : "off");
+        t.Add("nr.streams", ns.streams);
+        t.Add("nr.liveStreams", ns.liveStreams);
+        t.Add("nr.runs", ns.runs);
+        t.Add("nr.fallbacks", ns.fallbacks);
+        t.Add("nr.lastGpuMicroseconds", static_cast<uint64_t>(ns.lastGpuMs * 1000.0));
+        t.Add("nr.videoMemoryMb", ns.videoMemoryMb);
+        t.AddBool("nr.late", ns.late);
+        t.Add("nr.uiDrawsGivenResult", g_stats.nrSwaps.load(std::memory_order_relaxed));
+    }
 
     // The table: pointers only, never dereferenced. The format is known for the entries a draw was seen sampling.
     const table::Snapshot& snap = table::Current(now);
@@ -613,6 +627,7 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
     }
     sources.push_back({ "aa", enhance::OutputTexture(), "the spatial AA has not produced an image" });
     sources.push_back({ "dlss", dlss::ComposedTexture(), "the DLSS path has no evaluated preview image" });
+    sources.push_back({ "nr", nr::ResultTexture(now), "preview NR has no current result" });
 
     std::string why;
     if (!dump::Begin(context, sources, BuildState(now), now, why))
