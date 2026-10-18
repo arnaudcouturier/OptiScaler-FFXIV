@@ -348,3 +348,12 @@ touching the upstream shim).
 Not established: whether the game's NGX device is the immediate context's device under the DX11-on-DX12 bridge, whether a
 D3D11 feature can be created while the bridge's own feature exists, the meaning and sign of the camera offset (the log prints
 it with `PreviewGuideCapture`), and the window coverage (portraits).
+
+## Preview Neural Rendering: new work, not reconstructed
+
+`[FFXIV] PreviewNR`, `PreviewNRLingerSeconds` and `PreviewNRLate` and the module behind them (`ext/ffxiv/chara/CharaNr*.{h,cpp}`, the small
+`ext/nr` seam) are not reconstructed from Nickle's build. The unpublished build only carried a trace that records which draws read the
+preview images (the "preview NR trace"); it contains no NR call for previews, and its menu said "Preview NR and FG are not active".
+The design, the reasons for running the model on the Direct3D 12 side of the bridge, and the independence of the NR and
+Super Resolution paths are described in the feature section of FEATURES.md. The debug probe (`PreviewProbe`, `PreviewDebugFlood`,
+`chara-probe.cmd`) is also new work and has no counterpart in that build.
