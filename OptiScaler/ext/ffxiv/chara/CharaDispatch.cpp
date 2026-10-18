@@ -479,15 +479,11 @@ void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize)
 {
     if (shader == nullptr)
         return;
-    SetShaderInfo(shader, crc, dxbcSize);
-
-    uint32_t roles = RoleOfCrc(crc);
-    UINT ui = 0;
-    UINT size = sizeof(ui);
-    if (SUCCEEDED(shader->GetPrivateData(ext::hdr::FfxivHdrPreview::tag, &size, &ui)) && size == sizeof(ui) && ui != 0)
-        roles |= RoleUi;
-    if (roles == RoleNone || !SetRoles(shader, roles))
+    // The UI module tagged the shader just before (the hook layer calls it first): its tag is read here (see TagCreatedShader).
+    const TagOutcome tagged = TagCreatedShader(shader, crc, dxbcSize, ext::hdr::FfxivHdrPreview::tag);
+    if (!tagged.written)
         return;
+    const uint32_t roles = tagged.roles;
 
     // The first shader of each role is named in the log: shaders are created whenever the game first needs them, which can be
     // after the first preview draw, so the one-time "tagged so far" summary alone can read 0 for a role that is tagged later.

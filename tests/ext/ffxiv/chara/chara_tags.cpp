@@ -1,5 +1,15 @@
 #include "check.h"
+// FfxivHdrPreview.h is used for its real UI tag (it is not self-contained: the headers it relies on are listed here)
+#include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+#include <array>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include "ext/ffxiv/chara/CharaTags.h"
+#include "ext/hdr/FfxivHdrPreview.h"
 
 #include <cstring>
 #include <set>
@@ -159,6 +169,84 @@ void TestShaderInfo()
     CHECK(!GetShaderInfo(&odd).known);
     CHECK(std::memcmp(&kShaderInfoTag, &kRoleTag, sizeof(GUID)) != 0);
 }
+// The creation hook: the UI module tags the shader first, then the preview layer reads that tag. The UI set is the real one
+// (ext::hdr::FfxivHdrPreview::Tag), not a restated list, so this fails if the two modules drift apart or the order is swapped.
+void TestCreationOrder()
+{
+    const GUID& uiTag = ext::hdr::FfxivHdrPreview::tag;
+
+    // Every UI CRC the real module accepts, and only those: the restated list and the real one agree, and no chara CRC is a UI CRC.
+    {
+        std::set<uint32_t> accepted;
+        std::vector<uint32_t> probes(std::begin(kUiCrcs), std::end(kUiCrcs));
+        for (const auto c : kGeometryCrcs)
+            probes.push_back(c);
+        probes.push_back(kFinisherCrc);
+        probes.push_back(kEquipDisplayCrc);
+        probes.push_back(0);
+        probes.push_back(0x12345678u);
+        for (const uint32_t crc : probes)
+        {
+            FakeShader s;
+            if (ext::hdr::FfxivHdrPreview::Tag(&s, crc))
+                accepted.insert(crc);
+        }
+        CHECK(accepted == std::set<uint32_t>(std::begin(kUiCrcs), std::end(kUiCrcs)));
+    }
+
+    // UI shader, tagged by the UI module first: the preview layer adds RoleUi, records CRC and size
+    for (const uint32_t crc : kUiCrcs)
+    {
+        FakeShader s;
+        CHECK(ext::hdr::FfxivHdrPreview::Tag(&s, crc));
+        const TagOutcome out = TagCreatedShader(&s, crc, 1234, uiTag);
+        CHECK(out.written && out.roles == RoleUi);
+        CHECK(RoleOf(&s) == RoleUi);
+        CHECK(GetShaderInfo(&s).known && GetShaderInfo(&s).crc == crc && GetShaderInfo(&s).size == 1234);
+    }
+
+    // the wrong order: the preview layer looks first, so the UI shader is not recognised (this is the dependency the hook order serves)
+    {
+        FakeShader s;
+        const TagOutcome out = TagCreatedShader(&s, kUiCrcs[0], 99, uiTag);
+        CHECK(!out.written && out.roles == RoleNone && RoleOf(&s) == RoleNone);
+        CHECK(GetShaderInfo(&s).known); // the info is recorded for every shader anyway
+    }
+
+    // a shader that is both a preview shader and carries the UI tag has both roles
+    {
+        FakeShader s;
+        const uint32_t one = 1;
+        s.SetPrivateData(uiTag, sizeof(one), &one);
+        const TagOutcome out = TagCreatedShader(&s, kFinisherCrc, 4321, uiTag);
+        CHECK(out.written && out.roles == (RoleFinisher | RoleUi));
+        CHECK(RoleOf(&s) == (RoleFinisher | RoleUi));
+    }
+
+    // roles by CRC alone, a shader without any role writes nothing but the info, a zero UI tag is no tag, a null shader is safe
+    for (const auto c : kGeometryCrcs)
+    {
+        FakeShader s;
+        CHECK(TagCreatedShader(&s, c, 10, uiTag).roles == RoleGeometry && RoleOf(&s) == RoleGeometry);
+    }
+    {
+        FakeShader s;
+        CHECK(TagCreatedShader(&s, kEquipDisplayCrc, 10, uiTag).roles == RoleEquipDisplay);
+        FakeShader plain;
+        const TagOutcome out = TagCreatedShader(&plain, 0xDEADBEEFu, 77, uiTag);
+        CHECK(!out.written && out.roles == RoleNone);
+        CHECK(plain.items.size() == 1); // only the CRC and size item
+        FakeShader zero;
+        const uint32_t none = 0;
+        zero.SetPrivateData(uiTag, sizeof(none), &none);
+        CHECK(!TagCreatedShader(&zero, 0xDEADBEEFu, 1, uiTag).written);
+        const uint8_t odd = 1;
+        FakeShader wrongSize;
+        wrongSize.SetPrivateData(uiTag, 1, &odd);
+        CHECK(!TagCreatedShader(&wrongSize, 0xDEADBEEFu, 1, uiTag).written);
+        CHECK(!TagCreatedShader(nullptr, kFinisherCrc, 1, uiTag).written && TagCreatedShader(nullptr, kFinisherCrc, 1, uiTag).roles == RoleNone);
+    }
+}
 } // namespace
 
 int main()
@@ -167,5 +255,6 @@ int main()
     TestRoleBits();
     TestPrivateData();
     TestShaderInfo();
+    TestCreationOrder();
     return TEST_RESULT("chara_tags");
 }

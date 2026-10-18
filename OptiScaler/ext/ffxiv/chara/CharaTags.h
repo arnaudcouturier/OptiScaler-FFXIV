@@ -103,4 +103,30 @@ inline bool SetRoles(ID3D11PixelShader* shader, uint32_t roles)
         return false;
     return SUCCEEDED(shader->SetPrivateData(kRoleTag, sizeof(roles), &roles));
 }
+
+struct TagOutcome
+{
+    uint32_t roles = RoleNone; // the role bits the shader has now (RoleNone: none)
+    bool written = false;      // role bits were written to the shader
+};
+
+// A pixel shader was created: records its CRC and size (every shader gets them) and, when it has a role, the role bits: the CRC
+// list's role plus RoleUi when the UI module (`uiTag`: its private-data GUID) tagged the shader before. That order is a dependency of the
+// creation hook: the UI tag has to be written first, or a UI shader would not be recognised.
+inline TagOutcome TagCreatedShader(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize, const GUID& uiTag)
+{
+    TagOutcome out;
+    if (shader == nullptr)
+        return out;
+    SetShaderInfo(shader, crc, dxbcSize);
+
+    uint32_t roles = RoleOfCrc(crc);
+    UINT ui = 0;
+    UINT size = sizeof(ui);
+    if (SUCCEEDED(shader->GetPrivateData(uiTag, &size, &ui)) && size == sizeof(ui) && ui != 0)
+        roles |= RoleUi;
+    out.roles = roles;
+    out.written = roles != RoleNone && SetRoles(shader, roles);
+    return out;
+}
 } // namespace ext::ffxiv::chara
