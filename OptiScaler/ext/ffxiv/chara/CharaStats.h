@@ -39,10 +39,12 @@ struct Stats
     std::atomic<uint64_t> deferredSeen { 0 };    // equipment display shader drawn on a deferred context (left native)
 
     // Debug aids
-    std::atomic<uint64_t> tintApplied { 0 };     // processed preview images that were made with the debug tint (PreviewDebugTint)
+    std::atomic<uint64_t> tintApplied { 0 };     // processed preview images that were made with the debug tint (PreviewDebugTint): composed images (magenta, or cyan for NR) and bring-up NR results (cyan)
     std::atomic<uint64_t> floodSwaps { 0 };      // draws that were given the solid magenta image (PreviewDebugFlood)
     std::atomic<uint64_t> nrSwaps { 0 };         // UI draws that were given the preview NR result
-    std::atomic<uint64_t> nrRuns { 0 };          // finisher outputs the dispatcher handed to preview NR that produced a result
+    std::atomic<uint64_t> nrRuns { 0 };          // finisher outputs the dispatcher handed to preview NR that produced a result (bring-up)
+    std::atomic<uint64_t> nrProductionRuns { 0 }; // super-resolution outputs preview NR improved and the alpha pass used (production)
+    std::atomic<uint64_t> nrProductionSwaps { 0 }; // UI draws that were given a composed image made from the production NR output
 
     // Preview probe (PreviewProbe). Written by the draw thread, read by the menu.
     std::atomic<uint64_t> probeScanned { 0 };       // draws whose first eight pixel-shader resources were compared with the preview textures

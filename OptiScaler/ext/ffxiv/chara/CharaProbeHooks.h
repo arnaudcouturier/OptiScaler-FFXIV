@@ -5,6 +5,7 @@
 // null pointer.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <d3d11.h>
 
@@ -15,12 +16,15 @@ namespace ext::ffxiv::chara::probe
 // [FFXIV] PreviewProbe: the master switch of the probe (one config bool).
 inline bool ProbeOn() { return ext::Cfg().ffxiv.chara.previewProbe.value_or_default(); }
 
+inline constexpr size_t kSwapKindCount = 5; // Aa, Dlss, Flood, Nr, NrSr
+
 enum class SwapKind : uint8_t
 {
     Aa,    // the spatial AA result replaced the image a UI draw samples
     Dlss,  // the composed DLSS image replaced it
     Flood, // the debug magenta replaced it
-    Nr,    // the preview NR result replaced it
+    Nr,    // the bring-up NR result (native size) replaced it
+    NrSr,  // the composed image made from the production NR output (NR on the super-resolution output) replaced it
 };
 
 inline constexpr const char* SwapKindName(SwapKind k)
@@ -30,6 +34,7 @@ inline constexpr const char* SwapKindName(SwapKind k)
     case SwapKind::Aa: return "AA";
     case SwapKind::Dlss: return "DLSS";
     case SwapKind::Nr: return "NR";
+    case SwapKind::NrSr: return "NR-DLSS";
     default: return "flood";
     }
 }

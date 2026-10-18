@@ -111,7 +111,7 @@ struct State
     bool flood = false; // PreviewDebugFlood: the scan runs on every draw and copies are followed (silently), so the flood reaches copies
     std::array<Held, 8> held;
     DrawFacts lastDraw;
-    std::array<StoredSwap, 4> lastSwap; // by SwapKind
+    std::array<StoredSwap, kSwapKindCount> lastSwap; // by SwapKind
     uint64_t drawSerial = 0;
     uint64_t lastTick = 0;
     uint64_t lastPoll = 0;
@@ -128,8 +128,8 @@ struct State
     uint64_t backbufferStamp = 0;
     uint64_t backbufferFrame = 0; // g_stats.frames when the answer was taken: a new frame asks again
     uint64_t lastGauge = 0;
-    std::array<bool, 4> swapSeen {};
-    std::array<uint32_t, 4> swapBurst {};
+    std::array<bool, kSwapKindCount> swapSeen {};
+    std::array<uint32_t, kSwapKindCount> swapBurst {};
 };
 
 // Never destroyed: the process may unload this module under the loader lock, where releasing objects is not safe.
