@@ -181,8 +181,8 @@ void TestFormatFamilyAndWholeCopies()
     boxed.boxBottom = image.height;
     boxed.boxBack = 1;
     CHECK(WholeImageCopy(boxed));
-    // ... any other box is partial: each edge one off, a deeper box, a box larger than the source, an empty box, a box with an offset
-    for (int edge = 0; edge < 8; ++edge)
+    // ... any other box is partial: each edge one off in both directions, a deeper box, a box larger than the source, an empty box, a box with an offset
+    for (int edge = 0; edge < 9; ++edge)
     {
         CopyFacts f = boxed;
         switch (edge)
@@ -195,6 +195,7 @@ void TestFormatFamilyAndWholeCopies()
         case 5: f.boxBack = 2; break;
         case 6: f.boxRight = image.width + 1; break;
         case 7: f.boxBack = 0; break;
+        case 8: f.boxBottom = image.height + 1; break;
         }
         CHECK(!WholeImageCopy(f));
     }
