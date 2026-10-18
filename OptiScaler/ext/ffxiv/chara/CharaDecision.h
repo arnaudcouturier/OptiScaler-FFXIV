@@ -229,9 +229,13 @@ inline bool FinisherAccepted(const FinisherCheck& c) { return CheckFinisher(c) =
 // finisher closes the render ("finished"): its facts stay readable (a second finisher of the same render is still checked against
 // them), but the next prepass or G-buffer draw starts a new pass and bumps the counter.
 //
-// The frame counter (bumped by the bridge's present callback, possibly from another thread and at any moment of a render) never
-// ends a pass by itself: it is only compared when a prepass or G-buffer draw arrives. A render in progress therefore completes in
-// its own pass, and the first geometry draw after the counter moved starts the next one.
+// The frame counter is bumped by the bridge's present callback (dx11bridge::AfterSharedCopy, called while the swap chain copies the back
+// buffer on the presenting thread, which is the thread that issues the draws). It never ends a pass by itself: it is only compared when a
+// prepass or G-buffer draw arrives. A preview render does not straddle a present, so a render in progress completes in its own pass, and the
+// first geometry draw after the counter moved starts the next one.
+// Known limit, not reachable today: a callback between two G-buffer draws of one render would start a new pass for the second draw (a new
+// jitter phase and a cleared motion target; the rest of that render would run without jitter). It matters only if the callback ever runs on
+// another thread (pinned in chara_decision, TestFrameCounterBetweenGbufferDrawsKnownLimit).
 struct PassState
 {
     bool active = false;

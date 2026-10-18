@@ -598,6 +598,20 @@ void TestFrameCounterDoesNotCutARender()
     CHECK(!fresh.active && fresh.counter == 0);
 }
 
+// KNOWN LIMIT, pinned as it is today (not a wanted behaviour): a frame callback between two G-buffer draws of one render splits the render
+// into two passes. The callback is the bridge's present callback, which runs on the presenting thread, the thread that issues the draws,
+// and a preview render does not straddle a present, so nothing reaches this today. If the callback ever moves to another thread, the second
+// draw below would start a new pass (a new jitter phase, the motion target cleared) and the rest of the render would run without jitter;
+// the fix would be to restart only when the counter is two or more ahead, and this check would then change.
+void TestFrameCounterBetweenGbufferDrawsKnownLimit()
+{
+    PassState pass;
+    pass.NoteFrame(7);
+    CHECK(pass.OnGeometry(Gbuffer(8)) && pass.counter == 1);
+    pass.NoteFrame(8); // the callback fires between two G-buffer draws of the same render
+    CHECK(pass.OnGeometry(Gbuffer(13)) && pass.counter == 2); // today: a second pass starts mid-render
+}
+
 // One render as the second in-game log shows it, step by step as the dispatcher runs it. The pass state is NOT reset between
 // renders: a render starts a new pass because the previous one ended (a rejected finisher) or finished (an accepted one), exactly
 // as in the game.
@@ -737,6 +751,7 @@ int main()
     TestSecondRenderInOneFrame();
     TestPassStartObservedSignatures();
     TestFrameCounterDoesNotCutARender();
+    TestFrameCounterBetweenGbufferDrawsKnownLimit();
     TestGeometryFollowsPass();
     TestShapeOnlyRules();
     TestPassSurvivesShapeOnlyDraw();

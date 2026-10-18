@@ -90,10 +90,13 @@ template <class F> inline void Around(ID3D11DeviceContext* context, DrawApi api,
 // The hook layer attached: `immediate` is the game's immediate context, `rawDraw` the original (unhooked) Draw.
 void OnInstalled(ID3D11DeviceContext* immediate, void* rawDraw);
 void OnDetached();
-// The hooks are about to be removed (device calls are still valid): release every GPU object. Called from the unhook path on any
-// thread. On the draw thread the objects are released at once; on another thread this only raises a request and the draw thread
-// releases them at its next draw (nothing of the feature is synchronised, so a release under a draw in flight would race). If no draw
-// follows before the hooks are gone, the objects are left to the device's own teardown.
+// The hooks are about to be removed (device calls are still valid): release the GPU objects. Called from the unhook path on any
+// thread. On the draw thread the teardown runs at once; on another thread this only raises a request and the draw thread runs it at its
+// next draw (nothing of the feature is synchronised, so a release under a draw in flight would race). The teardown releases what the GPU
+// has finished with: the super-resolution slots, the probe's holds and the spatial AA go at once, but preview NR can only free the objects
+// the GPU is no longer using, which is rarely everything right after a run; the rest waits for the bridge shutdown (it drains) or the next
+// install. If no draw follows before the hooks are gone, the objects are left to the device's own teardown. Nothing is requested before the
+// dispatcher has run for a draw (the feature has created nothing then).
 void Detach();
 
 // CreatePixelShader succeeded; `crc` is the CRC-32 of the DXBC. Call after the other shader tags were written.
