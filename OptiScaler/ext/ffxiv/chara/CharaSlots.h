@@ -48,6 +48,7 @@ struct SlotState
     uint64_t lastUse = 0;
     uint64_t lastEvaluate = 0;
     uint32_t evaluatePass = 0;
+    uint32_t renders = 0;       // accepted finishers of this preview image so far: the jitter phase of its next render (see JitterPhase)
     bool everEvaluated = false; // the "evaluated OK" flag
     bool failed = false;
     uint64_t failedAt = 0;      // when it failed (0 = not known: never released by the failed-slot rule)
@@ -254,14 +255,54 @@ class SlotTable
         return released;
     }
 
+    // ---- Jitter phase ----
+    // The sub-pixel jitter of a render is chosen when its first geometry draw arrives, before the finisher says which preview image the
+    // render is for. Each slot keeps its own render count and the pass takes the phase from the slot it most likely belongs to. A phase
+    // taken from the one counter that all previews share would hand each of two alternating previews every second phase, and in base 2
+    // every second phase lies in the same half of the pixel in x.
+    //
+    // The prediction: after the finisher of slot X came the finisher of slot Y the last time, so the render that starts after X's finisher
+    // is Y's (strict alternation of previews, a single preview: Y == X). With no history, or when the predicted slot is gone or failed, the
+    // caller's shared counter is used, as before.
+    int PredictPassSlot() const
+    {
+        if (_lastFinished == kNoSlot)
+            return kNoSlot;
+        const int next = _successor[static_cast<size_t>(_lastFinished)];
+        const int candidate = next != kNoSlot ? next : _lastFinished;
+        const SlotState& s = Slot(candidate);
+        return s.Used() && !s.failed ? candidate : kNoSlot;
+    }
+
+    uint32_t JitterPhase(uint32_t sharedCounter) const
+    {
+        const int slot = PredictPassSlot();
+        return slot == kNoSlot ? sharedCounter : Slot(slot).renders;
+    }
+
+    // The finisher of slot `index` was accepted: the render counts for that slot, and the order of the previews is learned.
+    void NoteFinishedRender(int index)
+    {
+        if (index < 0 || static_cast<size_t>(index) >= kMaxSlots || !Slot(index).Used())
+            return;
+        ++Slot(index).renders;
+        if (_lastFinished != kNoSlot)
+            _successor[static_cast<size_t>(_lastFinished)] = index;
+        _lastFinished = index;
+    }
+
     void Clear()
     {
         _slots = {};
         _recent = {};
+        _lastFinished = kNoSlot;
+        _successor.fill(kNoSlot);
     }
 
   private:
     std::array<SlotState, kMaxSlots> _slots {};
     std::array<RecentEntry, kMaxRecent> _recent {};
+    int _lastFinished = kNoSlot;
+    std::array<int, kMaxSlots> _successor = [] { std::array<int, kMaxSlots> a {}; a.fill(kNoSlot); return a; }();
 };
 } // namespace ext::ffxiv::chara

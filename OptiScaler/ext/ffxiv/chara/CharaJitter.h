@@ -3,6 +3,9 @@
 // top-left corner. The same offset goes to the upscaler and to the alpha re-composition.
 //
 // Phase n = (pass & 15) + 1, so n runs 1..16. jx = RadicalInverse2(n) - 0.5, jy = RadicalInverse3(n) - 0.5 (pixels).
+// `pass` is the render count of the preview the render is for (SlotTable::JitterPhase), not a counter shared by all previews: two
+// previews that render in a fixed order would otherwise get every second phase each, and in base 2 every second phase lies in the same
+// half of the pixel in x.
 // RadicalInverse_b(n) = sum over the digits d_k of n in base b of d_k * b^-(k+1).
 
 #include <cstdint>

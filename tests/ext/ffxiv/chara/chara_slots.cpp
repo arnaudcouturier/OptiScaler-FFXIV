@@ -1,4 +1,5 @@
 #include "check.h"
+#include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaSlots.h"
 
 #include <set>
@@ -270,6 +271,138 @@ void TestEvaluatedInPass()
     CHECK(!t.EvaluatedInPass(s, 5)); // a failed slot shows nothing
 }
 
+// The jitter phase is a per-preview render count. The jitter of a pass is chosen before the finisher says which preview the render is for,
+// so the slot is predicted from the order of the finishers seen so far.
+struct Signs
+{
+    bool negative = false, positive = false;
+    void Add(float jx)
+    {
+        negative = negative || jx < 0.0f;
+        positive = positive || jx > 0.0f;
+    }
+    bool Both() const { return negative && positive; }
+};
+
+// Renders `count` renders; `slotOf(i)` is the slot (0 or 1) that render i is for. Returns the signs of jx handed to each slot's renders,
+// from the table (JitterPhase) and, as a negative control, from the shared counter that was used before.
+struct Streams
+{
+    Signs table[2], shared[2];
+    int wrongPredictions = 0;
+};
+
+template <class SlotOf> Streams Simulate(SlotTable& t, const int slot[2], int count, SlotOf&& slotOf, int skip = 3)
+{
+    Streams out;
+    uint32_t sharedCounter = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        ++sharedCounter;
+        const int which = slotOf(i);
+        const uint32_t phase = t.JitterPhase(sharedCounter);
+        if (t.PredictPassSlot() != slot[which])
+            ++out.wrongPredictions;
+        if (i >= skip) // the first renders teach the order
+        {
+            out.table[which].Add(PassJitter(phase).x);
+            out.shared[which].Add(PassJitter(sharedCounter).x);
+        }
+        t.NoteFinishedRender(slot[which]);
+    }
+    return out;
+}
+
+void TestJitterPhasePerSlot()
+{
+    SlotTable t;
+    t.NoteRecent(kA, 100, 1);
+    t.NoteRecent(kB, 100, 1);
+    const int slot[2] = { t.AcquireForConsumer(kA, 100, 576, 960), t.AcquireForConsumer(kB, 100, 576, 960) };
+    CHECK(slot[0] != kNoSlot && slot[1] != kNoSlot && slot[0] != slot[1]);
+
+    // Nothing finished yet: no prediction, the shared counter is used (the jitter does not apply before the first evaluation anyway)
+    CHECK(t.PredictPassSlot() == kNoSlot && t.JitterPhase(7) == 7);
+
+    // Two previews that render in a fixed order every frame: each gets both signs of jx. With the shared counter (the old rule) one of them
+    // only ever got the right half of the pixel and the other the left half.
+    const Streams alternating = Simulate(t, slot, 64, [](int i) { return i & 1; });
+    CHECK(alternating.table[0].Both() && alternating.table[1].Both());
+    CHECK(alternating.wrongPredictions <= 3); // only while the order is learned (the first three renders)
+    CHECK(!alternating.shared[0].Both() && !alternating.shared[1].Both());     // the old rule: one-sided
+    CHECK(alternating.shared[0].negative != alternating.shared[1].negative);   // ... and opposite sides
+
+    // The phase a render gets is the render count of its own preview: 1, 2, 3 ... for each
+    {
+        SlotTable u;
+        u.NoteRecent(kA, 100, 1);
+        u.NoteRecent(kB, 100, 1);
+        const int s[2] = { u.AcquireForConsumer(kA, 100, 576, 960), u.AcquireForConsumer(kB, 100, 576, 960) };
+        for (int i = 0; i < 20; ++i)
+        {
+            const int which = i & 1;
+            if (i >= 2)
+                CHECK(u.JitterPhase(999) == u.Slot(s[which]).renders); // the prediction names this render's preview
+            u.NoteFinishedRender(s[which]);
+        }
+        CHECK(u.Slot(s[0]).renders == 10 && u.Slot(s[1]).renders == 10);
+    }
+
+    // One preview: its own sequence 1, 2, 3 ... (all 16 phases, both signs)
+    {
+        SlotTable one;
+        one.NoteRecent(kA, 100, 1);
+        const int s[2] = { one.AcquireForConsumer(kA, 100, 576, 960), kNoSlot };
+        const Streams single = Simulate(one, s, 40, [](int) { return 0; });
+        CHECK(single.table[0].Both());
+        CHECK(single.wrongPredictions <= 1);
+        // the first jittered render of a slot: the slot has finished once (it is evaluated before the jitter applies): phase 1
+        SlotTable first;
+        first.NoteRecent(kA, 100, 1);
+        const int f = first.AcquireForConsumer(kA, 100, 576, 960);
+        first.NoteFinishedRender(f);
+        const Jitter j = PassJitter(first.JitterPhase(55));
+        CHECK(j.x == PassJitter(1).x && j.y == PassJitter(1).y);
+    }
+
+    // Irregular order (one preview renders three times for every render of the other): still both signs for the busy one
+    {
+        SlotTable u;
+        u.NoteRecent(kA, 100, 1);
+        u.NoteRecent(kB, 100, 1);
+        const int s[2] = { u.AcquireForConsumer(kA, 100, 576, 960), u.AcquireForConsumer(kB, 100, 576, 960) };
+        const Streams irregular = Simulate(u, s, 200, [](int i) { return (i % 4) == 3 ? 1 : 0; }, 8);
+        CHECK(irregular.table[0].Both() && irregular.table[1].Both());
+    }
+
+    // A released slot is not predicted any more (the shared counter is used), and a slot that is acquired again starts counting from zero
+    {
+        SlotTable u;
+        u.NoteRecent(kA, 100, 1);
+        const int a = u.AcquireForConsumer(kA, 100, 576, 960);
+        u.NoteFinishedRender(a);
+        u.NoteFinishedRender(a);
+        CHECK(u.PredictPassSlot() == a && u.JitterPhase(9) == 2);
+        u.Cleanup(100 + kIdleReleaseMs + 1, false, [](int) { return true; }, [](int) {});
+        CHECK(u.PredictPassSlot() == kNoSlot && u.JitterPhase(9) == 9);
+        u.NoteRecent(kB, 5000, 1);
+        const int b = u.AcquireForConsumer(kB, 5000, 576, 960);
+        CHECK(b == a && u.Slot(b).renders == 0);
+    }
+
+    // A failed slot is not predicted
+    {
+        SlotTable u;
+        u.NoteRecent(kA, 100, 1);
+        const int a = u.AcquireForConsumer(kA, 100, 576, 960);
+        u.NoteFinishedRender(a);
+        u.MarkFailed(a, 100);
+        CHECK(u.PredictPassSlot() == kNoSlot && u.JitterPhase(9) == 9);
+        u.Clear();
+        CHECK(u.PredictPassSlot() == kNoSlot);
+    }
+}
+
 void TestRecentExpiryInCleanup()
 {
     SlotTable t;
@@ -294,5 +427,6 @@ int main()
     TestReadyForRelease();
     TestEvaluatedInPass();
     TestRecentExpiryInCleanup();
+    TestJitterPhasePerSlot();
     return TEST_RESULT("chara_slots");
 }

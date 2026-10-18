@@ -535,7 +535,7 @@ void BeginPass(const DrawView& view)
     if (g_pass.live)
     {
         if (g_slots.JitterApplies(view.now))
-            g_pass.jitter = PassJitter(g_pass.counter);
+            g_pass.jitter = PassJitter(g_slots.JitterPhase(g_pass.counter)); // the phase of the preview this render most likely is for
         // The signed-motion target is ensured and cleared at the start of every pass.
         if (!motion::EnsureTarget(g_device.Get(), g_pass.width, g_pass.height))
         {
@@ -948,6 +948,7 @@ void Finish(const DrawView& view)
     g_slots.NoteRecent(key, view.now, g_pass.counter);
 
     const int index = g_slots.Find(key);
+    g_slots.NoteFinishedRender(index); // an accepted finisher: the render counts for this preview's jitter phase
     FinishFacts f;
     f.width = g_pass.width;
     f.height = g_pass.height;
