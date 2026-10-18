@@ -39,6 +39,7 @@ class Env
     virtual uint32_t CurrentThread() = 0;
     virtual uint32_t OwnerThread(uint64_t hwnd) = 0; // 0 = unknown
     virtual WindowInfo ReadWindow(uint64_t hwnd) = 0;
+    virtual uint64_t MonitorOfWindow(uint64_t hwnd) = 0; // HMONITOR of the window, 0 = unknown
     // SetWindowLongPtr(GWL_EXSTYLE) + SetWindowPos(NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED). Only ever called
     // on the window's owner thread. The window procedure runs inside it.
     virtual bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) = 0;
@@ -188,6 +189,7 @@ class Controller
         // Streamline flush) when the FG swapchain already has the window's size. The hold cannot cover a size-changing one.
         const bool sizeMatches = _swapW != 0 && f.window.valid && f.window.right - f.window.left == static_cast<int32_t>(_swapW) &&
                                  f.window.bottom - f.window.top == static_cast<int32_t>(_swapH);
+        in.targetOk = ev.target == 0 || ev.target == env.MonitorOfWindow(hwnd);
         in.sizeMatchesWindow = true;
         const bool wouldHold = DecideDefer(in) == DeferVerdict::Defer;
         in.sizeMatchesWindow = sizeMatches;

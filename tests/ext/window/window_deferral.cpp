@@ -138,6 +138,17 @@ int main()
         CHECK(d.OnPresentEnd(false, false, 1) == WaitResult::Wait);
         CHECK(d.OnPresentEnd(false, false, 2) == WaitResult::ReplayAtLimit);
     }
+    {
+        // the custom hard limit (3 presents) ends the wait with frame generation still on; 2 presents do not
+        DeferralLimits limits;
+        limits.softPresents = 2;
+        limits.hardPresents = 3;
+        Deferral d(limits);
+        CHECK(d.Begin(true, 0));
+        CHECK(d.OnPresentEnd(true, false, 1) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 2) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 3) == WaitResult::ReplayAtHardLimit);
+    }
 
     // A clock that goes backwards never produces a huge elapsed time.
     {

@@ -349,6 +349,23 @@ int main()
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // held again: not stuck
     }
 
+    // M4: the event target. 0 and the window's own monitor are held; any other output passes (the replay drops the target).
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        FsEvent ev = Event(true);
+        ev.target = 0x99; // some other output
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, ev));
+        CHECK(AnyLogContains(env, "target=0x99"));
+        CHECK(AnyLogContains(env, "verdict=pass(target output is not the window monitor)"));
+        CHECK(env.fgOffRequests == 0);
+        ev.target = 0x77; // the window's monitor (FakeEnv::monitor)
+        CHECK(c.OnSetFullscreenState(env, Mode::On, ev));
+        c.OnBridgeDestroyed(env, Mode::On, kBridge);
+    }
+
     // Probe never holds or prevents; off does nothing.
     {
         FakeEnv env;

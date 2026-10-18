@@ -65,6 +65,10 @@ class LiveEnv final : public Env
     uint32_t CurrentThread() override { return GetCurrentThreadId(); }
     uint32_t OwnerThread(uint64_t hwnd) override { return win32::OwnerThread(hwnd); }
     WindowInfo ReadWindow(uint64_t hwnd) override { return win32::Read(hwnd); }
+    uint64_t MonitorOfWindow(uint64_t hwnd) override
+    {
+        return reinterpret_cast<uint64_t>(MonitorFromWindow(reinterpret_cast<HWND>(static_cast<uintptr_t>(hwnd)), MONITOR_DEFAULTTONEAREST));
+    }
     bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
     {
         Unlocked unlocked;

@@ -31,6 +31,7 @@ struct CountingEnv final : Env
     uint32_t CurrentThread() override { ++calls; return 1; }
     uint32_t OwnerThread(uint64_t) override { ++calls; return 1; }
     WindowInfo ReadWindow(uint64_t) override { ++calls; return {}; }
+    uint64_t MonitorOfWindow(uint64_t) override { ++calls; return 0; }
     bool ApplyExStyle(uint64_t, uint32_t) override { ++calls; return false; }
     void RequestFgOff() override { ++calls; }
     uint64_t NowMs() override { ++calls; return 0; }

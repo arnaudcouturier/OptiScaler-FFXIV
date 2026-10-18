@@ -182,6 +182,33 @@ int main()
         CHECK(env.window.clientWidth == 3840 && env.window.clientHeight == 2160);
     }
 
+    // The give-up boundary: a caption window is checked once per gated present. A frame-less style that shows up at check 120
+    // is fixed; at check 121 the fix has given up (logged) and nothing is applied. The caption window is never touched.
+    for (const int captionChecks : { 119, 120 })
+    {
+        FakeEnv env;
+        Controller c;
+        env.window = wt::BorderlessWindow();
+        env.window.style = 0x16CF0000u; // caption
+        env.window.exstyle = 0x300u;
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < captionChecks; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        env.window.style = 0x90000000u; // the game writes its frame-less style
+        Present(c, env, Mode::On, kOff, kOff);
+        if (captionChecks == 119)
+        {
+            CHECK(env.applied.size() == 1); // check 120
+        }
+        else
+        {
+            CHECK(env.applied.empty()); // check 121: given up
+            CHECK_CONTAINS(env.All(), "border fix gave up");
+        }
+    }
+
     // L5: an armed fix also expires by presents (600) and by wall time (30 s) since arming, even if frame generation never goes
     // off; a later off period then applies nothing.
     {

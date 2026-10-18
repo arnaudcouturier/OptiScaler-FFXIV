@@ -18,6 +18,7 @@ DeferInputs Deferred()
     in.threadsAgree = true;
     in.swapchainIsBridge = true;
     in.sizeMatchesWindow = true;
+    in.targetOk = true;
     return in;
 }
 } // namespace
@@ -72,6 +73,14 @@ int main()
         DeferInputs in = Deferred();
         in.swapchainIsBridge = false;
         CHECK(DecideDefer(in) == DeferVerdict::UnknownSwapchain);
+    }
+    {
+        // M4: a call that names another output than the window monitor would be replayed with a null target (the window monitor):
+        // it passes instead.
+        DeferInputs in = Deferred();
+        in.targetOk = false;
+        CHECK(DecideDefer(in) == DeferVerdict::TargetDiffers);
+        CHECK(std::string(VerdictName(DeferVerdict::TargetDiffers)).find("not the window monitor") != std::string::npos);
     }
     {
         // The FG swapchain is not the window size: the game follow-up ResizeBuffers would be a real flush, the hold cannot

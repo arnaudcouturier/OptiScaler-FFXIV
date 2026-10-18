@@ -107,6 +107,8 @@ struct FakeEnv final : Env
     uint32_t CurrentThread() override { return current; }
     uint32_t OwnerThread(uint64_t) override { return owner; }
     WindowInfo ReadWindow(uint64_t) override { return window; }
+    uint64_t monitor = 0x77;
+    uint64_t MonitorOfWindow(uint64_t) override { return monitor; }
     bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
     {
         applied.push_back({ hwnd, exstyle, fg.present && fg.active, current });
