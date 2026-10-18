@@ -36,7 +36,10 @@ Assert-Match $good 'CHECK PASS\s+inv1-leak ' 'invariant 1 check'
 Assert-Match $good 'CHECK PASS\s+end-stable ' 'End output stability check'
 Assert-Match $good 'CHECK PASS\s+blob ' 'blob check'
 Assert-Match $good 'CHECK INFO\s+ffn-slots .*all 3 pair\(s\) match' 'FFN slot hypothesis'
-Assert-NoMatch $good 'CHECK (FAIL|WARN)' 'clean capture produced warnings'
+# The clean capture's decoder launch (cc_dec_out) legitimately carries End slot 1 after the run, so the end-users check says so
+# (a WARN: whether it only reads the buffer is not in the files); nothing else may warn or fail.
+Assert-NoMatch $good 'CHECK (FAIL|WARN)\s+(?!end-users\b)\S' 'clean capture produced warnings'
+Assert-Match $good 'CHECK WARN\s+end-users .*cc_dec_out' 'the launch after End that carries End slot 1 was not reported'
 # pointer table: sync counter private to the run, in/out buffers at the boundary, global only outside, y/x buffers inside
 Assert-Match $good '0xc400300000\s+ptr\s+\d+\s+\d+\s+\d+\s+\d+\s+0\s+yes\s+run-private' 'sync counter not run-private'
 Assert-Match $good '0xc400000000\s+ptr\s+\d+\s+\d+\s+0\s+1\s+\d+\s+yes\s+boundary' 'input buffer not at the boundary'
@@ -56,7 +59,7 @@ if ($signature -ne $expected) { throw "signature $signature != $expected" }
 Write-Output 'PASS: clean synthetic capture parsed, signature hash reproduced independently'
 
 # ---- the same capture through -PassThru ----
-$obj = & pwsh -NoProfile -Command "& '$script' -Capture '$Out/caps/good/capture.txt' -PassThru | Select-Object -Last 1 | ConvertTo-Json -Depth 3 -Compress"
+$obj = & pwsh -NoProfile -Command "& '$script' -Capture '$Out/caps/good/capture.txt' -PassThru | Select-Object -Last 1 | ConvertTo-Json -Depth 6 -Compress"
 $o = $obj | ConvertFrom-Json
 if ($o.NamesHash -ne $signature -or $o.Evaluations -ne 3 -or -not $o.SameNames -or $o.Failed -ne 0) { throw "-PassThru object wrong: $obj" }
 Write-Output 'PASS: -PassThru object agrees'
@@ -87,7 +90,7 @@ Copy-Item "$Out/caps/bare/capture.txt" "$Out/root/20261001-000000/capture.txt"
 Copy-Item "$Out/caps/good/capture.txt" "$Out/root/20261016-135152/capture.txt"
 $viaRoot = Run-Summary @('-Capture', "$Out/root")
 Assert-Match $viaRoot '20261016-135152' 'the newest run was not chosen'
-Assert-NoMatch $viaRoot 'CHECK WARN' 'older run was read'
+Assert-NoMatch $viaRoot 'CHECK WARN\s+outside' 'older run was read (it is the capture without outside launches)'
 $viaRun = Run-Summary @('-Capture', "$Out/caps/good")
 Assert-Match $viaRun 'CHECK PASS\s+run-1 ' 'run folder not accepted'
 Write-Output 'PASS: capture file, run folder and nr-vit-capture folder inputs'
