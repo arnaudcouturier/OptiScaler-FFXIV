@@ -20,6 +20,7 @@
 #include "ext/ffxiv/ui/UiDiagFormat.h"
 
 #include <array>
+#include <dxgi.h>
 #include <atomic>
 #include <filesystem>
 #include <format>
@@ -37,8 +38,6 @@ constexpr uint64_t kBackbufferCacheMs = 250; // the swapchain is asked at most t
 constexpr uint64_t kActivityMs = 250;        // the per-draw scan runs this long after the preview renderer was last seen
 constexpr uint64_t kGaugeMs = 100;           // the derived-texture count shown in the menu is refreshed this often
 constexpr uint32_t kMaxSwapLines = 64;       // consumer swap traces over the session
-constexpr uint32_t kScreenClassWidth = 3000; // "3840x2160-class" render target: render-target capable and at least this large
-constexpr uint32_t kScreenClassHeight = 1700;
 constexpr UINT kScanSlots = 8;               // pixel-shader resources compared per draw
 constexpr uint64_t kTickMs = 100;            // dump pump and request handling cadence
 constexpr uint64_t kExtraImageMs = 2000;     // a preview output other than entry 0 is dumped when a draw sampled it this recently
@@ -283,6 +282,12 @@ void ReleaseHeld()
 void ForgetAll()
 {
     ForgetDerived();
+    // A fresh start: copy tracking back on and the case logs empty, so a second session in one game session is not silent because the first
+    // one filled the caps, and a "copies off" from an earlier session does not silently stop the flood-only mode from following copies.
+    State& s = S();
+    s.derived.Reset();
+    s.copyCases.Clear();
+    s.samplerCases.Clear();
     ReleaseHeld();
 }
 
@@ -301,13 +306,6 @@ void SwitchOff(const char* why)
 }
 
 // ---- Copies ---------------------------------------------------------------------------------------------------------------
-
-enum class CopyVia : uint8_t
-{
-    CopyResource,
-    CopyRegion,
-    Resolve,
-};
 
 struct CopyDetail
 {
@@ -339,6 +337,49 @@ std::string DetailText(const CopyDetail& d)
     else
         text += "whole source subresource";
     return text;
+}
+
+// A reference to a derived texture for the derived set (see Derived::hold), or an empty one when it must not be held: a swapchain buffer
+// (a reference we hold makes the game's ResizeBuffers fail). A buffer is recognised by being the backbuffer the boundary module reports and
+// by DXGI's own back-buffer usage flag (the other buffers of a flip-model swapchain).
+std::shared_ptr<void> HoldOf(ID3D11Resource* resource, bool isBackbuffer)
+{
+    if (resource == nullptr || isBackbuffer)
+        return {};
+    ComPtr<IDXGIResource> dxgi;
+    if (SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&dxgi))) && dxgi != nullptr)
+    {
+        DXGI_USAGE usage = 0;
+        if (SUCCEEDED(dxgi->GetUsage(&usage)) && (usage & DXGI_USAGE_BACK_BUFFER) != 0)
+            return {};
+    }
+    resource->AddRef();
+    return std::shared_ptr<void>(resource, [](void* p) { static_cast<ID3D11Resource*>(p)->Release(); });
+}
+
+// The size and format of a 2D texture resource (false for a buffer or anything else).
+bool TextureInfoOf(ID3D11Resource* resource, TextureInfo& out)
+{
+    ComPtr<ID3D11Texture2D> texture;
+    if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture))) || texture == nullptr)
+        return false;
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    out = { desc.Width, desc.Height, static_cast<uint32_t>(desc.Format) };
+    return true;
+}
+
+// The live derived entry of a texture a draw samples. An entry that holds a reference to its texture is the texture; one without (a
+// swapchain buffer) is checked against the texture's actual size and format, so a recycled address with another size does not match.
+const Derived* FindDerived(State& s, ID3D11Resource* resource, uintptr_t texture, uint64_t now)
+{
+    const Derived* found = s.derived.Find(texture, now);
+    if (found == nullptr || found->hold)
+        return found;
+    TextureInfo actual;
+    if (!TextureInfoOf(resource, actual))
+        return nullptr;
+    return s.derived.Find(texture, now, &actual);
 }
 
 void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& detail)
@@ -385,10 +426,39 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
 
     const TextureInfo info { td.Width, td.Height, static_cast<uint32_t>(td.Format) };
     const bool destIsPreviewEntry = table::IndexOfPointer(snap, dst) >= 0;
-    if (follow)
+
+    // Only a copy of the WHOLE image into a texture of its own is followed (WholeImageCopy): a region copied into an atlas, a mip or an
+    // array slice would make the whole destination "preview-derived". Partial copies are logged below as "not followed".
+    bool wholeCopy = false;
     {
-        const DeriveResult result = fromPreview ? s.derived.FromPreview(entry, src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now)
-                                                : s.derived.FromDerived(src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now);
+        ComPtr<ID3D11Texture2D> sourceTexture;
+        if (SUCCEEDED(source->QueryInterface(IID_PPV_ARGS(&sourceTexture))) && sourceTexture != nullptr)
+        {
+            D3D11_TEXTURE2D_DESC sd {};
+            sourceTexture->GetDesc(&sd);
+            CopyFacts facts;
+            facts.via = detail.via;
+            facts.destSub = detail.destSub;
+            facts.x = detail.x;
+            facts.y = detail.y;
+            facts.z = detail.z;
+            facts.sourceSub = detail.sourceSub;
+            facts.hasBox = detail.box != nullptr;
+            facts.source = { sd.Width, sd.Height, static_cast<uint32_t>(sd.Format) };
+            facts.dest = info;
+            facts.resolveFormat = static_cast<uint32_t>(detail.format);
+            wholeCopy = WholeImageCopy(facts);
+        }
+    }
+
+    if (follow && wholeCopy)
+    {
+        // The derived entry keeps the destination texture alive (so its address cannot be reused by another texture while the entry lives),
+        // except a swapchain buffer: a held buffer makes ResizeBuffers fail.
+        const BackbufferInfo& bbForHold = Backbuffer(now);
+        const std::shared_ptr<void> hold = HoldOf(dest, bbForHold.valid && bbForHold.texture == dst);
+        const DeriveResult result = fromPreview ? s.derived.FromPreview(entry, src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now, hold)
+                                                : s.derived.FromDerived(src, dst, info, destIsPreviewEntry, DerivedKind::Copy, now, hold);
         if (!Accepted(result))
         {
             ++g_stats.probeCopiesRefused;
@@ -409,7 +479,7 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
     const uint32_t hops = fromPreview ? 1 : from.hops + 1;
     const uint64_t sourceTag = fromPreview ? static_cast<uint64_t>(entry) : 1000 + static_cast<uint64_t>(from.sourceEntry) * 16 + from.hops;
     const uint64_t key = CaseKey(sourceTag, dst, (static_cast<uint64_t>(td.Width) << 32) | td.Height,
-                                 static_cast<uint64_t>(td.Format) | (static_cast<uint64_t>(detail.via) << 32));
+                                 static_cast<uint64_t>(td.Format) | (static_cast<uint64_t>(detail.via) << 32) | (follow && wholeCopy ? 1ull << 40 : 0));
     if (!s.copyCases.Offer(key))
         return;
 
@@ -418,7 +488,7 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
     const bool isBackbuffer = bb.valid && bb.texture == dst;
     const bool renderTarget = (td.BindFlags & D3D11_BIND_RENDER_TARGET) != 0;
     const bool shaderResource = (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
-    const bool screenClass = renderTarget && td.Width >= kScreenClassWidth && td.Height >= kScreenClassHeight;
+    const bool screenClass = renderTarget && bb.valid && IsScreenSizeIntermediate(info, { bb.width, bb.height, bb.format }); // at least half of the backbuffer's area
 
     std::string what = fromPreview ? std::format("copy of preview entry {}", entry)
                                    : std::format("copy of derived texture {:#x} (entry {}, hops {})", src, from.sourceEntry, from.hops);
@@ -426,14 +496,17 @@ void HandleCopy(ID3D11Resource* dest, ID3D11Resource* source, const CopyDetail& 
     if (isBackbuffer)
         flag = " <-- destination is the swapchain backbuffer";
     else if (screenClass)
-        flag = " <-- destination is a screen-size render target";
+        flag = " <-- destination is a screen-size render target (at least half of the backbuffer's area)";
+    if (!(follow && wholeCopy))
+        flag += follow ? " <-- partial copy, not followed (a region, another subresource, or another size or format than the source)"
+                       : " <-- the preview was not rendering: not followed";
     ++g_stats.probeCopyLines;
     LOG_INFO("CharaView probe: {} -> texture {:#x} {}x{} format {} (backbuffer? {}, render target? {}, shader resource? {}, usage {}, "
              "screen-size render target? {}); preview entry {}, hops {}; via {}{}",
              what, dst, td.Width, td.Height, FormatText(static_cast<uint32_t>(td.Format)), YesNo(isBackbuffer), YesNo(renderTarget),
              YesNo(shaderResource), UsageText(td.Usage), YesNo(screenClass), sourceEntry, hops, DetailText(detail), flag);
     if (s.copyCases.Count() == kCopyCaseCap)
-        LOG_INFO("CharaView probe: the limit of {} copy cases is reached; further new cases are only counted", kCopyCaseCap);
+        LOG_INFO("CharaView probe: the limit of {} copy cases is reached; further new cases are only counted (send the command `reset`, or switch the probe off and on, to start new logs)", kCopyCaseCap);
 }
 
 // ---- Preview image dump and state.txt --------------------------------------------------------------------------------------------
@@ -858,9 +931,10 @@ static void UpdateCore(uint64_t now, ID3D11DeviceContext* context)
                  kSamplerCaseCap);
         return;
     }
-    if (s.on && (now < s.lastGauge || now - s.lastGauge >= kGaugeMs))
+    if ((s.on || s.flood) && (now < s.lastGauge || now - s.lastGauge >= kGaugeMs))
     {
         s.lastGauge = now;
+        s.derived.Prune(now); // lets go of the textures of entries that expired (they are held only while the entry lives)
         g_stats.probeDerivedLive.store(static_cast<uint32_t>(s.derived.Count(now)), std::memory_order_relaxed);
     }
     if (s.on && context != nullptr)
@@ -950,7 +1024,7 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
             hit.entry = entry;
             hit.sourceEntry = entry;
         }
-        else if (const Derived* found = s.derived.Find(texture, now))
+        else if (const Derived* found = FindDerived(s, resource.Get(), texture, now))
         {
             hit.derived = true;
             hit.sourceEntry = found->sourceEntry;
@@ -1005,11 +1079,14 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
     const BackbufferInfo& bb = Backbuffer(now);
     const bool targetIsBackbuffer = haveTarget && bb.valid && bb.texture == rtPointer;
 
+    // The pixel shader: the probe logs it, and "is there one" decides whether the render target may become derived (a draw without a
+    // pixel shader reads nothing; what it has bound at t0..t7 is left over from an earlier draw).
+    ComPtr<ID3D11PixelShader> ps;
+    context->PSGetShader(&ps, nullptr, nullptr);
+
     if (s.on)
     {
-        // The pixel shader, viewport and the log lines are the probe's own.
-        ComPtr<ID3D11PixelShader> ps;
-        context->PSGetShader(&ps, nullptr, nullptr);
+        // The viewport and the log lines are the probe's own.
         const ShaderInfo shader = GetShaderInfo(ps.Get());
         const uint32_t roles = RoleOf(ps.Get());
 
@@ -1072,29 +1149,71 @@ ScanResult OnDraw(ID3D11DeviceContext* context, DrawApi api, const table::Snapsh
                      hit.slot, crc, roles, target, bb.valid ? YesNo(targetIsBackbuffer) : "unknown", static_cast<int>(viewport.Width),
                      static_cast<int>(viewport.Height), DrawApiName(api));
             if (s.samplerCases.Count() == kSamplerCaseCap)
-                LOG_INFO("CharaView probe: the limit of {} sampler-draw cases is reached; further new cases are only counted", kSamplerCaseCap);
+                LOG_INFO("CharaView probe: the limit of {} sampler-draw cases is reached; further new cases are only counted (send the command `reset`, or switch the probe off and on, to start new logs)", kSamplerCaseCap);
         }
     }
 
-    // The render target of a draw that sampled the preview (or a copy of it) holds the image too, unless it is the screen.
-    // Only while the preview renders (see the copy path), and never a screen-size target when the backbuffer is not known.
-    const bool screenSize = rtDesc.Width >= kScreenClassWidth && rtDesc.Height >= kScreenClassHeight;
-    if (recent && haveTarget && rtPointer != 0 && !targetIsBackbuffer && (bb.valid || !screenSize) &&
-        table::IndexOfPointer(snapshot, rtPointer) < 0)
+    // The render target of a draw that sampled the preview (or a copy of it) holds the image too, unless it is the screen, one of the
+    // preview renderer's own textures, a screen-size intermediate, or the draw reads nothing (no pixel shader: what is bound is left
+    // over from an earlier draw). Only while the preview renders (see the copy path). The rules are DecidePromotion.
+    if (recent && haveTarget && rtPointer != 0)
     {
-        // the closest source: a preview output first, then the derived texture with the fewest hops
-        const ScanHit* best = &result.hits[0];
-        for (size_t n = 1; n < count; ++n)
+        PromotionFacts pf;
+        pf.rendererRecent = recent;
+        pf.haveTarget = haveTarget;
+        pf.targetIsBackbuffer = targetIsBackbuffer;
+        pf.targetIsTableEntry = table::IndexOfPointer(snapshot, rtPointer) >= 0;
+        pf.pixelShaderBound = ps != nullptr;
+        pf.target = { rtDesc.Width, rtDesc.Height, static_cast<uint32_t>(rtDesc.Format) };
+        pf.backbufferKnown = bb.valid;
+        pf.backbuffer = { bb.width, bb.height, bb.format };
+        if (!bb.valid)
         {
-            const ScanHit& h = result.hits[n];
-            if ((!h.derived && best->derived) || (h.derived == best->derived && h.hops < best->hops))
-                best = &h;
+            D3D11_VIEWPORT viewport {};
+            UINT viewportCount = 1;
+            context->RSGetViewports(&viewportCount, &viewport);
+            if (viewportCount >= 1)
+            {
+                pf.viewportWidth = static_cast<uint32_t>(viewport.Width);
+                pf.viewportHeight = static_cast<uint32_t>(viewport.Height);
+            }
         }
-        const TextureInfo info { rtDesc.Width, rtDesc.Height, static_cast<uint32_t>(rtDesc.Format) };
-        const DeriveResult derived = best->derived ? s.derived.FromDerived(best->texture, rtPointer, info, false, DerivedKind::Draw, now)
-                                                   : s.derived.FromPreview(best->entry, best->texture, rtPointer, info, false, DerivedKind::Draw, now);
-        if (derived == DeriveResult::Added || derived == DeriveResult::Replaced)
-            ++g_stats.probeDerivedAdded;
+        const Promotion verdict = DecidePromotion(pf);
+        if (verdict == Promotion::Promote)
+        {
+            // the closest source: a preview output first, then the derived texture with the fewest hops
+            const ScanHit* best = &result.hits[0];
+            for (size_t n = 1; n < count; ++n)
+            {
+                const ScanHit& h = result.hits[n];
+                if ((!h.derived && best->derived) || (h.derived == best->derived && h.hops < best->hops))
+                    best = &h;
+            }
+            const std::shared_ptr<void> hold = HoldOf(rtResource.Get(), false); // not the backbuffer (checked above)
+            const DeriveResult derived = best->derived ? s.derived.FromDerived(best->texture, rtPointer, pf.target, false, DerivedKind::Draw, now, hold)
+                                                       : s.derived.FromPreview(best->entry, best->texture, rtPointer, pf.target, false, DerivedKind::Draw, now, hold);
+            if (derived == DeriveResult::Added || derived == DeriveResult::Replaced)
+                ++g_stats.probeDerivedAdded;
+        }
+        else if (s.on && (verdict == Promotion::NoPixelShader || verdict == Promotion::ScreenSizeIntermediate || verdict == Promotion::NoReference))
+        {
+            // Said once per case: these are the draws a reader of the log would otherwise wonder about.
+            const uint64_t key = CaseKey(900 + static_cast<uint64_t>(verdict), rtPointer, (static_cast<uint64_t>(rtDesc.Width) << 32) | rtDesc.Height);
+            if (s.samplerCases.Offer(key))
+            {
+                ++g_stats.probeSamplerLines;
+                if (verdict == Promotion::NoPixelShader)
+                    LOG_INFO("CharaView probe: bound, not known to be read: a draw with no pixel shader has the preview or a copy of it bound; its render target "
+                             "{:#x} is not followed", rtPointer);
+                else if (verdict == Promotion::ScreenSizeIntermediate)
+                    LOG_INFO("CharaView probe: screen-size intermediate: {:#x} {}x{} is at least half of the {} area and is not followed as a texture derived "
+                             "from the preview (a copy of the preview into it would be)",
+                             rtPointer, rtDesc.Width, rtDesc.Height, bb.valid ? "backbuffer's" : "viewport's");
+                else
+                    LOG_INFO("CharaView probe: neither the backbuffer nor the viewport is known: the render target {:#x} {}x{} is not followed", rtPointer,
+                             rtDesc.Width, rtDesc.Height);
+            }
+        }
     }
     return result;
 }

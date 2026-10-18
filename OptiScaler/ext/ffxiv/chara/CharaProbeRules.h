@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -49,7 +50,130 @@ struct Derived
     uint64_t firstSeen = 0;
     uint64_t lastSeen = 0;
     bool used = false;
+    // A reference to the texture itself (kept for at most kExpiryMs after the last sighting, 16 entries at most): while it lives the
+    // address cannot be handed to another texture, so the entry cannot be mistaken for a recycled address. Empty for a swapchain buffer.
+    std::shared_ptr<void> hold;
 };
+
+// The 8-bit, 16-bit float and 10-bit formats a texture and its copies commonly use come in a typeless and a typed (or sRGB) flavour:
+// "the same format" for the purpose of following a copy means the same family. DXGI_FORMAT values: 9 R16G16B16A16_TYPELESS, 10 _FLOAT,
+// 23 R10G10B10A2_TYPELESS, 24 _UNORM, 27 R8G8B8A8_TYPELESS, 28 _UNORM, 29 _UNORM_SRGB, 87 B8G8R8A8_UNORM, 90 _TYPELESS, 91 _UNORM_SRGB.
+constexpr uint32_t FormatFamily(uint32_t format)
+{
+    switch (format)
+    {
+    case 9:
+    case 10: return 10;
+    case 23:
+    case 24: return 24;
+    case 27:
+    case 28:
+    case 29: return 28;
+    case 87:
+    case 90:
+    case 91: return 87;
+    default: return format;
+    }
+}
+
+constexpr bool SameFormatFamily(uint32_t a, uint32_t b) { return FormatFamily(a) == FormatFamily(b); }
+
+// How a copy reached its destination.
+enum class CopyVia : uint8_t
+{
+    CopyResource,
+    CopyRegion,
+    Resolve,
+};
+
+struct CopyFacts
+{
+    CopyVia via = CopyVia::CopyResource;
+    uint32_t destSub = 0;
+    uint32_t x = 0, y = 0, z = 0;
+    uint32_t sourceSub = 0;
+    bool hasBox = false;          // a source box was given
+    TextureInfo source;           // the source texture's size and format
+    TextureInfo dest;             // the destination texture's size and format
+    uint32_t resolveFormat = 0;   // ResolveSubresource: the format argument
+};
+
+// A copy is followed only when it puts the WHOLE image into a texture of its own: subresource 0 to subresource 0, the whole of it, into a
+// destination of the same width, height and format family. A region copied into an atlas, a mip or an array slice would make the whole
+// destination "preview-derived" and with the flood test on every draw that samples the rest of the atlas would turn magenta. (Those
+// copies are still logged, as "partial copy, not followed": they are the interesting case for the maintainer.)
+constexpr bool WholeImageCopy(const CopyFacts& f)
+{
+    if (f.source.width == 0 || f.source.height == 0 || f.source.width != f.dest.width || f.source.height != f.dest.height)
+        return false;
+    switch (f.via)
+    {
+    case CopyVia::CopyResource: return SameFormatFamily(f.source.format, f.dest.format);
+    case CopyVia::CopyRegion:
+        return f.destSub == 0 && f.sourceSub == 0 && f.x == 0 && f.y == 0 && f.z == 0 && !f.hasBox && SameFormatFamily(f.source.format, f.dest.format);
+    case CopyVia::Resolve:
+        return f.destSub == 0 && f.sourceSub == 0 &&
+               (SameFormatFamily(f.source.format, f.dest.format) || SameFormatFamily(f.resolveFormat, f.dest.format));
+    }
+    return false;
+}
+
+// Whether a render target of a draw that sampled the preview (or a copy of it) may become "derived" (REVIEW-CHARA-2 M5, M7).
+struct PromotionFacts
+{
+    bool rendererRecent = false;      // the preview renderer was seen active lately (a derived chain only lives while it renders)
+    bool haveTarget = false;          // the draw has a 2D render target
+    bool targetIsBackbuffer = false;
+    bool targetIsTableEntry = false;  // one of the preview renderer's own textures
+    bool pixelShaderBound = false;    // a draw without a pixel shader reads nothing: its bindings are stale ones
+    TextureInfo target;
+    bool backbufferKnown = false;
+    TextureInfo backbuffer;           // the swapchain's size (when known)
+    uint32_t viewportWidth = 0;       // the draw's viewport, the reference when the backbuffer is not known
+    uint32_t viewportHeight = 0;
+};
+
+enum class Promotion : uint8_t
+{
+    Promote,
+    RendererIdle,             // the renderer is not active
+    NoTarget,
+    IsBackbuffer,
+    IsTableEntry,
+    NoPixelShader,            // "bound, not known to be read": the draw has no pixel shader
+    ScreenSizeIntermediate,   // at least half the screen's area: not followed (it would turn the whole screen into "preview")
+    NoReference,              // neither the backbuffer nor the viewport is known: cannot tell whether it is screen-sized
+};
+
+// The reference size is the backbuffer's own (a 1080p or 1440p game is judged by its own screen, not by a 4K constant); when it is not
+// known, the draw's viewport. A target of at least half of that area is not followed as a draw-derived texture unless it is an explicit
+// copy destination (the copy path does not use this rule).
+constexpr Promotion DecidePromotion(const PromotionFacts& f)
+{
+    if (!f.rendererRecent)
+        return Promotion::RendererIdle;
+    if (!f.haveTarget)
+        return Promotion::NoTarget;
+    if (f.targetIsBackbuffer)
+        return Promotion::IsBackbuffer;
+    if (f.targetIsTableEntry)
+        return Promotion::IsTableEntry;
+    if (!f.pixelShaderBound)
+        return Promotion::NoPixelShader;
+    const uint64_t reference = f.backbufferKnown ? static_cast<uint64_t>(f.backbuffer.width) * f.backbuffer.height
+                                                 : static_cast<uint64_t>(f.viewportWidth) * f.viewportHeight;
+    if (reference == 0)
+        return Promotion::NoReference;
+    const uint64_t area = static_cast<uint64_t>(f.target.width) * f.target.height;
+    return area * 2 >= reference ? Promotion::ScreenSizeIntermediate : Promotion::Promote;
+}
+
+// The target is a screen-size intermediate by the same rule (for the annotation of a copy line).
+constexpr bool IsScreenSizeIntermediate(const TextureInfo& target, const TextureInfo& backbuffer)
+{
+    const uint64_t reference = static_cast<uint64_t>(backbuffer.width) * backbuffer.height;
+    return reference != 0 && static_cast<uint64_t>(target.width) * target.height * 2 >= reference;
+}
 
 enum class DeriveResult : uint8_t
 {
@@ -77,9 +201,10 @@ public:
     void SetCopiesEnabled(bool on) { copies_ = on; }
     bool CopiesEnabled() const { return copies_; }
 
-    // The source is the preview output with table entry `entry` (0..7): the destination is one hop away.
+    // The source is the preview output with table entry `entry` (0..7): the destination is one hop away. `hold` (optional) keeps the
+    // destination texture alive while the entry lives (see Derived::hold).
     DeriveResult FromPreview(int entry, uintptr_t source, uintptr_t dest, const TextureInfo& info, bool destIsPreviewEntry,
-                             DerivedKind kind, uint64_t now)
+                             DerivedKind kind, uint64_t now, std::shared_ptr<void> hold = {})
     {
         if (!copies_)
             return DeriveResult::CopiesOff;
@@ -91,12 +216,12 @@ public:
             return DeriveResult::DestIsPreview;
         if (entry < 0 || entry >= kPreviewEntries)
             return DeriveResult::UnknownSource;
-        return Insert(dest, info, entry, 1, kind, now);
+        return Insert(dest, info, entry, 1, kind, now, std::move(hold));
     }
 
     // The source is a texture that is already derived (and not expired): the destination is one hop further.
     DeriveResult FromDerived(uintptr_t source, uintptr_t dest, const TextureInfo& info, bool destIsPreviewEntry,
-                             DerivedKind kind, uint64_t now)
+                             DerivedKind kind, uint64_t now, std::shared_ptr<void> hold = {})
     {
         if (!copies_)
             return DeriveResult::CopiesOff;
@@ -111,30 +236,44 @@ public:
             return DeriveResult::UnknownSource;
         if (src->hops + 1 > kMaxHops)
             return DeriveResult::TooManyHops;
-        return Insert(dest, info, src->sourceEntry, src->hops + 1, kind, now);
+        return Insert(dest, info, src->sourceEntry, src->hops + 1, kind, now, std::move(hold));
     }
 
-    // The live entry of this texture, or null (never stored, or not refreshed for kExpiryMs).
-    const Derived* Find(uintptr_t ptr, uint64_t now) const
+    // The live entry of this texture, or null (never stored, or not refreshed for kExpiryMs). An entry that holds a reference to its
+    // texture is the texture (its address cannot be reused while the reference lives). An entry without one (a swapchain buffer is
+    // never held, it would block ResizeBuffers) is only the same texture when `actual`, if the caller has it, still has the size and
+    // format family the entry was made with: a recycled address with another size does not match (REVIEW-CHARA-2 M3).
+    const Derived* Find(uintptr_t ptr, uint64_t now, const TextureInfo* actual = nullptr) const
     {
         if (ptr == 0)
             return nullptr;
         for (const Derived& d : entries_)
             if (d.used && d.ptr == ptr && Alive(d, now))
-                return &d;
+                return Matches(d, actual) ? &d : nullptr;
         return nullptr;
     }
 
-    // A draw saw the texture again: keeps it alive. Returns false when it is unknown or expired.
-    bool Touch(uintptr_t ptr, uint64_t now)
+    // A draw saw the texture again: keeps it alive. Returns false when it is unknown, expired or no longer the same texture.
+    bool Touch(uintptr_t ptr, uint64_t now, const TextureInfo* actual = nullptr)
     {
         for (Derived& d : entries_)
             if (d.used && d.ptr == ptr && Alive(d, now))
             {
+                if (!Matches(d, actual))
+                    return false;
                 d.lastSeen = std::max(d.lastSeen, now);
                 return true;
             }
         return false;
+    }
+
+    // Lets go of the entries that expired: their texture references are released (called regularly, so the game's textures are not
+    // kept alive for longer than kExpiryMs after the last time they were seen).
+    void Prune(uint64_t now)
+    {
+        for (Derived& d : entries_)
+            if (d.used && !Alive(d, now))
+                d = Derived {};
     }
 
     size_t Count(uint64_t now) const
@@ -156,12 +295,28 @@ public:
         return out;
     }
 
+    // Forgets every entry (and releases the references they hold). The copy-tracking switch stays as it is: the `reset` command and a
+    // texture change must not undo "copies off".
     void Clear() { entries_ = {}; }
+    // A fresh set: no entries and copy tracking on (what switching the probe on or off does).
+    void Reset()
+    {
+        Clear();
+        copies_ = true;
+    }
 
 private:
     static bool Alive(const Derived& d, uint64_t now) { return now < d.lastSeen || now - d.lastSeen < kExpiryMs; }
 
-    DeriveResult Insert(uintptr_t dest, const TextureInfo& info, int entry, uint32_t hops, DerivedKind kind, uint64_t now)
+    static bool Matches(const Derived& d, const TextureInfo* actual)
+    {
+        if (d.hold || actual == nullptr)
+            return true;
+        return d.info.width == actual->width && d.info.height == actual->height && SameFormatFamily(d.info.format, actual->format);
+    }
+
+    DeriveResult Insert(uintptr_t dest, const TextureInfo& info, int entry, uint32_t hops, DerivedKind kind, uint64_t now,
+                        std::shared_ptr<void> hold)
     {
         // the same texture again (live): keep the shortest chain, refresh the time
         for (Derived& d : entries_)
@@ -175,6 +330,8 @@ private:
                 d.info = info;
                 d.kind = kind;
                 d.lastSeen = std::max(d.lastSeen, now);
+                if (hold)
+                    d.hold = std::move(hold);
                 return DeriveResult::Refreshed;
             }
 
@@ -207,6 +364,7 @@ private:
         slot->firstSeen = now;
         slot->lastSeen = now;
         slot->used = true;
+        slot->hold = std::move(hold); // the previous occupant's reference (if any) is released here
         return result;
     }
 

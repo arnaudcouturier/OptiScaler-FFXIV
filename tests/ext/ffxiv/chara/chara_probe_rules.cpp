@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,13 +36,238 @@ void TestChainAndHopCap()
     CHECK(set.FromDerived(0xC, 0xD, kInfo, false, DerivedKind::Copy, 1030) == DeriveResult::TooManyHops);
     CHECK(set.Find(0xD, 1030) == nullptr);
     CHECK(set.Count(1030) == 3);
-    CHECK(kMaxHops == 3);
 
     // the source entry is inherited along the chain
     DerivedSet other;
     CHECK(other.FromPreview(5, 0x500, 0xE, kInfo, false, DerivedKind::Copy, 0) == DeriveResult::Added);
     CHECK(other.FromDerived(0xE, 0xF, kInfo, false, DerivedKind::Copy, 1) == DeriveResult::Added);
     CHECK(other.Find(0xF, 1) && other.Find(0xF, 1)->sourceEntry == 5);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Which texture is it: references, recycled addresses (REVIEW-CHARA-2 M3)
+// ---------------------------------------------------------------------------------------------------------------------
+
+void TestHeldReferences()
+{
+    // The set keeps the texture alive while the entry lives, so its address cannot be handed to an unrelated texture.
+    auto texture = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = texture;
+    DerivedSet set;
+    CHECK(set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 1000, texture) == DeriveResult::Added);
+    texture.reset(); // the game let go of its reference
+    CHECK(!weak.expired());
+
+    // an entry that holds its texture is the texture: a different size at the same address is not a question (it cannot happen)
+    const TextureInfo other { 64, 64, 28 };
+    CHECK(set.Find(0xA, 1500, &other) != nullptr);
+
+    // a sampler draw keeps it alive, so the reference stays
+    CHECK(set.Touch(0xA, 3500));
+    set.Prune(3500 + kExpiryMs - 1);
+    CHECK(!weak.expired() && set.Find(0xA, 3500 + kExpiryMs - 1) != nullptr);
+
+    // 3 s after the last sighting the entry is dead and Prune releases the texture
+    set.Prune(3500 + kExpiryMs);
+    CHECK(weak.expired());
+    CHECK(set.Find(0xA, 3500 + kExpiryMs) == nullptr && set.Empty(3500 + kExpiryMs));
+
+    // Clear releases every reference
+    auto a = std::make_shared<int>(1), b = std::make_shared<int>(2);
+    std::weak_ptr<int> wa = a, wb = b;
+    set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 0, a);
+    set.FromDerived(0xA, 0xB, kInfo, false, DerivedKind::Copy, 1, b);
+    a.reset();
+    b.reset();
+    CHECK(!wa.expired() && !wb.expired());
+    set.Clear();
+    CHECK(wa.expired() && wb.expired());
+
+    // a replaced entry (full set) releases its texture; only 16 are ever held
+    DerivedSet full;
+    std::vector<std::weak_ptr<int>> weaks;
+    for (uintptr_t i = 0; i < DerivedSet::kCapacity; ++i)
+    {
+        auto t = std::make_shared<int>(static_cast<int>(i));
+        weaks.push_back(t);
+        full.FromPreview(0, 0x100, 0x1000 + i, kInfo, false, DerivedKind::Copy, 100 + i, t);
+    }
+    size_t alive = 0;
+    for (auto& w : weaks)
+        alive += w.expired() ? 0 : 1;
+    CHECK(alive == DerivedSet::kCapacity);
+    auto extra = std::make_shared<int>(99);
+    CHECK(full.FromPreview(0, 0x100, 0x2000, kInfo, false, DerivedKind::Copy, 200, extra) == DeriveResult::Replaced);
+    CHECK(weaks[0].expired()); // the oldest entry went, with its reference
+    alive = 0;
+    for (auto& w : weaks)
+        alive += w.expired() ? 0 : 1;
+    CHECK(alive == DerivedSet::kCapacity - 1);
+
+    // deriving the same texture again with a new reference replaces the old one; without one the entry keeps its own
+    DerivedSet again;
+    auto first = std::make_shared<int>(1), second = std::make_shared<int>(2);
+    std::weak_ptr<int> w1 = first, w2 = second;
+    again.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 0, first);
+    first.reset();
+    CHECK(again.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 1) == DeriveResult::Refreshed);
+    CHECK(!w1.expired());
+    CHECK(again.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 2, second) == DeriveResult::Refreshed);
+    second.reset();
+    CHECK(w1.expired() && !w2.expired());
+}
+
+void TestRecycledAddressWithoutReference()
+{
+    // A swapchain buffer is never held (it would block ResizeBuffers). Its entry is checked against the texture's actual size and
+    // format family: a new texture at the same address with other dimensions is not the derived one.
+    const TextureInfo screen { 1920, 1080, 87 };
+    DerivedSet set;
+    set.FromPreview(0, 0x100, 0xB, screen, false, DerivedKind::Copy, 1000); // no reference
+    CHECK(set.Find(0xB, 1100) != nullptr);                                  // no size given: as before
+    CHECK(set.Find(0xB, 1100, &screen) != nullptr);
+    const TextureInfo typed { 1920, 1080, 91 };                              // sRGB flavour of the same family: the same texture
+    CHECK(set.Find(0xB, 1100, &typed) != nullptr);
+    const TextureInfo smaller { 960, 540, 87 };                              // a recycled address: another size
+    CHECK(set.Find(0xB, 1100, &smaller) == nullptr);
+    const TextureInfo taller { 1920, 1081, 87 };
+    CHECK(set.Find(0xB, 1100, &taller) == nullptr);
+    const TextureInfo otherFormat { 1920, 1080, 10 };
+    CHECK(set.Find(0xB, 1100, &otherFormat) == nullptr);
+    // a sampler draw on the recycled texture does not keep the stale entry alive either
+    CHECK(!set.Touch(0xB, 3900, &smaller));
+    CHECK(set.Find(0xB, 4000) == nullptr); // so it expired on time
+    set.FromPreview(0, 0x100, 0xB, screen, false, DerivedKind::Copy, 5000);
+    CHECK(set.Touch(0xB, 5200, &screen) == true);
+}
+
+void TestFormatFamilyAndWholeCopies()
+{
+    CHECK(SameFormatFamily(27, 28) && SameFormatFamily(28, 29) && SameFormatFamily(87, 90) && SameFormatFamily(87, 91));
+    CHECK(SameFormatFamily(9, 10) && SameFormatFamily(23, 24));
+    CHECK(!SameFormatFamily(28, 87) && !SameFormatFamily(10, 28) && !SameFormatFamily(87, 10));
+    CHECK(SameFormatFamily(41, 41) && !SameFormatFamily(41, 40)); // other formats: equal only to themselves
+
+    const TextureInfo image { 576, 960, 87 };
+    CopyFacts whole;
+    whole.source = whole.dest = image;
+    CHECK(WholeImageCopy(whole));                                      // CopyResource of the whole image
+    whole.via = CopyVia::CopyRegion;
+    CHECK(WholeImageCopy(whole));                                      // CopySubresourceRegion without box and offsets
+    whole.via = CopyVia::Resolve;
+    CHECK(WholeImageCopy(whole));
+
+    // a partial CopySubresourceRegion never derives the destination (an atlas, a mip, an array slice)
+    CopyFacts region = whole;
+    region.via = CopyVia::CopyRegion;
+    for (int what = 0; what < 6; ++what)
+    {
+        CopyFacts f = region;
+        switch (what)
+        {
+        case 0: f.destSub = 1; break;
+        case 1: f.sourceSub = 1; break;
+        case 2: f.x = 8; break;
+        case 3: f.y = 8; break;
+        case 4: f.z = 1; break;
+        case 5: f.hasBox = true; break;
+        }
+        CHECK(!WholeImageCopy(f));
+    }
+    // ... nor does a copy into a texture of another size or format
+    CopyFacts bigger = whole;
+    bigger.via = CopyVia::CopyResource;
+    bigger.dest = { 1024, 1024, 87 };
+    CHECK(!WholeImageCopy(bigger));
+    bigger.dest = { 576, 961, 87 };
+    CHECK(!WholeImageCopy(bigger));
+    bigger.dest = { 576, 960, 28 };
+    CHECK(!WholeImageCopy(bigger));
+    bigger.dest = { 576, 960, 90 }; // typeless flavour of the same family: a whole copy
+    CHECK(WholeImageCopy(bigger));
+    CopyFacts empty;
+    CHECK(!WholeImageCopy(empty)); // unknown sizes
+    // a resolve of another subresource, or into another size, is partial; the format argument can make the families agree
+    CopyFacts resolve = whole;
+    resolve.via = CopyVia::Resolve;
+    resolve.destSub = 2;
+    CHECK(!WholeImageCopy(resolve));
+    resolve.destSub = 0;
+    resolve.source.format = 91;
+    resolve.dest.format = 28; // other family, but the resolve format names the destination's family
+    resolve.resolveFormat = 29;
+    CHECK(WholeImageCopy(resolve));
+    resolve.resolveFormat = 87;
+    CHECK(!WholeImageCopy(resolve));
+}
+
+PromotionFacts Promotable()
+{
+    PromotionFacts f;
+    f.rendererRecent = true;
+    f.haveTarget = true;
+    f.pixelShaderBound = true;
+    f.target = { 576, 960, 87 };
+    f.backbufferKnown = true;
+    f.backbuffer = { 1920, 1080, 87 };
+    return f;
+}
+
+void TestPromotion()
+{
+    CHECK(DecidePromotion(Promotable()) == Promotion::Promote);
+
+    PromotionFacts f = Promotable();
+    f.rendererRecent = false;
+    CHECK(DecidePromotion(f) == Promotion::RendererIdle);
+    f = Promotable();
+    f.haveTarget = false;
+    CHECK(DecidePromotion(f) == Promotion::NoTarget);
+    f = Promotable();
+    f.targetIsBackbuffer = true;
+    CHECK(DecidePromotion(f) == Promotion::IsBackbuffer);
+    f = Promotable();
+    f.targetIsTableEntry = true;
+    CHECK(DecidePromotion(f) == Promotion::IsTableEntry);
+
+    // a stale binding: the draw has no pixel shader, so nothing it did read the bound preview (M5)
+    f = Promotable();
+    f.pixelShaderBound = false;
+    CHECK(DecidePromotion(f) == Promotion::NoPixelShader);
+
+    // a screen-size intermediate is judged against the backbuffer's own size, not a 4K constant (M7)
+    f = Promotable();
+    f.target = { 1920, 1080, 87 };
+    CHECK(DecidePromotion(f) == Promotion::ScreenSizeIntermediate); // the whole screen
+    f.target = { 1920, 540, 87 };
+    CHECK(DecidePromotion(f) == Promotion::ScreenSizeIntermediate); // exactly half the area
+    f.target = { 1920, 539, 87 };
+    CHECK(DecidePromotion(f) == Promotion::Promote);                // just under half
+    f.backbuffer = { 2560, 1440, 87 };                              // 2.07 M of 3.69 M pixels: more than half
+    f.target = { 1920, 1080, 87 };
+    CHECK(DecidePromotion(f) == Promotion::ScreenSizeIntermediate);
+    f.target = { 1280, 720, 87 };
+    CHECK(DecidePromotion(f) == Promotion::Promote);
+    // a 1080p game with a 1920x1080 intermediate was invisible to the old 3000x1700 rule
+    f = Promotable();
+    f.target = { 1920, 1080, 87 };
+    CHECK(DecidePromotion(f) != Promotion::Promote);
+
+    // backbuffer unknown: the draw's viewport is the reference; no viewport at all: nothing can be said, nothing is promoted
+    f = Promotable();
+    f.backbufferKnown = false;
+    f.viewportWidth = 1920;
+    f.viewportHeight = 1080;
+    CHECK(DecidePromotion(f) == Promotion::Promote);                // 576x960 is under half of the viewport
+    f.target = { 1920, 1080, 87 };
+    CHECK(DecidePromotion(f) == Promotion::ScreenSizeIntermediate);
+    f.viewportWidth = f.viewportHeight = 0;
+    CHECK(DecidePromotion(f) == Promotion::NoReference);
+
+    // the same rule annotates the copy line
+    CHECK(IsScreenSizeIntermediate({ 1920, 1080, 87 }, { 1920, 1080, 87 }));
+    CHECK(!IsScreenSizeIntermediate({ 576, 960, 87 }, { 1920, 1080, 87 }));
+    CHECK(!IsScreenSizeIntermediate({ 1920, 1080, 87 }, { 0, 0, 0 })); // backbuffer unknown: no annotation
 }
 
 void TestRefusals()
@@ -85,7 +311,6 @@ void TestExpiryAndRefresh()
     CHECK(set.Find(0xA, 4000) == nullptr); // 3000 ms: expired
     CHECK(set.Empty(4000));
     CHECK(set.Count(4000) == 0);
-    CHECK(kExpiryMs == 3000);
 
     // deriving again refreshes the time, and it counts from the refresh
     CHECK(set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 3500) == DeriveResult::Refreshed);
@@ -145,7 +370,13 @@ void TestFullSet()
     CHECK(set.FromPreview(0, 0x100, 0x2002, kInfo, false, DerivedKind::Copy, 100 + 3000 + 50) == DeriveResult::Added);
     CHECK(set.Find(0x2000, 3150) != nullptr && set.Find(0x2001, 3150) != nullptr && set.Find(0x1001, 3150) != nullptr);
     CHECK(set.Find(0x2002, 3150) != nullptr);
-    CHECK(set.Live(3150).size() <= DerivedSet::kCapacity);
+    // sixteen slots, never more: flooding the set with distinct textures keeps exactly the most recent sixteen
+    DerivedSet flood;
+    for (uintptr_t i = 0; i < 40; ++i)
+        flood.FromPreview(0, 0x100, 0x5000 + i, kInfo, false, DerivedKind::Copy, 100 + i);
+    CHECK(flood.Count(140) == DerivedSet::kCapacity && flood.Live(140).size() == DerivedSet::kCapacity);
+    for (uintptr_t i = 0; i < 40; ++i)
+        CHECK((flood.Find(0x5000 + i, 140) != nullptr) == (i >= 40 - DerivedSet::kCapacity));
 }
 
 void TestCopiesSwitchAndClear()
@@ -164,6 +395,15 @@ void TestCopiesSwitchAndClear()
     set.Clear();
     CHECK(set.Empty(2) && set.Find(0xA, 2) == nullptr && set.Live(2).empty());
     CHECK(set.CopiesEnabled()); // Clear forgets textures, not the switch
+    set.SetCopiesEnabled(false);
+    set.Clear();
+    CHECK(!set.CopiesEnabled()); // the `reset` command does not undo "copies off" ...
+    set.SetCopiesEnabled(true);
+    set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 5);
+    set.SetCopiesEnabled(false);
+    set.Reset();
+    CHECK(set.CopiesEnabled() && set.Empty(5)); // ... switching the probe off and on does (REVIEW-CHARA-2 L5)
+    CHECK(set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 6) == DeriveResult::Added);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -790,6 +1030,10 @@ int main()
 {
     TestScanGate();
     TestChainAndHopCap();
+    TestHeldReferences();
+    TestRecycledAddressWithoutReference();
+    TestFormatFamilyAndWholeCopies();
+    TestPromotion();
     TestRefusals();
     TestExpiryAndRefresh();
     TestFullSet();

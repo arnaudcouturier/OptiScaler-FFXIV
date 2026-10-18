@@ -720,6 +720,62 @@ void Main2(Env& e)
         CHECK(flood::SwapAndDraw(e.context.Get(), 1u << 5, call));
         CHECK(seen.v[5] != bystanderSrv.Get() && seen.v[3] == previewSrv.Get() && seen.v[0] == sourceSrv.Get() && boundAgain());
 
+        // an array view and a multisampled view are left alone (CanReplace only takes a plain 2D view): naming them in the mask replaces
+        // nothing, the draw is NOT run, everything stays bound (REVIEW-CHARA-2 weak test 5)
+        {
+            D3D11_TEXTURE2D_DESC td {};
+            td.Width = td.Height = 32;
+            td.MipLevels = 1;
+            td.ArraySize = 2;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> arrayTex;
+            CHECK(SUCCEEDED(e.device->CreateTexture2D(&td, nullptr, &arrayTex)));
+            ComPtr<ID3D11ShaderResourceView> arraySrv;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd {};
+            vd.Format = td.Format;
+            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            vd.Texture2DArray.MipLevels = 1;
+            vd.Texture2DArray.ArraySize = 2;
+            CHECK(arrayTex != nullptr && SUCCEEDED(e.device->CreateShaderResourceView(arrayTex.Get(), &vd, &arraySrv)));
+
+            td.ArraySize = 1;
+            td.SampleDesc.Count = 4;
+            ComPtr<ID3D11Texture2D> msTex;
+            ComPtr<ID3D11ShaderResourceView> msSrv;
+            const HRESULT msHr = e.device->CreateTexture2D(&td, nullptr, &msTex);
+            CHECK(SUCCEEDED(msHr)); // the case must exist: a missing multisampled texture is a failure, not a skip
+            if (msTex != nullptr)
+            {
+                D3D11_SHADER_RESOURCE_VIEW_DESC md {};
+                md.Format = td.Format;
+                md.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+                CHECK(SUCCEEDED(e.device->CreateShaderResourceView(msTex.Get(), &md, &msSrv)));
+            }
+
+            ID3D11ShaderResourceView* withViews[8] { sourceSrv.Get(), nullptr, nullptr, previewSrv.Get(), uintSrv.Get(), bystanderSrv.Get(),
+                                                     arraySrv.Get(), msSrv.Get() };
+            e.context->PSSetShaderResources(0, 8, withViews);
+            seen = {};
+            const auto floodCount = g_stats.floodSwaps.load();
+            CHECK(!flood::SwapAndDraw(e.context.Get(), 1u << 6, call));              // the array view alone
+            CHECK(!flood::SwapAndDraw(e.context.Get(), 1u << 7, call));              // the multisampled view alone
+            CHECK(!flood::SwapAndDraw(e.context.Get(), (1u << 6) | (1u << 7), call)); // both
+            CHECK(seen.calls == 0 && g_stats.floodSwaps == floodCount);
+            ID3D11ShaderResourceView* now[8] {};
+            e.context->PSGetShaderResources(0, 8, now);
+            CHECK(now[6] == arraySrv.Get() && now[7] == msSrv.Get() && now[3] == previewSrv.Get());
+            for (auto* v : now)
+                if (v != nullptr)
+                    v->Release();
+            // a plain view named together with them is still replaced; the array and multisampled views are not
+            seen = {};
+            CHECK(flood::SwapAndDraw(e.context.Get(), (1u << 3) | (1u << 6) | (1u << 7), call));
+            CHECK(seen.calls == 1 && seen.v[3] != previewSrv.Get() && seen.v[6] == arraySrv.Get() && seen.v[7] == msSrv.Get());
+            e.context->PSSetShaderResources(0, 8, bound);
+        }
+
         // the flood image is created once and handed out again (sRGB family picks the sRGB view)
         ID3D11ShaderResourceView* plain = flood::View(e.context.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         ID3D11ShaderResourceView* srgb = flood::View(e.context.Get(), DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
