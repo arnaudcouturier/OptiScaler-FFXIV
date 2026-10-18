@@ -221,24 +221,34 @@ inline bool FinisherAccepted(const FinisherCheck& c) { return CheckFinisher(c) =
 // of one presented frame share one pass (the same jitter phase, the guides and motion target of the first render). Here an accepted
 // finisher closes the render ("finished"): its facts stay readable (a second finisher of the same render is still checked against
 // them), but the next prepass or G-buffer draw starts a new pass and bumps the counter.
+//
+// The frame counter (bumped by the bridge's present callback, possibly from another thread and at any moment of a render) never
+// ends a pass by itself: it is only compared when a prepass or G-buffer draw arrives. A render in progress therefore completes in
+// its own pass, and the first geometry draw after the counter moved starts the next one.
 struct PassState
 {
     bool active = false;
-    bool finished = false; // an accepted finisher closed the render; the next geometry draw starts a new pass
-    uint32_t counter = 0;  // passes started so far; also the jitter phase
+    bool finished = false;     // an accepted finisher closed the render; the next geometry draw starts a new pass
+    uint32_t counter = 0;      // passes started so far; also the jitter phase
     uint32_t width = 0;
     uint32_t height = 0;
+    uint64_t startFrame = 0;   // the frame counter when the pass started
+    uint64_t currentFrame = 0; // the newest frame counter seen (NoteFrame)
+
+    // The draw thread learns the frame counter (any value that only grows). Nothing else changes.
+    void NoteFrame(uint64_t frame) { currentFrame = frame; }
 
     // Returns true when this draw started a new pass.
     bool OnGeometry(const DrawFacts& f)
     {
-        if (active && !finished)
+        if (active && !finished && currentFrame == startFrame)
             return false;
         active = true;
         finished = false;
         ++counter;
         width = f.targetWidth;
         height = f.targetHeight;
+        startFrame = currentFrame;
         return true;
     }
 

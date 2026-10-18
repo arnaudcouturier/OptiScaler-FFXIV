@@ -564,6 +564,40 @@ FinisherCheck ObservedCheck(const PassState& pass, bool depthTest)
     return c;
 }
 
+// The frame counter moves at an arbitrary moment (the bridge's present callback). It never ends a pass by itself: a render in progress
+// completes in its own pass, and the first geometry draw after the counter moved starts the next pass.
+void TestFrameCounterDoesNotCutARender()
+{
+    PassState pass;
+    pass.NoteFrame(7);
+    const DrawFacts g = Gbuffer(8);
+    CHECK(pass.OnGeometry(g) && pass.counter == 1 && pass.startFrame == 7);
+    CHECK(!pass.OnGeometry(Gbuffer(13)));
+
+    // the callback fires between the G-buffer draws and the finisher
+    pass.NoteFrame(8);
+    CHECK(pass.active && !pass.finished); // nothing ended the pass
+    FinisherCheck c = ObservedCheck(pass, false);
+    CHECK(CheckFinisher(c) == FinisherVerdict::Accepted); // the finisher still finds its pass
+    pass.OnFinisher(CheckFinisher(c));
+    CHECK(pass.OnGeometry(g) && pass.counter == 2 && pass.startFrame == 8); // the next render: a new pass
+
+    // more geometry draws of that render in the same frame: the same pass
+    CHECK(!pass.OnGeometry(Gbuffer(13)) && pass.counter == 2);
+
+    // a pass that never reached an accepted finisher (a render the module could not follow): the first geometry draw after the counter
+    // moved starts a new pass, so a stale pass cannot stay alive across frames
+    pass.NoteFrame(9);
+    CHECK(pass.OnGeometry(g) && pass.counter == 3 && pass.startFrame == 9);
+    pass.NoteFrame(9); // the same value again changes nothing
+    CHECK(!pass.OnGeometry(g) && pass.counter == 3);
+
+    // the counter seen before any pass (startFrame 0) does not start one by itself
+    PassState fresh;
+    fresh.NoteFrame(100);
+    CHECK(!fresh.active && fresh.counter == 0);
+}
+
 // One render as the second in-game log shows it, step by step as the dispatcher runs it. The pass state is NOT reset between
 // renders: a render starts a new pass because the previous one ended (a rejected finisher) or finished (an accepted one), exactly
 // as in the game.
@@ -658,8 +692,9 @@ int main()
     TestFinisherVerdict();
     TestPassState();
     TestSecondRenderInOneFrame();
-    TestGeometryFollowsPass();
     TestPassStartObservedSignatures();
+    TestFrameCounterDoesNotCutARender();
+    TestGeometryFollowsPass();
     TestShapeOnlyRules();
     TestPassSurvivesShapeOnlyDraw();
     TestNames();

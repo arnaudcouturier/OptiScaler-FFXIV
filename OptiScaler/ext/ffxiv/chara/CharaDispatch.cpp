@@ -61,7 +61,9 @@ void Maintain(uint64_t now)
     {
         g_seenFrame = serial;
         ++g_stats.frames;
-        g_pass.End();
+        // The frame callback must not end the pass here: Maintain runs at an arbitrary draw, possibly between the G-buffer draws and
+        // the finisher of a render in progress. The pass only learns the counter; the next prepass or G-buffer draw starts a new pass.
+        g_pass.NoteFrame(serial);
         const nr::MaintenancePlan plan = nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources());
         if (plan.sr)
             dlss::OnFrameEnd();
