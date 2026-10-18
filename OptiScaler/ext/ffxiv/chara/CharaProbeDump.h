@@ -69,4 +69,15 @@ void Release();
 // Tests: the output root (instead of the game folder) and a fresh session budget.
 void SetOutputRootForTest(const fs::path& root);
 void ResetSessionForTest();
+
+// Tests: replacement for the calls that talk to the GPU (null members keep the real call). `map`: map a staging texture for reading
+// without waiting (S_OK or DXGI_ERROR_WAS_STILL_DRAWING or an error); `unmap`; `queryDone`: S_OK when the copies are finished, S_FALSE when
+// not.
+struct TestHooks
+{
+    HRESULT (*map)(ID3D11DeviceContext*, ID3D11Resource*, D3D11_MAPPED_SUBRESOURCE*) = nullptr;
+    void (*unmap)(ID3D11DeviceContext*, ID3D11Resource*) = nullptr;
+    HRESULT (*queryDone)(ID3D11DeviceContext*, ID3D11Query*) = nullptr;
+};
+void SetHooksForTest(const TestHooks& hooks);
 } // namespace ext::ffxiv::chara::probe::dump

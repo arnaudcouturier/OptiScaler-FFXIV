@@ -309,10 +309,28 @@ void TestPoll(const fs::path& root)
         Write(cmd, text);
         p = ch.Poll(WriteTime(cmd) + 200 * kMs);
         CHECK(p.state == CommandChannel::Polled::State::Commands && p.parsed.truncatedBytes && p.fileBytes == text.size());
-        CHECK(p.parsed.commands.size() == 4096 / 8 || p.parsed.truncatedLines); // 32 lines at most
+        CHECK(p.parsed.commands.size() == kMaxCommandLines && p.parsed.truncatedLines); // the line cap is what stopped it, not the byte cap
         CHECK(p.parsed.commands.size() <= kMaxCommandLines);
         for (const Command& c : p.parsed.commands)
             CHECK(c.kind == CommandKind::Tint); // the dump line at the end was never reached
+        CHECK(!fs::exists(cmd));
+    }
+
+    // A huge file is never read whole: at most kMaxCommandBytes + 1 bytes are read, however large it is (REVIEW-CHARA-2 weak test 3: deleting
+    // the read cap used to pass every test, and a 2 GB file was read into memory)
+    {
+        {
+            std::ofstream big(cmd, std::ios::binary | std::ios::trunc);
+            big << std::string(4090, ' ') << "dump";
+            big.seekp(64 * 1024 * 1024 - 1);
+            big.put('\n');
+        }
+        p = ch.Poll(WriteTime(cmd) + 200 * kMs);
+        CHECK(p.state == CommandChannel::Polled::State::Commands && p.fileBytes == 64ull * 1024 * 1024);
+        CHECK(p.bytesRead == kMaxCommandBytes + 1);
+        CHECK(p.parsed.truncatedBytes);
+        for (const Command& c : p.parsed.commands)
+            CHECK(c.kind != CommandKind::Dump); // the line that straddles the cut never runs
         CHECK(!fs::exists(cmd));
     }
 

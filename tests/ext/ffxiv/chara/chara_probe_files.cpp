@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -309,6 +310,73 @@ void TestWriteDump(const fs::path& root)
     CHECK(budget.files == 11);
 }
 
+// A file that fails in the middle of the set (disk full): the partial file is removed, only complete files are counted in the outcome and
+// the budget, the message says how many, and state.txt is still written (REVIEW-CHARA-2 L3).
+int g_writeCall = 0;
+int g_failOnCall = 0;
+bool g_throwOnCall = false;
+bool FailingWriter(const fs::path& path, const void* data, size_t size)
+{
+    ++g_writeCall;
+    if (g_writeCall == g_failOnCall)
+    {
+        // half of the file reaches the disk, then the write fails
+        std::ofstream half(path, std::ios::binary | std::ios::trunc);
+        half.write(static_cast<const char*>(data), static_cast<std::streamsize>(size / 2));
+        if (g_throwOnCall)
+            throw std::runtime_error("disk full");
+        return false;
+    }
+    return WriteFileBytes(path, data, size);
+}
+
+void TestWriteFailsMidSet(const fs::path& root)
+{
+    std::vector<DumpImage> images;
+    images.push_back(MakeImage("native", 87, "B8G8R8A8_UNORM(87)", PaddedImage(1, 2, 3)));
+    images.push_back(MakeImage("aa", 29, "R8G8B8A8_UNORM_SRGB(29)", PaddedImage(50, 60, 70)));
+    const fs::path out = root / "midfail";
+
+    // the 2nd of 5 files (alpha-native.png) fails after half of it was written
+    OutputBudget budget;
+    g_writeCall = 0;
+    g_failOnCall = 2;
+    g_throwOnCall = false;
+    DumpOutcome o = WriteDump(out, "20261007-050000", images, "a: b\n", budget, &FailingWriter);
+    const fs::path folder = out / "20261007-050000";
+    CHECK(o.result == DumpOutcome::Result::Written && o.files == 4 && o.plannedFiles == 5);
+    CHECK(!fs::exists(folder / "alpha-native.png"));                         // the truncated file is gone
+    CHECK(fs::exists(folder / "native.png") && fs::exists(folder / "aa.png") && fs::exists(folder / "alpha-aa.png") && fs::exists(folder / "state.txt"));
+    CHECK(CountEntries(folder) == 4);
+    CHECK(budget.files == 4 && budget.bytes == o.bytes);                      // only complete files count
+    CHECK(o.message.find("ok, 4 of 5 files") == 0 && o.message.find("1 could not be written completely and was removed") != std::string::npos);
+    uint64_t onDisk = 0;
+    for (const auto& entry : fs::directory_iterator(folder))
+        onDisk += fs::file_size(entry.path());
+    CHECK(onDisk == o.bytes);                                                // the byte count is the disk content
+
+    // an exception in the middle of a file: that file is removed, the files before it are counted, nothing after it is written
+    OutputBudget thrown;
+    g_writeCall = 0;
+    g_failOnCall = 3;
+    g_throwOnCall = true;
+    o = WriteDump(out, "20261007-050001", images, "a: b\n", thrown, &FailingWriter);
+    const fs::path folder2 = out / "20261007-050001";
+    CHECK(o.result == DumpOutcome::Result::Written && o.files == 2); // native.png and alpha-native.png
+    CHECK(!fs::exists(folder2 / "aa.png") && fs::exists(folder2 / "native.png") && fs::exists(folder2 / "alpha-native.png"));
+    CHECK(thrown.files == 2 && thrown.bytes == o.bytes);               // the budget still sees the complete files
+    CHECK(o.message.find("an error stopped the dump after 2 files") != std::string::npos);
+
+    // every write fails: nothing is counted, the failure is reported, no truncated file is left behind
+    OutputBudget none;
+    g_writeCall = 0;
+    g_failOnCall = 0;
+    o = WriteDump(out, "20261007-050002", images, "a: b\n", none,
+                  [](const fs::path&, const void*, size_t) { return false; });
+    CHECK(o.result == DumpOutcome::Result::Failed && o.files == 0 && none.files == 0 && CountEntries(out / "20261007-050002") == 0);
+    CHECK(o.message.find("no file could be written") != std::string::npos);
+}
+
 void TestBudgetRefusal(const fs::path& root)
 {
     std::vector<DumpImage> images;
@@ -364,6 +432,7 @@ int main()
     TestImageAge();
     TestFolderNames(root);
     TestWriteDump(root);
+    TestWriteFailsMidSet(root);
     TestBudgetRefusal(root);
 
     fs::remove_all(root, ec);

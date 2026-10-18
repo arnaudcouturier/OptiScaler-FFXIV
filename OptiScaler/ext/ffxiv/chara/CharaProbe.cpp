@@ -118,6 +118,7 @@ struct State
     DerivedSet derived;
     ResolveHookState resolveHook; // whether the hook layer's ResolveSubresource detour is wanted and attached
     DumpTrigger dumpTrigger;      // when a requested image dump is executed (at a point where the preview image is complete)
+    bool outputFailureLogged = false; // the one log line about an answer file that cannot be written
     bool swapCompleted = false;   // a consumer swap was reported since the request was armed: the images of this frame exist
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
@@ -771,8 +772,16 @@ std::string StartDump(ID3D11DeviceContext* context, uint64_t now)
 void WriteOut(const std::vector<std::string>& lines)
 {
     State& s = S();
-    if (s.channel)
-        s.channel->AppendOutput(lines);
+    if (!s.channel)
+        return;
+    if (!s.channel->AppendOutput(lines) && !s.outputFailureLogged)
+    {
+        // A read-only folder, a full disk, or a viewer that locks the file: the user gets no answer, so the log says why, once.
+        s.outputFailureLogged = true;
+        LOG_WARN("CharaView probe: the answer file {} could not be written (read-only folder, full disk or a program holding the file); the "
+                 "answers to commands only appear in the log",
+                 Utf8(s.channel->OutputPath()));
+    }
 }
 
 void PumpDump(ID3D11DeviceContext* context, uint64_t now)
@@ -960,6 +969,7 @@ static void UpdateCore(uint64_t now, ID3D11DeviceContext* context)
         s.lastTick = 0;
         s.lastPoll = 0;
         s.channel.reset();
+        s.outputFailureLogged = false;
         if (const std::filesystem::path folder = dump::OptiScalerDirectory(); !folder.empty())
             s.channel.emplace(folder);
         detail::g_live.store(true, std::memory_order_relaxed);

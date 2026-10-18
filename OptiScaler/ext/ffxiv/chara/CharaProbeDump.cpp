@@ -47,6 +47,24 @@ std::string g_lastMessage;
 
 std::string FormatText(uint32_t format) { return std::format("{}({})", ext::ffxiv::ui::dfmt::FormatName(format), format); }
 
+// The three calls that talk to the GPU, replaceable by a test (SetHooksForTest): a map that is still busy, a pitch that is not tight, a query
+// that never finishes cannot be produced on WARP, which finishes at once.
+HRESULT RealMap(ID3D11DeviceContext* context, ID3D11Resource* resource, D3D11_MAPPED_SUBRESOURCE* mapped)
+{
+    return context->Map(resource, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, mapped);
+}
+void RealUnmap(ID3D11DeviceContext* context, ID3D11Resource* resource) { context->Unmap(resource, 0); }
+HRESULT RealQuery(ID3D11DeviceContext* context, ID3D11Query* query) { return context->GetData(query, nullptr, 0, 0); }
+TestHooks g_hooks { &RealMap, &RealUnmap, &RealQuery };
+
+// The result of a dump that gave up.
+DumpOutcome GaveUp()
+{
+    DumpOutcome outcome;
+    outcome.message = "failed, the GPU did not finish the copies within 10 seconds";
+    return outcome;
+}
+
 void Record(const DumpOutcome& outcome)
 {
     if (outcome.result == DumpOutcome::Result::Written)
@@ -207,16 +225,18 @@ std::optional<DumpOutcome> Pump(ID3D11DeviceContext* context, uint64_t nowMs)
         return std::nullopt;
     try
     {
-        if (nowMs >= g_job.startMs && nowMs - g_job.startMs > kGiveUpMs)
+        // A dump whose GPU work did not finish in time is dropped, but only when the GPU really is not done: a dump that finished long ago and
+        // is pumped late (no draws during a loading screen, a minimised window) is written, not reported as a GPU failure.
+        const bool late = nowMs >= g_job.startMs && nowMs - g_job.startMs > kGiveUpMs;
+        const auto giveUp = [&]
         {
-            DumpOutcome outcome;
-            outcome.message = "failed, the GPU did not finish the copies within 10 seconds";
+            DumpOutcome outcome = GaveUp();
             Record(outcome);
             Drop();
             return outcome;
-        }
-        if (g_job.query != nullptr && context->GetData(g_job.query.Get(), nullptr, 0, 0) != S_OK)
-            return std::nullopt; // the GPU is not done with the copies
+        };
+        if (g_job.query != nullptr && g_hooks.queryDone(context, g_job.query.Get()) != S_OK)
+            return late ? std::optional<DumpOutcome>(giveUp()) : std::nullopt; // the GPU is not done with the copies
 
         // Map every staged image without waiting. One that is still busy gives up this call (all mappings are undone); any other
         // failure only drops that image.
@@ -228,7 +248,7 @@ std::optional<DumpOutcome> Pump(ID3D11DeviceContext* context, uint64_t nowMs)
             Item& item = g_job.items[i];
             if (item.staging == nullptr)
                 continue;
-            const HRESULT hr = context->Map(item.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped[i]);
+            const HRESULT hr = g_hooks.map(context, item.staging.Get(), &mapped[i]);
             if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
                 busy = true;
             else if (FAILED(hr))
@@ -243,8 +263,8 @@ std::optional<DumpOutcome> Pump(ID3D11DeviceContext* context, uint64_t nowMs)
         {
             for (size_t i = 0; i < g_job.items.size(); ++i)
                 if (isMapped[i])
-                    context->Unmap(g_job.items[i].staging.Get(), 0);
-            return std::nullopt;
+                    g_hooks.unmap(context, g_job.items[i].staging.Get());
+            return late ? std::optional<DumpOutcome>(giveUp()) : std::nullopt;
         }
 
         // Copy the rows out packed and unmap before touching the disk.
@@ -262,7 +282,7 @@ std::optional<DumpOutcome> Pump(ID3D11DeviceContext* context, uint64_t nowMs)
                 for (uint32_t y = 0; y < img.height; ++y)
                     std::memcpy(img.data.data() + static_cast<size_t>(y) * rowBytes,
                                 static_cast<const uint8_t*>(mapped[i].pData) + static_cast<size_t>(y) * mapped[i].RowPitch, rowBytes);
-                context->Unmap(item.staging.Get(), 0);
+                g_hooks.unmap(context, item.staging.Get());
                 img.present = true;
             }
             images.push_back(std::move(img));
@@ -309,6 +329,13 @@ void Release()
         Drop();
 }
 
+
+void SetHooksForTest(const TestHooks& hooks)
+{
+    g_hooks.map = hooks.map != nullptr ? hooks.map : &RealMap;
+    g_hooks.unmap = hooks.unmap != nullptr ? hooks.unmap : &RealUnmap;
+    g_hooks.queryDone = hooks.queryDone != nullptr ? hooks.queryDone : &RealQuery;
+}
 void SetOutputRootForTest(const fs::path& root) { g_rootOverride = root; }
 
 void ResetSessionForTest()

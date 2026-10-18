@@ -13,6 +13,7 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 
 namespace ext::ffxiv::chara
 {
@@ -378,10 +379,11 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     // The probe compares every draw's first resources with the preview textures before the draw is classified: the draws that put
     // a copy of the preview on screen have no role and no table render target, so Gather would drop them. It reads state only. The
     // result also tells the flood test which slots hold the preview or a copy of it.
-    probe::ScanResult scan;
+    std::optional<probe::ScanResult> scanned; // built only while the probe or the flood test is live (a ScanResult is about 450 bytes of COM pointers)
     if (probe::Live())
-        scan = probe::OnDraw(context, api, snap, now);
-    const bool floodThisDraw = scan.count != 0 && flood::On();
+        scanned = probe::OnDraw(context, api, snap, now);
+    const bool floodThisDraw = scanned.has_value() && scanned->count != 0 && flood::On();
+    const uint32_t slotMask = scanned.has_value() ? scanned->slotMask : 0;
 
     DrawView view;
     view.context = context;
@@ -393,7 +395,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         ++g_stats.kind[static_cast<size_t>(DrawKind::Ignore)];
         // No role and no render target of the table: this is where a UI draw that samples a copy of the preview ends up. The flood
         // test gives it the magenta image (our own replays never get here: t_replay / t_busy returned above).
-        if (!floodThisDraw || !flood::SwapAndDraw(context, scan.slotMask, draw))
+        if (!floodThisDraw || !flood::SwapAndDraw(context, slotMask, draw))
             draw();
         return;
     }
@@ -441,9 +443,14 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     {
         // A draw no module took: the flood test gives it the magenta image in place of the preview (or a copy of it), unless it
         // renders into one of the preview renderer's own textures.
-        const bool targetIsTableEntry = gathered.rtvResource != nullptr &&
-                                        table::IndexOfPointer(snap, reinterpret_cast<uintptr_t>(gathered.rtvResource.Get())) >= 0;
-        if (!floodThisDraw || targetIsTableEntry || !flood::SwapAndDraw(context, scan.slotMask, draw))
+        bool swapped = false;
+        if (floodThisDraw) // the table-entry test (a pointer scan) is only worth doing for a draw that is about to be flooded
+        {
+            const bool targetIsTableEntry = gathered.rtvResource != nullptr &&
+                                            table::IndexOfPointer(snap, reinterpret_cast<uintptr_t>(gathered.rtvResource.Get())) >= 0;
+            swapped = !targetIsTableEntry && flood::SwapAndDraw(context, slotMask, draw);
+        }
+        if (!swapped)
             draw();
     }
 

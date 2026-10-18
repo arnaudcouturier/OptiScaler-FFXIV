@@ -55,6 +55,7 @@ struct Doubles
     int nrMaintain = 0, nrFrameEnd = 0, nrDetach = 0;
     int probeUpdate = 0, probeDetach = 0, probeOnDraw = 0, probeComplete = 0;
     bool followedCopies = false;
+    uint32_t scanSlotMask = 0; // what the probe double reports for every scanned draw (count 1 when the mask is not zero)
     std::thread::id detachThread;
     std::vector<SeenDraw> seen;
     std::vector<std::string> events; // the order of the NR hold-off calls: "nr.detach", "nr.init"
@@ -152,7 +153,10 @@ void Update(uint64_t, ID3D11DeviceContext*) { ++d.probeUpdate; }
 ScanResult OnDraw(ID3D11DeviceContext*, DrawApi, const table::Snapshot&, uint64_t)
 {
     ++d.probeOnDraw;
-    return {};
+    ScanResult result;
+    result.slotMask = d.scanSlotMask;
+    result.count = d.scanSlotMask != 0 ? 1 : 0;
+    return result;
 }
 bool HasFollowedCopies(uint64_t) { return d.followedCopies; }
 void OnCopy(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*) {}
@@ -520,6 +524,82 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     Doubles_Off();
 }
 
+// The flood test through the real dispatcher (REVIEW-CHARA-2 L6 rewrote this part): the draw a module did not take gets the magenta image
+// in the slots the scan found, the native draw runs once, the game's views are bound again afterwards, and a draw that renders into one of
+// the preview renderer's own textures is not flooded.
+void TestFloodWiring(Scene& s)
+{
+    probe::detail::g_live.store(true);
+    Doubles_Off();
+    Config(false, false, false);
+    ext::Cfg().ffxiv.chara.previewDebugFlood = true;
+    BindConsumer(s, s.ui.Get(), s.aaSrv.Get()); // t0 = some image, a UI draw into the back buffer
+
+    ID3D11ShaderResourceView* game = s.aaSrv.Get();
+    ID3D11ShaderResourceView* seenAtDraw = nullptr;
+    int calls = 0;
+    const auto run = [&]
+    {
+        calls = 0;
+        seenAtDraw = nullptr;
+        Around(s.context.Get(), DrawApi::Draw,
+               [&]
+               {
+                   ++calls;
+                   ID3D11ShaderResourceView* now = nullptr;
+                   s.context->PSGetShaderResources(0, 1, &now);
+                   seenAtDraw = now; // a pointer only (compared below), the reference is released at once
+                   if (now != nullptr)
+                       now->Release();
+               });
+    };
+    const auto boundNow = [&]
+    {
+        ID3D11ShaderResourceView* now = nullptr;
+        s.context->PSGetShaderResources(0, 1, &now);
+        if (now != nullptr)
+            now->Release();
+        return now;
+    };
+
+    // the scan found the preview at t0: the draw sees another view, once, and t0 is the game's again afterwards
+    d.scanSlotMask = 1u << 0;
+    run();
+    CHECK(calls == 1 && seenAtDraw != nullptr && seenAtDraw != game);
+    CHECK(boundNow() == game);
+
+    // the scan found nothing: untouched
+    d.scanSlotMask = 0;
+    run();
+    CHECK(calls == 1 && seenAtDraw == game && boundNow() == game);
+
+    // flood off: untouched even though the scan found something
+    ext::Cfg().ffxiv.chara.previewDebugFlood = false;
+    d.scanSlotMask = 1u << 0;
+    run();
+    CHECK(calls == 1 && seenAtDraw == game);
+    ext::Cfg().ffxiv.chara.previewDebugFlood = true;
+
+    // a draw into one of the preview renderer's own textures is never flooded
+    ID3D11RenderTargetView* rtv = s.outputRtv.Get();
+    s.context->OMSetRenderTargets(1, &rtv, nullptr);
+    s.context->PSSetShader(s.plain.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* t0 = s.aaSrv.Get();
+    s.context->PSSetShaderResources(0, 1, &t0);
+    SetViewport(s, kW, kH);
+    run();
+    CHECK(calls == 1 && seenAtDraw == game && boundNow() == game);
+
+    // a draw with no role and no table target that the scan matched (a UI draw sampling a copy of the preview) is flooded too
+    BindConsumer(s, s.plain.Get(), s.aaSrv.Get());
+    run();
+    CHECK(calls == 1 && seenAtDraw != nullptr && seenAtDraw != game && boundNow() == game);
+
+    ext::Cfg().ffxiv.chara.previewDebugFlood = false;
+    probe::detail::g_live.store(false);
+    Doubles_Off();
+}
+
 void TestPassAcrossRenders(Scene& s)
 {
     Doubles_Off();
@@ -700,6 +780,7 @@ int main()
     TestGateAndEarlyExits(scene);
     TestRoutes(scene);
     TestNrWithoutResultFallsBackToAa(scene);
+    TestFloodWiring(scene);
     TestDebugAidsAndTheQuietPath(scene);
     TestPassAcrossRenders(scene);
     TestMaintenanceAfterSwitchOff(scene);

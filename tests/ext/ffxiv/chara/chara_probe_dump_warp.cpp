@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -275,18 +276,165 @@ int main()
                       std::string::npos);
         }
         else
-            std::printf("note: WARP offers no 4x multisampling for B8G8R8A8; multisampled case skipped\n");
+        {
+            // the case must exist: a WARP without 4x multisampling would silently skip it, which is not a pass
+            std::printf("FAIL: the multisampled texture could not be created\n");
+            ++g_failures;
+        }
     }
 
     // ---- Release drops a dump in flight; a dump the GPU never finishes is dropped after 10 s ---------------------------------------
     CHECK(dump::Begin(g_context.Get(), sources, "", 5000, why));
     dump::Release();
     CHECK(!dump::InFlight() && !dump::Pump(g_context.Get(), 5001).has_value());
+    // The give-up needs a GPU that never finishes; WARP finishes at once, so the query result is replaced by the test hook.
     CHECK(dump::Begin(g_context.Get(), sources, "", 6000, why));
     {
-        auto late = dump::Pump(g_context.Get(), 6000 + 10001); // the time check comes before the query check
+        dump::TestHooks hooks;
+        hooks.queryDone = [](ID3D11DeviceContext*, ID3D11Query*) -> HRESULT { return S_FALSE; };
+        dump::SetHooksForTest(hooks);
+        CHECK(!dump::Pump(g_context.Get(), 6000 + 5000).has_value());       // not finished, not late: waiting
+        CHECK(!dump::Pump(g_context.Get(), 6000 + 10000).has_value());      // exactly 10 s is not "more than 10 s"
+        auto late = dump::Pump(g_context.Get(), 6000 + 10001);
         CHECK(late && late->result == DumpOutcome::Result::Failed && late->message.find("10 seconds") != std::string::npos);
         CHECK(!dump::InFlight());
+        dump::SetHooksForTest({});
+    }
+
+    // ---- the GPU side of the pump: a late pump of a finished dump, a map that is still busy, a row pitch that is not tight (REVIEW-CHARA-2 L4) ----
+    {
+        // L4: the copies finished on the GPU but nobody pumped for a long time (a loading screen, a minimised window): the dump is
+        // written, not reported as "the GPU did not finish".
+        CHECK(dump::Begin(g_context.Get(), sources, "late: yes\n", 20000, why));
+        // (the hook waits until the real GPU work is done, which models a GPU that finished long ago)
+        dump::TestHooks waitForGpu;
+        waitForGpu.queryDone = [](ID3D11DeviceContext* ctx, ID3D11Query* q) -> HRESULT
+        {
+            for (int i = 0; i < 400; ++i)
+            {
+                if (ctx->GetData(q, nullptr, 0, 0) == S_OK)
+                    return S_OK;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return S_FALSE;
+        };
+        dump::SetHooksForTest(waitForGpu);
+        const auto late = PumpToEnd(20000 + 60000 - 1); // PumpToEnd pumps at startMs + 1: a minute after the dump began
+        dump::SetHooksForTest({});
+        CHECK(late && late->result == DumpOutcome::Result::Written && late->files == 7);
+        if (late)
+            CHECK(ReadAll(fs::path(late->folder) / "native.png") == Png(NW, NH, 3, nativeRgb));
+
+        // a busy map: the first pumps find the second image busy; everything mapped so far is unmapped again (a map is never left open),
+        // nothing is written, and the pump that finds everything free writes correct files.
+        struct Counters
+        {
+            int callInPump = 0, busyPumps = 0, mapped = 0, unmapped = 0, busyAnswers = 0;
+        };
+        static Counters c;
+        c = Counters {};
+        c.busyPumps = 2;
+        dump::TestHooks hooks;
+        hooks.map = [](ID3D11DeviceContext* ctx, ID3D11Resource* res, D3D11_MAPPED_SUBRESOURCE* m) -> HRESULT
+        {
+            if (++c.callInPump == 2 && c.busyPumps > 0)
+            {
+                --c.busyPumps;
+                ++c.busyAnswers;
+                return DXGI_ERROR_WAS_STILL_DRAWING;
+            }
+            const HRESULT hr = ctx->Map(res, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, m);
+            if (SUCCEEDED(hr))
+                ++c.mapped;
+            return hr;
+        };
+        hooks.queryDone = [](ID3D11DeviceContext* ctx, ID3D11Query* q) -> HRESULT // waits until the real GPU work is done: the maps then succeed at once
+        {
+            for (int i = 0; i < 400; ++i)
+            {
+                if (ctx->GetData(q, nullptr, 0, 0) == S_OK)
+                    return S_OK;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return S_FALSE;
+        };
+        hooks.unmap = [](ID3D11DeviceContext* ctx, ID3D11Resource* res)
+        {
+            ++c.unmapped;
+            ctx->Unmap(res, 0);
+        };
+        dump::SetHooksForTest(hooks);
+        std::vector<dump::Source> two;
+        two.push_back({ "native", native.Get(), "" });
+        two.push_back({ "aa", aa.Get(), "" });
+        CHECK(dump::Begin(g_context.Get(), two, "busy: test\n", 30000, why));
+        for (int pump = 0; pump < 2; ++pump)
+        {
+            c.callInPump = 0;
+            CHECK(!dump::Pump(g_context.Get(), 30001 + pump).has_value()); // busy: no outcome, retried later
+            CHECK(dump::InFlight());
+            CHECK(c.unmapped == c.mapped);                                   // the image mapped before the busy one was unmapped again
+        }
+        CHECK(c.busyAnswers == 2 && c.mapped == 2);
+        c.callInPump = 0;
+        const auto done = dump::Pump(g_context.Get(), 30003);
+        CHECK(done && done->result == DumpOutcome::Result::Written && done->files == 5);
+        CHECK(c.unmapped == c.mapped && c.mapped == 4); // two images mapped and unmapped by the last pump
+        if (done)
+        {
+            CHECK(ReadAll(fs::path(done->folder) / "native.png") == Png(NW, NH, 3, nativeRgb));
+            CHECK(ReadAll(fs::path(done->folder) / "aa.png") == Png(4, 4, 3, aaRgb));
+        }
+
+        // a busy map that never frees up: late, the dump is given up
+        c = Counters {};
+        c.busyPumps = 1000;
+        CHECK(dump::Begin(g_context.Get(), two, "", 40000, why));
+        c.callInPump = 0;
+        CHECK(!dump::Pump(g_context.Get(), 40100).has_value());
+        c.callInPump = 0;
+        const auto gaveUp = dump::Pump(g_context.Get(), 40000 + 10001);
+        CHECK(gaveUp && gaveUp->result == DumpOutcome::Result::Failed && !dump::InFlight() && c.unmapped == c.mapped);
+
+        // a row pitch wider than the row (what a GPU gives for most sizes; WARP's is tight): the rows are copied with the mapped pitch, the
+        // padding is not part of the picture. The hook hands out a buffer with 16 junk bytes after every row.
+        static std::map<ID3D11Resource*, std::vector<uint8_t>> padded; // one buffer per mapped image: the rows are copied out after all maps
+        hooks.map = [](ID3D11DeviceContext* ctx, ID3D11Resource* res, D3D11_MAPPED_SUBRESOURCE* m) -> HRESULT
+        {
+            const HRESULT hr = ctx->Map(res, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, m);
+            if (FAILED(hr))
+                return hr;
+            ComPtr<ID3D11Texture2D> texture;
+            res->QueryInterface(IID_PPV_ARGS(&texture));
+            D3D11_TEXTURE2D_DESC d {};
+            texture->GetDesc(&d);
+            const UINT bytesPerPixel = d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+            const UINT row = d.Width * bytesPerPixel;
+            const UINT pitch = row + 16;
+            std::vector<uint8_t>& buffer = padded[res];
+            buffer.assign(static_cast<size_t>(pitch) * d.Height, 0xEE);
+            for (UINT y = 0; y < d.Height; ++y)
+                std::memcpy(buffer.data() + static_cast<size_t>(y) * pitch, static_cast<const uint8_t*>(m->pData) + static_cast<size_t>(y) * m->RowPitch, row);
+            m->pData = buffer.data();
+            m->RowPitch = pitch;
+            return hr;
+        };
+        hooks.unmap = nullptr;
+        dump::SetHooksForTest(hooks);
+        std::vector<dump::Source> mixed;
+        mixed.push_back({ "native", native.Get(), "" });
+        mixed.push_back({ "nr", nrImage.Get(), "" });
+        CHECK(dump::Begin(g_context.Get(), mixed, "pitch: test\n", 50000, why));
+        const auto wide = PumpToEnd(50000);
+        CHECK(wide && wide->result == DumpOutcome::Result::Written && wide->files == 5);
+        if (wide)
+        {
+            CHECK(ReadAll(fs::path(wide->folder) / "native.png") == Png(NW, NH, 3, nativeRgb));
+            CHECK(ReadAll(fs::path(wide->folder) / "alpha-native.png") == Png(NW, NH, 1, nativeAlpha));
+            CHECK(ReadAll(fs::path(wide->folder) / "nr.png") == Png(RW, RH, 3, nrRgb));
+            CHECK(ReadAll(fs::path(wide->folder) / "alpha-nr.png") == Png(RW, RH, 1, nrAlpha));
+        }
+        dump::SetHooksForTest({});
     }
 
     // ---- state only -------------------------------------------------------------------------------------------------------------

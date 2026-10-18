@@ -347,6 +347,9 @@ inline fs::path CreateUniqueFolder(const fs::path& root, std::string_view stamp)
     return {};
 }
 
+// Writes a whole file; false when any part of it failed (the caller removes what is left of it).
+using FileWriter = bool (*)(const fs::path& path, const void* data, size_t size);
+
 inline bool WriteFileBytes(const fs::path& path, const void* data, size_t size)
 {
     try
@@ -384,9 +387,20 @@ struct DumpOutcome
 // state text plus one line per image). The budget is checked for the whole set before anything is written (all or nothing: a refused
 // dump creates no folder and no file); what was written is added to it. Never throws.
 inline DumpOutcome WriteDump(const fs::path& root, std::string_view stamp, const std::vector<DumpImage>& images, const std::string& stateText,
-                             OutputBudget& budget)
+                             OutputBudget& budget, FileWriter writeFile = &WriteFileBytes)
 {
     DumpOutcome outcome;
+    // What was written is added to the budget exactly once, on every way out (a thrown exception included): only complete files count.
+    bool accounted = false;
+    const auto account = [&]
+    {
+        if (!accounted)
+        {
+            accounted = true;
+            budget.Add(outcome.files, outcome.bytes);
+        }
+    };
+    fs::path current; // the file being written, removed if an exception stops the dump in the middle of it
     try
     {
         const DumpPlan plan = MakePlan(images, stateText);
@@ -408,17 +422,19 @@ inline DumpOutcome WriteDump(const fs::path& root, std::string_view stamp, const
         }
         outcome.folder = Utf8(folder);
 
+        uint32_t failedFiles = 0;
         Planes planes;
         size_t planesFor = static_cast<size_t>(-1);
         std::vector<uint8_t> encoded;
         for (const PlannedFile& file : plan.files)
         {
             const fs::path path = folder / file.fileName;
+            current = path;
             bool ok = false;
             uint64_t size = 0;
             if (file.image == static_cast<size_t>(-1))
             {
-                ok = WriteFileBytes(path, plan.stateText.data(), plan.stateText.size());
+                ok = writeFile(path, plan.stateText.data(), plan.stateText.size());
                 size = plan.stateText.size();
             }
             else
@@ -438,17 +454,26 @@ inline DumpOutcome WriteDump(const fs::path& root, std::string_view stamp, const
                 {
                     const bool done = file.alpha ? EncodePng(img.width, img.height, 1, planes.alpha.data(), encoded)
                                                  : EncodePng(img.width, img.height, 3, planes.rgb.data(), encoded);
-                    ok = done && WriteFileBytes(path, encoded.data(), encoded.size());
+                    ok = done && writeFile(path, encoded.data(), encoded.size());
                     size = encoded.size();
                 }
             }
-            if (ok)
+            if (!ok)
+            {
+                // A file that could not be written completely (disk full, a viewer locking it) is removed: a truncated PNG would pass for a
+                // picture. It is not counted.
+                std::error_code removeError;
+                fs::remove(path, removeError);
+                ++failedFiles;
+            }
+            else
             {
                 ++outcome.files;
                 outcome.bytes += size;
             }
+            current.clear(); // this file is finished, whichever way
         }
-        budget.Add(outcome.files, outcome.bytes);
+        account();
         if (outcome.files == 0)
         {
             outcome.message = "failed, no file could be written in " + outcome.folder;
@@ -456,10 +481,17 @@ inline DumpOutcome WriteDump(const fs::path& root, std::string_view stamp, const
         }
         outcome.result = DumpOutcome::Result::Written;
         outcome.message = "ok, " + std::to_string(outcome.files) + " of " + std::to_string(outcome.plannedFiles) + " files (" +
-                          SizeText(outcome.bytes) + ") written to " + outcome.folder;
+                          SizeText(outcome.bytes) + ") written to " + outcome.folder +
+                          (failedFiles != 0 ? "; " + std::to_string(failedFiles) + " could not be written completely and " + (failedFiles == 1 ? "was" : "were") + " removed" : std::string());
     }
     catch (...)
     {
+        if (!current.empty())
+        {
+            std::error_code removeError;
+            fs::remove(current, removeError); // a file the exception stopped in the middle of
+        }
+        account();
         outcome.result = outcome.files != 0 ? DumpOutcome::Result::Written : DumpOutcome::Result::Failed;
         outcome.message = "failed, an error stopped the dump after " + std::to_string(outcome.files) + " files";
     }

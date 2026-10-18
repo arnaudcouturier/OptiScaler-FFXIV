@@ -56,6 +56,7 @@ class CommandChannel
         State state = State::None;
         ParsedFile parsed;
         uint64_t fileBytes = 0;
+        uint64_t bytesRead = 0; // bytes actually read from the file (never more than kMaxCommandBytes + 1, whatever its size)
         Disposition disposition = Disposition::Removed;
     };
 
@@ -120,6 +121,7 @@ class CommandChannel
                 _sizeSeen = size;
             }
             polled.fileBytes = size;
+            polled.bytesRead = text.size();
             polled.parsed = ParseFile(text);
             if (size > kMaxCommandBytes)
                 polled.parsed.truncatedBytes = true;
