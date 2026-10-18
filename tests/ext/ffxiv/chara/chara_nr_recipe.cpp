@@ -187,7 +187,9 @@ void TestTwoBuffers()
     CHECK(bad.errors > 0);
 }
 
-// The state model of the Fake is the recipe's own; this is an independent oracle: the transitions the main NR pass makes for the same
+// DOCUMENTATION TEST, not an independent oracle. The state model of the Fake is the recipe's own, and the expectations below are literals
+// typed from what the recipe's comments and the main NR pass's source say; nothing here reads the main pass, so this cannot fail if the recipe
+// and the main pass drift apart. It pins the transitions the recipe is documented to make, for the same
 // images on its SDR path, read from DlssNr_Dx12.cpp (colorCopy = the proxy, hdrCopy = the kept original, output = the model's answer):
 //   encode writes colorCopy and hdrCopy in UNORDERED_ACCESS, then UAV -> NON_PIXEL_SHADER_RESOURCE for both (lines 2419, 2425);
 //   MakeModelWritable(output) keeps/puts the answer in UAV before the evaluate (2678), MakeModelReadable(finalAnswer) UAV -> NPSR after it
@@ -195,7 +197,7 @@ void TestTwoBuffers()
 // What this cannot prove, and only a GPU run with the D3D12 debug layer can: COMMON <-> UAV / NPSR transitions of the shared images
 // (opened from a D3D11 shared handle), the model's own use of its inputs inside the evaluate, and that the encode pass does not need
 // the colour image in another state.
-void TestMatchesTheMainPass()
+void TestDocumentedTransitionsOfTheMainPass()
 {
     Fake f;
     CHECK(RecordRun(f, Plan(false)));
@@ -284,7 +286,7 @@ int main()
 {
     TestSequence();
     TestTwoBuffers();
-    TestMatchesTheMainPass();
+    TestDocumentedTransitionsOfTheMainPass();
     TestConstants();
     TestModelCall();
     TestFailure();
