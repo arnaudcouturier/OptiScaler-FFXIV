@@ -42,7 +42,7 @@ struct SeenDraw
 struct Doubles
 {
     // answers
-    bool canRun = false;
+    bool srCanRun = false; // the super-resolution path can run (PreviewDLSS wanted, not latched, its gate open)
     bool nrCanRun = false; // preview NR specifically can run (wanted, not latched, available)
     bool active = false;
     bool srAvailable = false;
@@ -101,7 +101,8 @@ void LogTable(const char*, const Snapshot&) {}
 namespace dlss
 {
 bool Active() { return d.active; }
-bool CanRun() { return d.canRun; }
+bool CanRun() { return d.srCanRun || d.nrCanRun; }
+bool SrCanRun() { return d.srCanRun; }
 bool NrCanRun() { return d.nrCanRun; }
 bool SrAvailable() { return d.srAvailable; }
 bool HoldsGpuObjects() { return d.dlssHolds; }
@@ -402,7 +403,7 @@ void TestRoutes(Scene& s)
     // route Dlss, module handles the draw (and runs it once): once in total
     Doubles_Off();
     Config(true, false, false);
-    d.canRun = d.active = true;
+    d.srCanRun = d.active = true;
     d.aroundHandles = true;
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(d.dlssAround == 1 && d.seen.size() == 1 && d.seen[0].kind == DrawKind::Consumer);
@@ -417,14 +418,14 @@ void TestRoutes(Scene& s)
     Doubles_Off();
     Config(false, false, true);
     d.nrWanted = true;
-    d.nrCanRun = d.canRun = d.active = true;
+    d.nrCanRun = d.active = true;
     CHECK(Draw(s.context.Get()) == 1);
     CHECK(d.dlssAround == 1);
 
     // PreviewDLSS on, its path cannot run: the UI draw is not offered to it (native, once) ...
     Doubles_Off();
     Config(true, false, false);
-    d.canRun = false;
+    d.srCanRun = false;
     d.active = true; // the plumbing is alive (slots draining) but cannot do work
     d.dlssHolds = true;
     CHECK(Draw(s.context.Get()) == 1);
@@ -433,7 +434,7 @@ void TestRoutes(Scene& s)
     // ... and the equipment display draw gets the spatial AA when PreviewAA is on (the real AA runs on WARP)
     Doubles_Off();
     Config(true, true, false);
-    d.canRun = false;
+    d.srCanRun = false;
     d.active = true;
     d.dlssHolds = true;
     // the equipment output is table entry 0: a 64x64 RGBA image for this check
@@ -446,7 +447,7 @@ void TestRoutes(Scene& s)
     CHECK(d.dlssAround == 0);
 
     // with the DLSS path able to run the same draw goes to it and the AA does not run
-    d.canRun = true;
+    d.srCanRun = true;
     d.aroundHandles = true;
     CHECK(Draw(s.context.Get(), DrawApi::DrawIndexed) == 1);
     CHECK(g_stats.aaProcessed == processed + 1 && d.dlssAround == 1);
@@ -467,7 +468,7 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     // (b) NR usable, no result: the plumbing declines, the AA runs (it ran the draw once)
     Doubles_Off();
     Config(false, true, true);
-    d.nrWanted = d.nrCanRun = d.canRun = d.active = true;
+    d.nrWanted = d.nrCanRun = d.active = true;
     d.aroundHandles = false;
     auto processed = g_stats.aaProcessed.load();
     CHECK(Draw(s.context.Get(), indexed) == 1);
@@ -494,13 +495,37 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     CHECK(Draw(s.context.Get(), indexed) == 1);
     CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
 
-    // PreviewDLSS wanted as well: the equipment draw that the plumbing declines stays native (the specification; the DLSS result is just
-    // not ready yet), no AA
+    // PreviewDLSS wanted as well and its super-resolution path runs: the equipment draw that the plumbing declines stays native (the
+    // specification; the super-resolution result is just not ready yet), no AA
     BindConsumer(s, s.equip.Get(), s.aaSrv.Get());
     Config(true, true, true);
+    d.srCanRun = true;
     d.ResetCounts();
     CHECK(Draw(s.context.Get(), indexed) == 1);
     CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 1);
+
+    // PreviewDLSS wanted but the super-resolution path cannot run (NGX not initialised, latched), preview NR usable and without a result for
+    // this draw: the plumbing declines it, and the AA takes the equipment draw (the documented fallback)
+    d.srCanRun = false;
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 2);
+    // ... but with the AA off the draw stays native, and a UI draw is never the AA's
+    Config(true, false, true);
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 2);
+    Config(true, true, true);
+    BindConsumer(s, s.ui.Get(), s.aaSrv.Get());
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 2);
+    BindConsumer(s, s.equip.Get(), s.aaSrv.Get());
+    // and the super-resolution path running again takes it back
+    d.srCanRun = true;
+    d.ResetCounts();
+    CHECK(Draw(s.context.Get(), indexed) == 1);
+    CHECK(d.dlssAround == 1 && g_stats.aaProcessed == processed + 2);
 
     // (a) NR is wanted but cannot run (latched or unavailable) while leftover objects keep the plumbing alive: the draw is not offered to
     // the plumbing at all and the AA takes it
@@ -508,7 +533,7 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     Config(false, true, true);
     d.nrWanted = true;
     d.nrCanRun = false;
-    d.canRun = false;
+    d.srCanRun = false;
     d.active = true;
     d.nrHolds = true;
     processed = g_stats.aaProcessed.load();
@@ -521,7 +546,7 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     Config(false, true, true);
     d.nrWanted = true;
     d.nrCanRun = false;
-    d.canRun = true;
+    d.srCanRun = true;
     d.active = true;
     CHECK(Draw(s.context.Get(), indexed) == 1);
     CHECK(d.dlssAround == 0 && g_stats.aaProcessed == processed + 2);
@@ -611,7 +636,7 @@ void TestPassAcrossRenders(Scene& s)
 {
     Doubles_Off();
     Config(true, false, false);
-    d.canRun = d.active = true;
+    d.srCanRun = d.active = true;
     d.aroundHandles = true;
     const auto passes = g_stats.passes.load();
 
@@ -702,7 +727,7 @@ void TestDetachFromAnotherThread(Scene& s)
     Doubles_Off();
     OnInstalled(s.context.Get(), nullptr);
     Config(true, true, false);
-    d.canRun = d.active = true;
+    d.srCanRun = d.active = true;
     BindConsumer(s, s.ui.Get(), s.outputSrv.Get());
     CHECK(Draw(s.context.Get()) == 1); // this thread is now the draw thread
     d.ResetCounts();
@@ -748,7 +773,7 @@ void TestDetachFromAnotherThread(Scene& s)
     Doubles_Off();
     OnInstalled(s.context.Get(), nullptr);
     Config(true, true, false);
-    d.canRun = d.active = true;
+    d.srCanRun = d.active = true;
     BindConsumer(s, s.ui.Get(), s.outputSrv.Get());
     CHECK(Draw(s.context.Get()) == 1);
     d.ResetCounts();

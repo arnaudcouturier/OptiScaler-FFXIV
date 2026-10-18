@@ -48,6 +48,11 @@ bool CanRun();
 // route decision: with the key on but NR unusable the equipment draw goes to the spatial AA.
 bool NrCanRun();
 
+// The super-resolution path specifically can do work for a draw now (PreviewDLSS wanted, not latched, its gate open). Reads the current
+// state without refreshing the gate. The dispatcher asks it only for an equipment draw that the plumbing declined: with PreviewDLSS on
+// and this false, the spatial AA takes that draw.
+bool SrCanRun();
+
 // The SR path itself may do work (wanted, not latched, gate open) or still holds objects. The SR-only hooks (copy, clear, query)
 // check this instead of Active(), which is also true for preview NR alone.
 bool SrAvailable();

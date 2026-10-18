@@ -1287,6 +1287,8 @@ bool CanRun() { return nr::PathCanRun(RefreshedFacts()); }
 
 bool NrCanRun() { return nr::NrUsable(PlumbingNow()); }
 
+bool SrCanRun() { return nr::SrUsable(PlumbingNow()); }
+
 bool SrAvailable()
 {
     // Runs for every copy, clear, query and vertex shader creation of the game: the cheap conditions first (see SrHooksNeededLazy).

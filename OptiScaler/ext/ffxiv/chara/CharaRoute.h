@@ -2,8 +2,9 @@
 // Which module handles a draw of the character preview feature. Pure: the dispatcher passes facts in and acts on the answer,
 // so every rule is tested without a device.
 //
-//   PreviewDLSS (or PreviewNR) on and a path able to run -> the isolated DLSS / NR plumbing. With PreviewNR alone the AA still takes
-//                      the equipment display draw when the NR module leaves it alone (no NR result for this draw yet; FallBackToAa)
+//   PreviewDLSS (or PreviewNR) on and a path able to run -> the isolated DLSS / NR plumbing. The AA still takes the equipment display
+//                      draw when the plumbing leaves it alone (no result for this draw yet) unless PreviewDLSS is on and its
+//                      super-resolution path runs (FallBackToAa)
 //   PreviewAA on    -> spatial AA for the draw that shows the equipment preview image, also when PreviewDLSS is on but its path
 //                      cannot run (NGX not initialised, the path latched after a failure). The reference build left that draw
 //                      native; falling back to the AA instead is a deliberate product decision of this fork.
@@ -40,14 +41,16 @@ constexpr Route ChooseRoute(bool dlssWanted, bool dlssActive, bool aaWanted, uin
     return Route::Native;
 }
 
-// The route was Dlss and the module left the draw alone (dlss::Around returned false: it never called the draw). With PreviewDLSS off,
-// PreviewAA on and the equipment display draw, the spatial AA takes it: the preview NR path is usable but has no result for this draw
-// (the first renders, a render that was skipped, a finisher that was rejected), and the AA must not be lost for that. With PreviewDLSS
-// on the equipment draw stays native, as the specification says (the DLSS result is not ready yet). The native draw still runs exactly
-// once: the AA runs it, or the dispatcher does when the AA declines too.
-constexpr bool FallBackToAa(Route route, bool handled, bool dlssWanted, bool aaWanted, uint32_t roles)
+// The route was Dlss and the module left the draw alone (dlss::Around returned false: it never called the draw). With PreviewAA on and the
+// equipment display draw, the spatial AA takes it unless PreviewDLSS is on AND its super-resolution path can run (`srUsable`,
+// dlss::SrCanRun()). So the AA is used while PreviewDLSS is off (preview NR is usable but has no result for this draw: the first renders,
+// a render that was skipped, a finisher that was rejected) and while the PreviewDLSS pass cannot run (NGX not initialised, latched).
+// While the super-resolution path runs the equipment draw stays native, as the specification says (its result is not ready yet). The
+// native draw still runs exactly once: the AA runs it, or the dispatcher does when the AA declines too.
+constexpr bool FallBackToAa(Route route, bool handled, bool dlssWanted, bool srUsable, bool aaWanted, uint32_t roles)
 {
-    return route == Route::Dlss && !handled && !dlssWanted && aaWanted && (roles & RoleEquipDisplay) != 0;
+    const bool superResolutionRuns = dlssWanted && srUsable;
+    return route == Route::Dlss && !handled && !superResolutionRuns && aaWanted && (roles & RoleEquipDisplay) != 0;
 }
 
 // A draw with the equipment display shader on a deferred context is only counted (the menu says why nothing happened).

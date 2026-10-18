@@ -188,19 +188,22 @@ void TestUnavailable()
     CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, f.nrWanted) == Route::Dlss);
 }
 
-// The route was Dlss and the module left the draw alone: the AA takes the equipment display draw when PreviewDLSS is off.
+// The route was Dlss and the module left the draw alone: the AA takes the equipment display draw when PreviewDLSS is off or its
+// super-resolution path cannot run. Arguments: (route, handled, dlssWanted, srUsable, aaWanted, roles).
 void TestFallBackToAa()
 {
     const uint32_t equip = RoleEquipDisplay;
-    CHECK(FallBackToAa(Route::Dlss, false, false, true, equip));      // declined, AA on, DLSS off, equipment draw: the AA
-    CHECK(!FallBackToAa(Route::Dlss, true, false, true, equip));      // the plumbing ran the draw
-    CHECK(!FallBackToAa(Route::Dlss, false, true, true, equip));      // PreviewDLSS on: the equipment draw stays native (specification)
-    CHECK(!FallBackToAa(Route::Dlss, false, false, false, equip));    // AA off
-    CHECK(!FallBackToAa(Route::Dlss, false, false, true, RoleUi));    // not the equipment display draw
-    CHECK(!FallBackToAa(Route::Dlss, false, false, true, RoleNone));
-    CHECK(!FallBackToAa(Route::Native, false, false, true, equip));   // other routes: the draw was not offered to the plumbing
-    CHECK(!FallBackToAa(Route::Enhance, false, false, true, equip));  // the AA already had its turn
-    CHECK(FallBackToAa(Route::Dlss, false, false, true, equip | RoleUi));
+    CHECK(FallBackToAa(Route::Dlss, false, false, false, true, equip));      // declined, AA on, DLSS off, equipment draw: the AA
+    CHECK(!FallBackToAa(Route::Dlss, true, false, false, true, equip));      // the plumbing ran the draw
+    CHECK(!FallBackToAa(Route::Dlss, false, true, true, true, equip));       // PreviewDLSS on and its path runs: the equipment draw stays native
+    CHECK(FallBackToAa(Route::Dlss, false, true, false, true, equip));       // PreviewDLSS on but its path cannot run (NR carried the route): the AA
+    CHECK(!FallBackToAa(Route::Dlss, false, false, false, false, equip));    // AA off
+    CHECK(!FallBackToAa(Route::Dlss, false, true, false, false, equip));     // AA off, SR path not running: native
+    CHECK(!FallBackToAa(Route::Dlss, false, false, false, true, RoleUi));    // not the equipment display draw
+    CHECK(!FallBackToAa(Route::Dlss, false, false, false, true, RoleNone));
+    CHECK(!FallBackToAa(Route::Native, false, false, false, true, equip));   // other routes: the draw was not offered to the plumbing
+    CHECK(!FallBackToAa(Route::Enhance, false, false, false, true, equip));  // the AA already had its turn
+    CHECK(FallBackToAa(Route::Dlss, false, false, false, true, equip | RoleUi));
 }
 
 // The hook forwarders' gate gives the same answer as SrHooksNeeded(facts) but reads the dear inputs only when they matter.

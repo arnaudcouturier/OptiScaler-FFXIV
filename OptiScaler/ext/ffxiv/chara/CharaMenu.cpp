@@ -32,7 +32,7 @@ void DrawNrSection(CharaConfig& cfg)
                        "bridge, and nvngx_dlssnr.dll with nvngx.dll_dlssnr.dll. Alone it runs on the native preview image. Together with "
                        "Preview DLSS it runs on the DLSS result (twice the size, with the preview's depth and motion) and the preview's own "
                        "alpha is put back afterwards; when NR cannot run for a render the plain DLSS image is shown. The spatial AA still "
-                       "takes the equipment preview while NR has no result for a draw. Every open window costs "
+                       "takes the equipment preview while NR has no result for a draw, unless the Preview DLSS pass runs. Every open window costs "
                        "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
                        "native preview stays.");
 
@@ -103,10 +103,10 @@ void DrawCharaCard(ext::menu::Ctx&)
     bool aa = cfg.previewAA.value_or_default();
     if (ImGui::Checkbox("Preview spatial AA", &aa))
         cfg.previewAA = aa;
-    ext::menu::Tooltip("Spatial anti-aliasing of the equipment preview image. It is used when neither Preview DLSS nor Preview NR "
-                       "produces that image: with both off, while the DLSS path cannot run, and with Preview NR on whenever NR has no "
-                       "result for a draw yet (the first frames after opening a window, renders it skipped, a preview it cannot process). "
-                       "When Preview DLSS runs, its result is shown instead.");
+    ext::menu::Tooltip("Spatial anti-aliasing of the equipment preview image. It is used while Preview DLSS is off, and while the DLSS "
+                       "pass cannot run. With Preview NR on, a result NR has for a draw is shown instead, so the AA only takes the draws "
+                       "NR has no result for yet (the first frames after opening a window, renders it skipped, a preview it cannot "
+                       "process). While the DLSS pass runs the AA is not used, also for a draw NR has no result for.");
     bool upscale = cfg.previewUpscale.value_or_default();
     if (ImGui::Checkbox("2x preview upscaling", &upscale))
         cfg.previewUpscale = upscale;

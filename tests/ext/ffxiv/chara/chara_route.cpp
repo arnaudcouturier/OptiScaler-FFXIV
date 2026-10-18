@@ -49,5 +49,18 @@ int main()
         CHECK(!CountsAsDeferredEquip(false, RoleEquipDisplay, api));
         CHECK(!CountsAsDeferredEquip(true, RoleUi, api));
     }
+    // A draw routed to the plumbing that the plumbing declined (it never ran the draw): FallBackToAa(route, handled, dlssWanted, srUsable,
+    // aaWanted, roles). The spatial AA takes the equipment display draw unless PreviewDLSS is on AND its super-resolution path runs.
+    const uint32_t equip = RoleEquipDisplay;
+    CHECK(FallBackToAa(Route::Dlss, false, false, false, true, equip));  // PreviewDLSS off (preview NR carried the route)
+    CHECK(!FallBackToAa(Route::Dlss, false, true, true, true, equip));   // PreviewDLSS on and its path runs: the draw stays native, deliberately
+    CHECK(FallBackToAa(Route::Dlss, false, true, false, true, equip));   // PreviewDLSS on, its path cannot run (NGX not initialised, latched)
+    CHECK(!FallBackToAa(Route::Dlss, false, true, false, false, equip)); // ... but PreviewAA off: native
+    CHECK(!FallBackToAa(Route::Dlss, true, true, false, true, equip));   // the plumbing ran the draw: nothing to hand over
+    CHECK(!FallBackToAa(Route::Dlss, false, true, false, true, RoleUi)); // only the equipment display draw gets the AA
+    CHECK(!FallBackToAa(Route::Native, false, true, false, true, equip));
+    CHECK(!FallBackToAa(Route::Enhance, false, true, false, true, equip)); // the AA already had its turn
+    // PreviewDLSS off: "srUsable" cannot be true (it is the PreviewDLSS path), and the answer does not depend on it
+    CHECK(FallBackToAa(Route::Dlss, false, false, true, true, equip));
     return TEST_RESULT("chara_route");
 }

@@ -427,7 +427,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     identify::Observe(view);
 
     // Route: (PreviewDLSS or a usable PreviewNR) and a path that can run ? Dlss : PreviewAA ? Enhance : native. The draw API plays no
-    // part (see CharaRoute.h). With PreviewDLSS on but its path unable to run, the spatial AA still takes the equipment display draw.
+    // part (see CharaRoute.h). With PreviewDLSS on but its path unable to run, the spatial AA still takes the equipment display draw,
+    // also when only preview NR kept the route on the plumbing (FallBackToAa below).
     bool handled = false;
     const bool dlssWanted = DlssWanted();
     const bool nrWanted = nr::Wanted();
@@ -442,8 +443,10 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     case Route::Enhance: handled = enhance::Around(view, draw); break;
     case Route::Native: break;
     }
-    // The plumbing was offered the draw and left it alone (it never ran it): the AA is not lost for that.
-    if (FallBackToAa(route, handled, dlssWanted, aaWanted, view.roles))
+    // The plumbing was offered the draw and left it alone (it never ran it): the AA is not lost for that, unless PreviewDLSS is on and its
+    // super-resolution path runs. The path is asked only here, for an equipment draw the plumbing declined (never in the default configuration).
+    const bool srUsable = dlssWanted && route == Route::Dlss && !handled && aaWanted && (view.roles & RoleEquipDisplay) != 0 && dlss::SrCanRun();
+    if (FallBackToAa(route, handled, dlssWanted, srUsable, aaWanted, view.roles))
         handled = enhance::Around(view, draw);
     if (!handled)
     {
