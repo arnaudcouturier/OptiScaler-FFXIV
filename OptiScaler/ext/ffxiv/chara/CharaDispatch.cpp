@@ -64,7 +64,8 @@ void Maintain(uint64_t now)
         // The frame callback must not end the pass here: Maintain runs at an arbitrary draw, possibly between the G-buffer draws and
         // the finisher of a render in progress. The pass only learns the counter; the next prepass or G-buffer draw starts a new pass.
         g_pass.NoteFrame(serial);
-        const nr::MaintenancePlan plan = nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources());
+        const nr::MaintenancePlan plan =
+            nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources(), dlss::HoldsGpuObjects());
         if (plan.sr)
             dlss::OnFrameEnd();
         if (plan.nr)
@@ -78,7 +79,8 @@ void Maintain(uint64_t now)
     if (g_pass.active && now >= g_lastGeometry && now - g_lastGeometry > kPassIdleMs)
         g_pass.End(); // no frame callback (no bridge): the pass ended with the last geometry draw
     identify::Maintain(now);
-    const nr::MaintenancePlan plan = nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources());
+    const nr::MaintenancePlan plan =
+        nr::PlanMaintenance(DlssWanted(), nr::Wanted(), dlss::Active(), nr::HoldsResources(), dlss::HoldsGpuObjects());
     if (plan.sr)
         dlss::Maintain(now);
     if (plan.nr)

@@ -5,6 +5,7 @@
 // Why this exists: the plumbing that finds the finisher, the preview images and the consumers lives next to the SR path. NR must run
 // with the SR path latched, failed or switched off, and SR must not care when NR fails. The answers below keep the two apart.
 
+#include <atomic>
 #include <cstdint>
 
 #include "ext/ffxiv/chara/CharaNrRules.h"
@@ -39,10 +40,11 @@ constexpr bool PlumbingActive(const PlumbingFacts& f)
 // The hooks that only the SR path needs (clear of the G-buffer, query bookkeeping, vertex shader, motion replay).
 constexpr bool SrHooksNeeded(const PlumbingFacts& f) { return SrUsable(f) || f.srSlotsHeld != 0; }
 
-// The dispatcher's cheap gate in front of every draw (the debug aids keep it running as before).
-constexpr bool DispatcherWanted(bool aaWanted, bool srWanted, bool nrWanted, bool nrHoldsResources, bool debugAids)
+// The dispatcher's cheap gate in front of every draw (the debug aids keep it running as before). Both paths keep it open while they
+// still hold GPU objects after their key was switched off, so the maintenance that releases them still runs.
+constexpr bool DispatcherWanted(bool aaWanted, bool srWanted, bool nrWanted, bool nrHoldsResources, bool srHoldsObjects, bool debugAids)
 {
-    return aaWanted || srWanted || nrWanted || nrHoldsResources || debugAids;
+    return aaWanted || srWanted || nrWanted || nrHoldsResources || srHoldsObjects || debugAids;
 }
 
 struct MaintenancePlan
@@ -51,12 +53,24 @@ struct MaintenancePlan
     bool nr = false; // call nr::Maintain
 };
 
-// The dispatcher's maintenance forwarding. NR keeps being maintained while it holds resources, also with the key switched off:
-// that is how the models are freed after PreviewNR is turned off.
-constexpr MaintenancePlan PlanMaintenance(bool srWanted, bool nrWanted, bool plumbingActive, bool nrHoldsResources)
+// The dispatcher's maintenance forwarding. Both paths keep being maintained while they hold objects, also with their key switched off:
+// that is how the models and the preview slots (images and NGX features) are freed after PreviewNR / PreviewDLSS is turned off.
+constexpr MaintenancePlan PlanMaintenance(bool srWanted, bool nrWanted, bool plumbingActive, bool nrHoldsResources, bool srHoldsObjects)
 {
-    return MaintenancePlan { (srWanted || nrWanted) && plumbingActive, nrWanted || nrHoldsResources };
+    return MaintenancePlan { ((srWanted || nrWanted) && plumbingActive) || srHoldsObjects, nrWanted || nrHoldsResources };
 }
+
+// Remembers one boolean and says when it changed. Used for "the SR hooks are being fed": whenever that flips either way, the open-query
+// bookkeeping of the motion replay is forgotten (an End seen by nobody would keep every replay refused). It is asked from the hook
+// forwarders themselves, which run whether or not the dispatcher's gate is open, so an off-on switch is never missed.
+class EdgeTracker
+{
+  public:
+    bool Changed(bool now) { return _last.exchange(now, std::memory_order_relaxed) != now; }
+
+  private:
+    std::atomic<bool> _last { false };
+};
 
 // What a UI draw that samples a preview image gets.
 enum class ConsumerSource : uint8_t

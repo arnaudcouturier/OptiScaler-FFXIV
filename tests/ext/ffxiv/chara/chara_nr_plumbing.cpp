@@ -97,33 +97,58 @@ void TestHolding()
 
 void TestDispatcherAndMaintenance()
 {
-    CHECK(!DispatcherWanted(false, false, false, false, false));
-    CHECK(DispatcherWanted(false, false, true, false, false));
+    CHECK(!DispatcherWanted(false, false, false, false, false, false));
+    CHECK(DispatcherWanted(false, false, true, false, false, false));
     // PreviewNR switched off but a model still exists: the gate stays open until it is freed
-    CHECK(DispatcherWanted(false, false, false, true, false));
-    CHECK(DispatcherWanted(true, false, false, false, false));
-    CHECK(DispatcherWanted(false, true, false, false, false));
-    CHECK(DispatcherWanted(false, false, false, false, true));
+    CHECK(DispatcherWanted(false, false, false, true, false, false));
+    CHECK(DispatcherWanted(true, false, false, false, false, false));
+    CHECK(DispatcherWanted(false, true, false, false, false, false));
+    CHECK(DispatcherWanted(false, false, false, false, false, true));
+    // PreviewDLSS switched off while preview slots still hold GPU objects: the gate stays open so the cleanup can run
+    CHECK(DispatcherWanted(false, false, false, false, true, false));
 
     // maintenance: NR alone is maintained and gets the SR cleanup too (it releases nothing it does not hold)
-    MaintenancePlan p = PlanMaintenance(false, true, true, false);
+    MaintenancePlan p = PlanMaintenance(false, true, true, false, false);
     CHECK(p.nr && p.sr);
     // PreviewNR off while resources exist: NR is still maintained
-    p = PlanMaintenance(false, false, true, true);
+    p = PlanMaintenance(false, false, true, true, false);
     CHECK(p.nr && !p.sr);
     // nothing wanted and nothing held: no calls
-    p = PlanMaintenance(false, false, false, false);
+    p = PlanMaintenance(false, false, false, false, false);
     CHECK(!p.nr && !p.sr);
     // SR alone as before
-    p = PlanMaintenance(true, false, true, false);
+    p = PlanMaintenance(true, false, true, false, false);
     CHECK(p.sr && !p.nr);
-    p = PlanMaintenance(true, false, false, false);
+    p = PlanMaintenance(true, false, false, false, false);
     CHECK(!p.sr && !p.nr);
     // NR wanted but the plumbing is not alive (latched): NR is still maintained so it can free what it holds
-    p = PlanMaintenance(false, true, false, true);
+    p = PlanMaintenance(false, true, false, true, false);
     CHECK(p.nr && !p.sr);
+
+    // PreviewDLSS and PreviewNR are both off but preview slots still hold images and NGX features: the SR cleanup and frame end still
+    // run (that is how the slots are released after the option was switched off), whether or not the plumbing says it is alive
+    p = PlanMaintenance(false, false, true, false, true);
+    CHECK(p.sr && !p.nr);
+    p = PlanMaintenance(false, false, false, false, true);
+    CHECK(p.sr && !p.nr);
+    // a latched SR path with slots held is drained the same way
+    p = PlanMaintenance(true, false, false, false, true);
+    CHECK(p.sr);
 }
 
+// The query bookkeeping of the motion replay is only fed while the SR hooks are forwarded: whenever that changes (either way) what was
+// open is forgotten.
+void TestEdgeTracker()
+{
+    EdgeTracker e;
+    CHECK(!e.Changed(false));  // starts off: no edge
+    CHECK(e.Changed(true));    // off -> on
+    CHECK(!e.Changed(true));
+    CHECK(!e.Changed(true));
+    CHECK(e.Changed(false));   // on -> off
+    CHECK(!e.Changed(false));
+    CHECK(e.Changed(true));    // the next time it is switched on, again an edge (the old design missed it when nothing asked in between)
+}
 void TestUnavailable()
 {
     // NR wanted but the module cannot run (bridge not up, no NVIDIA card, files missing): it does not claim the draws, so the AA
@@ -220,6 +245,7 @@ int main()
     TestIndependence();
     TestHolding();
     TestDispatcherAndMaintenance();
+    TestEdgeTracker();
     TestRoute();
     TestUnavailable();
     TestConsumerSeen();

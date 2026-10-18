@@ -16,6 +16,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
+#include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDraw.h"
 #include "ext/ffxiv/chara/CharaProbe.h"
 
@@ -53,8 +54,9 @@ inline bool Wanted()
         return false;
     const auto& c = ext::Cfg().ffxiv.chara;
     // PreviewNR keeps the gate open while it holds models after the key was switched off, so maintenance can free them.
+    // PreviewDLSS keeps the gate open in the same way while preview slots hold images or NGX features (see dlss::HoldsGpuObjects).
     return nr::DispatcherWanted(c.previewAA.value_or_default(), c.previewDlss.value_or_default(), c.previewNr.value_or_default(),
-                                nr::HoldsResources(),
+                                nr::HoldsResources(), dlss::HoldsGpuObjects(),
                                 c.previewProbe.value_or_default() || c.previewDebugFlood.value_or_default() || probe::Live());
 }
 

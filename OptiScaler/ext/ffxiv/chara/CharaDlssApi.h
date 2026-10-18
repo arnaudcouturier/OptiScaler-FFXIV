@@ -44,6 +44,10 @@ bool Active();
 // check this instead of Active(), which is also true for preview NR alone.
 bool SrAvailable();
 
+// Preview slots still hold GPU objects (images, NGX features), whatever the config says now. The dispatcher's gate and its
+// maintenance stay on while this is true, so the objects are released after PreviewDLSS is switched off.
+bool HoldsGpuObjects();
+
 // Called for every draw the dispatcher classified while [FFXIV] PreviewDLSS is on, also when Active() is false: it keeps the
 // NGX-device comparison current, which is what lets an unavailable path become available again.
 void Probe(const DrawView& view);

@@ -99,7 +99,7 @@ bool SrLatched() { return nr::SharedLatches().SrLatched(); }
 std::atomic<uint32_t> g_slotsHeld { 0 }; // slots whose GPU objects still exist (a latched path drains them before it stops)
 std::atomic<uint8_t> g_availability { static_cast<uint8_t>(Availability::ConfigOff) };
 std::atomic<uint64_t> g_nextGateCheck { 0 };
-std::atomic<bool> g_wasActive { false };
+nr::EdgeTracker g_queryHooks; // whether the SR hooks (including the query hooks) were being fed at the last look
 
 std::atomic<uint8_t> g_deviceState { 0 }; // 0 not compared yet, 1 same device, 2 different device
 
@@ -327,6 +327,15 @@ void UpdateCounts()
 }
 
 void CountFallback() { g_fallbacks.fetch_add(1, std::memory_order_relaxed); }
+
+// The query hooks are forwarded only while the SR hooks are needed. Whenever that changes, in either direction, the queries that were
+// open are unknown (an End nobody saw would keep every motion replay refused): the set is forgotten and the replay waits for the next
+// frame end. Asked from the hook forwarders themselves, which run whether or not the dispatcher's gate is open.
+void NoteQueryHooks(bool hooksNeeded)
+{
+    if (g_queryHooks.Changed(hooksNeeded))
+        motion::MarkQueriesBlind();
+}
 
 // ---- GPU objects ---------------------------------------------------------------------------------------------------------
 bool CreateImage(ID3D11Device* device, DXGI_FORMAT format, uint32_t w, uint32_t h, Image& out)
@@ -1054,15 +1063,18 @@ bool Active()
     if (srWanted && !SrLatched() && now >= g_nextGateCheck.load(std::memory_order_relaxed))
         Refresh(now);
     const nr::PlumbingFacts facts = PlumbingNow();
-    const bool srUsable = nr::SrUsable(facts);
-    if (srUsable && !g_wasActive.exchange(true))
-        motion::MarkQueriesBlind(); // queries opened before the hooks saw them are unknown until the next frame end
-    else if (!srUsable)
-        g_wasActive.store(false, std::memory_order_relaxed);
+    NoteQueryHooks(nr::SrHooksNeeded(facts));
     return nr::PlumbingActive(facts);
 }
 
-bool SrAvailable() { return nr::SrHooksNeeded(PlumbingNow()); }
+bool SrAvailable()
+{
+    const bool on = nr::SrHooksNeeded(PlumbingNow());
+    NoteQueryHooks(on);
+    return on;
+}
+
+bool HoldsGpuObjects() { return g_slotsHeld.load(std::memory_order_relaxed) != 0; }
 
 void Probe(const DrawView& view)
 {
@@ -1247,7 +1259,7 @@ void Detach()
     g_device.Reset();
     g_deviceCache.Reset();
     g_deviceState.store(0, std::memory_order_relaxed);
-    g_wasActive.store(false, std::memory_order_relaxed);
+    (void)g_queryHooks.Changed(false);
     UpdateCounts();
 }
 

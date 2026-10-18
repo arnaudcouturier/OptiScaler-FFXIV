@@ -250,8 +250,11 @@ class OpenQuerySet
     bool Blind() const { return _blind; }
     bool ReplayAllowed() const { return !_blind && _open.empty(); }
 
+    // The hooks stopped or started being fed (the path went inactive or active): what was open is unknown, and an open query whose
+    // End was not seen would keep every replay refused for good, so the set is forgotten.
     void MarkBlind()
     {
+        _open.clear();
         _blind = true;
         _blindSince = 0;
     }

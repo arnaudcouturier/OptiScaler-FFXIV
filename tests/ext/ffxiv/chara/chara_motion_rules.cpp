@@ -260,6 +260,16 @@ void TestQueries()
     CHECK(s.Blind());
     s.OnFrameEnd(); // a frame callback lifts it at once
     CHECK(!s.Blind());
+    // The query that was open when the hooks stopped being fed never sees its End: marking the set blind forgets it, so the replay is
+    // not refused for the rest of the session.
+    CHECK(s.Count() == 0 && s.ReplayAllowed());
+
+    // the same when the path simply goes inactive and active again with a query straddling the change
+    s.Begin(0x700, true);
+    CHECK(!s.ReplayAllowed());
+    s.MarkBlind(); // the path became inactive (or active) with 0x700 open
+    s.OnFrameEnd();
+    CHECK(s.Count() == 0 && s.ReplayAllowed());
 }
 } // namespace
 
