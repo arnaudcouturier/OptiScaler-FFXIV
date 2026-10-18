@@ -70,6 +70,12 @@ static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Exposure_Scale) == ngx::
 static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width) == ngx::kSubrectWidth);
 static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height) == ngx::kSubrectHeight);
 static_assert(std::string_view(NVSDK_NGX_Parameter_Reset) == ngx::kReset);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA) == ngx::kPresetHintNames[0]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality) == ngx::kPresetHintNames[1]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality) == ngx::kPresetHintNames[2]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced) == ngx::kPresetHintNames[3]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance) == ngx::kPresetHintNames[4]);
+static_assert(std::string_view(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance) == ngx::kPresetHintNames[5]);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes == ngx::kFlagMotionLowRes);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_DepthInverted == ngx::kFlagDepthInverted);
 static_assert(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure == ngx::kFlagAutoExposure);
@@ -376,6 +382,31 @@ std::string PointerSet(ID3D11DeviceContext* context)
                        g_drawDeviceNative.load(std::memory_order_relaxed));
 }
 
+// The render-preset hints of the main game's DLSS: the configuration's override when it is on, otherwise the values the game
+// requested for its own feature (State keeps them while the override is off).
+ngx::PresetHints CurrentPresetHints()
+{
+    const Config& cfg = *Config::Instance();
+    const State& state = State::Instance();
+    ngx::PresetSource source;
+    source.overrideOn = cfg.RenderPresetOverride.value_or_default();
+    source.forAll = static_cast<const std::optional<uint32_t>&>(cfg.RenderPresetForAll);
+    const std::optional<uint32_t>* perQuality[ngx::kPresetHintCount] = {
+        &cfg.RenderPresetDLAA, &cfg.RenderPresetUltraQuality, &cfg.RenderPresetQuality,
+        &cfg.RenderPresetBalanced, &cfg.RenderPresetPerformance, &cfg.RenderPresetUltraPerformance,
+    };
+    const uint32_t game[ngx::kPresetHintCount] = {
+        state.dlssRenderPresetDLAA, state.dlssRenderPresetUltraQuality, state.dlssRenderPresetQuality,
+        state.dlssRenderPresetBalanced, state.dlssRenderPresetPerformance, state.dlssRenderPresetUltraPerformance,
+    };
+    for (size_t i = 0; i < ngx::kPresetHintCount; ++i)
+    {
+        source.perQuality[i] = *perQuality[i];
+        source.game[i] = game[i];
+    }
+    return ngx::ComposePresetHints(source);
+}
+
 // Creates the NGX feature of a slot. A failure here ends the path for the session (the driver cannot do it).
 bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t h, bool reversedZ)
 {
@@ -396,6 +427,7 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     }
     ParamSetter setter { params };
     ngx::ApplyCreate(setter, w, h, reversedZ);
+    ngx::ApplyPresetHints(setter, CurrentPresetHints());
 
     NVSDK_NGX_Handle* handle = nullptr;
     const NVSDK_NGX_Result result = create(context, NVSDK_NGX_Feature_SuperSampling, params, &handle);
@@ -413,8 +445,11 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     g.handle = handle;
     g.ngxGeneration = g_ngxGeneration.load(std::memory_order_acquire);
     g_slots.Slot(index).hasFeature = true;
-    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; {}", w, h, w * ngx::kOutputScale,
-             h * ngx::kOutputScale, static_cast<unsigned>(result), PointerSet(context));
+    const ngx::PresetHints hints = CurrentPresetHints();
+    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; NGX result {:#x}; render presets "
+             "DLAA {} / UltraQuality {} / Quality {} / Balanced {} / Performance {} / UltraPerformance {}; {}",
+             w, h, w * ngx::kOutputScale, h * ngx::kOutputScale, static_cast<unsigned>(result), hints.value[0], hints.value[1],
+             hints.value[2], hints.value[3], hints.value[4], hints.value[5], PointerSet(context));
     UpdateCounts();
     return true;
 }

@@ -6,11 +6,17 @@
 // Feature: DLSS super resolution, render size W x H, output 2W x 2H, performance preset "MaxPerf" (0). Create flags: motion
 // vectors at render resolution (0x2), automatic exposure (0x40), inverted depth (0x8) when the scene uses a reversed depth
 // buffer. Not HDR, vectors not flagged as jittered, no sharpening, no alpha upscaling.
+// Render preset hints: the same six DLSS.Hint.Render.Preset.* values as the game's own DLSS (see ComposePresetHints).
 // Evaluate: colour, depth, motion vectors and output resources; the pass jitter in pixels (no sign flip); motion scale equal
 // to the render size; no exposure texture and no masks; the history is reset when the slot never evaluated or its last
 // evaluation is older than 250 ms.
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+
+#include "ext/nr/presr/PreSrModelHints.h"
 
 namespace ext::ffxiv::chara::dlss::ngx
 {
@@ -46,6 +52,55 @@ inline constexpr const char* kExposureScale = "DLSS.Exposure.Scale";
 inline constexpr const char* kSubrectWidth = "DLSS.Render.Subrect.Dimensions.Width";
 inline constexpr const char* kSubrectHeight = "DLSS.Render.Subrect.Dimensions.Height";
 inline constexpr const char* kReset = "Reset";
+
+// ---- Render preset hints --------------------------------------------------------------------------------------------------
+// The isolated feature gets the same transformer-model preset hints as the game's own DLSS (DLSS.Hint.Render.Preset.*), so the
+// preview and the main image use one model. The six values are composed from what the main DLSS path reads: the configuration's
+// override ([DLSS] RenderPresetOverride with RenderPresetForAll or one key per quality level) when it is on, otherwise the values the
+// game itself requested for its own feature. The legacy "latest" sentinel is mapped to the runtime default.
+inline constexpr size_t kPresetHintCount = 6;
+inline constexpr const char* kPresetHintNames[kPresetHintCount] = {
+    "DLSS.Hint.Render.Preset.DLAA",         "DLSS.Hint.Render.Preset.UltraQuality",      "DLSS.Hint.Render.Preset.Quality",
+    "DLSS.Hint.Render.Preset.Balanced",     "DLSS.Hint.Render.Preset.Performance",       "DLSS.Hint.Render.Preset.UltraPerformance",
+};
+
+struct PresetHints
+{
+    uint32_t value[kPresetHintCount] {};
+    bool operator==(const PresetHints&) const = default;
+};
+
+// What the main DLSS path knows, in the order of kPresetHintNames.
+struct PresetSource
+{
+    bool overrideOn = false;                         // RenderPresetOverride
+    std::optional<uint32_t> forAll;                  // RenderPresetForAll (wins over the per-quality keys)
+    std::optional<uint32_t> perQuality[kPresetHintCount]; // RenderPresetDLAA ... RenderPresetUltraPerformance
+    uint32_t game[kPresetHintCount] {};              // the values the game requested for its own feature
+};
+
+inline PresetHints ComposePresetHints(const PresetSource& s)
+{
+    std::array<uint32_t, kPresetHintCount> game {};
+    std::array<std::optional<uint32_t>, kPresetHintCount> perQuality {};
+    for (size_t i = 0; i < kPresetHintCount; ++i)
+    {
+        game[i] = s.game[i];
+        perQuality[i] = s.perQuality[i];
+    }
+    const DlssModelHints::Settings resolved = DlssModelHints::Resolve(0, game, s.overrideOn, s.forAll, perQuality);
+    PresetHints hints;
+    for (size_t i = 0; i < kPresetHintCount; ++i)
+        hints.value[i] = resolved.presets[i];
+    return hints;
+}
+
+// `S` provides SetUInt(name, uint32_t).
+template <class S> void ApplyPresetHints(S& s, const PresetHints& hints)
+{
+    for (size_t i = 0; i < kPresetHintCount; ++i)
+        s.SetUInt(kPresetHintNames[i], hints.value[i]);
+}
 
 // `S` provides SetUInt(name, uint32_t), SetInt(name, int), SetFloat(name, float).
 template <class S> void ApplyCreate(S& s, uint32_t width, uint32_t height, bool reversedZ)
