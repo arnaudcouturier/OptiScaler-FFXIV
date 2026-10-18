@@ -339,6 +339,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     // Route: PreviewDLSS ? Dlss : PreviewAA ? Enhance : native. The draw API plays no part (see CharaRoute.h).
     bool handled = false;
     const bool dlssWanted = DlssWanted();
+    if (dlssWanted)
+        dlss::Probe(view);
     switch (ChooseRoute(dlssWanted, dlssWanted && dlss::Active(), AaWanted(), view.roles, api))
     {
     case Route::Dlss: handled = dlss::Around(view, draw); break;

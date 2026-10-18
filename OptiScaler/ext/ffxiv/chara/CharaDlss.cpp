@@ -30,6 +30,7 @@
 #include <format>
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <string_view>
 
 // The isolated DLSS path for character previews: entry points behind CharaDlssApi.h.
@@ -87,7 +88,13 @@ std::atomic<uint64_t> g_nextGateCheck { 0 };
 std::atomic<bool> g_wasActive { false };
 
 std::atomic<uint8_t> g_deviceState { 0 }; // 0 not compared yet, 1 same device, 2 different device
-std::atomic<ID3D11Device*> g_checkedNgxDevice { nullptr };
+
+// The device NGX was initialised with: identity values only (never dereferenced after the capture, the device may be released).
+std::atomic<uintptr_t> g_ngxRaw { 0 };
+std::atomic<uintptr_t> g_ngxNative { 0 };
+std::atomic<uint32_t> g_ngxGeneration { 0 };
+std::atomic<uintptr_t> g_drawDeviceRaw { 0 };    // the last compared draw context's device, and what a preview resource says
+std::atomic<uintptr_t> g_drawDeviceNative { 0 };
 
 std::mutex g_logMutex;
 ReasonLog g_reasonLog;
@@ -99,7 +106,8 @@ std::atomic<uint64_t> g_copyChains { 0 };
 std::atomic<uint32_t> g_slotFailures { 0 };
 
 // ---- Draw-thread state --------------------------------------------------------------------------------------------------
-uint64_t g_nextDeviceCheck = 0;
+DeviceCache g_deviceCache;
+uint32_t g_deviceLines = 0;
 
 struct Image
 {
@@ -136,7 +144,6 @@ std::array<SlotGpu, kMaxSlots> g_gpu;
 PassData g_pass;
 ComPtr<ID3D11Device> g_device;
 ID3D11DeviceContext* g_context = nullptr; // the immediate context (valid until Detach)
-ComPtr<IUnknown> g_contextDeviceRef;
 guides::Passes g_passes;
 bool g_passesTried = false;
 ComPtr<ID3D11Texture2D> g_depthTexture;
@@ -184,28 +191,88 @@ Availability Refresh(uint64_t now)
     return a;
 }
 
-// Compares the immediate context's device with the device NGX was initialised on (draw thread, at most once a second).
-void CheckDevice(ID3D11DeviceContext* context, uint64_t now)
+// The device a resource created through `device` reports (see DeviceIdentity). 0 when no resource could be made.
+uintptr_t NativeDeviceOf(ID3D11Device* device)
 {
-    if (now < g_nextDeviceCheck && g_deviceState.load(std::memory_order_relaxed) != 0)
-        return;
-    g_nextDeviceCheck = now + 1000;
-
-    ID3D11Device* ngxDevice = State::Instance().currentD3D11Device;
-    if (ngxDevice == nullptr || context == nullptr)
-        return; // NGX has not seen a device yet: the proxy gate reports that
-
-    ComPtr<ID3D11Device> contextDevice;
-    context->GetDevice(&contextDevice);
-    ComPtr<IUnknown> a, b;
-    if (contextDevice == nullptr || FAILED(contextDevice.As(&a)) || FAILED(ngxDevice->QueryInterface(IID_PPV_ARGS(&b))))
-        return;
-
-    g_contextDeviceRef = a;
-    g_checkedNgxDevice.store(ngxDevice, std::memory_order_relaxed);
-    g_deviceState.store(a.Get() == b.Get() ? 1 : 2, std::memory_order_relaxed);
+    if (device == nullptr)
+        return 0;
+    D3D11_TEXTURE2D_DESC td {};
+    td.Width = td.Height = 1;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> probe;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &probe)) || probe == nullptr)
+        return 0;
+    ComPtr<ID3D11Device> owner;
+    probe->GetDevice(&owner);
+    return reinterpret_cast<uintptr_t>(owner.Get());
 }
 
+std::string DeviceText(const DeviceIdentity& d)
+{
+    return std::format("{:#x} (native {:#x}, {})", d.raw, d.native, d.native == 0 ? "native device not readable" : d.IsProxy() ? "a wrapper" : "not wrapped");
+}
+
+const char* VerdictText(DeviceVerdict v)
+{
+    switch (v)
+    {
+    case DeviceVerdict::Same: return "same device";
+    case DeviceVerdict::Different: return "different devices";
+    default: return "not compared";
+    }
+}
+
+// Compares the device NGX was initialised on with the device the preview draws run on, through the devices that resources
+// report (a wrapper such as ReShade's proxy has another pointer than the native device it forwards to). Draw thread; the
+// verdict is cached and only recomputed when NGX (re)initialises, the draw context changes or a "different" verdict gets old.
+void CheckDevice(const DrawView& view)
+{
+    const uintptr_t ngxRaw = g_ngxRaw.load(std::memory_order_relaxed);
+    if (ngxRaw == 0 || view.context == nullptr || view.kind == DrawKind::Ignore)
+        return; // NGX has not seen a device yet (the proxy gate reports that), or this draw says nothing about the preview device
+
+    const uint32_t generation = g_ngxGeneration.load(std::memory_order_relaxed);
+    const uintptr_t key = reinterpret_cast<uintptr_t>(view.context);
+    if (!g_deviceCache.NeedsCheck(generation, key, view.now))
+        return;
+
+    ComPtr<ID3D11Device> contextDevice;
+    view.context->GetDevice(&contextDevice);
+    DeviceIdentity draw { reinterpret_cast<uintptr_t>(contextDevice.Get()), 0 };
+    draw.native = NativeDeviceOf(contextDevice.Get());
+
+    // The texture of the draw is the device the preview images really live on: it decides when it can be read.
+    uintptr_t textureDevice = 0;
+    if (ID3D11Texture2D* texture = view.rtvTexture != nullptr ? view.rtvTexture : view.dsvTexture; texture != nullptr)
+    {
+        ComPtr<ID3D11Device> owner;
+        texture->GetDevice(&owner);
+        textureDevice = reinterpret_cast<uintptr_t>(owner.Get());
+    }
+    if (textureDevice != 0)
+        draw.native = textureDevice;
+
+    const DeviceIdentity ngx { ngxRaw, g_ngxNative.load(std::memory_order_relaxed) };
+    const DeviceVerdict verdict = CompareDevices(ngx, draw);
+    const DeviceVerdict previous = g_deviceCache.verdict;
+    g_deviceCache.Store(verdict, generation, key, view.now);
+    g_drawDeviceRaw.store(draw.raw, std::memory_order_relaxed);
+    g_drawDeviceNative.store(draw.native, std::memory_order_relaxed);
+    g_deviceState.store(verdict == DeviceVerdict::Same ? 1 : verdict == DeviceVerdict::Different ? 2 : 0, std::memory_order_relaxed);
+    g_nextGateCheck.store(0, std::memory_order_relaxed); // the gate reads the new verdict now
+
+    if (verdict != previous && g_deviceLines < 4)
+    {
+        ++g_deviceLines;
+        LOG_INFO("CharaView DLSS device check: {}. NGX device {}; draw context device {}; device of the preview texture {:#x}; "
+                 "draw context {:#x}",
+                 VerdictText(verdict), DeviceText(ngx), DeviceText(draw), textureDevice, key);
+    }
+}
 void Latch(const char* why)
 {
     if (g_latched.exchange(true))
@@ -288,6 +355,18 @@ struct ParamSetter
     void SetResource(const char* name, ID3D11Resource* r) { p->Set(name, r); }
 };
 
+// The pointers a CreateFeature / EvaluateFeature call involves, for the log line that settles whether the driver accepted them.
+std::string PointerSet(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11Device> contextDevice;
+    if (context != nullptr)
+        context->GetDevice(&contextDevice);
+    return std::format("context {:#x}, its device {:#x}, NGX device {:#x} (native {:#x}), preview texture device {:#x}",
+                       reinterpret_cast<uintptr_t>(context), reinterpret_cast<uintptr_t>(contextDevice.Get()),
+                       g_ngxRaw.load(std::memory_order_relaxed), g_ngxNative.load(std::memory_order_relaxed),
+                       g_drawDeviceNative.load(std::memory_order_relaxed));
+}
+
 // Creates the NGX feature of a slot. A failure here ends the path for the session (the driver cannot do it).
 bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t h, bool reversedZ)
 {
@@ -315,6 +394,7 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     {
         if (auto destroy = NVNGXProxy::D3D11_DestroyParameters(); destroy != nullptr)
             destroy(params);
+        LOG_WARN("CharaView DLSS: NGX CreateFeature returned {:#x}; {}", static_cast<unsigned>(result), PointerSet(context));
         char text[96];
         std::snprintf(text, sizeof(text), "feature creation failed (0x%X)", static_cast<unsigned>(result));
         Latch(text);
@@ -323,8 +403,8 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     g.params = params;
     g.handle = handle;
     g_slots.Slot(index).hasFeature = true;
-    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained", w, h, w * ngx::kOutputScale,
-             h * ngx::kOutputScale);
+    LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; {}", w, h, w * ngx::kOutputScale,
+             h * ngx::kOutputScale, PointerSet(context));
     UpdateCounts();
     return true;
 }
@@ -737,10 +817,6 @@ bool Active()
     if (g_latched.load(std::memory_order_relaxed))
         return g_slotsHeld.load(std::memory_order_relaxed) != 0;
 
-    // NGX moved to another device since the last comparison: compare again on the next draw.
-    if (g_deviceState.load(std::memory_order_relaxed) != 0 &&
-        State::Instance().currentD3D11Device != g_checkedNgxDevice.load(std::memory_order_relaxed))
-        g_deviceState.store(0, std::memory_order_relaxed);
 
     const uint64_t now = GetTickCount64();
     if (now >= g_nextGateCheck.load(std::memory_order_relaxed))
@@ -753,12 +829,35 @@ bool Active()
     return active;
 }
 
+void Probe(const DrawView& view)
+{
+    if (!g_latched.load(std::memory_order_relaxed))
+        CheckDevice(view);
+}
+
+void OnNgxInitialised(ID3D11Device* device)
+{
+    g_ngxRaw.store(reinterpret_cast<uintptr_t>(device), std::memory_order_relaxed);
+    g_ngxNative.store(NativeDeviceOf(device), std::memory_order_relaxed);
+    g_ngxGeneration.fetch_add(1, std::memory_order_release);
+    g_nextGateCheck.store(0, std::memory_order_relaxed);
+}
+
+void OnNgxShutdown()
+{
+    g_ngxRaw.store(0, std::memory_order_relaxed);
+    g_ngxNative.store(0, std::memory_order_relaxed);
+    g_ngxGeneration.fetch_add(1, std::memory_order_release);
+    g_deviceState.store(0, std::memory_order_relaxed);
+    g_nextGateCheck.store(0, std::memory_order_relaxed);
+}
+
 bool Around(const DrawView& view, DrawCall draw)
 {
     if (g_latched.load(std::memory_order_relaxed))
         return false;
     ID3D11DeviceContext* context = view.context;
-    CheckDevice(context, view.now);
+    CheckDevice(view);
     if (view.now >= g_nextGateCheck.load(std::memory_order_relaxed))
         Refresh(view.now);
     if (static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) != Availability::Available)
@@ -890,7 +989,7 @@ void Detach()
     g_pass = PassData {};
     g_context = nullptr;
     g_device.Reset();
-    g_contextDeviceRef.Reset();
+    g_deviceCache.Reset();
     g_deviceState.store(0, std::memory_order_relaxed);
     g_wasActive.store(false, std::memory_order_relaxed);
     UpdateCounts();

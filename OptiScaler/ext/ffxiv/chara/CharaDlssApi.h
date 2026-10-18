@@ -37,6 +37,15 @@ bool Implemented();
 // Implemented, switched on in the config and not failed for this session.
 bool Active();
 
+// Called for every draw the dispatcher classified while [FFXIV] PreviewDLSS is on, also when Active() is false: it keeps the
+// NGX-device comparison current, which is what lets an unavailable path become available again.
+void Probe(const DrawView& view);
+
+// D3D11 NGX was initialised on `device` / is shutting down (from the NGX entry points, any thread). Identity only: the device
+// pointer is not kept for later calls.
+void OnNgxInitialised(ID3D11Device* device);
+void OnNgxShutdown();
+
 bool Around(const DrawView& view, DrawCall draw);
 
 // CopyResource / CopySubresourceRegion on the immediate context, after the native copy ran (`full` = whole subresource 0).

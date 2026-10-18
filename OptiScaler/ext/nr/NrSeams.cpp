@@ -2,6 +2,7 @@
 
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/nr/DlssNr.h"
 #include <State.h>
 #include <Util.h>
@@ -268,10 +269,17 @@ void AppendNgxSearchPaths(const std::filesystem::path& exePath, std::vector<std:
 
 namespace ext::dx11bridge
 {
-void OnNgxInit() { DlssNr::ResumeAfterBridgeInit(); }
+void OnNgxInit()
+{
+    DlssNr::ResumeAfterBridgeInit();
+    // The character preview DLSS path needs the device D3D11 NGX was initialised on (State::currentD3D11Device is set to it
+    // just before this call).
+    ext::ffxiv::chara::dlss::OnNgxInitialised(State::Instance().currentD3D11Device);
+}
 
 void OnNgxShutdownBegin()
 {
+    ext::ffxiv::chara::dlss::OnNgxShutdown();
     // The oracle tested the FFXIV exe name here; the bridge-active test is what the call is about.
     if (WithDx12::IsInited())
         DlssNr::SuspendForBridgeShutdown();

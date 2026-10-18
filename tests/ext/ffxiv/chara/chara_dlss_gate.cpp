@@ -103,6 +103,73 @@ void TestReasonLog()
     }
     CHECK(lines == kMaxReasonLines);
 }
+
+void TestDeviceIdentity()
+{
+    // Not compared until both sides are known.
+    CHECK(CompareDevices({}, {}) == DeviceVerdict::NotCompared);
+    CHECK(CompareDevices({ 0x1000, 0x1000 }, {}) == DeviceVerdict::NotCompared);
+    CHECK(CompareDevices({}, { 0x1000, 0x1000 }) == DeviceVerdict::NotCompared);
+
+    // One native device, plain pointers.
+    CHECK(CompareDevices({ 0x1000, 0x1000 }, { 0x1000, 0x1000 }) == DeviceVerdict::Same);
+    CHECK(CompareDevices({ 0x1000, 0x1000 }, { 0x2000, 0x2000 }) == DeviceVerdict::Different);
+
+    // The regression of the first in-game test: the game's device is a wrapper (ReShade proxy). The pointer NGX was initialised
+    // with, the one the context reports and the native device differ, but all of them name one device.
+    const DeviceIdentity ngxProxy { 0x5000, 0x1000 };   // NGX got the proxy; a resource created through it says 0x1000
+    const DeviceIdentity ctxNative { 0x1000, 0x1000 };  // the context returns the native device
+    CHECK(CompareDevices(ngxProxy, ctxNative) == DeviceVerdict::Same);
+    CHECK(CompareDevices(ctxNative, ngxProxy) == DeviceVerdict::Same);
+    CHECK(CompareDevices({ 0x5000, 0x1000 }, { 0x6000, 0x1000 }) == DeviceVerdict::Same); // two different proxies of one device
+    CHECK(ngxProxy.IsProxy() && !ctxNative.IsProxy());
+
+    // Two proxies of two devices stay different, and so does a proxy against an unrelated native device.
+    CHECK(CompareDevices({ 0x5000, 0x1000 }, { 0x6000, 0x2000 }) == DeviceVerdict::Different);
+    CHECK(CompareDevices({ 0x5000, 0x1000 }, { 0x2000, 0x2000 }) == DeviceVerdict::Different);
+
+    // A side whose native device could not be read falls back to its raw pointer: equal pointers match, others do not
+    // (the path then stays off, which is the safe answer).
+    CHECK(CompareDevices({ 0x1000, 0 }, { 0x1000, 0x1000 }) == DeviceVerdict::Same);
+    CHECK(CompareDevices({ 0x5000, 0 }, { 0x1000, 0x1000 }) == DeviceVerdict::Different);
+    const DeviceIdentity unreadable { 0x1000, 0 };
+    CHECK(!unreadable.IsProxy());
+}
+
+void TestDeviceCache()
+{
+    DeviceCache cache;
+    CHECK(cache.NeedsCheck(1, 0x10, 100)); // nothing cached yet
+
+    cache.Store(DeviceVerdict::Same, 1, 0x10, 100);
+    CHECK(!cache.NeedsCheck(1, 0x10, 100));
+    CHECK(!cache.NeedsCheck(1, 0x10, 1000000)); // a good verdict does not expire on its own
+    CHECK(cache.NeedsCheck(2, 0x10, 100));      // NGX initialised again (possibly on another device)
+    CHECK(cache.NeedsCheck(1, 0x20, 100));      // another draw context
+
+    // A "different" verdict is looked at again after a while, so it cannot stay stuck.
+    cache.Store(DeviceVerdict::Different, 1, 0x10, 100);
+    CHECK(!cache.NeedsCheck(1, 0x10, 100 + kDeviceRecheckMs - 1));
+    CHECK(cache.NeedsCheck(1, 0x10, 100 + kDeviceRecheckMs));
+
+    // mismatch, then NGX re-initialises on the device that draws: the gate clears
+    GateFacts f = Ready();
+    f.deviceChecked = true;
+    f.deviceMatches = false;
+    CHECK(Evaluate(f) == Availability::DeviceMismatch);
+    f.deviceMatches = CompareDevices({ 0x5000, 0x1000 }, { 0x1000, 0x1000 }) == DeviceVerdict::Same;
+    CHECK(Evaluate(f) == Availability::Available);
+
+    // NGX not initialised, then initialised: the gate clears
+    f = Ready();
+    f.dx11Initialised = false;
+    CHECK(Evaluate(f) == Availability::NgxNotInitialised);
+    f.dx11Initialised = true;
+    CHECK(Evaluate(f) == Availability::Available);
+
+    cache.Reset();
+    CHECK(cache.NeedsCheck(1, 0x10, 100));
+}
 } // namespace
 
 int main()
@@ -110,5 +177,7 @@ int main()
     TestDecision();
     TestTexts();
     TestReasonLog();
+    TestDeviceIdentity();
+    TestDeviceCache();
     return TEST_RESULT("chara_dlss_gate");
 }

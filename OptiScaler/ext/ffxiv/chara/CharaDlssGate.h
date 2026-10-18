@@ -53,6 +53,67 @@ constexpr Availability Evaluate(const GateFacts& f)
     return Availability::Available;
 }
 
+
+// ---- Which device is which ----------------------------------------------------------------------------------------------
+// A D3D11 device pointer is not an identity: the game's device may be wrapped (ReShade hands the game a proxy that forwards to
+// the native device), and the pointer NGX was initialised with, the one `context->GetDevice()` returns and the one a texture
+// reports can all differ while naming one device. The native device of a pointer is therefore read through a resource created
+// on it: a resource always reports the native device it lives on. Two pointers name the same device when those agree.
+struct DeviceIdentity
+{
+    uintptr_t raw = 0;    // the pointer as handed over (0 = not known)
+    uintptr_t native = 0; // the device a resource created through `raw` reports (0 = could not be read)
+
+    constexpr bool Known() const { return raw != 0; }
+    // The pointer is a wrapper around another device object.
+    constexpr bool IsProxy() const { return native != 0 && native != raw; }
+    constexpr uintptr_t Identity() const { return native != 0 ? native : raw; }
+};
+
+enum class DeviceVerdict : uint8_t
+{
+    NotCompared, // one side is not known yet
+    Same,
+    Different,
+};
+
+constexpr DeviceVerdict CompareDevices(const DeviceIdentity& ngx, const DeviceIdentity& draw)
+{
+    if (!ngx.Known() || !draw.Known())
+        return DeviceVerdict::NotCompared;
+    return ngx.Identity() == draw.Identity() ? DeviceVerdict::Same : DeviceVerdict::Different;
+}
+
+// A verdict is cached for as long as the facts it came from: the NGX identity generation (bumped when NGX initialises or shuts
+// down) and the draw context's device pointer. A "different" verdict is also looked at again after `kRecheckMs`, so a stale
+// answer cannot outlive a changed setup.
+inline constexpr uint64_t kDeviceRecheckMs = 5000;
+
+struct DeviceCache
+{
+    DeviceVerdict verdict = DeviceVerdict::NotCompared;
+    uint32_t generation = 0;
+    uintptr_t drawKey = 0; // the draw context pointer the verdict was made for
+    uint64_t checkedAt = 0;
+
+    bool NeedsCheck(uint32_t ngxGeneration, uintptr_t currentDrawKey, uint64_t now) const
+    {
+        if (verdict == DeviceVerdict::NotCompared || generation != ngxGeneration || drawKey != currentDrawKey)
+            return true;
+        return verdict == DeviceVerdict::Different && now >= checkedAt && now - checkedAt >= kDeviceRecheckMs;
+    }
+
+    void Store(DeviceVerdict v, uint32_t ngxGeneration, uintptr_t currentDrawKey, uint64_t now)
+    {
+        verdict = v;
+        generation = ngxGeneration;
+        drawKey = currentDrawKey;
+        checkedAt = now;
+    }
+
+    void Reset() { *this = DeviceCache {}; }
+};
+
 // The reason in log text. The same strings serve as menu notes (static storage, safe to hand to another thread).
 constexpr const char* ReasonText(Availability a)
 {
