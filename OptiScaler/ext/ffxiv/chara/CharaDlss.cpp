@@ -166,6 +166,7 @@ guides::Passes g_passes;
 bool g_passesTried = false;
 ComPtr<ID3D11Texture2D> g_depthTexture;
 ComPtr<ID3D11ShaderResourceView> g_depthSrv;
+DepthMemo g_depthMemo; // what was learnt about g_depthTexture (an unreadable one is looked at and logged once)
 bool g_reversedZ = false;
 bool g_loggedNoPrepass = false;
 BurstLimiter g_lines; // log lines of the path: once per reason per burst of preview activity (reasons: FinishVerdict values, then kLine*)
@@ -579,24 +580,39 @@ void CaptureGuideInputs(const DrawView& view)
     ID3D11Texture2D* depth = view.dsvTexture;
     if (depth == nullptr)
         return;
-    if (g_depthTexture.Get() != depth || g_depthSrv == nullptr)
+    // A texture that cannot be read (or whose view cannot be created after a few tries) is remembered: it is neither examined nor
+    // logged again in every pass.
+    const uintptr_t key = reinterpret_cast<uintptr_t>(depth);
+    if (!g_depthMemo.ShouldExamine(key, g_depthSrv != nullptr))
+        return;
+    g_depthMemo.Start(key);
+    D3D11_TEXTURE2D_DESC desc {};
+    depth->GetDesc(&desc);
+    if (g_depthTexture.Get() != depth)
     {
-        D3D11_TEXTURE2D_DESC desc {};
-        depth->GetDesc(&desc);
         g_depthSrv.Reset();
         g_depthTexture = depth;
-        if (DepthReadable(static_cast<uint32_t>(desc.Format), (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0))
+    }
+    if (DepthReadable(static_cast<uint32_t>(desc.Format), (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0))
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd {};
+        sd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(g_device->CreateShaderResourceView(depth, &sd, &g_depthSrv)))
         {
-            D3D11_SHADER_RESOURCE_VIEW_DESC sd {};
-            sd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            sd.Texture2D.MipLevels = 1;
-            if (FAILED(g_device->CreateShaderResourceView(depth, &sd, &g_depthSrv)))
-                g_depthSrv.Reset();
+            g_depthSrv.Reset();
+            if (g_depthMemo.ViewFailed())
+                LOG_INFO("CharaView DLSS: a shader resource view of the preview depth texture could not be created ({} tries); native "
+                         "previews retained",
+                         DepthMemo::kMaxViewFailures);
         }
-        else
-            LOG_INFO("CharaView DLSS: the preview depth texture (format {}) cannot be read; native previews retained",
-                     static_cast<uint32_t>(desc.Format));
+    }
+    else
+    {
+        g_depthMemo.Reject();
+        LOG_INFO("CharaView DLSS: the preview depth texture (format {}) cannot be read; native previews retained",
+                 static_cast<uint32_t>(desc.Format));
     }
 }
 
@@ -1265,6 +1281,7 @@ void Detach()
     diag::Release();
     g_depthSrv.Reset();
     g_depthTexture.Reset();
+    g_depthMemo.Reset();
     g_pass = PassData {};
     g_context = nullptr;
     g_device.Reset();

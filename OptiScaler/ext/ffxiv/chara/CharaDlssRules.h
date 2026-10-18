@@ -145,4 +145,43 @@ constexpr bool DepthReadable(uint32_t dxgiFormat, bool shaderResourceBind)
 {
     return dxgiFormat == 44 /* DXGI_FORMAT_R24G8_TYPELESS */ && shaderResourceBind;
 }
+// Float depth (R32_TYPELESS and the like) is deliberately not mapped: the reference build records the preview depth view as
+// R24_UNORM_X8_TYPELESS, a float buffer would come with a reversed-Z convention nobody has seen in this renderer, and a wrong
+// guess produces wrong guides silently, where an unknown format keeps the preview native.
+
+// What was learnt about the pass's depth texture, so that an unreadable one is looked at (and logged) once instead of once per pass.
+// The creation of the shader resource view may fail for a readable format; it is tried a few times and then given up on.
+class DepthMemo
+{
+  public:
+    static constexpr uint8_t kMaxViewFailures = 3;
+
+    // True when the texture must be examined now: it is not the one remembered, or it has no view yet and may still get one.
+    bool ShouldExamine(uintptr_t texture, bool haveView) const { return texture != _texture || (!haveView && !_rejected); }
+
+    // A texture is being examined: a new one starts with a clean record.
+    void Start(uintptr_t texture)
+    {
+        if (texture == _texture)
+            return;
+        _texture = texture;
+        _failures = 0;
+        _rejected = false;
+    }
+
+    void Reject() { _rejected = true; }                // the format cannot be read: never examine this texture again
+    bool ViewFailed()                                  // a view could not be created; true when this was the last try
+    {
+        if (++_failures >= kMaxViewFailures)
+            _rejected = true;
+        return _rejected;
+    }
+    bool Rejected() const { return _rejected; }
+    void Reset() { *this = DepthMemo {}; }
+
+  private:
+    uintptr_t _texture = 0;
+    uint8_t _failures = 0;
+    bool _rejected = false;
+};
 } // namespace ext::ffxiv::chara::dlss

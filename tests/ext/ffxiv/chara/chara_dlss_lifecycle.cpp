@@ -87,6 +87,67 @@ void TestDepthReadable()
     CHECK(!DepthReadable(39, true));  // R32_TYPELESS: not the 24-bit path
 }
 
+// The pass's depth texture is examined once. An unreadable format used to be looked at (and logged) in every pass.
+void TestDepthMemo()
+{
+    // An unreadable texture: examined in the first pass, never again, however many passes follow
+    {
+        DepthMemo m;
+        int examined = 0;
+        for (int pass = 0; pass < 100; ++pass)
+        {
+            if (!m.ShouldExamine(0x1000, false))
+                continue;
+            ++examined;
+            m.Start(0x1000);
+            m.Reject(); // the format cannot be read
+        }
+        CHECK(examined == 1);
+        CHECK(m.Rejected());
+    }
+    // A readable texture whose view creation keeps failing is tried kMaxViewFailures times, then given up on
+    {
+        DepthMemo m;
+        int examined = 0;
+        for (int pass = 0; pass < 100; ++pass)
+        {
+            if (!m.ShouldExamine(0x2000, false))
+                continue;
+            ++examined;
+            m.Start(0x2000);
+            m.ViewFailed();
+        }
+        CHECK(examined == DepthMemo::kMaxViewFailures);
+        CHECK(m.Rejected());
+    }
+    // A view that was created is kept without looking again
+    {
+        DepthMemo m;
+        CHECK(m.ShouldExamine(0x3000, false));
+        m.Start(0x3000);
+        CHECK(!m.ShouldExamine(0x3000, true));
+        CHECK(!m.Rejected());
+    }
+    // A different texture is a new start: the record of the rejected one does not carry over; coming back to it examines it again
+    {
+        DepthMemo m;
+        m.Start(0x4000);
+        m.Reject();
+        CHECK(!m.ShouldExamine(0x4000, false));
+        CHECK(m.ShouldExamine(0x5000, false)); // another texture
+        m.Start(0x5000);
+        CHECK(!m.Rejected());
+        CHECK(!m.ViewFailed()); // 1 of 3
+        CHECK(!m.ViewFailed()); // 2 of 3
+        CHECK(m.ViewFailed());  // 3 of 3: given up
+        CHECK(m.ShouldExamine(0x4000, false)); // back to the first one: the memo only holds the latest
+        m.Reset();
+        CHECK(m.ShouldExamine(0x5000, false) && !m.Rejected());
+    }
+    // the format rule itself stays as it was
+    CHECK(!DepthReadable(41, true) && !DepthReadable(19, true));
+}
+
 // A preview from first sight to release, with the clock injected.
 void TestLifecycle()
 {
@@ -227,6 +288,7 @@ int main()
     TestNgxGeneration();
     TestFinishRules();
     TestDepthReadable();
+    TestDepthMemo();
     TestLifecycle();
     TestLatchDrain();
     TestJitterFeed();
