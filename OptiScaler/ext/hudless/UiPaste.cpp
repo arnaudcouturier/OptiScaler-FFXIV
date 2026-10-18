@@ -151,6 +151,7 @@ struct Core
 
     std::atomic<bool> debugTint { false };
     std::atomic<bool> steady { false };
+    std::atomic<bool> pasteEnabled { true }; // consumer gate (UiPaste::SetPasteEnabled)
 
     // Objects of a device that went away are parked here and never released (work on that device may still reference
     // them; it is gone or about to be).
@@ -884,6 +885,9 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
             return;
 
         Core& c = C();
+        if (!c.pasteEnabled.load(std::memory_order_relaxed))
+            return; // switched off by the engine: not a failed paste, so nothing is counted
+
         std::lock_guard consumerLock(c.pasteMutex);
 
         // ---- pick -------------------------------------------------------------------------------------------------
@@ -1086,6 +1090,11 @@ void SetDebugTint(bool enabled)
 void SetSteadyTiming(bool enabled)
 {
     C().steady.store(enabled, std::memory_order_relaxed);
+}
+
+void SetPasteEnabled(bool enabled)
+{
+    C().pasteEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 PasteStatus Snapshot()

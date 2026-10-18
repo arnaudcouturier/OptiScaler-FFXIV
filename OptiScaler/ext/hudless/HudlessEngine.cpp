@@ -738,8 +738,12 @@ void Engine::Post(Dx11wDx12SC& sc)
     auto* fg = Access::Hudless::Fg(sc);
     if (!_core.Staged() || _stagedSlot < 0)
     {
-        // Exactly one of Produce / Invalidate per present: no usable pair, so stop pasting (the normal base carries its UI)
-        if (_core.PasteDecision() == PasteAction::Invalidate)
+        // Exactly one of Produce / Invalidate / Hold per present: no usable pair, so stop pasting (the normal base carries
+        // its UI), but not yet in the first presents after a swapped one (Hold: the ring stays, the paste stays visible)
+        const PasteAction action = _core.PasteDecision();
+        if (action != PasteAction::None)
+            UiPaste::SetPasteEnabled(_core.PasteVisible());
+        if (action == PasteAction::Invalidate)
             UiPaste::Invalidate(ReasonText(_core.PresentReason()));
         Finish();
         return;
@@ -796,6 +800,8 @@ void Engine::Post(Dx11wDx12SC& sc)
     }
 
     const PasteAction action = _core.PasteDecision();
+    if (action != PasteAction::None)
+        UiPaste::SetPasteEnabled(_core.PasteVisible());
     bool produced = true;
     if (action == PasteAction::Produce)
     {
@@ -809,6 +815,7 @@ void Engine::Post(Dx11wDx12SC& sc)
 
     if (!produced)
     {
+        UiPaste::SetPasteEnabled(false); // the ring is empty from here on: no output should count as a skipped paste
         UiPaste::Invalidate("the paste producer could not run");
         _core.Fail(Reason::PasteNotReady);
     }

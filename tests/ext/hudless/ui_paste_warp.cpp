@@ -157,6 +157,7 @@ void SafeBeforeInit(Rig& rig)
     UiPaste::Invalidate(nullptr);
     UiPaste::SetDebugTint(false);
     UiPaste::SetSteadyTiming(false);
+    UiPaste::SetPasteEnabled(true);
     EXPECT(!UiPaste::Ready(rig.device.Get(), 8, 8), "Ready before any Produce");
     EXPECT(!UiPaste::Ready(nullptr, 0, 0), "Ready with nulls");
     const auto s = UiPaste::Snapshot();
@@ -820,6 +821,65 @@ void TimingAndLifecycle(Rig& rig)
     EXPECT(CountNonBg(bridge.Paste()) == 9, "Produce works again after Release");
     UiPaste::Release();
 }
+
+void PasteGate(Rig& rig)
+{
+    std::printf("  paste gate: off = no draw and no skip, Produce keeps going, on = draws again\n");
+    Bridge bridge { rig };
+    const UINT w = 40, h = 32;
+    Image8 hudless(w, h, 60, 60, 60), final = hudless;
+    Fill(final, 10, 8, 13, 11, 200, 50, 20); // a 4x4 block, 6x6 with the dilation ring
+    EXPECT(UiPaste::Snapshot().coverageSequence == 0, "the gate test starts from a released state");
+
+    bridge.Backbuffer(w, h);
+    bridge.Produce(final, hudless, Params(0.008f, 1));
+    EXPECT(UiPaste::Ready(rig.device.Get(), w, h), "an image is ready");
+
+    // gate off: nothing drawn, nothing counted, even though an image is ready
+    UiPaste::SetPasteEnabled(false);
+    const auto before = UiPaste::Snapshot();
+    const auto gated = bridge.Paste();
+    auto after = UiPaste::Snapshot();
+    EXPECT(CountNonBg(gated) == 0, "gate off: no pixel drawn (%zu)", CountNonBg(gated));
+    EXPECT(after.pasted == before.pasted && after.skipped == before.skipped, "gate off: pasted %llu -> %llu, skipped %llu -> %llu",
+           (unsigned long long) before.pasted, (unsigned long long) after.pasted, (unsigned long long) before.skipped,
+           (unsigned long long) after.skipped);
+
+    // a paste with nothing to draw is a skip when the gate is on, and not one when it is off
+    UiPaste::Invalidate("test");
+    const auto invalidated = UiPaste::Snapshot();
+    bridge.Paste();
+    EXPECT(UiPaste::Snapshot().skipped == invalidated.skipped, "gate off: an empty ring counts no skip");
+
+    // Produce is not gated: the image is built, the readback and its sequence advance
+    bridge.Produce(final, hudless, Params(0.008f, 1));
+    bridge.Produce(final, hudless, Params(0.008f, 1));
+    const auto produced = UiPaste::Snapshot();
+    EXPECT(produced.produced == before.produced + 2, "gate off: Produce still builds images (%llu -> %llu)",
+           (unsigned long long) before.produced, (unsigned long long) produced.produced);
+    EXPECT(produced.coverageSequence == produced.produced && produced.coverage >= 0.f,
+           "gate off: the coverage sequence follows Produce (sequence %llu, produced %llu, coverage %f)",
+           (unsigned long long) produced.coverageSequence, (unsigned long long) produced.produced, produced.coverage);
+    EXPECT(std::abs(produced.coverage - 36.0f / float(w * h)) < 1e-6f, "gate off: coverage %f", produced.coverage);
+    EXPECT(UiPaste::Ready(rig.device.Get(), w, h), "gate off: the produced image is ready for the moment the gate opens");
+    EXPECT(UiPaste::Snapshot().pasted == before.pasted, "gate off: nothing was drawn meanwhile");
+
+    // gate on: the same image is drawn and counted
+    UiPaste::SetPasteEnabled(true);
+    bridge.Backbuffer(w, h);
+    const auto drawn = bridge.Paste();
+    EXPECT(CountNonBg(drawn) == 36, "gate on: the 6x6 block is drawn (%zu pixels)", CountNonBg(drawn));
+    EXPECT(UiPaste::Snapshot().pasted == before.pasted + 1, "gate on: counted as pasted");
+
+    // and a paste with nothing to draw counts a skip again
+    UiPaste::Invalidate("test");
+    const auto empty = UiPaste::Snapshot();
+    bridge.Paste();
+    EXPECT(UiPaste::Snapshot().skipped == empty.skipped + 1, "gate on: an empty ring counts a skip");
+
+    UiPaste::SetPasteEnabled(true);
+    UiPaste::Release();
+}
 } // namespace
 
 int main()
@@ -837,6 +897,7 @@ try
     OtherFormats(rig);
     RingAndFences(rig);
     TimingAndLifecycle(rig);
+    PasteGate(rig);
     std::printf("[ui_paste_warp] failures: %d\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

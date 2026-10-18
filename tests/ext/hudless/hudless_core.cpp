@@ -196,8 +196,9 @@ void TestReasons()
     // MaskCoverage is exercised in TestCoverage
 }
 
-// The invariant of the traps list: exactly one of Produce / Invalidate per ui_free present, Produce on every swapped base
-// and on PasteNotReady frames (bootstrap), Invalidate on every other fallback, none outside ui_free.
+// The invariant of the traps list: exactly one of Produce / Invalidate / Hold per ui_free present, Produce on every swapped
+// base, on probing frames and on PasteNotReady frames (bootstrap), Invalidate on every other fallback (Hold instead for
+// the first presents after a swapped one, see TestPasteHold), none outside ui_free.
 void TestPasteDecision()
 {
     auto decide = [](auto&& setup, Mode mode = Mode::UiFree)
@@ -246,6 +247,28 @@ void TestPasteDecision()
         const Run r = Present(core, Mode::UiFree);
         assert(!(r.swapped && core.PasteDecision() == PasteAction::Invalidate));
         assert(core.PasteDecision() != PasteAction::None);
+        assert(core.PasteDecision() != PasteAction::Hold); // nothing was swapped before: nothing to hold
+        assert(core.PasteVisible() == r.swapped);
+    }
+    // the same right after a swapped present: a present without a capture holds instead of invalidating, a present with a
+    // capture never holds, the paste stays visible unless the present invalidates
+    for (unsigned bits = 0; bits < 64; ++bits)
+    {
+        FakeHost host;
+        Core core(host);
+        assert(Present(core, Mode::UiFree).swapped);
+        host.fgActive = !(bits & 1);
+        host.compare = bits & 2;
+        host.pasteReady = !(bits & 4);
+        host.sceneOwns = bits & 8;
+        host.stage = (bits & 16) ? Reason::SlotBusy : Reason::None;
+        host.source.result = (bits & 32) ? TakeResult::NotThisFrame : TakeResult::Ok;
+        const Run r = Present(core, Mode::UiFree);
+        const PasteAction action = core.PasteDecision();
+        assert(action != PasteAction::None);
+        assert(r.staged ? action != PasteAction::Hold : action == PasteAction::Hold);
+        assert(!(r.swapped && action != PasteAction::Produce));
+        assert(core.PasteVisible() == (action != PasteAction::Invalidate));
     }
     // outside ui_free the producer is never involved
     assert(decide(noop, Mode::Recomposition).first == PasteAction::None);
@@ -523,7 +546,8 @@ struct Replay
 
     std::vector<Run> runs;
     std::vector<PasteAction> actions;
-    uint64_t flips = 0; // changes of the swapped state
+    std::vector<bool> visible; // the paste is drawn over the outputs of the present (Core::PasteVisible)
+    uint64_t flips = 0;        // changes of the swapped state
     bool lastSwapped = false;
 
     Run Step()
@@ -557,11 +581,13 @@ struct Replay
             for (auto& image : inFlight)
                 image.valid = false;
         }
+        // PasteAction::Hold leaves the ring alone
 
         flips += r.swapped != lastSwapped;
         lastSwapped = r.swapped;
         runs.push_back(r);
         actions.push_back(action);
+        visible.push_back(core.PasteVisible());
         return r;
     }
 
@@ -626,7 +652,8 @@ void TestProbePrecedence()
         FakeHost host;
         Core core(host);
         PasteCounters p;
-        for (uint64_t i = 1; i <= 6; ++i)
+        // tripped at present 6, then probing long enough for the hold after the last swapped present to run out
+        for (uint64_t i = 1; i <= 6 + 2 * Core::kLeaveHold; ++i)
         {
             p.produced = i;
             p.coverageSequence = i;
@@ -636,8 +663,8 @@ void TestProbePrecedence()
         assert(core.Snapshot().coverageTripped);
         const int queriesBefore = host.pasteQueries;
         setup(host);
-        p.produced = 7;
-        p.coverageSequence = 7;
+        p.produced = 7 + 2 * Core::kLeaveHold;
+        p.coverageSequence = p.produced;
         const Run r = Present(core, Mode::UiFree, p);
         return Outcome { r, core.Probing(), core.PasteDecision(), core.WantsTags(), host.pasteQueries - queriesBefore };
     };
@@ -791,6 +818,255 @@ void TestHysteresisBand()
         assert(replay.flips == 2);
     }
 }
+
+// The paste hold: the outputs of the first kLeaveHold presents after a swapped one still carry the last UI image, so the
+// generated frame between the hud-less base and the normal base is not an unpasted blend of the two. After that the
+// ring is invalidated as before.
+void TestPasteHold()
+{
+    static_assert(Core::kLeaveHold == 2);
+
+    struct Step
+    {
+        PasteAction action;
+        bool visible;
+        bool swapped;
+        Run run;
+    };
+    // Mirrors the engine: the decision is read in the third seam, before EndPresent, and must not change afterwards
+    auto step = [](FakeHost& host, Core& core, TakeResult result, Mode mode = Mode::UiFree)
+    {
+        host.source.result = result;
+        Step s {};
+        s.run.staged = core.BeginPresent(mode, {});
+        s.run.swapped = core.DecideBase();
+        s.run.reason = core.PresentReason();
+        s.action = core.PasteDecision();
+        s.visible = core.PasteVisible();
+        s.swapped = core.Swapped();
+        core.EndPresent();
+        assert(core.PasteDecision() == s.action && core.PasteVisible() == s.visible);
+        return s;
+    };
+
+    // The boundary is lost after a run of swapped presents
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 10; ++i)
+        {
+            const Step s = step(host, core, TakeResult::Ok);
+            assert(s.swapped && s.action == PasteAction::Produce && s.visible);
+        }
+        for (int i = 0; i < Core::kLeaveHold; ++i)
+        {
+            const Step s = step(host, core, TakeResult::NotThisFrame);
+            assert(!s.run.staged && !s.swapped && s.run.reason == Reason::NoBoundaryThisFrame);
+            assert(s.action == PasteAction::Hold && s.visible);
+        }
+        for (int i = 0; i < 5; ++i)
+        {
+            const Step s = step(host, core, TakeResult::NotThisFrame);
+            assert(s.action == PasteAction::Invalidate && !s.visible);
+        }
+        // the paste is ready in this fake, so the base is swapped again at once
+        const Step back = step(host, core, TakeResult::Ok);
+        assert(back.swapped && back.action == PasteAction::Produce && back.visible);
+
+        // a loss shorter than the hold, then back: the hold starts over after the next swapped present
+        assert(step(host, core, TakeResult::NotThisFrame).action == PasteAction::Hold);
+        assert(step(host, core, TakeResult::Ok).swapped);
+        assert(step(host, core, TakeResult::NotThisFrame).action == PasteAction::Hold);
+        assert(step(host, core, TakeResult::NotThisFrame).action == PasteAction::Hold);
+        assert(step(host, core, TakeResult::NotThisFrame).action == PasteAction::Invalidate);
+    }
+
+    // The same for every present that takes no capture
+    const auto losses = { +[](FakeHost& h) { h.source.result = TakeResult::Rejected; },
+                          +[](FakeHost& h) { h.check = Reason::SizeMismatch; },
+                          +[](FakeHost& h) { h.stage = Reason::SlotBusy; },
+                          +[](FakeHost& h) { h.compare = true; },
+                          +[](FakeHost& h) { h.fgActive = false; } };
+    for (auto loss : losses)
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 5; ++i)
+            assert(step(host, core, TakeResult::Ok).swapped);
+        loss(host);
+        const TakeResult result = host.source.result;
+        for (int i = 0; i < Core::kLeaveHold; ++i)
+        {
+            const Step s = step(host, core, result);
+            assert(!s.run.staged && s.action == PasteAction::Hold && s.visible);
+        }
+        const Step s = step(host, core, result);
+        assert(!s.run.staged && s.action == PasteAction::Invalidate && !s.visible);
+    }
+
+    // Scene HDR taking over a frame withdraws the paste at once, hold or not
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 5; ++i)
+            assert(step(host, core, TakeResult::Ok).swapped);
+        host.sceneOwns = true;
+        const Step s = step(host, core, TakeResult::Ok);
+        assert(s.run.staged && !s.swapped && s.run.reason == Reason::SceneHdrOwnsFrame);
+        assert(s.action == PasteAction::Invalidate && !s.visible);
+    }
+
+    // A session that never swapped never holds: nothing was removed from the base, there is nothing to cover
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 20; ++i)
+        {
+            const Step s = step(host, core, TakeResult::NotThisFrame);
+            assert(s.action == PasteAction::Invalidate && !s.visible);
+        }
+        host.pasteReady = false;
+        for (int i = 0; i < 20; ++i)
+        {
+            const Step s = step(host, core, TakeResult::Ok);
+            assert(s.run.reason == Reason::PasteNotReady && s.action == PasteAction::Produce && !s.visible);
+        }
+        for (int i = 0; i < 20; ++i)
+            assert(step(host, core, TakeResult::NotThisFrame).action == PasteAction::Invalidate);
+    }
+
+    // A swap the host refused (Reject) leaves nothing to hold
+    {
+        FakeHost host;
+        Core core(host);
+        core.BeginPresent(Mode::UiFree, {});
+        assert(core.DecideBase());
+        core.Reject(Reason::SizeMismatch);
+        assert(!core.Swapped() && core.PasteDecision() == PasteAction::Produce && !core.PasteVisible());
+        core.EndPresent();
+        host.source.result = TakeResult::NotThisFrame;
+        core.BeginPresent(Mode::UiFree, {});
+        assert(core.PasteDecision() == PasteAction::Invalidate && !core.PasteVisible());
+        core.EndPresent();
+    }
+
+    // A mode change or mode off forgets the hold
+    for (const Mode other : { Mode::Off, Mode::Recomposition })
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 5; ++i)
+            assert(step(host, core, TakeResult::Ok).swapped);
+        step(host, core, TakeResult::Ok, other);
+        const Step s = step(host, core, TakeResult::NotThisFrame);
+        assert(s.action == PasteAction::Invalidate && !s.visible);
+    }
+
+    // Recomposition has no producer decisions at all, hold included
+    {
+        FakeHost host;
+        Core core(host);
+        for (int i = 0; i < 5; ++i)
+        {
+            const Step s = step(host, core, TakeResult::Ok, Mode::Recomposition);
+            assert(s.action == PasteAction::None && !s.visible);
+        }
+        const Step s = step(host, core, TakeResult::NotThisFrame, Mode::Recomposition);
+        assert(s.action == PasteAction::None && !s.visible);
+    }
+}
+
+// The hold covers the first kLeaveHold presents after the last swapped one on a probing present as well: the trip is a
+// change of the base like a lost boundary. Probing presents beyond the hold are not pasted.
+void TestPasteHoldAtTrip()
+{
+    Replay replay;
+    replay.coverage = 0.95f;
+    replay.Steps(60);
+    assert(replay.runs[5].swapped && replay.runs[6].reason == Reason::MaskCoverage);
+    // presents 1..2 bootstrap (nothing to paste), 3..6 swapped, then the hold, then nothing
+    for (size_t i = 0; i < 2; ++i)
+        assert(!replay.visible[i]);
+    for (size_t i = 2; i < 6; ++i)
+        assert(replay.visible[i]);
+    for (size_t i = 6; i < 6 + Core::kLeaveHold; ++i)
+        assert(replay.visible[i] && replay.actions[i] == PasteAction::Produce);
+    for (size_t i = 6 + Core::kLeaveHold; i < replay.visible.size(); ++i)
+        assert(!replay.visible[i] && replay.actions[i] == PasteAction::Produce); // still produced: the guard needs it
+}
+
+// A short loss of the boundary no longer costs paste-not-ready presents: the ring survives the hold, so the base is swapped
+// again at once. A longer loss invalidates the ring and the way back goes through the paste-not-ready presents as before.
+void TestHoldAvoidsPasteNotReady()
+{
+    for (int lost = 1; lost <= 6; ++lost)
+    {
+        Replay replay;
+        replay.coverage = 0.10f;
+        replay.Steps(20);
+        replay.noBoundary = true;
+        replay.Steps(lost);
+        replay.noBoundary = false;
+        replay.Steps(6);
+        const size_t back = 20 + static_cast<size_t>(lost); // index of the first present after the loss
+        const bool kept = lost <= Core::kLeaveHold;
+        for (size_t i = 0; i < static_cast<size_t>(lost); ++i)
+            assert(replay.actions[20 + i] == (static_cast<int>(i) < Core::kLeaveHold ? PasteAction::Hold : PasteAction::Invalidate));
+        if (kept)
+        {
+            for (size_t i = back; i < back + 6; ++i)
+                assert(replay.runs[i].swapped && replay.runs[i].reason == Reason::None);
+        }
+        else
+        {
+            assert(replay.runs[back].reason == Reason::PasteNotReady && replay.runs[back + 1].reason == Reason::PasteNotReady);
+            for (size_t i = back + 2; i < back + 6; ++i)
+                assert(replay.runs[i].swapped && replay.runs[i].reason == Reason::None);
+        }
+    }
+}
+
+// A cutscene: the mask covers about half of the screen (under the limit), and the game shows no UI boundary for 30 presents
+// every 100 (fades, scene changes). Each run is exactly two changes of the base: out when the boundary is lost, back
+// once the paste has a completed image again. The guard never trips.
+void TestCutsceneReplay()
+{
+    Replay replay;
+    replay.coverage = 0.50f;
+    constexpr int kRuns = 10;
+    for (int n = 1; n <= 1050; ++n)
+    {
+        replay.noBoundary = (n % 100) >= 70;
+        replay.Step();
+    }
+    const Status s = replay.core.Snapshot();
+    assert(s.reasons[static_cast<size_t>(Reason::MaskCoverage)] == 0);
+    assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 30 * kRuns);
+    assert(replay.flips == 1 + 2 * kRuns); // the bootstrap swap, then two per run
+
+    // two per run, in every window around a run (runs are presents 70..99, 170..199, ...)
+    for (int k = 0; k < kRuns; ++k)
+    {
+        const size_t from = 100 * static_cast<size_t>(k) + 60;
+        const size_t to = std::min(from + 100, replay.runs.size()); // presents from+1 .. to
+        int flips = 0;
+        for (size_t i = from; i < to; ++i)
+            flips += replay.runs[i].swapped != replay.runs[i - 1].swapped;
+        assert(flips == 2);
+    }
+
+    // the first kLeaveHold presents of each run hold, the rest invalidate; the way back has the usual two presents
+    // without a completed image
+    size_t holds = 0, invalidates = 0;
+    for (size_t i = 0; i < replay.actions.size(); ++i)
+    {
+        holds += replay.actions[i] == PasteAction::Hold;
+        invalidates += replay.actions[i] == PasteAction::Invalidate;
+    }
+    assert(holds == static_cast<size_t>(Core::kLeaveHold) * kRuns);
+    assert(invalidates == static_cast<size_t>(30 - Core::kLeaveHold) * kRuns);
+    assert(s.reasons[static_cast<size_t>(Reason::PasteNotReady)] == 2 + 2 * kRuns);
+}
 } // namespace
 
 int main()
@@ -808,6 +1084,10 @@ int main()
     TestReplayNoBurst();
     TestReleaseIsSeamless();
     TestHysteresisBand();
+    TestPasteHold();
+    TestPasteHoldAtTrip();
+    TestHoldAvoidsPasteNotReady();
+    TestCutsceneReplay();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
     return 0;
 }

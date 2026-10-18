@@ -60,6 +60,12 @@ void Release();
 // pasted and never older than 250 ms. Draws nothing and counts a skip otherwise. Never stalls pacing.
 void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue);
 
+// Output-side switch, any thread; on at start. While it is off Paste() returns at once: nothing is drawn and no skip is
+// counted (a skip means a paste that was wanted and failed). Produce() and Invalidate() are not affected, so the paste
+// images and their coverage readbacks keep coming. The engine sets it once per real frame, before the frame generator's
+// outputs of that frame are presented.
+void SetPasteEnabled(bool enabled);
+
 void SetDebugTint(bool enabled);  // "Show detected UI"
 void SetSteadyTiming(bool enabled); // pick the image of one real frame behind (steadier, slightly older UI)
 PasteStatus Snapshot();

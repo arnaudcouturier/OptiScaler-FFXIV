@@ -59,11 +59,15 @@ struct IEngineHost
 //               come back through the paste).
 //   Invalidate  no usable pair this present (any early fallback), or scene HDR owns the frame: stop pasting, the normal
 //               base carries its own UI. Never chosen for a swapped base.
+//   Hold        the same as Invalidate for the first kLeaveHold presents after a swapped one: the ring stays valid, so the
+//               outputs of those presents still carry the last UI image (see PasteVisible()). Exactly one of
+//               Produce / Invalidate / Hold per ui_free present.
 enum class PasteAction : uint8_t
 {
     None, // not ui_free
     Produce,
     Invalidate,
+    Hold,
 };
 
 // Plain copy of the engine state for the menu and the tests
@@ -87,6 +91,10 @@ class Core
 {
   public:
     static constexpr uint64_t kSummaryPresents = 600;
+    // Presents after the last swapped one whose outputs still get the UI image pasted. The first output after the base
+    // goes back from the hud-less image to the normal one is generated from both, and without the paste it shows the
+    // un-faded scene and the fade blended.
+    static constexpr int kLeaveHold = 2;
 
     explicit Core(IEngineHost& host) : _host(host) {}
 
@@ -94,6 +102,12 @@ class Core
     bool BeginPresent(Mode mode, const PasteCounters& paste)
     {
         const bool probedLast = _probing;
+        // The hold follows the FINAL state of the previous present (Reject() may have undone its swap): a swapped present
+        // grants kLeaveHold presents of visible paste, every other present uses one up.
+        if (_swapped)
+            _holdLeft = kLeaveHold;
+        else if (_holdLeft > 0)
+            --_holdLeft;
         _staged = false;
         _swapped = false;
         _probing = false;
@@ -113,6 +127,7 @@ class Core
             _lastMode = mode;
             _tracker.SetOff();
             _guard.Reset();
+            _holdLeft = 0;
             _shownPhase = Phase::Off;
             _shownReason = Reason::None;
             _baseline = paste;
@@ -123,6 +138,7 @@ class Core
         if (mode == Mode::Off)
         {
             _active = false;
+            _holdLeft = 0;
             _reason = Reason::ModeOff;
             return false;
         }
@@ -287,9 +303,20 @@ class Core
     {
         if (!_active || _mode != Mode::UiFree)
             return PasteAction::None;
-        if (!_staged || _reason == Reason::SceneHdrOwnsFrame)
+        if (!_staged)
+            return _holdLeft > 0 ? PasteAction::Hold : PasteAction::Invalidate;
+        if (_reason == Reason::SceneHdrOwnsFrame)
             return PasteAction::Invalidate;
         return PasteAction::Produce;
+    }
+
+    // Whether the outputs of this present (the generated frames and the real one) get the UI image pasted over them: on a
+    // swapped base, and for the kLeaveHold presents after the last swapped one. Never when the present invalidates the
+    // ring (nothing would be left to draw, and every output would count as a skipped paste).
+    bool PasteVisible() const
+    {
+        return _active && _mode == Mode::UiFree && PasteDecision() != PasteAction::Invalidate &&
+               (_swapped || _holdLeft > 0);
     }
 
     bool Staged() const { return _staged; }
@@ -344,5 +371,6 @@ class Core
     bool _staged = false;
     bool _swapped = false;
     bool _probing = false;
+    int _holdLeft = 0;
 };
 } // namespace ext::hudless
