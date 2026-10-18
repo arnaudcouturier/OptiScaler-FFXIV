@@ -22,8 +22,10 @@ namespace
 {
 using RawDraw = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
 
-ID3D11DeviceContext* g_immediate = nullptr;
-RawDraw g_rawDraw = nullptr;
+// The hook layer clears these from the unhook thread while a draw may be in flight: atomic, so the draw sees either value whole.
+std::atomic<ID3D11DeviceContext*> g_immediate { nullptr };
+std::atomic<RawDraw> g_rawDraw { nullptr };
+std::atomic<uint32_t> g_drawThread { 0 }; // the thread that last drew on the immediate context through the dispatcher (see Detach)
 thread_local bool t_busy = false; // the feature's own full-screen draw is in flight (only used without a raw Draw)
 
 PassState g_pass;
@@ -287,6 +289,18 @@ void EvaluateFinisher(ID3D11DeviceContext* context, DrawView& v)
     v.finisherVerdict = CheckFinisher(c);
     v.finisherAccepted = v.finisherVerdict == FinisherVerdict::Accepted;
 }
+
+// Releases every GPU object of the feature. Draw thread only (or the unhook thread when it is the draw thread). After it the gate stays
+// closed until the hooks are installed again.
+void DetachNow()
+{
+    probe::Detach();
+    enhance::Detach();
+    nr::Detach(); // before the SR path: the NR module owns D3D12 objects that wait for the GPU
+    dlss::Detach();
+    g_pass.End();
+    detail::g_detach.Completed();
+}
 } // namespace
 
 void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
@@ -318,6 +332,16 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         return;
     }
 
+    // This is the thread that draws on the immediate context. A teardown that the unhook path asked for from another thread happens
+    // here, between two draws, with nothing of the feature in flight.
+    g_drawThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    if (detail::g_detach.Take())
+    {
+        DetachNow();
+        draw();
+        return;
+    }
+
     const uint64_t now = GetTickCount64();
     Maintain(now);
     probe::Update(now, context); // switches the preview probe on or off (releasing what it holds); while on, pumps the image dump and the command file
@@ -329,6 +353,24 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         return;
     }
 
+    if (!g_loggedTags)
+    {
+        g_loggedTags = true;
+        LOG_INFO("CharaView: shaders tagged so far: geometry {}, finisher {}, equipment display {}, UI {}", g_stats.tagged[0].load(),
+                 g_stats.tagged[1].load(), g_stats.tagged[2].load(), g_stats.tagged[3].load());
+    }
+
+    // Nothing of the preview renderer exists (the table holds no valid image) and no debug aid is looking: no draw can be a preview
+    // draw, so the per-draw classification (about ten COM calls) is skipped. What it would have produced for an ignored draw is kept:
+    // the counters and the one-time table line. Not kept: the diagnostics about the finisher shader drawing outside the preview
+    // outputs appear once a preview image exists instead of before. No timing was measured; this only removes work.
+    if (!ClassificationNeeded(snap.AnyValid(), probe::Live()))
+    {
+        identify::NoteQuietDraw(snap);
+        draw();
+        return;
+    }
+
     // The probe compares every draw's first resources with the preview textures before the draw is classified: the draws that put
     // a copy of the preview on screen have no role and no table render target, so Gather would drop them. It reads state only. The
     // result also tells the flood test which slots hold the preview or a copy of it.
@@ -336,13 +378,6 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
     if (probe::Live())
         scan = probe::OnDraw(context, api, snap, now);
     const bool floodThisDraw = scan.count != 0 && flood::On();
-
-    if (!g_loggedTags)
-    {
-        g_loggedTags = true;
-        LOG_INFO("CharaView: shaders tagged so far: geometry {}, finisher {}, equipment display {}, UI {}", g_stats.tagged[0].load(),
-                 g_stats.tagged[1].load(), g_stats.tagged[2].load(), g_stats.tagged[3].load());
-    }
 
     DrawView view;
     view.context = context;
@@ -414,23 +449,30 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
 
 void OnInstalled(ID3D11DeviceContext* immediate, void* rawDraw)
 {
+    detail::g_detach.Reset();
     g_rawDraw = reinterpret_cast<RawDraw>(rawDraw);
     g_immediate = immediate;
 }
 
 void OnDetached()
 {
+    if (detail::g_detach.Pending())
+        LOG_INFO("CharaView: the hooks were removed before another draw could release the preview objects; they are left to the "
+                 "device's own teardown");
     g_immediate = nullptr;
     g_rawDraw = nullptr;
 }
 
 void Detach()
 {
-    probe::Detach();
-    enhance::Detach();
-    nr::Detach(); // before the SR path: the NR module owns D3D12 objects that wait for the GPU
-    dlss::Detach();
-    g_pass.End();
+    // Only the draw thread may release the objects: on any other thread a draw can be inside them right now. A request is raised
+    // instead and the next draw performs the teardown (AroundSlow).
+    if (DecideDetach(GetCurrentThreadId() == g_drawThread.load(std::memory_order_relaxed)) == DetachAction::Now)
+    {
+        DetachNow();
+        return;
+    }
+    detail::g_detach.Request();
 }
 
 void OnShaderCreated(ID3D11PixelShader* shader, uint32_t crc, uint32_t dxbcSize)
@@ -526,9 +568,9 @@ void OnFrameEnd() { g_frameSerial.fetch_add(1, std::memory_order_relaxed); }
 
 void DrawFullscreenTriangle(ID3D11DeviceContext* context)
 {
-    if (g_rawDraw != nullptr)
+    if (const RawDraw raw = g_rawDraw.load(); raw != nullptr)
     {
-        g_rawDraw(context, 3, 0);
+        raw(context, 3, 0);
         return;
     }
     const bool previous = t_busy;

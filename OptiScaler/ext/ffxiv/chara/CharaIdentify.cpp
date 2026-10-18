@@ -241,6 +241,17 @@ void Observe(const DrawView& v)
              d >= 0 ? std::to_string(d) : std::string("none"), t >= 0 ? std::to_string(t) : std::string("none"), v.roles);
 }
 
+void NoteQuietDraw(const table::Snapshot& snapshot)
+{
+    ++g_stats.classified;
+    ++g_stats.kind[static_cast<size_t>(DrawKind::Ignore)];
+    if (!g_state.loggedFirstTable && snapshot.ready)
+    {
+        g_state.loggedFirstTable = true;
+        table::LogTable("feature on, before any preview activity", snapshot);
+    }
+}
+
 void OnFinisher(const DrawView& view)
 {
     State& s = g_state;

@@ -18,6 +18,7 @@
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDraw.h"
+#include "ext/ffxiv/chara/CharaLifecycle.h"
 #include "ext/ffxiv/chara/CharaProbe.h"
 
 namespace ext::ffxiv::chara
@@ -40,6 +41,7 @@ struct ReplayScope
 namespace detail
 {
 inline std::atomic<bool> g_inert { false }; // latched when the game build or the table accessor cannot be verified
+inline DetachGate g_detach;                 // the unhook path asks, the draw thread tears down (see CharaLifecycle.h)
 } // namespace detail
 
 inline bool DlssWanted() { return ext::Cfg().ffxiv.chara.previewDlss.value_or_default(); }
@@ -50,8 +52,13 @@ inline bool AaWanted() { return ext::Cfg().ffxiv.chara.previewAA.value_or_defaul
 // so the probe can release what it holds.
 inline bool Wanted()
 {
-    if (detail::g_inert.load(std::memory_order_relaxed))
-        return false;
+    // A pending teardown keeps the gate open so the draw thread reaches the dispatcher and performs it; a finished one closes it.
+    switch (GateOverrideFor(detail::g_inert.load(std::memory_order_relaxed), detail::g_detach.Pending(), detail::g_detach.Detached()))
+    {
+    case GateOverride::Off: return false;
+    case GateOverride::On: return true;
+    case GateOverride::None: break;
+    }
     const auto& c = ext::Cfg().ffxiv.chara;
     // PreviewNR keeps the gate open while it holds models after the key was switched off, so maintenance can free them.
     // PreviewDLSS keeps the gate open in the same way while preview slots hold images or NGX features (see dlss::HoldsGpuObjects).
@@ -77,7 +84,10 @@ template <class F> inline void Around(ID3D11DeviceContext* context, DrawApi api,
 // The hook layer attached: `immediate` is the game's immediate context, `rawDraw` the original (unhooked) Draw.
 void OnInstalled(ID3D11DeviceContext* immediate, void* rawDraw);
 void OnDetached();
-// The hooks are about to be removed: release every GPU object (device calls are still valid).
+// The hooks are about to be removed (device calls are still valid): release every GPU object. Called from the unhook path on any
+// thread. On the draw thread the objects are released at once; on another thread this only raises a request and the draw thread
+// releases them at its next draw (nothing of the feature is synchronised, so a release under a draw in flight would race). If no draw
+// follows before the hooks are gone, the objects are left to the device's own teardown.
 void Detach();
 
 // CreatePixelShader succeeded; `crc` is the CRC-32 of the DXBC. Call after the other shader tags were written.

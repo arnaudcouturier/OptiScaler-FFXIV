@@ -121,6 +121,12 @@ inline bool GeometryAccepted(const DrawFacts& f)
            f.viewportMatchesTarget;
 }
 
+// The dispatcher's cheapest gate, evaluated before any state of the draw is read (about ten COM calls): a draw can only be a preview
+// draw when the preview renderer's table holds a valid image. A prepass needs a depth candidate, a G-buffer draw an entry 8/13, a
+// finisher an output entry, a consumer a preview image among its shader resources; with an empty table none of them exists, so every
+// draw classifies as Ignore (tested exhaustively). The debug aids (probe, flood) look at draws without the table and keep the full path.
+constexpr bool ClassificationNeeded(bool tableHasValidEntry, bool debugAidsLive) { return tableHasValidEntry || debugAidsLive; }
+
 // Classification of one draw. Everything not listed is Ignore.
 inline DrawKind Classify(const DrawFacts& f)
 {

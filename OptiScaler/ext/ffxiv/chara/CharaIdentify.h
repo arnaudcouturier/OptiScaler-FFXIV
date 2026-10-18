@@ -18,6 +18,10 @@ namespace ext::ffxiv::chara::identify
 // One classified draw (view.kind is set). Called before the draw runs.
 void Observe(const DrawView& view);
 
+// A draw the dispatcher did not classify because the preview renderer's table holds no valid image (no draw can be a preview draw
+// then): counted as an ignored draw, and the table is logged once, exactly as Observe does for an ignored draw.
+void NoteQuietDraw(const table::Snapshot& snapshot);
+
 // The outcome of the finisher check (view.finisherVerdict / view.finisherCheck): counted per reason, and the values the check
 // read are logged once for the first rejection of each reason.
 void OnFinisher(const DrawView& view);

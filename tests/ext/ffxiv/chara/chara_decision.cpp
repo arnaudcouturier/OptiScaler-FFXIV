@@ -669,6 +669,49 @@ void TestShapeOnlyRules()
     CHECK(!IsShapeOnlyFinisher(f)); // no pass active
 }
 
+// The dispatcher skips the classification (about ten COM calls per draw) while the preview renderer's table holds no valid image. That
+// is only safe if every draw classifies as Ignore then, whatever else it looks like: checked over every combination of the facts that do
+// not name a table entry.
+void TestEmptyTableClassifiesNothing()
+{
+    CHECK(ClassificationNeeded(true, false));
+    CHECK(ClassificationNeeded(false, true)); // a debug aid looks at draws without the table
+    CHECK(ClassificationNeeded(true, true));
+    CHECK(!ClassificationNeeded(false, false));
+
+    size_t combos = 0;
+    for (unsigned bits = 0; bits < (1u << 12); ++bits)
+    {
+        for (const uint32_t cb : { 0u, kCameraBlockBytes, 0x10000u })
+        {
+            for (const uint32_t samples : { 1u, 4u })
+            {
+                DrawFacts f; // every table entry field stays "none": the table is empty
+                f.immediate = (bits & 1u) != 0;
+                f.reentrant = (bits & 2u) != 0;
+                f.psGeometry = (bits & 4u) != 0;
+                f.psFinisher = (bits & 8u) != 0;
+                f.psEquipDisplay = (bits & 16u) != 0;
+                f.psUi = (bits & 32u) != 0;
+                f.rtv0Present = (bits & 64u) != 0;
+                f.dsvPresent = (bits & 128u) != 0;
+                f.passActive = (bits & 256u) != 0;
+                f.finisherTagKnown = (bits & 512u) != 0;
+                f.anySrvIsEntry8 = (bits & 1024u) != 0;
+                f.viewportMatchesTarget = (bits & 2048u) != 0;
+                f.vsCb0Bytes = cb;
+                f.samples = samples;
+                f.targetWidth = f.passWidth = 576;
+                f.targetHeight = f.passHeight = 960;
+                f.targetFormat = kFormatB8G8R8A8Unorm;
+                CHECK(Classify(f) == DrawKind::Ignore);
+                ++combos;
+            }
+        }
+    }
+    CHECK(combos == 4096u * 6u);
+}
+
 void TestNames()
 {
     CHECK(std::string(DrawKindName(DrawKind::Prepass)) == "prepass");
@@ -697,6 +740,7 @@ int main()
     TestGeometryFollowsPass();
     TestShapeOnlyRules();
     TestPassSurvivesShapeOnlyDraw();
+    TestEmptyTableClassifiesNothing();
     TestNames();
     return TEST_RESULT("chara_decision");
 }
