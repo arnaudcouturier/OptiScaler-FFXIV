@@ -123,6 +123,7 @@ struct SlotGpu
     ComPtr<ID3D11Query> query;
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Handle* handle = nullptr;
+    uint32_t ngxGeneration = 0; // the NGX instance (g_ngxGeneration) that created params and handle
     bool failureLogged = false;
 };
 
@@ -312,7 +313,9 @@ void ReleaseSlotGpu(int index)
 {
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     // NGX shutdown can flip the proxy state under us: only call into the driver while it is initialised.
-    const bool ngxUsable = !State::Instance().isShuttingDown && NVNGXProxy::IsDx11Inited();
+    const bool ngxUsable = DecideFeatureUse(g.handle != nullptr || g.params != nullptr, g.ngxGeneration,
+                                            g_ngxGeneration.load(std::memory_order_acquire), NVNGXProxy::IsDx11Inited(),
+                                            State::Instance().isShuttingDown, true) == FeatureUse::ReleaseThroughDriver;
     if (g.handle != nullptr && ngxUsable)
     {
         if (auto release = NVNGXProxy::D3D11_ReleaseFeature(); release != nullptr)
@@ -402,6 +405,7 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     }
     g.params = params;
     g.handle = handle;
+    g.ngxGeneration = g_ngxGeneration.load(std::memory_order_acquire);
     g_slots.Slot(index).hasFeature = true;
     LOG_INFO("CreateFeature CharaView DLSS: isolated feature {}x{} -> {}x{}, native alpha retained; {}", w, h, w * ngx::kOutputScale,
              h * ngx::kOutputScale, PointerSet(context));
@@ -541,6 +545,24 @@ void RunSlot(int index, const DrawView& view)
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     SlotState& s = g_slots.Slot(index);
     const uint32_t w = g_pass.width, h = g_pass.height;
+
+    // NGX was shut down and initialised again since this slot's feature was created: its objects belong to the old instance.
+    if (s.hasFeature && DecideFeatureUse(g.handle != nullptr || g.params != nullptr, g.ngxGeneration,
+                                         g_ngxGeneration.load(std::memory_order_acquire), NVNGXProxy::IsDx11Inited(),
+                                         State::Instance().isShuttingDown, false) == FeatureUse::Forget)
+    {
+        g.handle = nullptr;
+        g.params = nullptr;
+        s.hasFeature = false;
+        g_slots.ClearEvaluated(index);
+        UpdateCounts();
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_INFO("CharaView DLSS: NGX was re-initialised; preview features are recreated");
+        }
+    }
 
     guides::Settings settings;
     settings.jitterX = g_pass.jitter.x;

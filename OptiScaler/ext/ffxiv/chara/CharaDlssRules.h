@@ -46,6 +46,27 @@ enum class FinishVerdict : uint8_t
 
 constexpr bool IsWaiting(FinishVerdict v) { return v >= FinishVerdict::WaitingForMotion; }
 
+// What may be done with the NGX objects (feature handle, parameter object) a slot holds. They belong to the NGX instance that
+// created them: once NGX was shut down and initialised again (the generation changed) they must neither be used nor released
+// through the driver, because the new instance does not know them. They are dropped without a driver call (the shutdown
+// reclaimed them) and the next finish creates a new feature.
+enum class FeatureUse : uint8_t
+{
+    Keep,                 // nothing to do: no NGX objects, or they are in use
+    ReleaseThroughDriver, // objects of the live NGX instance: release them with the driver
+    Forget,               // objects of an earlier (or ending) NGX instance: drop the pointers, no driver call
+};
+
+constexpr FeatureUse DecideFeatureUse(bool hasObjects, uint32_t slotGeneration, uint32_t currentGeneration, bool ngxInitialised,
+                                      bool ngxShuttingDown, bool releasing)
+{
+    if (!hasObjects)
+        return FeatureUse::Keep;
+    if (slotGeneration != currentGeneration || !ngxInitialised || ngxShuttingDown)
+        return FeatureUse::Forget;
+    return releasing ? FeatureUse::ReleaseThroughDriver : FeatureUse::Keep;
+}
+
 constexpr const char* FinishVerdictName(FinishVerdict v)
 {
     switch (v)

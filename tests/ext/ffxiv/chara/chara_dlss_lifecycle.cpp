@@ -184,10 +184,31 @@ void TestJitterFeed()
     }
     CHECK(distinct == static_cast<int>(kJitterPhases));
 }
+
+// NGX objects of an earlier NGX instance are dropped without a driver call, never used and never released through the driver:
+// the new instance does not know them.
+void TestNgxGeneration()
+{
+    // (hasObjects, slotGeneration, currentGeneration, ngxInitialised, shuttingDown, releasing)
+    CHECK(DecideFeatureUse(false, 1, 1, true, false, true) == FeatureUse::Keep);   // nothing held
+    CHECK(DecideFeatureUse(false, 1, 5, false, true, true) == FeatureUse::Keep);   // nothing held, whatever NGX does
+    CHECK(DecideFeatureUse(true, 3, 3, true, false, false) == FeatureUse::Keep);   // in use, same instance
+    CHECK(DecideFeatureUse(true, 3, 3, true, false, true) == FeatureUse::ReleaseThroughDriver);
+
+    // NGX shut down and initialised again: the generation moved on
+    CHECK(DecideFeatureUse(true, 3, 5, true, false, false) == FeatureUse::Forget);
+    CHECK(DecideFeatureUse(true, 3, 5, true, false, true) == FeatureUse::Forget);  // the release must not reach the new instance
+
+    // NGX is down or going down right now
+    CHECK(DecideFeatureUse(true, 3, 3, false, false, true) == FeatureUse::Forget);
+    CHECK(DecideFeatureUse(true, 3, 3, true, true, true) == FeatureUse::Forget);
+    CHECK(DecideFeatureUse(true, 3, 3, false, false, false) == FeatureUse::Forget);
+}
 } // namespace
 
 int main()
 {
+    TestNgxGeneration();
     TestFinishRules();
     TestDepthReadable();
     TestLifecycle();

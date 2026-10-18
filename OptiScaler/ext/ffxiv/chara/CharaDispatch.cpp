@@ -74,7 +74,7 @@ void Maintain(uint64_t now)
 
 void CountDeferred(ID3D11DeviceContext* context, DrawApi api)
 {
-    if (!AaWanted())
+    if (!AaWanted() || g_stats.deferredSeen.load(std::memory_order_relaxed) != 0) // the menu only needs to know whether any was seen
         return;
     ComPtr<ID3D11PixelShader> ps;
     context->PSGetShader(&ps, nullptr, nullptr);
