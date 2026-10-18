@@ -60,12 +60,20 @@ struct Shared
     }
 };
 
+// One stream per preview image, in one of two modes (CharaNrRules.h, StreamShape): bring-up (the native image and synthetic guides, native
+// size) or production (the super-resolution output at twice the render size, copies of the preview's depth and motion at the render size).
+// The mode is part of the shape the stream was built for; a change of mode rebuilds the stream after the settle time. Everything else is
+// shared between the modes: the fences, the command lists and allocators, the compute pass recorder, the model creation and its linger,
+// the stream table and its release rules.
 struct Stream
 {
-    uint32_t width = 0, height = 0;
-    bool late = false;            // the hand-off variant, decided when the stream is created (a config change rebuilds the stream)
+    uint32_t width = 0, height = 0;       // the colour image and the model's input size
+    uint32_t guideWidth = 0, guideHeight = 0; // the depth and motion images (production: the render size, bring-up: same as the image)
+    bool production = false;
+    bool late = false;            // the hand-off variant, decided when the stream is created (a config change rebuilds the stream); never in production
     Shared colour[2];             // the late variant uses both (the run before may still read one while the copy writes the other)
     Shared result[2], depth, motion;
+    uint64_t serial[2] = {};      // identifies the result in result[i] (a module-wide counter, never reused): the debug tint is made once per serial
     ComPtr<ID3D12Resource> proxy, original, modelOut;
     void* feature = nullptr;
     bool featureReady = false;
@@ -123,9 +131,12 @@ struct Module
     uint64_t lastMaintain = 0;
 
     std::atomic<bool> holds { false };
-    std::atomic<uint64_t> runs { 0 }, fallbacks { 0 };
+    std::atomic<uint64_t> runs { 0 }, fallbacks { 0 };                     // both modes
+    std::atomic<uint64_t> productionRuns { 0 }, productionFallbacks { 0 }; // the production entry alone (a subset of the two above)
+    std::atomic<uint64_t> serialCounter { 0 };
     std::atomic<uint32_t> streamCount { 0 }, liveCount { 0 };
     std::atomic<uint64_t> lastGpuUs { 0 }, lastCpuUs { 0 };
+    std::atomic<uint64_t> lastProductionGpuUs { 0 }, lastProductionCpuUs { 0 };
     std::atomic<uint64_t> vramAddedMb { 0 };
 };
 
@@ -327,17 +338,27 @@ bool CreatePrivate(uint32_t w, uint32_t h, ComPtr<ID3D12Resource>& out)
                                                         nullptr, IID_PPV_ARGS(&out)));
 }
 
-bool CreateStreamGpu(Stream& s, uint32_t w, uint32_t h, DXGI_FORMAT nativeFormat, bool late)
+// The objects of a stream for `shape`. Bring-up: the colour image has the format of the native image (`nativeFormat`) and the guides have the
+// image's size. Production: the colour image is the format of the super-resolution output (RGBA16F, filled by a copy), the guides have the
+// render size; the late variant does not exist (the alpha pass needs this render's colour), so there is one colour image.
+bool CreateStreamGpu(Stream& s, const StreamShape& shape, DXGI_FORMAT nativeFormat)
 {
+    const uint32_t w = shape.width, h = shape.height;
+    const uint32_t gw = shape.production ? shape.guideWidth : w, gh = shape.production ? shape.guideHeight : h;
+    const bool late = shape.late && !shape.production;
+    const DXGI_FORMAT colourFormat = shape.production ? kResultFormat : nativeFormat;
     s.width = w;
     s.height = h;
+    s.guideWidth = gw;
+    s.guideHeight = gh;
+    s.production = shape.production;
     s.late = late; // decided here, for the life of the stream
-    if (!CreateShared("CharaNr colour", w, h, nativeFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[0]) ||
-        (late && !CreateShared("CharaNr colour 1", w, h, nativeFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[1])) ||
+    if (!CreateShared("CharaNr colour", w, h, colourFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[0]) ||
+        (late && !CreateShared("CharaNr colour 1", w, h, colourFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[1])) ||
         !CreateShared("CharaNr result 0", w, h, kResultFormat, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, true, false, s.result[0]) ||
         !CreateShared("CharaNr result 1", w, h, kResultFormat, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, true, false, s.result[1]) ||
-        !CreateShared("CharaNr depth", w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, false, true, s.depth) ||
-        !CreateShared("CharaNr motion", w, h, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, false, false, s.motion) ||
+        !CreateShared("CharaNr depth", gw, gh, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, false, true, s.depth) ||
+        !CreateShared("CharaNr motion", gw, gh, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, false, false, s.motion) ||
         !CreatePrivate(w, h, s.proxy) || !CreatePrivate(w, h, s.original) || !CreatePrivate(w, h, s.modelOut))
         return false;
     s.gpuObjects = true;
@@ -698,14 +719,27 @@ struct HandoffOps
     StreamState& st;
     ID3D11DeviceContext* ctx;
     ID3D11Texture2D* native;
+    const ProductionRequest* production; // null: bring-up
     FramePlan plan;
     int buffer = 0;
     double cpuMs = 0.0;
 
     // The late variant overwrites a colour image the run before last read: the D3D11 queue first waits for that run (done fence).
     bool WaitColourFree(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), v)); }
-    // The extra copy of the bring-up: native image -> shareable colour image.
-    void CopyColour() { ctx->CopyResource(s.colour[plan.colour == Tex::Colour1 ? 1 : 0].t11(), native); }
+    // The copies into the shareable images. Bring-up: the native image -> the colour image. Production: the super-resolution output ->
+    // the colour image, and the slot's depth and motion -> the guide images (sizes and formats were checked by the caller). All of them
+    // are issued before the ready signal, so the D3D12 queue starts after every one of them.
+    void CopyColour()
+    {
+        if (production != nullptr)
+        {
+            ctx->CopyResource(s.colour[0].t11(), production->colour);
+            ctx->CopyResource(s.depth.t11(), production->depth);
+            ctx->CopyResource(s.motion.t11(), production->motion);
+            return;
+        }
+        ctx->CopyResource(s.colour[plan.colour == Tex::Colour1 ? 1 : 0].t11(), native);
+    }
     bool Signal11(uint64_t v) { return SUCCEEDED(m.ctx4->Signal(m.readyFence11.Get(), v)); }
     bool Wait12(uint64_t v) { return SUCCEEDED(m.queue->Wait(m.readyFence12.Get(), v)); }
     // Records the list, executes it and queues the done signal. `done` is the value the signal takes (0: the list did not run).
@@ -772,8 +806,8 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     s.createDone = value;
     s.created = start;
     const uint64_t after = VramUsedBytes();
-    LOG_INFO("CharaView NR: model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB -> {} MB",
-             index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
+    LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB -> {} MB",
+             s.production ? "production" : "bring-up", index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
     return RunOutcome::Preparing;
 }
 
@@ -810,7 +844,7 @@ RunOutcome Fallback(RunOutcome why)
     return why;
 }
 
-RunOutcome Run(int index, Stream& s, const RunRequest& req)
+RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequest* production)
 {
     Module& m = M();
     ReplayScope own; // the copy and clear below go through the hooked context: they are not the game's work
@@ -820,7 +854,11 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     FramePlan plan;
     plan.width = s.width;
     plan.height = s.height;
-    plan.initGuides = !s.guidesInit;
+    // Bring-up: the motion image is zeroed on the first run and the depth is cleared to far (below). Production: both hold the preview's
+    // own guides, copied in by the hand-off, and must never be overwritten.
+    plan.initGuides = production == nullptr && !s.guidesInit;
+    if (production != nullptr)
+        plan.guides = production->guides;
     const int resultBuffer = ResultBufferForRun(st.runs);
     plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                 // the result image this run writes
     plan.colour = (late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
@@ -842,7 +880,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     }
 
     const int buffer = resultBuffer;
-    HandoffOps ops { m, s, st, ctx, req.native, plan, buffer };
+    HandoffOps ops { m, s, st, ctx, req.native, production, plan, buffer };
     const HandoffOutcome out = RunFrame(ops, m.ready, late, s.doneValue[buffer]);
     if (!out.ok)
     {
@@ -855,26 +893,34 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req)
     }
 
     s.doneValue[buffer] = out.done;
+    s.serial[buffer] = m.serialCounter.fetch_add(1, std::memory_order_relaxed) + 1; // a new result: its tint (if any) is stale
     s.guidesInit = true;
     st.everRan = true;
     st.lastRun = req.now;
-    st.ranAttempt = st.attempts; // this bring-up call produced the result that is there now
+    st.ranAttempt = st.attempts; // this call produced the result that is there now
     ++st.runs;
     st.chain = reset != ResetReason::None ? 1 : st.chain + 1; // the late variant shows the run before the newest only inside one chain
     m.runs.fetch_add(1, std::memory_order_relaxed);
     m.lastCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     m.cpuCost.Add(ops.cpuMs);
+    if (production != nullptr)
+    {
+        m.productionRuns.fetch_add(1, std::memory_order_relaxed);
+        m.lastProductionCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
+    }
     if (m.timer != nullptr)
     {
         if (const auto gpuMs = m.timer->ReadGpuTime(m.queue); gpuMs.has_value())
         {
             m.lastGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
+            if (production != nullptr)
+                m.lastProductionGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
             m.gpuCost.Add(*gpuMs);
         }
     }
     if (st.runs == 1)
-        LOG_INFO("CharaView NR: stream {} first run {}x{} ({}, history {})", index, s.width, s.height, late ? "late variant" : "same frame",
-                 ResetReasonText(reset));
+        LOG_INFO("CharaView NR: stream {} first {} run {}x{} (guides {}x{}; {}, history {})", index, production != nullptr ? "production" : "bring-up",
+                 s.width, s.height, s.guideWidth, s.guideHeight, late ? "late variant" : "same frame", ResetReasonText(reset));
     LogCostIfDue(req.now);
     return RunOutcome::Ran;
 }
@@ -886,11 +932,26 @@ bool Available() { return static_cast<Availability>(M().availabilitySnapshot.loa
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
 
-static RunOutcome RunBringUpCore(const RunRequest& req)
+// The images a production run copies from, as the D3D11 side reports them.
+static ImageInfo InfoOf(ID3D11Texture2D* texture)
+{
+    D3D11_TEXTURE2D_DESC d {};
+    if (texture != nullptr)
+        texture->GetDesc(&d);
+    return ImageInfo { d.Width, d.Height, static_cast<uint32_t>(d.Format) };
+}
+
+// Both modes run through this one function; `production` is null for the bring-up. The stream table, the availability and creation steps,
+// the settle-and-rebuild rule, the model creation and the readiness wait are common; the mode decides the shape the stream is built for
+// and what the hand-off copies (see Stream).
+static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
     if (req.context == nullptr || req.native == nullptr || req.width == 0 || req.height == 0)
+        return Fallback(RunOutcome::Skipped);
+    if (production != nullptr && (production->colour == nullptr || production->depth == nullptr || production->motion == nullptr ||
+                                  production->guides.width == 0 || production->guides.height == 0))
         return Fallback(RunOutcome::Skipped);
 
     // Every call that reaches a preview that has a stream is an attempt. The result in the stream is current only while the newest
@@ -927,7 +988,13 @@ static RunOutcome RunBringUpCore(const RunRequest& req)
     wanted.height = req.height;
     wanted.preset = tuning.preset;
     wanted.style = tuning.style;
-    wanted.late = Late();
+    wanted.late = production == nullptr && Late(); // PreviewNRLate applies to the bring-up only: the alpha pass needs this render's colour
+    wanted.production = production != nullptr;
+    if (production != nullptr)
+    {
+        wanted.guideWidth = production->guides.width;
+        wanted.guideHeight = production->guides.height;
+    }
     m.table.At(index).lastLive = req.now;
     switch (DecideRebuild(m.table.At(index), wanted, req.now))
     {
@@ -938,7 +1005,8 @@ static RunOutcome RunBringUpCore(const RunRequest& req)
         if (!GpuDone(m.table.At(index).lastSubmitted))
             return Fallback(RunOutcome::Skipped);
         const StreamShape old = m.table.At(index).built;
-        LOG_INFO("CharaView NR: stream {} rebuilt: {}x{} -> {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index, old.width, old.height,
+        LOG_INFO("CharaView NR: stream {} rebuilt: {} {}x{} -> {} {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index,
+                 old.production ? "production" : "bring-up", old.width, old.height, wanted.production ? "production" : "bring-up",
                  wanted.width, wanted.height, old.preset, wanted.preset, old.style, wanted.style, old.late ? "late" : "same frame",
                  wanted.late ? "late" : "same frame");
         ReleaseStreamObjects(m.streams[index], true);
@@ -956,13 +1024,22 @@ static RunOutcome RunBringUpCore(const RunRequest& req)
     StreamState& st = m.table.At(index);
     UpdateHolds();
 
+    // A production run copies three images into the stream: their sizes and formats are the stream's, or the copy is not allowed. They are
+    // fixed for a slot's life (a slot rebuild changes the sizes and so the wanted shape), so this only trips on a programming error.
+    if (production != nullptr &&
+        !ProductionInputsFit(wanted, InfoOf(production->colour), InfoOf(production->depth), InfoOf(production->motion)))
+    {
+        Latch("the production inputs (super-resolution output, depth, motion) do not match the stream's sizes and formats");
+        return Fallback(RunOutcome::Failed);
+    }
     if (!s.gpuObjects)
     {
         D3D11_TEXTURE2D_DESC nd {};
         req.native->GetDesc(&nd);
-        if (nd.Format != DXGI_FORMAT_B8G8R8A8_UNORM || !CreateStreamGpu(s, req.width, req.height, nd.Format, wanted.late))
+        const bool formatOk = production != nullptr || nd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        if (!formatOk || !CreateStreamGpu(s, wanted, nd.Format))
         {
-            Latch(nd.Format != DXGI_FORMAT_B8G8R8A8_UNORM ? "the preview image is not B8G8R8A8_UNORM" : "the shared images could not be created");
+            Latch(!formatOk ? "the preview image is not B8G8R8A8_UNORM" : "the shared images could not be created");
             return Fallback(RunOutcome::Failed);
         }
         st.built = wanted;
@@ -978,27 +1055,50 @@ static RunOutcome RunBringUpCore(const RunRequest& req)
         NoteFeatureReady(s, index);
         return Fallback(RunOutcome::Preparing); // the first evaluation is on the next render
     }
-    const RunOutcome outcome = Run(index, s, req);
+    const RunOutcome outcome = Run(index, s, req, production);
     UpdateHolds();
     return outcome == RunOutcome::Ran ? outcome : Fallback(outcome);
 }
 
-// One bring-up call. A call that ends without a run breaks the stream's chain (the late variant must not show a result from before this
-// render; the attempt itself was counted when the call reached the stream, see RunBringUpCore).
+// One call of either entry. A call that ends without a run breaks the stream's chain (the late variant must not show a result from before
+// this render; the attempt itself was counted when the call reached the stream, see RunCore).
 static RunOutcome RunBringUpImpl(const RunRequest& req)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
-    const RunOutcome outcome = RunBringUpCore(req);
+    const RunOutcome outcome = RunCore(req, nullptr);
     NoteBringUpEnded(m.table, reinterpret_cast<uintptr_t>(req.native), outcome == RunOutcome::Ran);
     return outcome;
 }
 
-RunOutcome RunProduction(const RunRequest&)
+// The production entry: NR on the super-resolution output of this render. On a run, the result image is handed back with its own
+// reference (the alpha pass samples it right away, on this thread; the inline D3D11 wait was queued by the hand-off). Any other outcome
+// returns no view and the caller keeps the super-resolution output.
+static ProductionResult RunProductionImpl(const ProductionRequest& request)
 {
-    // Not implemented yet. Planned position: between the super-resolution evaluate and the alpha pass (CharaDlss.cpp RunSlot), with the
-    // SR output as the colour image and the real depth and motion guides, writing the result image that the alpha pass reads.
-    return RunOutcome::NotImplemented;
+    Module& m = M();
+    std::lock_guard lock(m.mutex);
+    ProductionResult result;
+    const uintptr_t key = reinterpret_cast<uintptr_t>(request.base.native);
+    result.outcome = RunCore(request.base, &request);
+    NoteBringUpEnded(m.table, key, result.outcome == RunOutcome::Ran);
+    if (result.outcome != RunOutcome::Ran)
+    {
+        m.productionFallbacks.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
+    const int index = m.table.Find(key);
+    if (index == kNoStream || !m.streams[index].production || m.table.At(index).runs == 0)
+    {
+        result.outcome = RunOutcome::Failed; // cannot happen: a run just finished on this stream
+        m.productionFallbacks.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
+    const Stream& s = m.streams[index];
+    const int buffer = ResultBufferForRun(m.table.At(index).runs - 1); // the run that just finished wrote this image
+    result.view = s.result[buffer].srv;
+    result.serial = s.serial[buffer];
+    return result;
 }
 
 static void InvalidateImpl(uintptr_t key)
@@ -1026,37 +1126,43 @@ static bool WaitForResult(Module& m, const Stream& s, int buffer)
     return false;
 }
 
-static ComPtr<ID3D11ShaderResourceView> ResultForImpl(uintptr_t key, uint64_t now)
+static ResultView ResultForImpl(uintptr_t key, uint64_t now)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
     if (!m.inited || m.availability != Availability::Available)
-        return nullptr;
+        return {};
     const int index = m.table.Find(key);
     if (index == kNoStream)
-        return nullptr;
+        return {};
     const StreamState& st = m.table.At(index);
-    // Only the result of the newest bring-up call, and only while it is recent: a skipped, preparing or failed render has no result.
-    if (!st.ResultIsCurrent() || now < st.lastRun || now - st.lastRun > kLiveMs)
-        return nullptr;
+    // Only the result of the newest call, only a bring-up result (a production stream holds the raw output of the super-resolution image,
+    // which only the alpha pass of that path reads), and only while it is recent: a skipped, preparing or failed render has no result.
+    if (!ServesBringUpConsumer(ResultKindOf(st)) || now < st.lastRun || now - st.lastRun > kLiveMs)
+        return {};
     Stream& s = m.streams[index];
     const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
     if (buffer < 0 || !WaitForResult(m, s, buffer))
-        return nullptr;
-    return s.result[buffer].srv; // a reference of its own: the view outlives the lock (see CharaNr.h)
+        return {};
+    ResultView view;
+    view.view = s.result[buffer].srv; // a reference of its own: the view outlives the lock (see CharaNr.h)
+    view.serial = s.serial[buffer];
+    return view;
 }
 
-static ComPtr<ID3D11Texture2D> ResultTextureImpl(uint64_t now, bool waitForResult)
+static ComPtr<ID3D11Texture2D> ResultTextureImpl(uint64_t now, bool waitForResult, ResultKind* kind)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
+    if (kind != nullptr)
+        *kind = ResultKind::None;
     if (!m.inited || m.availability != Availability::Available)
         return nullptr;
     int best = kNoStream;
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
         const StreamState& st = m.table.At(static_cast<int>(i));
-        if (!st.Used() || !st.ResultIsCurrent() || now < st.lastRun || now - st.lastRun > kLiveMs)
+        if (!st.Used() || ResultKindOf(st) == ResultKind::None || now < st.lastRun || now - st.lastRun > kLiveMs)
             continue;
         if (best == kNoStream || st.lastRun > m.table.At(best).lastRun)
             best = static_cast<int>(i);
@@ -1068,6 +1174,8 @@ static ComPtr<ID3D11Texture2D> ResultTextureImpl(uint64_t now, bool waitForResul
     const int buffer = ConsumerBuffer(s.late, st.runs, st.chain);
     if (buffer < 0 || (waitForResult && !WaitForResult(m, s, buffer)))
         return nullptr;
+    if (kind != nullptr)
+        *kind = ResultKindOf(st);
     return s.result[buffer].t11(); // ComPtr: takes its own reference
 }
 
@@ -1174,6 +1282,10 @@ static Status GetStatusImpl()
     s.fallbacks = m.fallbacks.load(std::memory_order_relaxed);
     s.lastGpuMs = static_cast<double>(m.lastGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.lastCpuMs = static_cast<double>(m.lastCpuUs.load(std::memory_order_relaxed)) / 1000.0;
+    s.productionRuns = m.productionRuns.load(std::memory_order_relaxed);
+    s.productionFallbacks = m.productionFallbacks.load(std::memory_order_relaxed);
+    s.productionGpuMs = static_cast<double>(m.lastProductionGpuUs.load(std::memory_order_relaxed)) / 1000.0;
+    s.productionCpuMs = static_cast<double>(m.lastProductionCpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.videoMemoryMb = m.vramAddedMb.load(std::memory_order_relaxed);
     s.late = Late();
     return s;
@@ -1193,13 +1305,26 @@ RunOutcome RunBringUp(const RunRequest& req)
                    });
 }
 
-ComPtr<ID3D11ShaderResourceView> ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
+ProductionResult RunProduction(const ProductionRequest& request)
+{
+    return Guarded([&] { return RunProductionImpl(request); },
+                   []
+                   {
+                       Latch("an unexpected exception stopped the production run");
+                       M().productionFallbacks.fetch_add(1, std::memory_order_relaxed);
+                       ProductionResult failed;
+                       failed.outcome = Fallback(RunOutcome::Failed);
+                       return failed;
+                   });
+}
+
+ResultView ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)
 {
     return Guarded([&] { return ResultForImpl(key, now); },
-                   []() -> ComPtr<ID3D11ShaderResourceView>
+                   []() -> ResultView
                    {
                        Latch("an unexpected exception while looking up a result");
-                       return nullptr;
+                       return {};
                    });
 }
 
@@ -1208,9 +1333,9 @@ void Invalidate(uintptr_t key)
     Guarded([&] { InvalidateImpl(key); }, [] { Latch("an unexpected exception while withdrawing a result"); });
 }
 
-ComPtr<ID3D11Texture2D> ResultTexture(uint64_t now, bool waitForResult)
+ComPtr<ID3D11Texture2D> ResultTexture(uint64_t now, bool waitForResult, ResultKind* kind)
 {
-    return Guarded([&] { return ResultTextureImpl(now, waitForResult); },
+    return Guarded([&] { return ResultTextureImpl(now, waitForResult, kind); },
                    []() -> ComPtr<ID3D11Texture2D>
                    {
                        Latch("an unexpected exception while looking up the result texture");

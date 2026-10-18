@@ -830,7 +830,7 @@ void RunNrProduction(const DrawView& view, uint32_t w, uint32_t h)
     request.width = w;
     request.height = h;
     request.now = view.now;
-    (void)nr::RunProduction(request);
+    (void)request; // wired in the next step
 }
 
 // True when `key` is one of the preview renderer's output textures (table entries 0..7): only those can be replaced by an NR result.
@@ -1011,7 +1011,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         // when the stream has a current one and the SR result is not there. The flood test wins (the dispatcher applies it to a draw this
         // function leaves alone). The result is held with its own reference until the draw has been issued.
         if (nr::WantNrResult(nrOn, floodOn, srReady, previewOutput))
-            nrHold[i] = nr::ResultFor(context, key, view.now);
+            nrHold[i] = nr::ResultFor(context, key, view.now).view;
         switch (nr::ChooseConsumerSource(floodOn, false, srReady, nrHold[i] != nullptr))
         {
         case nr::ConsumerSource::SrResult: // SR wins over NR
