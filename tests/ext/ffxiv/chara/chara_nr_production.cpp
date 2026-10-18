@@ -1,7 +1,8 @@
 // Preview NR, production entry (NR on the super-resolution output): the pure parts. What this proves: the model call of a production
 // run (output-size colour, render-size guides, the upscaler's depth convention and motion scale), the recipe of a production run (no
 // zero-motion pass, the same states as the bring-up), the stream shape (a mode change rebuilds the stream, a bring-up consumer is never
-// given a production result), the checks on the images a production run copies, and the mode-specific decisions of the dispatcher side.
+// given a production result) and the checks on the images a production run copies. The decisions of one render (production vs bring-up, the
+// alpha input, the withdrawal) are tested in chara_nr_render.
 // What it cannot prove (the game session does): the D3D12 state tracking of the copied inputs, the model's behaviour for guides smaller
 // than the colour, the image quality on alpha-masked characters.
 #include "check.h"
@@ -254,39 +255,6 @@ void TestInputsFit()
     CHECK(!ProductionInputsFit(noGuides, colour, depth, motion));
 }
 
-// The module-side decisions of one render with PreviewDLSS and PreviewNR both on, in the order the dispatcher takes them.
-void TestRenderDecisions()
-{
-    PlumbingFacts f;
-    f.srWanted = f.nrWanted = true;
-    f.srGateOpen = true;
-    f.nrHoldsResources = true;
-
-    // render where SR evaluated and production produced: no bring-up, no withdrawal, the consumer gets the production image
-    const bool srEvaluated = true, windowShown = true;
-    const bool production = RunProductionNow(f, srEvaluated, windowShown);
-    CHECK(production);
-    CHECK(!RunBringUpNow(f, true, windowShown, /*srInCharge=*/SrInCharge(true, false, false))); // the SR path is in charge: no bring-up, no cost
-    CHECK(!InvalidateNow(f, NrProducedForRender(false, production)));
-    CHECK(ChooseConsumerSource(false, production, srEvaluated, false) == ConsumerSource::ProductionResult);
-    CHECK(AlphaTintFor(true, ChooseAlphaInput(production)) == TintKind::Nr);
-
-    // production fell back (preparing the model, no free list, a failure): the SR image is used, as without NR (fail open)
-    const bool fellBack = false;
-    CHECK(InvalidateNow(f, NrProducedForRender(false, fellBack))); // the older NR result of the image is withdrawn
-    CHECK(ChooseConsumerSource(false, fellBack, srEvaluated, false) == ConsumerSource::SrResult);
-    CHECK(AlphaTintFor(true, ChooseAlphaInput(fellBack)) == TintKind::Sr);
-    CHECK(AlphaTintFor(false, ChooseAlphaInput(fellBack)) == TintKind::None);
-
-    // SR did not evaluate this render: no production. While the SR path is in charge of the preview the render keeps the native image (no
-    // bring-up, as with PreviewDLSS alone); the bring-up runs only where the SR path does not serve the preview (latched, a failed slot, too large)
-    CHECK(!RunProductionNow(f, false, windowShown));
-    CHECK(!RunBringUpNow(f, true, windowShown, SrInCharge(true, false, false)));
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, true, false)));  // the slot failed
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, false, true)));  // too large for the SR path
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(false, false, false))); // the SR path is not usable
-    CHECK(ChooseConsumerSource(false, false, false, true) == ConsumerSource::NrResult);
-}
 } // namespace
 
 int main()
@@ -295,6 +263,5 @@ int main()
     TestRecipe();
     TestStreamModes();
     TestInputsFit();
-    TestRenderDecisions();
     return TEST_RESULT("chara_nr_production");
 }

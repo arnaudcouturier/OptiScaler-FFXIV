@@ -51,16 +51,7 @@ struct RunRequest
     uint64_t now = 0;
 };
 
-// Failed is enumerator 0 on purpose: Guarded answers with a value-initialised outcome when even a failure handler throws, and that value must
-// never read as "a result image exists".
-enum class RunOutcome : uint8_t
-{
-    Failed,       // this call failed; preview NR is latched off
-    Ran,          // a result image exists for this render (drawn instead of the native one by ResultFor)
-    Preparing,    // the model is being built; the native image stays for now
-    NotAvailable, // preview NR is off, latched or its prerequisites are missing
-    Skipped,      // no stream or list was free this time; nothing changed
-};
+// RunOutcome (what an entry point answers) is declared in CharaNrRules.h, next to the pure rules that decide on it.
 
 // Config switch [FFXIV] PreviewNR.
 bool Wanted();

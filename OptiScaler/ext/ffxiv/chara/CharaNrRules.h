@@ -215,6 +215,19 @@ struct StreamState
     }
 };
 
+// What an entry point of the module answers for one call (CharaNr.h: RunBringUp, RunProduction). It lives here, with the pure rules that
+// decide on it (CharaNrPlumbing.h), so those rules are tested with the real enumerators.
+// Failed is enumerator 0 on purpose: Guarded answers with a value-initialised outcome when even a failure handler throws, and that value must
+// never read as "a result image exists".
+enum class RunOutcome : uint8_t
+{
+    Failed,       // this call failed; preview NR is latched off
+    Ran,          // a result image exists for this render (drawn instead of the native one by ResultFor)
+    Preparing,    // the model is being built; the native image stays for now
+    NotAvailable, // preview NR is off, latched or its prerequisites are missing
+    Skipped,      // no stream or list was free this time; nothing changed
+};
+
 // What kind of result a stream holds right now.
 enum class ResultKind : uint8_t
 {
@@ -772,7 +785,7 @@ struct CostAccumulator
 // The module's entry points run inside the game's Draw hook and the bridge's callbacks; an exception that leaves one of them would
 // leave the game's call. Every entry runs its body through Guarded: an exception is stopped here, `onThrow` (which latches the module
 // with one fixed log line and returns the fallback value) answers instead, and nothing is thrown out. `onThrow` must not format paths or
-// call anything that can throw; if it does anyway, a value-initialised result is returned (for RunOutcome that is Failed, see CharaNr.h).
+// call anything that can throw; if it does anyway, a value-initialised result is returned (for RunOutcome that is Failed, see RunOutcome above).
 template <class Body, class OnThrow> auto Guarded(Body&& body, OnThrow&& onThrow) noexcept -> decltype(body())
 {
     try

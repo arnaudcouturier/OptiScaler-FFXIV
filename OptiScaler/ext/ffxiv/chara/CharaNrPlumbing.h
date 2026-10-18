@@ -261,4 +261,81 @@ class CauseLog
   private:
     uint32_t _seen = 0;
 };
+
+// ---- One render of a preview image ---------------------------------------------------------------------------------------------------
+// Whether a UI draw sampled the preview image `texture` within the last `windowMs` (the liveness signal of both NR entries). One rule for the
+// slot step and for the finisher step; a render without a known texture is never shown.
+inline bool ConsumerRecentFor(const ConsumerSeen& seen, const void* texture, uint64_t now, uint64_t windowMs)
+{
+    return texture != nullptr && seen.Recent(reinterpret_cast<uintptr_t>(texture), now, windowMs);
+}
+
+// The glue takes the decisions of a render at two moments with effects between them, so the functions below own the ORDER and the effects are
+// passed in as callables (the real ones in CharaDlss.cpp, recording fakes in the tests):
+//   DecideSlotRender     inside RunSlot, after the SR evaluate succeeded: the production entry is offered or not, the alpha pass gets the NR
+//                        output or the SR output, and the slot learns whether its composed picture came from NR.
+//   DecideFinisherRender at the finisher, after the slot step: the bring-up step, "NR produced a result for this render", and whether the
+//                        older NR result of the image is withdrawn.
+// Nothing here reads a global or a device. What stays in the glue is the choice of the facts it passes (a fresh snapshot in the slot step, the
+// snapshot taken at the top of the dispatcher call in the finisher step) and the one flag that carries `composedFromNr` from the first step to
+// the second.
+
+// What the module said for the production entry: its outcome and whether it handed back an image.
+struct ProductionAnswer
+{
+    RunOutcome outcome = RunOutcome::Failed; // Failed also stands for "the call threw"
+    bool hasView = false;
+};
+
+// An image of the NR output exists only for Ran with a view; every other answer leaves the SR output as it is (fail open).
+constexpr bool ProductionProduced(const ProductionAnswer& answer) { return answer.outcome == RunOutcome::Ran && answer.hasView; }
+
+struct SlotRender
+{
+    bool offered = false;       // the production entry was run for this render
+    bool produced = false;      // it returned an NR image
+    AlphaInput alphaInput = AlphaInput::SrOutput;
+    TintKind tint = TintKind::None;
+    bool alphaOk = false;       // the alpha pass succeeded
+    bool composedFromNr = false; // the slot's composed picture was made from the NR image (needs the alpha pass to have succeeded)
+};
+
+// `runProduction() -> ProductionAnswer` runs the production entry; it is called only when RunProductionNow allows it, and before the alpha
+// pass. `alphaPass(AlphaInput, TintKind) -> bool` runs the alpha pass with the colour and tint decided here; it runs once, in every case.
+template <class RunProduction, class AlphaPass>
+SlotRender DecideSlotRender(const PlumbingFacts& facts, bool consumerRecent, bool tintOn, RunProduction&& runProduction, AlphaPass&& alphaPass)
+{
+    SlotRender r;
+    r.offered = RunProductionNow(facts, true, consumerRecent); // the SR evaluate succeeded: this step is only reached after it
+    if (r.offered)
+        r.produced = ProductionProduced(runProduction());
+    r.alphaInput = ChooseAlphaInput(r.produced);
+    r.tint = AlphaTintFor(tintOn, r.alphaInput);
+    r.alphaOk = alphaPass(r.alphaInput, r.tint);
+    r.composedFromNr = r.alphaOk && r.alphaInput == AlphaInput::NrOutput;
+    return r;
+}
+
+struct FinisherRender
+{
+    bool runBringUp = false;           // the bring-up entry was run
+    bool bringUpProduced = false;      // and returned a result
+    bool nrProducedForRender = false;  // either entry produced a result for this render
+    bool invalidate = false;           // the older NR result of the image is withdrawn
+};
+
+// `productionComposed`: the slot step's `composedFromNr` (false when the slot step did not run for this render). `runBringUp() -> bool` runs the
+// bring-up entry (true: it produced a result); it is called only when RunBringUpNow allows it.
+template <class RunBringUp>
+FinisherRender DecideFinisherRender(const PlumbingFacts& facts, bool finisherAccepted, bool consumerRecent, bool srInCharge, bool productionComposed,
+                                    RunBringUp&& runBringUp)
+{
+    FinisherRender r;
+    r.runBringUp = RunBringUpNow(facts, finisherAccepted, consumerRecent, srInCharge);
+    if (r.runBringUp)
+        r.bringUpProduced = runBringUp();
+    r.nrProducedForRender = NrProducedForRender(r.bringUpProduced, productionComposed);
+    r.invalidate = InvalidateNow(facts, r.nrProducedForRender);
+    return r;
+}
 } // namespace ext::ffxiv::chara::nr
