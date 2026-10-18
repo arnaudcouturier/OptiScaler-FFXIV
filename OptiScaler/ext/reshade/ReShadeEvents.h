@@ -24,6 +24,10 @@ void EnsureReportStarted();
 // state), independent of the probe. ReShade must already have accepted the registration. Idempotent; false = failed.
 bool InstallBoundaryTracking();
 
+// Window mode (ext/window): subscribes the set_fullscreen_state event, independent of the probe and of ReShadePresets. ReShade
+// must already have accepted the registration. Idempotent; false = failed.
+bool InstallWindowEvent();
+
 // A new live backend (own Inspect() state, separate from the probe's) for the live boundary. Heap-allocated, never destroyed.
 probe::IBackend* NewLiveBackend();
 

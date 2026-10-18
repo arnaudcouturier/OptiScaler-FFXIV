@@ -31,6 +31,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 | XeFG / XeMFG | untested | [XeFG](#xefg-and-xemfg) |
 | HUD-less frame generation | opt-in; SDR with DLSS-G 2x-4x tested, HDR untested | [HUD-less](#hud-less-frame-generation) |
 | ReShade built-in add-on | tested as part of HUD-less, ReShade 6.8.0 only | [HUD-less](#hud-less-frame-generation) |
+| Window mode (log probe; border fix and deferred mode switch follow) | opt-in, off by default; untested in game | [Window mode](#window-mode) |
 | FFXIV native quality, render geometry, colour scaling | tested | [FFXIV module](#ffxiv-module) |
 | FFXIV lighting scan | runs inside the tested NR path | [FFXIV module](#ffxiv-module) |
 | FFXIV companion / nameplates | tested | [FFXIV module](#ffxiv-module) |
@@ -166,6 +167,22 @@ All HDR code is under `OptiScaler/ext/hdr/`. The four parts share one set of sea
 **Config.** `[HudLess] ReShadePresets` (`auto`, `on`, `off`), `ReShadeProbe` (diagnostics).
 
 **Menu.** `reshade_addon_probe` (tab Compatibility, diagnostics).
+
+## Window mode
+
+**What it is for.** FFXIV runs borderless when `[XeFG] ForceBorderless = true` (a setting the fork does not turn on by itself). In that mode upstream's hook swallows the game's request to change the window mode and restyles the window itself. Two problems come from that, both seen in logs: after leaving the pseudo fullscreen the window keeps a thin edge (the client area becomes 3836x2156 inside a 3840x2160 window), and one window-mode switch made while DLSS-G was running stalled Streamline's frame pacer, which logged "Potential dead-lock in Present - please make sure DLSS-G is disabled when making any modifications to the window" and ended with the GPU device removed.
+
+**Zero-code advice.** In the game's display settings choose "Borderless Window", and restart the game after changing the mode. Do not switch to "Fullscreen" while the game runs. Without any switch the window is clean and nothing here is needed.
+
+**Status.** Opt-in, off by default, untested in game. This commit-by-commit branch builds the feature in steps; the section below lists what is in the current state.
+
+**Config.** `[Window] Mode`: `off` (default: nothing runs and nothing is logged), `probe` (log only), `on` (probe plus the corrections once they exist). Applies after a game restart; any other value counts as `off`. With `off` the module costs one atomic load and one branch at each of its four entry points (bridge resize, Present entry, Present exit, ReShade event), and the ReShade event is not even subscribed.
+
+**Probe.** With `probe` or `on`, one line starting with `Window:` is written (a) after every successful resize of the bridge swapchain and (b) for every window-mode call (`IDXGISwapChain::SetFullscreenState`) that ReShade sees, before the call. Fields: the window's style and extended style, window and client rectangles, frame generation state (`active`, `paused`, `off`, `none`) and whether DLSS-G is confirmed off, `SCExclusiveFullscreen` (and its value at the previous resize), `ForceBorderless`, the window's owner thread id, the current thread id and the thread that presents, and for the call: its argument, the swapchain ReShade passed and the bridge swapchain side by side, the verdict and the value the handler would return. The probe never changes anything. The ReShade event needs ReShade (the log line `Window: ReShade set_fullscreen_state event registered` at start-up says whether it was subscribed).
+
+**Code.** `ext/window/`: `WindowRules.h` (pure rules), `WindowProbe.h` (the line format), `WindowController.h` (decisions, driven through an `Env` interface so tests use fakes), `WindowWin32.cpp` (window reads), `WindowModule.cpp` (live `Env`, entry points), `WindowConfig.h`, `WindowMode.h`, `WindowSeams.h`.
+
+**Seams.** None in upstream files. The module is called from the existing fork seam bodies `dx11bridge::OnResizeDone` and `dx11bridge::PresentScope` (`ext/hdr/BridgeHdr.cpp`) and from a ReShade add-on event (`ext/reshade/ReShadeEvents.cpp`).
 
 ## FFXIV module
 
