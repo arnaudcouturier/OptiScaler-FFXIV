@@ -25,6 +25,10 @@ void OnFinisher(const DrawView& view);
 // A draw with the finisher shader that renders outside the preview renderer's outputs (not a preview draw).
 void OnOffTableFinisher(const DrawView& view);
 
+// A draw that only has the shape of the finisher while the tagged finisher shader is known (see DrawFacts::finisherTagKnown): counted
+// and logged, it neither counts as a finisher nor ends the pass.
+void OnShapeOnlyFinisher(const DrawView& view);
+
 // A depth-only draw (no render target) into a depth texture of the table, whether or not it satisfies the prepass rule: one
 // line per distinct combination of depth entry, vertex-shader cb0 size, viewport match, sample count and draw API (at most 12).
 void ObserveDepthOnly(const DrawView& view);

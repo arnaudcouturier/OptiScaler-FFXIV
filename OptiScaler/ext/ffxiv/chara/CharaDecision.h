@@ -70,6 +70,12 @@ struct DrawFacts
     // outputs 0..7 at the pass size in B8G8R8A8, and any bound shader resource is table entry 8.
     bool anySrvIsEntry8 = false;
 
+    // True once a pixel shader with the finisher tag has been created in this session. The shape test above exists for a
+    // finisher shader created before the hooks (which therefore never carried the tag); when the tagged shader is known, a
+    // draw that only has the finisher's shape is some other pass of the preview renderer (the second in-game test saw one
+    // that writes the same output with a depth test) and must not count as a finisher.
+    bool finisherTagKnown = false;
+
     // Pass
     bool passActive = false;
     uint32_t passWidth = 0;
@@ -88,12 +94,23 @@ inline bool IsOutputEntry(int entry) { return entry >= 0 && entry <= 7; }
 // must neither count as a rejected finisher nor end a pass that is running.
 inline bool IsOffTableFinisher(const DrawFacts& f) { return f.psFinisher && !IsOutputEntry(f.rtv0Entry); }
 
+// An untagged draw that looks like the finisher: a pass is active, the target is an output at the pass size in B8G8R8A8 and
+// the draw samples G-buffer entry 8.
+inline bool HasFinisherShape(const DrawFacts& f)
+{
+    return !f.psFinisher && f.passActive && f.rtv0Present && f.rtv0Entry >= 0 && f.rtv0Entry <= 7 &&
+           f.targetWidth == f.passWidth && f.targetHeight == f.passHeight && f.targetFormat == kFormatB8G8R8A8Unorm &&
+           f.anySrvIsEntry8;
+}
+
+// A draw that has the finisher's shape but is not treated as one because the tagged finisher shader is known.
+inline bool IsShapeOnlyFinisher(const DrawFacts& f) { return f.finisherTagKnown && HasFinisherShape(f); }
+
 inline bool IsFinisher(const DrawFacts& f)
 {
     if (f.psFinisher)
         return IsOutputEntry(f.rtv0Entry);
-    return f.passActive && f.rtv0Present && f.rtv0Entry >= 0 && f.rtv0Entry <= 7 && f.targetWidth == f.passWidth &&
-           f.targetHeight == f.passHeight && f.targetFormat == kFormatB8G8R8A8Unorm && f.anySrvIsEntry8;
+    return !f.finisherTagKnown && HasFinisherShape(f);
 }
 
 // True when a G-buffer draw (or a prepass) is one the module can follow: one sample, at most 4096 pixels each way, and
@@ -219,5 +236,12 @@ struct PassState
     }
 
     void End() { active = false; }
+
+    // The outcome of a finisher draw: a finisher that fails the check drops the pass, an accepted one leaves it as it is.
+    void OnFinisher(FinisherVerdict verdict)
+    {
+        if (verdict != FinisherVerdict::Accepted)
+            End();
+    }
 };
 } // namespace ext::ffxiv::chara

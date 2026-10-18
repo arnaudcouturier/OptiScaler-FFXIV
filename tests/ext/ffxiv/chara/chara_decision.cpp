@@ -431,6 +431,135 @@ void TestPassState()
     CHECK(pass.counter == 2 && pass.width == 288 && pass.height == 480);
 }
 
+// The second in-game test: no pass ever reached the finisher. An untagged draw that writes the same output with a depth test
+// ended the pass before the tagged finisher arrived.
+void TestPassStartObservedSignatures()
+{
+    // The preview renderer of that build has no depth prepass: the first G-buffer draw starts the pass.
+    PassState pass;
+    auto opaque = Gbuffer(8); // target entry 8, depth entry 18
+    CHECK(Classify(opaque) == DrawKind::GBuffer);
+    CHECK(pass.OnGeometry(opaque) && pass.active && pass.counter == 1 && pass.width == 576 && pass.height == 960);
+
+    // the transparent G-buffer: a depth view that is not a table entry
+    PassState other;
+    auto transparent = Gbuffer(13);
+    transparent.dsvEntry = kEntryNone;
+    CHECK(transparent.dsvPresent);
+    CHECK(Classify(transparent) == DrawKind::GBuffer);
+    CHECK(other.OnGeometry(transparent) && other.active);
+
+    // a draw into a G-buffer entry without any depth view is not followed
+    transparent.dsvPresent = false;
+    CHECK(Classify(transparent) == DrawKind::Ignore);
+}
+
+DrawFacts ObservedShapeOnlyDraw(bool tagKnown, const PassState& pass)
+{
+    // CRC C52B0FE9: no tag, writes output entry 0 at the pass size in B8G8R8A8 with a depth view, samples the G-buffer
+    DrawFacts f;
+    f.rtv0Present = true;
+    f.rtv0Entry = 0;
+    f.dsvPresent = true;
+    f.dsvEntry = 18;
+    f.samples = 1;
+    f.targetWidth = 576;
+    f.targetHeight = 960;
+    f.targetFormat = kFormatB8G8R8A8Unorm;
+    f.anySrvIsEntry8 = true;
+    f.passActive = pass.active;
+    f.passWidth = pass.width;
+    f.passHeight = pass.height;
+    f.finisherTagKnown = tagKnown;
+    return f;
+}
+
+DrawFacts ObservedTaggedFinisher(const PassState& pass)
+{
+    // CRC FDB2F4FC: tagged, draws into entry 0, no depth view
+    DrawFacts f = Finisher();
+    f.passActive = pass.active;
+    f.passWidth = pass.width;
+    f.passHeight = pass.height;
+    f.finisherTagKnown = true;
+    return f;
+}
+
+FinisherCheck ObservedCheck(const PassState& pass, bool depthTest)
+{
+    FinisherCheck c;
+    c.rtv0Present = true;
+    c.depthOrStencilTest = depthTest;
+    c.passActive = pass.active;
+    c.targetWidth = c.viewportWidth = 576;
+    c.targetHeight = c.viewportHeight = 960;
+    c.passWidth = pass.width;
+    c.passHeight = pass.height;
+    c.targetFormat = kFormatB8G8R8A8Unorm;
+    c.viewportX = c.viewportY = 0.5f;
+    return c;
+}
+
+// One render as the second in-game log shows it, step by step as the dispatcher runs it.
+FinisherVerdict RunRender(PassState& pass, bool tagKnown)
+{
+    pass = PassState {};
+    CHECK(pass.OnGeometry(Gbuffer(8)));
+    CHECK(!pass.OnGeometry(Gbuffer(13)));
+
+    // the draw that only has the finisher's shape, with a depth test
+    const DrawFacts shape = ObservedShapeOnlyDraw(tagKnown, pass);
+    if (Classify(shape) == DrawKind::Finisher)
+        pass.OnFinisher(CheckFinisher(ObservedCheck(pass, true)));
+
+    const DrawFacts tagged = ObservedTaggedFinisher(pass);
+    CHECK(Classify(tagged) == DrawKind::Finisher);
+    const FinisherVerdict verdict = CheckFinisher(ObservedCheck(pass, false));
+    pass.OnFinisher(verdict);
+    return verdict;
+}
+
+void TestPassSurvivesShapeOnlyDraw()
+{
+    PassState pass;
+    // the tagged finisher is known: the shape-only draw is not a finisher, so the pass reaches the real one
+    const auto shape = ObservedShapeOnlyDraw(true, [] { PassState p; p.OnGeometry(Gbuffer(8)); return p; }());
+    CHECK(HasFinisherShape(shape) && IsShapeOnlyFinisher(shape) && !IsFinisher(shape));
+    CHECK(Classify(shape) == DrawKind::Ignore);
+    CHECK(RunRender(pass, true) == FinisherVerdict::Accepted);
+    CHECK(pass.active); // an accepted finisher does not end the pass
+
+    // before any tagged finisher shader exists (a finisher created before the hooks), the shape still counts: the old behaviour
+    const auto early = ObservedShapeOnlyDraw(false, [] { PassState p; p.OnGeometry(Gbuffer(8)); return p; }());
+    CHECK(IsFinisher(early) && !IsShapeOnlyFinisher(early) && Classify(early) == DrawKind::Finisher);
+    CHECK(RunRender(pass, false) == FinisherVerdict::NoPass); // the bug of the second in-game test, kept only where it is meant
+    CHECK(!pass.active);
+
+    // a tagged finisher that fails the check still ends the pass
+    PassState rejected;
+    rejected.OnGeometry(Gbuffer(8));
+    rejected.OnFinisher(CheckFinisher(ObservedCheck(rejected, true)));
+    CHECK(!rejected.active);
+}
+
+void TestShapeOnlyRules()
+{
+    PassState active;
+    active.OnGeometry(Gbuffer(8));
+    auto f = ObservedShapeOnlyDraw(true, active);
+    CHECK(IsShapeOnlyFinisher(f));
+    f.finisherTagKnown = false;
+    CHECK(!IsShapeOnlyFinisher(f) && IsFinisher(f));
+    f = ObservedShapeOnlyDraw(true, active);
+    f.psFinisher = true; // a tagged shader is never "shape only"
+    CHECK(!IsShapeOnlyFinisher(f) && IsFinisher(f));
+    f = ObservedShapeOnlyDraw(true, active);
+    f.anySrvIsEntry8 = false;
+    CHECK(!IsShapeOnlyFinisher(f));
+    f = ObservedShapeOnlyDraw(true, PassState {});
+    CHECK(!IsShapeOnlyFinisher(f)); // no pass active
+}
+
 void TestNames()
 {
     CHECK(std::string(DrawKindName(DrawKind::Prepass)) == "prepass");
@@ -453,6 +582,9 @@ int main()
     TestFinisherCheck();
     TestFinisherVerdict();
     TestPassState();
+    TestPassStartObservedSignatures();
+    TestShapeOnlyRules();
+    TestPassSurvivesShapeOnlyDraw();
     TestNames();
     return TEST_RESULT("chara_decision");
 }

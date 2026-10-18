@@ -30,6 +30,10 @@ struct State
     uint64_t burstFinisherRejected = 0;
     std::array<uint64_t, kFinisherVerdicts> burstVerdict {};
     uint64_t burstOffTable = 0;
+    uint64_t burstShapeOnly = 0;
+    uint64_t burstPasses = 0;
+    uint32_t shapeOnlyLines = 0;
+    std::vector<uint64_t> shapeOnlyKeys;
     uint64_t burstDepthOnly = 0;
     std::array<bool, kFinisherVerdicts> verdictLogged {};
     uint32_t offTableLines = 0;
@@ -99,15 +103,15 @@ std::string DownstreamCounts()
 void LogEndOfBurst(uint64_t now)
 {
     State& s = g_state;
-    LOG_INFO("CharaView: preview render activity ended after {} ms: prepass {}, GBuffer {}, finisher {} (accepted {}, rejected {}), "
+    LOG_INFO("CharaView: preview render activity ended after {} ms: passes started {}, prepass {}, GBuffer {}, finisher {} (accepted {}, rejected {}), "
              "consumer {}",
-             now >= s.activityStart ? now - s.activityStart : 0, s.burst[static_cast<size_t>(DrawKind::Prepass)],
+             now >= s.activityStart ? now - s.activityStart : 0, s.burstPasses, s.burst[static_cast<size_t>(DrawKind::Prepass)],
              s.burst[static_cast<size_t>(DrawKind::GBuffer)], s.burst[static_cast<size_t>(DrawKind::Finisher)],
              s.burstFinisherOk, s.burstFinisherRejected, s.burst[static_cast<size_t>(DrawKind::Consumer)]);
-    LOG_INFO("CharaView: that burst: finisher rejections by reason: {}; finisher-shader draws outside the preview outputs {}; "
+    LOG_INFO("CharaView: that burst: finisher rejections by reason: {}; finisher-shader draws outside the preview outputs {}; draws with only the finisher shape (not counted) {}; "
              "depth-only draws into a table depth texture {}; shaders tagged so far: geometry {}, finisher {}, equipment display {}, "
              "UI {}; accepted finishers so far: {}",
-             ReasonCounts(s.burstVerdict), s.burstOffTable, s.burstDepthOnly, g_stats.tagged[0].load(), g_stats.tagged[1].load(),
+             ReasonCounts(s.burstVerdict), s.burstOffTable, s.burstShapeOnly, s.burstDepthOnly, g_stats.tagged[0].load(), g_stats.tagged[1].load(),
              g_stats.tagged[2].load(), g_stats.tagged[3].load(), DownstreamCounts());
     s.inActivity = false;
 }
@@ -165,6 +169,7 @@ void Observe(const DrawView& v)
         s.burstFinisherOk = s.burstFinisherRejected = 0;
         s.burstVerdict = {};
         s.burstOffTable = s.burstDepthOnly = 0;
+        s.burstShapeOnly = s.burstPasses = 0;
         ++s.bursts;
         LOG_INFO("CharaView: preview render activity started (burst {})", s.bursts);
         if (!s.loggedActiveTable && v.table != nullptr)
@@ -175,6 +180,8 @@ void Observe(const DrawView& v)
     }
     s.lastActivity = v.now;
     ++s.burst[static_cast<size_t>(v.kind)];
+    if (v.passStarted)
+        ++s.burstPasses;
 
     // One line per new signature.
     const uint64_t sig = Signature(v);
@@ -242,6 +249,23 @@ void OnOffTableFinisher(const DrawView& view)
              "format {}, table entry {}, via {}, {}",
              view.facts.targetWidth, view.facts.targetHeight, view.facts.rtvFormat, view.facts.rtv0Entry, DrawApiName(view.api),
              ShaderText(view.pixelShader));
+}
+
+void OnShapeOnlyFinisher(const DrawView& view)
+{
+    State& s = g_state;
+    ++g_stats.finisherShapeOnly;
+    ++s.burstShapeOnly;
+    if (s.shapeOnlyLines >= kMaxOffTableLines)
+        return;
+    const ShaderInfo info = view.pixelShader != nullptr ? GetShaderInfo(view.pixelShader) : ShaderInfo {};
+    const uint64_t key = info.known ? Mix(Mix(5, info.crc), info.size) : Mix(6, reinterpret_cast<uintptr_t>(view.pixelShader));
+    if (!Remember(s.shapeOnlyKeys, key))
+        return;
+    ++s.shapeOnlyLines;
+    LOG_INFO("CharaView: a draw has the shape of the finisher (output at the pass size, samples the G-buffer) but its shader is not the "
+             "tagged finisher; it is not treated as a finisher and does not end the pass: table entry {}, depth entry {}, via {}, {}",
+             view.facts.rtv0Entry, view.facts.dsvEntry, DrawApiName(view.api), ShaderText(view.pixelShader));
 }
 
 void ObserveDepthOnly(const DrawView& view)

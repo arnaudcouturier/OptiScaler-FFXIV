@@ -139,6 +139,7 @@ bool Gather(ID3D11DeviceContext* context, uint64_t now, const table::Snapshot& s
     f.psFinisher = (v.roles & RoleFinisher) != 0;
     f.psEquipDisplay = (v.roles & RoleEquipDisplay) != 0;
     f.psUi = (v.roles & RoleUi) != 0;
+    f.finisherTagKnown = g_stats.tagged[1].load(std::memory_order_relaxed) != 0;
     f.passActive = g_pass.active;
     f.passWidth = g_pass.width;
     f.passHeight = g_pass.height;
@@ -343,6 +344,8 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         EvaluateFinisher(context, view);
     else if (view.kind == DrawKind::Ignore && IsOffTableFinisher(view.facts))
         identify::OnOffTableFinisher(view);
+    else if (IsShapeOnlyFinisher(view.facts))
+        identify::OnShapeOnlyFinisher(view);
     if (view.facts.rtv0Entry >= 0 || view.facts.srvEntry >= 0)
         identify::ObserveShader(view);
     identify::Observe(view);
@@ -367,8 +370,7 @@ void AroundSlow(ID3D11DeviceContext* context, DrawApi api, DrawCall draw)
         identify::OnFinisher(view);
         if (view.finisherAccepted && route != Route::Dlss)
             ++(dlssWanted ? g_stats.finisherNoDlss : g_stats.finisherNotWanted); // the check passed, the DLSS path did not see it
-        if (!view.finisherAccepted)
-            g_pass.End();
+        g_pass.OnFinisher(view.finisherVerdict);
     }
 }
 

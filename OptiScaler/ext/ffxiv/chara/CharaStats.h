@@ -18,6 +18,7 @@ struct Stats
     std::atomic<uint64_t> finisherAccepted { 0 };
     std::atomic<uint64_t> finisherRejected { 0 };
     std::array<std::atomic<uint64_t>, kFinisherVerdicts> finisherVerdict {}; // indexed by FinisherVerdict (the check itself)
+    std::atomic<uint64_t> finisherShapeOnly { 0 };  // draws with only the finisher shape while the tagged finisher shader is known
     std::atomic<uint64_t> finisherOffTable { 0 };   // finisher shader drawing outside the preview renderer's outputs (not a preview draw)
     std::atomic<uint64_t> finisherNotWanted { 0 };  // accepted finisher while PreviewDLSS is off (nothing further is expected)
     std::atomic<uint64_t> finisherNoDlss { 0 };     // accepted finisher while PreviewDLSS is on but the path is not available
