@@ -675,7 +675,7 @@ bool EnsureInit(ID3D11DeviceContext* context, bool latchSrOnFailure = true)
     return true;
 }
 
-ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h); // preview NR production entry, defined below
+ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset); // preview NR production entry, defined below
 
 void RunSlot(int index, const DrawView& view)
 {
@@ -760,7 +760,7 @@ void RunSlot(int index, const DrawView& view)
     const bool consumerRecent = view.rtvTexture != nullptr && g_consumed.Recent(previewKey, view.now, kNrLiveWindowMs);
     ComPtr<ID3D11ShaderResourceView> nrOutput;
     if (nr::RunProductionNow(PlumbingNow(), true, consumerRecent))
-        nrOutput = RunNrProduction(view, g, s, w, h);
+        nrOutput = RunNrProduction(view, g, s, w, h, in.reset);
     nr::AlphaInput alphaInput = nr::ChooseAlphaInput(nrOutput != nullptr);
 
     const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
@@ -884,7 +884,7 @@ const char* ProductionCauseText(nr::RunOutcome outcome)
     }
 }
 
-ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h)
+ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
 {
     const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
     if (view.rtvTexture == nullptr || outW > kNrMaxSide || outH > kNrMaxSide)
@@ -907,6 +907,7 @@ ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, cons
     request.depth = g.depth.texture.Get();
     request.motion = g.motion.texture.Get();
     request.guides = nr::MakeProductionGuides(w, h, s.reversedZ); // what the SR feature of this slot was created with
+    request.superResolutionReset = srReset; // the SR evaluate of this render reset its history: so does the NR model
     nr::ProductionResult result = nr::RunProduction(request);
     if (result.outcome == nr::RunOutcome::Ran && result.view != nullptr)
         return std::move(result.view);
@@ -920,9 +921,9 @@ ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, cons
 
 // The second line of defence behind the module's own boundary (nr::RunProduction never throws): the request set-up and the log text
 // around it cannot leave the game's Draw hook either. An exception here latches preview NR; the SR output is used.
-ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h)
+ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
 {
-    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, w, h); },
+    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, w, h, srReset); },
                        []() -> ComPtr<ID3D11ShaderResourceView>
                        {
                            if (nr::SharedLatches().LatchNr())

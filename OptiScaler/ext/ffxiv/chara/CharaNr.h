@@ -85,6 +85,7 @@ struct ProductionRequest
     ID3D11Texture2D* depth = nullptr;      // the slot's depth: R32_FLOAT, guides.width x guides.height
     ID3D11Texture2D* motion = nullptr;     // the slot's motion: R16G16_FLOAT, guides.width x guides.height
     GuideSetup guides;                     // render size, depth convention and motion scale of the super-resolution evaluate
+    bool superResolutionReset = false;     // the super-resolution evaluate of this render reset its history: the NR history restarts too
 };
 
 struct ProductionResult

@@ -199,6 +199,12 @@ void TestReset()
     CHECK(DecideReset(true, 1000, 1250) == ResetReason::None);   // exactly the gap
     CHECK(DecideReset(true, 1000, 1251) == ResetReason::Gap);    // window closed and reopened
     CHECK(DecideReset(true, 5000, 1000) == ResetReason::Gap);    // clock went backwards
+    // the super-resolution evaluate of the same render reset its history (a skipped, rejected or stale render before it): the NR history restarts
+    CHECK(DecideReset(true, 1000, 1100, true) == ResetReason::SuperResolution);
+    CHECK(DecideReset(true, 1000, 1100, false) == ResetReason::None);
+    CHECK(DecideReset(false, 0, 1000, true) == ResetReason::FirstRun); // the older reasons keep their meaning and order
+    CHECK(DecideReset(true, 1000, 1251, true) == ResetReason::Gap);
+    CHECK(std::string(ResetReasonText(ResetReason::SuperResolution)) == "after a super-resolution reset");
 }
 
 struct FakeOps

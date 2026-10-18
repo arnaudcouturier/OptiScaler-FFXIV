@@ -863,7 +863,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     const int resultBuffer = ResultBufferForRun(st.runs);
     plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                 // the result image this run writes
     plan.colour = (late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
-    const ResetReason reset = DecideReset(st.everRan, st.lastRun, req.now);
+    const ResetReason reset = DecideReset(st.everRan, st.lastRun, req.now, production != nullptr && production->superResolutionReset);
     plan.reset = reset != ResetReason::None;
     plan.settings = SettingsFromConfig();
     plan.tuning = TuningFromBackend();

@@ -413,14 +413,19 @@ enum class ResetReason : uint8_t
     None,
     FirstRun, // a new stream, or one rebuilt after a resize: nothing to continue from
     Gap,      // the window was closed or hidden for longer than kResetGapMs
+    SuperResolution, // the super-resolution evaluate of this render reset its own history (production only): the model's history restarts with it
 };
 
-constexpr ResetReason DecideReset(bool everRan, uint64_t lastRun, uint64_t now)
+// `superResolutionReset`: the production entry's super-resolution evaluate reset its history for this render (a rejected or stale render, a first
+// evaluate): the image NR continues from is then a different picture, so its history restarts too.
+constexpr ResetReason DecideReset(bool everRan, uint64_t lastRun, uint64_t now, bool superResolutionReset = false)
 {
     if (!everRan)
         return ResetReason::FirstRun;
     if (now < lastRun || now - lastRun > kResetGapMs)
         return ResetReason::Gap;
+    if (superResolutionReset)
+        return ResetReason::SuperResolution;
     return ResetReason::None;
 }
 
@@ -431,6 +436,7 @@ constexpr const char* ResetReasonText(ResetReason r)
     case ResetReason::None: return "continued";
     case ResetReason::FirstRun: return "first run";
     case ResetReason::Gap: return "after a gap";
+    case ResetReason::SuperResolution: return "after a super-resolution reset";
     }
     return "?";
 }
