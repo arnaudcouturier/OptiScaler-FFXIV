@@ -502,6 +502,49 @@ class DumpTrigger
     uint32_t _postponed = 0;
 };
 
+// The draw-thread side of a waiting dump request: which draws are complete points, and what a postponed start leaves behind. A swap that
+// was reported since the request was armed counts as a complete point (every image of that frame exists); the flag is consumed whenever the
+// request starts, is postponed or ends, so a postponed request waits for the NEXT complete image instead of retrying at every draw.
+class DumpService
+{
+  public:
+    enum class Result : uint8_t
+    {
+        Nothing,   // no request waits, or it keeps waiting for a complete point
+        Postponed, // the start was postponed to the next complete point
+        GaveUp,    // postponed too often: the request is over, refused
+        Started,   // the start ran (the caller reports its outcome); the request is over
+    };
+
+    // A consumer swap was reported: all the images of this frame exist.
+    void NoteSwap() { _swapCompleted = true; }
+
+    // `pending`: a request waits. `finisherPoint`: right after an accepted finisher draw. `start` runs the dump and returns true when the
+    // game's state forbids it for now (an active predicate), which postpones it.
+    template <class StartFn> Result Service(bool pending, bool finisherPoint, uint64_t now, StartFn&& start)
+    {
+        if (!pending && !_trigger.Armed())
+            return Result::Nothing; // the common case: nothing waits
+        const bool arming = pending && !_trigger.Armed();
+        if (arming)
+            _swapCompleted = false; // a swap that happened before the request does not count
+        const bool point = finisherPoint || (!arming && _swapCompleted);
+        if (_trigger.Decide(pending, point, now) != DumpTrigger::Step::Start)
+            return Result::Nothing;
+        const bool postponed = start();
+        _swapCompleted = false; // consumed by this start, whatever came of it
+        if (postponed)
+            return _trigger.Postpone(now) ? Result::Postponed : Result::GaveUp;
+        return Result::Started;
+    }
+
+    bool Armed() const { return _trigger.Armed(); }
+
+  private:
+    DumpTrigger _trigger;
+    bool _swapCompleted = false;
+};
+
 // The facts of a swap are those of the swapped draw only when that draw was the last one scanned (the draw serial advances for every
 // dispatched draw while the probe is on, scanned or not).
 constexpr bool SameDraw(bool lastDrawValid, uint64_t lastDrawSerial, uint64_t currentSerial)

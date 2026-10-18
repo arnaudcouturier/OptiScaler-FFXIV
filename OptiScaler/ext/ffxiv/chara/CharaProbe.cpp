@@ -118,9 +118,8 @@ struct State
     std::optional<CommandChannel> channel; // chara-probe.cmd / chara-probe.out, while the probe is on
     DerivedSet derived;
     ResolveHookState resolveHook; // whether the hook layer's ResolveSubresource detour is wanted and attached
-    DumpTrigger dumpTrigger;      // when a requested image dump is executed (at a point where the preview image is complete)
+    DumpService dumpService;      // when a requested image dump is executed (at a point where the preview image is complete)
     bool outputFailureLogged = false; // the one log line about an answer file that cannot be written
-    bool swapCompleted = false;   // a consumer swap was reported since the request was armed: the images of this frame exist
     CaseLog<kCopyCaseCap> copyCases;
     CaseLog<kSamplerCaseCap> samplerCases;
     BackbufferInfo backbuffer;
@@ -210,7 +209,7 @@ void ReportSwap(const SwapRecord& r)
     stored.record = r;
     stored.draw = s.lastDraw;
     stored.sameDraw = SameDraw(s.lastDraw.valid, s.lastDraw.serial, s.drawSerial);
-    s.swapCompleted = true; // all the images of this frame exist now: a waiting dump request may start at the next draw
+    s.dumpService.NoteSwap(); // all the images of this frame exist now: a waiting dump request may start at the next draw
     stored.tick = GetTickCount64();
     ++stored.count;
 
@@ -874,42 +873,38 @@ void PollCommands(uint64_t now)
 }
 
 // Executes a waiting "save preview images" request. It is armed when first seen and started at the first point where the preview image
-// is complete (DumpTrigger): `finisherPoint` is true right after an accepted finisher draw; a consumer swap reported since the request was
+// is complete (DumpService): `finisherPoint` is true right after an accepted finisher draw; a consumer swap reported since the request was
 // armed also counts (every image of the frame exists then); 2 s without either, any draw will do. Draw thread, immediate context.
 void ServiceDump(ID3D11DeviceContext* context, uint64_t now, bool finisherPoint)
 {
     State& s = S();
     const bool pending = g_dumpPending.load(std::memory_order_relaxed);
-    if (!pending && !s.dumpTrigger.Armed())
-        return; // the common case: nothing waits
-    const bool arming = pending && !s.dumpTrigger.Armed();
-    if (arming)
-        s.swapCompleted = false; // a swap that happened before the request does not count
-    const bool point = finisherPoint || (!arming && s.swapCompleted);
-    if (s.dumpTrigger.Decide(pending, point, now) != DumpTrigger::Step::Start)
-        return;
-
     std::string result;
-    try
+    const auto start = [&]
     {
-        result = StartDump(context, now);
-    }
-    catch (...)
-    {
-        result = "failed, an error stopped the request";
-    }
-    if (result.rfind("postponed", 0) == 0)
-    {
-        // The game's state forbids the copy for now (an active predicate): the request stays and the next complete preview image tries again.
-        if (s.dumpTrigger.Postpone(now))
+        try
         {
-            dump::SetMessage(result);
-            return;
+            result = StartDump(context, now);
         }
+        catch (...)
+        {
+            result = "failed, an error stopped the request";
+        }
+        return result.rfind("postponed", 0) == 0;
+    };
+    switch (s.dumpService.Service(pending, finisherPoint, now, start))
+    {
+    case DumpService::Result::Nothing: return;
+    case DumpService::Result::Postponed:
+        // The game's state forbids the copy for now (an active predicate): the request stays and the next complete preview image tries again.
+        dump::SetMessage(result);
+        return;
+    case DumpService::Result::GaveUp:
         result = "refused, the game keeps a predicate set for the draws the dump could use; try again later";
+        break;
+    case DumpService::Result::Started: break;
     }
     g_dumpPending.store(false, std::memory_order_relaxed);
-    s.swapCompleted = false;
     dump::SetMessage(result);
     LOG_INFO("CharaView probe: save preview images: {}", result);
     if (result.rfind("ok", 0) != 0) // a started dump reports when it finishes; a refused one says so here

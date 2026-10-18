@@ -1032,6 +1032,55 @@ void TestDumpTrigger()
     CHECK(t.Postpone(21000)); // a new request starts counting again
 }
 
+// The draw-thread side of a waiting dump request. A start that the game postpones (an active predicate) waits for the NEXT complete image:
+// the swap that made the first attempt a point is consumed, so the draws that follow are not points. (Before, every later draw was a point
+// and the 20 allowed postponements were spent in 20 draws, then the request was refused.)
+void TestDumpServicePostpone()
+{
+    using R = DumpService::Result;
+    DumpService s;
+    int starts = 0;
+    bool postpone = true;
+    const auto start = [&]
+    {
+        ++starts;
+        return postpone;
+    };
+
+    CHECK(s.Service(false, false, 1000, start) == R::Nothing && starts == 0); // nothing waits
+    // the arming draw is never a point, also when a swap was reported before the request
+    s.NoteSwap();
+    CHECK(s.Service(true, false, 2000, start) == R::Nothing && s.Armed() && starts == 0);
+    CHECK(s.Service(true, false, 2001, start) == R::Nothing && starts == 0); // that earlier swap does not count
+    // a swap reported since the request was armed: the next draw is a point
+    s.NoteSwap();
+    CHECK(s.Service(true, false, 2010, start) == R::Postponed && starts == 1);
+    // postponed: the swap is used up, the draws that follow are not points and do not start anything
+    for (int i = 0; i < 50; ++i)
+        CHECK(s.Service(true, false, 2011 + i, start) == R::Nothing);
+    CHECK(starts == 1 && s.Armed());
+    // the next complete image (a swap, or an accepted finisher) tries again
+    s.NoteSwap();
+    CHECK(s.Service(true, false, 2100, start) == R::Postponed && starts == 2);
+    CHECK(s.Service(true, true, 2101, start) == R::Postponed && starts == 3);
+    // no point at all: after the fallback time any draw will do, also after a postponement
+    CHECK(s.Service(true, false, 2101 + kDumpFallbackMs - 1, start) == R::Nothing && starts == 3);
+    CHECK(s.Service(true, false, 2101 + kDumpFallbackMs, start) == R::Postponed && starts == 4);
+    // a start the game allows ends the request
+    postpone = false;
+    CHECK(s.Service(true, true, 9000, start) == R::Started && starts == 5);
+    CHECK(s.Service(false, false, 9001, start) == R::Nothing && !s.Armed() && starts == 5);
+
+    // postponed too often: given up after kMaxDumpPostponements postponements
+    DumpService often;
+    postpone = true;
+    CHECK(often.Service(true, true, 10000, start) == R::Postponed);
+    for (uint32_t i = 2; i <= kMaxDumpPostponements; ++i)
+        CHECK(often.Service(true, true, 10000 + i, start) == R::Postponed);
+    CHECK(often.Service(true, true, 11000, start) == R::GaveUp);
+    CHECK(often.Service(false, false, 11001, start) == R::Nothing && !often.Armed());
+}
+
 // "The facts are those of the swapped draw" only when the swapped draw was the last one scanned.
 void TestSameDraw()
 {
@@ -1115,6 +1164,7 @@ int main()
     TestPng();
     TestResolveHookState();
     TestDumpTrigger();
+    TestDumpServicePostpone();
     TestSameDraw();
     return TEST_RESULT("chara_probe_rules");
 }
