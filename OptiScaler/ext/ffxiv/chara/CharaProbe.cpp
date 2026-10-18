@@ -12,6 +12,7 @@
 #include "ext/ffxiv/chara/CharaProbeCommands.h"
 #include "ext/ffxiv/chara/CharaProbeDump.h"
 #include "ext/ffxiv/chara/CharaProbeFiles.h"
+#include "ext/ffxiv/chara/CharaProbeHold.h"
 #include "ext/ffxiv/chara/CharaProbeHooks.h"
 #include "ext/ffxiv/chara/CharaProbeRules.h"
 #include "ext/ffxiv/chara/CharaStats.h"
@@ -227,6 +228,7 @@ const SwapSink kSink { &ArmSwap, &ReportSwap };
 
 // ---- The ResolveSubresource hook ------------------------------------------------------------------------------------------------
 std::atomic<const ResolveHookControl*> g_resolveControl { nullptr };
+std::atomic<bool> g_resolveIncomplete { false }; // mirror of ResolveHookState::Incomplete() for the menu thread
 
 // Attaches the detour when a debug aid (the probe or the flood test) was switched on, removes it when both are off (ResolveHookState
 // decides). Draw thread; costs one comparison per call when nothing changes. A failed attach is reported once per switch-on and only
@@ -235,7 +237,8 @@ void SyncResolveHook()
 {
     State& s = S();
     const ResolveHookControl* control = g_resolveControl.load(std::memory_order_acquire);
-    switch (s.resolveHook.Decide(s.on || s.flood))
+    const ResolveHookState::Step step = s.resolveHook.Decide(s.on || s.flood);
+    switch (step)
     {
     case ResolveHookState::Step::Attach:
     {
@@ -255,6 +258,8 @@ void SyncResolveHook()
         break;
     case ResolveHookState::Step::None: break;
     }
+    if (step != ResolveHookState::Step::None)
+        g_resolveIncomplete.store(s.resolveHook.Incomplete(), std::memory_order_relaxed);
 }
 
 // ---- Switching ------------------------------------------------------------------------------------------------------------
@@ -341,24 +346,6 @@ std::string DetailText(const CopyDetail& d)
     else
         text += "whole source subresource";
     return text;
-}
-
-// A reference to a derived texture for the derived set (see Derived::hold), or an empty one when it must not be held: a swapchain buffer
-// (a reference we hold makes the game's ResizeBuffers fail). A buffer is recognised by being the backbuffer the boundary module reports and
-// by DXGI's own back-buffer usage flag (the other buffers of a flip-model swapchain).
-std::shared_ptr<void> HoldOf(ID3D11Resource* resource, bool isBackbuffer)
-{
-    if (resource == nullptr || isBackbuffer)
-        return {};
-    ComPtr<IDXGIResource> dxgi;
-    if (SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&dxgi))) && dxgi != nullptr)
-    {
-        DXGI_USAGE usage = 0;
-        if (SUCCEEDED(dxgi->GetUsage(&usage)) && (usage & DXGI_USAGE_BACK_BUFFER) != 0)
-            return {};
-    }
-    resource->AddRef();
-    return std::shared_ptr<void>(resource, [](void* p) { static_cast<ID3D11Resource*>(p)->Release(); });
 }
 
 // The size and format of a 2D texture resource (false for a buffer or anything else).
@@ -1011,7 +998,7 @@ void OnPreviewComplete(ID3D11DeviceContext* context, uint64_t now)
 }
 void SetResolveHookControl(const ResolveHookControl* control) { g_resolveControl.store(control, std::memory_order_release); }
 
-bool ResolveTrackingIncomplete() { return S().resolveHook.Incomplete(); }
+bool ResolveTrackingIncomplete() { return g_resolveIncomplete.load(std::memory_order_relaxed); }
 
 bool RequestDump()
 {

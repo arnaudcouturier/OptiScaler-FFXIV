@@ -206,7 +206,7 @@ int main()
     CHECK(status.dumps == 1 && status.files == 7 && status.refusals == 0 && !status.inFlight);
     CHECK(status.lastFolder == outcome->folder && status.lastMessage == outcome->message);
 
-    // ---- a predicate set by the game: the dump says so instead of copying under it (REVIEW-CHARA-2 L1) ---------------------------------
+    // ---- a predicate set by the game: the dump says so instead of copying under it ---------------------------------
     {
         CHECK(!dump::PredicationActive(g_context.Get()) && !dump::PredicationActive(nullptr));
         D3D11_QUERY_DESC qd {};
@@ -301,9 +301,9 @@ int main()
         dump::SetHooksForTest({});
     }
 
-    // ---- the GPU side of the pump: a late pump of a finished dump, a map that is still busy, a row pitch that is not tight (REVIEW-CHARA-2 L4) ----
+    // ---- the GPU side of the pump: a late pump of a finished dump, a map that is still busy, a row pitch that is not tight ----
     {
-        // L4: the copies finished on the GPU but nobody pumped for a long time (a loading screen, a minimised window): the dump is
+        // The copies finished on the GPU but nobody pumped for a long time (a loading screen, a minimised window): the dump is
         // written, not reported as "the GPU did not finish".
         CHECK(dump::Begin(g_context.Get(), sources, "late: yes\n", 20000, why));
         // (the hook waits until the real GPU work is done, which models a GPU that finished long ago)

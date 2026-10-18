@@ -118,7 +118,7 @@ constexpr bool WholeImageCopy(const CopyFacts& f)
     return false;
 }
 
-// Whether a render target of a draw that sampled the preview (or a copy of it) may become "derived" (REVIEW-CHARA-2 M5, M7).
+// Whether a render target of a draw that sampled the preview (or a copy of it) may become "derived".
 struct PromotionFacts
 {
     bool rendererRecent = false;      // the preview renderer was seen active lately (a derived chain only lives while it renders)
@@ -242,7 +242,7 @@ public:
     // The live entry of this texture, or null (never stored, or not refreshed for kExpiryMs). An entry that holds a reference to its
     // texture is the texture (its address cannot be reused while the reference lives). An entry without one (a swapchain buffer is
     // never held, it would block ResizeBuffers) is only the same texture when `actual`, if the caller has it, still has the size and
-    // format family the entry was made with: a recycled address with another size does not match (REVIEW-CHARA-2 M3).
+    // format family the entry was made with: a recycled address with another size does not match.
     const Derived* Find(uintptr_t ptr, uint64_t now, const TextureInfo* actual = nullptr) const
     {
         if (ptr == 0)

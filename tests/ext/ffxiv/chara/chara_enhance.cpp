@@ -721,7 +721,7 @@ void Main2(Env& e)
         CHECK(seen.v[5] != bystanderSrv.Get() && seen.v[3] == previewSrv.Get() && seen.v[0] == sourceSrv.Get() && boundAgain());
 
         // an array view and a multisampled view are left alone (CanReplace only takes a plain 2D view): naming them in the mask replaces
-        // nothing, the draw is NOT run, everything stays bound (REVIEW-CHARA-2 weak test 5)
+        // nothing, the draw is NOT run, everything stays bound
         {
             D3D11_TEXTURE2D_DESC td {};
             td.Width = td.Height = 32;

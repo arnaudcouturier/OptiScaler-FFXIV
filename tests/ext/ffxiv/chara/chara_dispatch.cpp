@@ -447,7 +447,7 @@ void TestRoutes(Scene& s)
     Config(false, false, false);
 }
 
-// REVIEW-NR-2 M1: PreviewAA on, PreviewDLSS off, preview NR usable but with no result for this draw (the first renders, a skipped render,
+// PreviewAA on, PreviewDLSS off, preview NR usable but with no result for this draw (the first renders, a skipped render,
 // a finisher that is always rejected). The equipment display draw is offered to the NR plumbing, which declines it without running it;
 // the spatial AA takes it, and the native draw still runs exactly once.
 void TestNrWithoutResultFallsBackToAa(Scene& s)
@@ -524,7 +524,7 @@ void TestNrWithoutResultFallsBackToAa(Scene& s)
     Doubles_Off();
 }
 
-// The flood test through the real dispatcher (REVIEW-CHARA-2 L6 rewrote this part): the draw a module did not take gets the magenta image
+// The flood test through the real dispatcher: the draw a module did not take gets the magenta image
 // in the slots the scan found, the native draw runs once, the game's views are bound again afterwards, and a draw that renders into one of
 // the preview renderer's own textures is not flooded.
 void TestFloodWiring(Scene& s)
@@ -621,7 +621,7 @@ void TestPassAcrossRenders(Scene& s)
     CHECK(Last().kind == DrawKind::Finisher);
     CHECK(Last().passActive);                         // the callback did not end the pass ...
     CHECK(Last().finisherAccepted);                   // ... so the finisher still finds it
-    CHECK(d.probeComplete == 1); // the probe is told that the preview image is complete: a waiting image dump starts there (REVIEW-CHARA-2 M6)
+    CHECK(d.probeComplete == 1); // the probe is told that the preview image is complete: a waiting image dump starts there
     CHECK(Last().counter == first);
 
     // render 2 of the same frame: the accepted finisher closed the first render, so this is a new pass (a new jitter phase)
@@ -724,7 +724,7 @@ void TestDetachFromAnotherThread(Scene& s)
     Detach();
     CHECK(d.dlssDetach == 1 && d.nrDetach == 1 && d.probeDetach == 1);
     CHECK(!Wanted());
-    CHECK(d.events.size() == 1 && d.events[0] == "nr.detach"); // preview NR was closed by the teardown (REVIEW-NR-2 L1) ...
+    CHECK(d.events.size() == 1 && d.events[0] == "nr.detach"); // preview NR was closed by the teardown ...
 
     // ... and is opened again by the hooks that are installed next, not before
     // installed again: the gate follows the configuration again

@@ -385,7 +385,7 @@ void TestResultCurrent()
     CHECK(!never.ResultIsCurrent());
 }
 
-// REVIEW-NR-2 M2: a render of the image for which the module produced nothing (the dispatcher never reached the bring-up: finisher rejected,
+// A render of the image for which the module produced nothing (the dispatcher never reached the bring-up: finisher rejected,
 // nobody shows the window, the SR result won) withdraws the older result; the late variant does not reach back over it either.
 void TestRenderWithoutResult()
 {

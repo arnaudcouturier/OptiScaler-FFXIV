@@ -86,7 +86,7 @@ template <class Cfg> std::string Run(const std::string& line, Cfg& cfg, FakeActi
 }
 
 // The configuration as the product has it: a CustomOptional<bool> per key (the stub in tests\ext\hdr\stubs\Config.h replicates the real
-// class's volatile behaviour). A command toggle must not reach the ini file: value_for_config() is what Save writes (REVIEW-CHARA-2 M1).
+// class's volatile behaviour). A command toggle must not reach the ini file: value_for_config() is what Save writes.
 struct RealConfig
 {
     CustomOptional<bool> previewDlss { false };
@@ -316,7 +316,7 @@ void TestPoll(const fs::path& root)
         CHECK(!fs::exists(cmd));
     }
 
-    // A huge file is never read whole: at most kMaxCommandBytes + 1 bytes are read, however large it is (REVIEW-CHARA-2 weak test 3: deleting
+    // A huge file is never read whole: at most kMaxCommandBytes + 1 bytes are read, however large it is (deleting
     // the read cap used to pass every test, and a 2 GB file was read into memory)
     {
         {

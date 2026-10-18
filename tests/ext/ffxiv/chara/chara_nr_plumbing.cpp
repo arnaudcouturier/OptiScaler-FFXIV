@@ -171,7 +171,7 @@ void TestUnavailable()
     CHECK(SrUsable(f) && !NrUsable(f) && PlumbingActive(f));
 
     // Leftover objects keep the plumbing alive while NR cannot run (NR latched or unavailable but its models are not released yet; the
-    // SR slots of a PreviewDLSS that was just switched off): the route must not claim the draw for NR (REVIEW-NR-2 M1 a). The NR branch
+    // SR slots of a PreviewDLSS that was just switched off): the route must not claim the draw for NR. The NR branch
     // of the route reads "NR usable", never the bare key or "plumbing alive".
     f = Facts(false, true);
     f.nrAvailable = false;
@@ -188,7 +188,7 @@ void TestUnavailable()
     CHECK(ChooseRoute(false, PlumbingActive(f), true, RoleEquipDisplay, api, f.nrWanted) == Route::Dlss);
 }
 
-// The route was Dlss and the module left the draw alone: the AA takes the equipment display draw when PreviewDLSS is off (REVIEW-NR-2 M1 b).
+// The route was Dlss and the module left the draw alone: the AA takes the equipment display draw when PreviewDLSS is off.
 void TestFallBackToAa()
 {
     const uint32_t equip = RoleEquipDisplay;
@@ -203,7 +203,7 @@ void TestFallBackToAa()
     CHECK(FallBackToAa(Route::Dlss, false, false, true, equip | RoleUi));
 }
 
-// The hook forwarders' gate gives the same answer as SrHooksNeeded(facts) but reads the dear inputs only when they matter (REVIEW-NR-2 L6).
+// The hook forwarders' gate gives the same answer as SrHooksNeeded(facts) but reads the dear inputs only when they matter.
 void TestSrHooksNeededLazy()
 {
     for (int bits = 0; bits < 16; ++bits)

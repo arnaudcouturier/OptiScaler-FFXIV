@@ -1,6 +1,6 @@
 // ext::PathText (ext/core/PathText.h): a path as UTF-8 text for log lines. std::filesystem::path::string() converts through the ANSI
 // code page and throws for a folder name the code page cannot represent; a log call evaluates its arguments in the caller, so the
-// throw would leave the game's Draw hook (REVIEW-NR-2 H1). PathText never throws.
+// throw would leave the game's Draw hook. PathText never throws.
 #include "check.h"
 #include "ext/core/PathText.h"
 

@@ -191,7 +191,7 @@ struct StreamState
     bool ResultIsCurrent() const { return everRan && ranAttempt != 0 && ranAttempt == attempts; }
     // A render of this preview image happened and the module produced no result for it (the finisher was rejected, the bring-up was not
     // run or returned without a result): whatever result the stream holds belongs to an earlier render and must not be shown for this
-    // one (REVIEW-NR-2 M2). It also breaks the chain: the late variant shows the run before the newest, which must not reach back over
+    // one. It also breaks the chain: the late variant shows the run before the newest, which must not reach back over
     // this render.
     void NoteRenderWithoutResult()
     {

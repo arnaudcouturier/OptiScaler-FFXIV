@@ -311,7 +311,7 @@ void TestWriteDump(const fs::path& root)
 }
 
 // A file that fails in the middle of the set (disk full): the partial file is removed, only complete files are counted in the outcome and
-// the budget, the message says how many, and state.txt is still written (REVIEW-CHARA-2 L3).
+// the budget, the message says how many, and state.txt is still written.
 int g_writeCall = 0;
 int g_failOnCall = 0;
 bool g_throwOnCall = false;

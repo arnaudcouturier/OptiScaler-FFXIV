@@ -131,6 +131,9 @@ void DrawCharaCard(ext::menu::Ctx&)
         ImGui::TextDisabled("Probe: %llu copies of the preview followed, %llu draws sampled the preview or a copy",
                             (unsigned long long) g_stats.probeCopies.load(std::memory_order_relaxed),
                             (unsigned long long) g_stats.probeSamplerDraws.load(std::memory_order_relaxed));
+        if (probe::ResolveTrackingIncomplete())
+            ImGui::TextWrapped("Probe: copy tracking incomplete: ResolveSubresource could not be hooked, so copies made by resolves are not followed "
+                               "(the other hooks are not affected).");
 
         const probe::DumpStatus dumpStatus = probe::GetDumpStatus();
         ImGui::BeginDisabled(dumpStatus.busy);

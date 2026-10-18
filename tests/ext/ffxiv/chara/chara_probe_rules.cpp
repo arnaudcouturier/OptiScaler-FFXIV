@@ -45,7 +45,7 @@ void TestChainAndHopCap()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Which texture is it: references, recycled addresses (REVIEW-CHARA-2 M3)
+// Which texture is it: references, recycled addresses
 // ---------------------------------------------------------------------------------------------------------------------
 
 void TestHeldReferences()
@@ -230,12 +230,12 @@ void TestPromotion()
     f.targetIsTableEntry = true;
     CHECK(DecidePromotion(f) == Promotion::IsTableEntry);
 
-    // a stale binding: the draw has no pixel shader, so nothing it did read the bound preview (M5)
+    // a stale binding: the draw has no pixel shader, so nothing it did read the bound preview
     f = Promotable();
     f.pixelShaderBound = false;
     CHECK(DecidePromotion(f) == Promotion::NoPixelShader);
 
-    // a screen-size intermediate is judged against the backbuffer's own size, not a 4K constant (M7)
+    // a screen-size intermediate is judged against the backbuffer's own size, not a 4K constant
     f = Promotable();
     f.target = { 1920, 1080, 87 };
     CHECK(DecidePromotion(f) == Promotion::ScreenSizeIntermediate); // the whole screen
@@ -402,7 +402,7 @@ void TestCopiesSwitchAndClear()
     set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 5);
     set.SetCopiesEnabled(false);
     set.Reset();
-    CHECK(set.CopiesEnabled() && set.Empty(5)); // ... switching the probe off and on does (REVIEW-CHARA-2 L5)
+    CHECK(set.CopiesEnabled() && set.Empty(5)); // ... switching the probe off and on does
     CHECK(set.FromPreview(0, 0x100, 0xA, kInfo, false, DerivedKind::Copy, 6) == DeriveResult::Added);
 }
 
@@ -989,7 +989,7 @@ void TestScanGate()
     CHECK(!ScanCanFindAnything(true, true, true, false, false));
 }
 
-// REVIEW-CHARA-2 M6: a requested dump starts where the preview image is complete, not at an arbitrary draw.
+// A requested dump starts where the preview image is complete, not at an arbitrary draw.
 void TestDumpTrigger()
 {
     using Step = DumpTrigger::Step;
@@ -1032,7 +1032,7 @@ void TestDumpTrigger()
     CHECK(t.Postpone(21000)); // a new request starts counting again
 }
 
-// REVIEW-CHARA-2 M8: "the facts are those of the swapped draw" only when the swapped draw was the last one scanned.
+// "The facts are those of the swapped draw" only when the swapped draw was the last one scanned.
 void TestSameDraw()
 {
     CHECK(SameDraw(true, 7, 7));
@@ -1056,8 +1056,7 @@ void TestSameDraw()
     CHECK(!SameDraw(valid, lastScannedSampler, serial));
 }
 
-// The ResolveSubresource detour has a hook transaction of its own: attached when a debug aid is first switched on, removed when both are off
-// (REVIEW-CHARA-2 M2).
+// The ResolveSubresource detour has a hook transaction of its own: attached when a debug aid is first switched on, removed when both are off.
 void TestResolveHookState()
 {
     using Step = ResolveHookState::Step;
