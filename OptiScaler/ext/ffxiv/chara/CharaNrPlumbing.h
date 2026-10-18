@@ -85,19 +85,25 @@ class EdgeTracker
     std::atomic<bool> _last { false };
 };
 
-// What a UI draw that samples a preview image gets.
+// What a UI draw that samples a preview image gets, best first (after the debug flood, which replaces everything):
+//   production result > super-resolution result > bring-up NR result > the native image.
 enum class ConsumerSource : uint8_t
 {
-    Native,   // nothing replaces the image
-    Flood,    // the debug flood test
-    SrResult, // the super-resolution result (also covers NR that ran before it: SR wins)
-    NrResult, // the NR result at native size
+    Native,           // nothing replaces the image
+    Flood,            // the debug flood test
+    ProductionResult, // the super-resolution image after NR (2x, original alpha): NR was run on the SR output of this render
+    SrResult,         // the super-resolution result (NR did not run on it, or failed: fail open)
+    NrResult,         // the bring-up NR result at native size
 };
 
-constexpr ConsumerSource ChooseConsumerSource(bool floodOn, bool srResultReady, bool nrResultReady)
+// `productionReady` means the composed image of the slot was made from the production NR output (it implies `srResultReady`: it is the
+// same composed image). The bring-up result is only asked for when no SR result exists (WantNrResult), so it never competes with these.
+constexpr ConsumerSource ChooseConsumerSource(bool floodOn, bool productionReady, bool srResultReady, bool nrResultReady)
 {
     if (floodOn)
         return ConsumerSource::Flood;
+    if (productionReady)
+        return ConsumerSource::ProductionResult;
     if (srResultReady)
         return ConsumerSource::SrResult;
     if (nrResultReady)
@@ -168,6 +174,73 @@ class ConsumerSeen
     uint64_t _last[kCapacity] {};
 };
 
-// The production entry (NR on the SR output) is offered only after an SR evaluate succeeded and NR may run.
-constexpr bool RunProductionNow(const PlumbingFacts& f, bool srEvaluateSucceeded) { return srEvaluateSucceeded && NrUsable(f); }
+// The production entry (NR on the SR output) is offered only after an SR evaluate succeeded for this render, NR may run, and a UI draw
+// showed this preview lately (the same liveness rule as the bring-up: a finisher output nobody shows gets no model).
+constexpr bool RunProductionNow(const PlumbingFacts& f, bool srEvaluateSucceeded, bool consumerRecent)
+{
+    return srEvaluateSucceeded && consumerRecent && NrUsable(f);
+}
+
+// NR produced a result for this render when either entry did. The dispatcher withdraws the older NR result of the image otherwise
+// (InvalidateNow); the production entry runs inside the SR step, before that decision, so its success has to count: without it every
+// production result would be marked stale in the render that made it.
+constexpr bool NrProducedForRender(bool bringUpProduced, bool productionProduced) { return bringUpProduced || productionProduced; }
+
+// The colour the alpha pass recomposes the original alpha onto: the production output when NR produced one, else the SR output. The
+// alpha pass is the last step of the SR path, so a failed NR must leave it exactly what it was without NR.
+enum class AlphaInput : uint8_t
+{
+    SrOutput,
+    NrOutput,
+};
+
+constexpr AlphaInput ChooseAlphaInput(bool productionProduced) { return productionProduced ? AlphaInput::NrOutput : AlphaInput::SrOutput; }
+
+// The alpha pass failed with the NR output: try once more with the SR output before the slot counts as failed (an NR problem must not
+// count toward the SR latch).
+constexpr bool RetryAlphaWithSr(AlphaInput used, bool alphaSucceeded) { return !alphaSucceeded && used == AlphaInput::NrOutput; }
+
+// ---- The debug tint (PreviewDebugTint) ----------------------------------------------------------------------------------------------
+// The tint is the on-screen proof of which image reached the screen: magenta for the super-resolution image (as before), cyan for an
+// image NR produced (the bring-up result and the production output both), none for the native image.
+enum class TintKind : uint8_t
+{
+    None,
+    Sr, // magenta
+    Nr, // cyan
+};
+
+// The alpha pass of the SR path: tinted when PreviewDebugTint is on, cyan when its colour came from NR.
+constexpr TintKind AlphaTintFor(bool tintOn, AlphaInput input)
+{
+    return !tintOn ? TintKind::None : (input == AlphaInput::NrOutput ? TintKind::Nr : TintKind::Sr);
+}
+
+// The bring-up result is a finished image that a UI draw samples as it is, so its tint is an extra pass over it (the result image is
+// owned by the D3D12 queue's pass and cannot be tinted in place). Due when the tint is on, the consumer is given that result, and the pass
+// has not been done for this result yet (`serial` identifies a result; the tint target keeps the last one it was made from).
+constexpr bool ResultTintPassDue(bool tintOn, ConsumerSource source, uint64_t tintedSerial, uint64_t resultSerial)
+{
+    return tintOn && source == ConsumerSource::NrResult && (tintedSerial == 0 || tintedSerial != resultSerial);
+}
+
+// Once per cause: a fallback of the production entry is counted every time and logged the first time its cause is seen.
+class CauseLog
+{
+  public:
+    static constexpr unsigned kCauses = 32;
+    // True when the caller should write the line for `cause` now.
+    bool First(unsigned cause)
+    {
+        if (cause >= kCauses)
+            return false;
+        const uint32_t bit = 1u << cause;
+        const bool seen = (_seen & bit) != 0;
+        _seen |= bit;
+        return !seen;
+    }
+
+  private:
+    uint32_t _seen = 0;
+};
 } // namespace ext::ffxiv::chara::nr

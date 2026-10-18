@@ -736,7 +736,7 @@ void RunSlot(int index, const DrawView& view)
     }
 
     // Preview NR, production entry: the SR evaluate succeeded.
-    if (nr::RunProductionNow(PlumbingNow(), true))
+    if (nr::RunProductionNow(PlumbingNow(), true, true))
         RunNrProduction(view, w * ngx::kOutputScale, h * ngx::kOutputScale);
 
     const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
@@ -1012,7 +1012,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         // function leaves alone). The result is held with its own reference until the draw has been issued.
         if (nr::WantNrResult(nrOn, floodOn, srReady, previewOutput))
             nrHold[i] = nr::ResultFor(context, key, view.now);
-        switch (nr::ChooseConsumerSource(floodOn, srReady, nrHold[i] != nullptr))
+        switch (nr::ChooseConsumerSource(floodOn, false, srReady, nrHold[i] != nullptr))
         {
         case nr::ConsumerSource::SrResult: // SR wins over NR
             replaced[i] = g->composed.srv.Get();

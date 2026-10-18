@@ -151,7 +151,15 @@ class Latches
 
 // ---- Streams: binding, linger and release -------------------------------------------------------------------------------------
 // What a stream's GPU objects were built for. A change of any of these needs a new stream: the size, the model's creation-time
-// preset and style, and the hand-off variant (the late variant is decided when the stream is created).
+// preset and style, the hand-off variant (the late variant is decided when the stream is created) and the mode.
+//
+// Two modes share the stream table, keyed by the preview image's texture pointer (one stream per image, whichever mode runs):
+//   bring-up   : colour = the native image (width x height), guides = synthetic images of the same size; the result is drawn instead of
+//                the native image by the UI draws (ResultFor); PreviewNR without PreviewDLSS, and renders the SR path did not evaluate.
+//   production : colour = the super-resolution output (width x height = twice the render size), guides = copies of the preview's own
+//                depth and motion at the render size (guideWidth x guideHeight); the result is read by the alpha pass of the SR path.
+// The two never run at once for one image. When the wanted mode changes the stream is rebuilt once the change has held still for the
+// settle time (DecideRebuild), exactly like a size change; a render in between keeps the native image or the SR result.
 struct StreamShape
 {
     uint32_t width = 0;
@@ -159,6 +167,9 @@ struct StreamShape
     uint32_t preset = 0;
     int style = 0;
     bool late = false;
+    bool production = false;
+    uint32_t guideWidth = 0;  // production only: size of the depth and motion images (0 in bring-up: same as width x height)
+    uint32_t guideHeight = 0;
 
     friend bool operator==(const StreamShape&, const StreamShape&) = default;
 };
@@ -199,6 +210,45 @@ struct StreamState
         chain = 0;
     }
 };
+
+// What kind of result a stream holds right now.
+enum class ResultKind : uint8_t
+{
+    None,       // no current result
+    BringUp,    // the NR result of the native image (native size, original alpha): UI draws sample it instead of the native image
+    Production, // the raw NR output of the super-resolution image (2x, before the alpha pass): only the SR path's alpha pass reads it
+};
+
+inline ResultKind ResultKindOf(const StreamState& st)
+{
+    if (!st.hasBuilt || !st.ResultIsCurrent())
+        return ResultKind::None;
+    return st.built.production ? ResultKind::Production : ResultKind::BringUp;
+}
+
+// A UI draw that asks for the bring-up result of an image is given only a bring-up result. A production stream's image has no alpha
+// recomposition and a different size; handing it out would show the SR path's intermediate image on screen.
+constexpr bool ServesBringUpConsumer(ResultKind kind) { return kind == ResultKind::BringUp; }
+
+// The images a production run copies into its stream, as the D3D11 side reports them (DXGI format numbers). A copy between images of a
+// different size or format is not allowed by Direct3D, so the module checks first and treats a mismatch as a failure of the module.
+struct ImageInfo
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0;
+};
+inline constexpr uint32_t kFormatRgba16Float = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT: the super-resolution output
+inline constexpr uint32_t kFormatR32Float = 41;    // DXGI_FORMAT_R32_FLOAT: the guides pass's depth
+inline constexpr uint32_t kFormatRg16Float = 34;   // DXGI_FORMAT_R16G16_FLOAT: the guides pass's motion
+
+constexpr bool ProductionInputsFit(const StreamShape& s, const ImageInfo& colour, const ImageInfo& depth, const ImageInfo& motion)
+{
+    return s.production && s.width != 0 && s.height != 0 && s.guideWidth != 0 && s.guideHeight != 0 &&
+           colour.width == s.width && colour.height == s.height && colour.format == kFormatRgba16Float &&
+           depth.width == s.guideWidth && depth.height == s.guideHeight && depth.format == kFormatR32Float &&
+           motion.width == s.guideWidth && motion.height == s.guideHeight && motion.format == kFormatRg16Float;
+}
 
 // A size, preset, style or variant change must hold still before the stream is rebuilt: a window dragged to a new size reports a new
 // size every frame, and each one would otherwise mean a new model (the main pass settles in the same way).

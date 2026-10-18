@@ -317,14 +317,18 @@ void TestHooks()
     f.nrAvailable = false; // bridge not up, no NVIDIA card or files missing
     CHECK(!RunBringUpNow(f, true, true, false));
 
-    // the production entry needs an SR evaluate that succeeded
+    // the production entry needs an SR evaluate that succeeded for this render, a window somebody shows, and a usable NR
     f = Facts(true, true);
-    CHECK(RunProductionNow(f, true));
-    CHECK(!RunProductionNow(f, false));
+    CHECK(RunProductionNow(f, true, true));
+    CHECK(!RunProductionNow(f, false, true));  // the SR evaluate failed or did not run: there is no SR output to improve
+    CHECK(!RunProductionNow(f, true, false));  // nobody shows this preview
     f.nrLatched = true;
-    CHECK(!RunProductionNow(f, true));
+    CHECK(!RunProductionNow(f, true, true));
     f = Facts(true, false);
-    CHECK(!RunProductionNow(f, true));
+    CHECK(!RunProductionNow(f, true, true));   // PreviewNR off
+    f = Facts(true, true);
+    f.nrAvailable = false;
+    CHECK(!RunProductionNow(f, true, true));   // the module cannot run (bridge, card, files)
 
     // A finisher without an NR result withdraws the older result, but only while the module holds something (nothing to withdraw
     // otherwise, and the call is skipped on the hot path)
@@ -338,12 +342,61 @@ void TestHooks()
     f.nrHoldsResources = true;        // PreviewNR switched off while models are still released
     CHECK(InvalidateNow(f, false));
 
-    // consumer priority: the flood beats everything, SR beats NR
-    CHECK(ChooseConsumerSource(true, true, true) == ConsumerSource::Flood);
-    CHECK(ChooseConsumerSource(false, true, true) == ConsumerSource::SrResult);
-    CHECK(ChooseConsumerSource(false, false, true) == ConsumerSource::NrResult);
-    CHECK(ChooseConsumerSource(false, true, false) == ConsumerSource::SrResult);
-    CHECK(ChooseConsumerSource(false, false, false) == ConsumerSource::Native);
+    // consumer priority: the flood beats everything, then production > SR > bring-up NR > native
+    CHECK(ChooseConsumerSource(true, true, true, true) == ConsumerSource::Flood);
+    CHECK(ChooseConsumerSource(true, false, false, false) == ConsumerSource::Flood);
+    CHECK(ChooseConsumerSource(false, true, true, true) == ConsumerSource::ProductionResult);  // production over SR over bring-up
+    CHECK(ChooseConsumerSource(false, true, true, false) == ConsumerSource::ProductionResult);
+    CHECK(ChooseConsumerSource(false, false, true, true) == ConsumerSource::SrResult);          // SR over bring-up
+    CHECK(ChooseConsumerSource(false, false, true, false) == ConsumerSource::SrResult);
+    CHECK(ChooseConsumerSource(false, false, false, true) == ConsumerSource::NrResult);
+    CHECK(ChooseConsumerSource(false, false, false, false) == ConsumerSource::Native);
+    // the production result is the SR slot's composed image, so it is never reported without an SR result being ready ... but if a caller
+    // passes it alone, production still wins over a stale bring-up view
+    CHECK(ChooseConsumerSource(false, true, false, true) == ConsumerSource::ProductionResult);
+    for (int bits = 0; bits < 16; ++bits)
+    {
+        const bool flood = (bits & 1) != 0, prod = (bits & 2) != 0, sr = (bits & 4) != 0, nr = (bits & 8) != 0;
+        const ConsumerSource expected = flood  ? ConsumerSource::Flood
+                                        : prod ? ConsumerSource::ProductionResult
+                                        : sr   ? ConsumerSource::SrResult
+                                        : nr   ? ConsumerSource::NrResult
+                                               : ConsumerSource::Native;
+        CHECK(ChooseConsumerSource(flood, prod, sr, nr) == expected);
+    }
+
+    // The alpha pass takes the NR output only when production produced one, and retries with the SR output when it fails with the NR one
+    CHECK(ChooseAlphaInput(true) == AlphaInput::NrOutput && ChooseAlphaInput(false) == AlphaInput::SrOutput);
+    CHECK(RetryAlphaWithSr(AlphaInput::NrOutput, false));
+    CHECK(!RetryAlphaWithSr(AlphaInput::NrOutput, true));
+    CHECK(!RetryAlphaWithSr(AlphaInput::SrOutput, false)); // a failure with the SR output is a failure of the SR path, no retry
+    CHECK(!RetryAlphaWithSr(AlphaInput::SrOutput, true));
+
+    // A render whose production NR ran counts as "NR produced a result": the dispatcher must not withdraw it in the same render
+    f = Facts(true, true);
+    f.nrHoldsResources = true;
+    CHECK(InvalidateNow(f, NrProducedForRender(false, false)));
+    CHECK(!InvalidateNow(f, NrProducedForRender(false, true)));  // production ran
+    CHECK(!InvalidateNow(f, NrProducedForRender(true, false)));  // bring-up ran
+    CHECK(!InvalidateNow(f, NrProducedForRender(true, true)));
+
+    // the debug tint: magenta for SR, cyan for anything NR produced, nothing when off
+    CHECK(AlphaTintFor(false, AlphaInput::SrOutput) == TintKind::None && AlphaTintFor(false, AlphaInput::NrOutput) == TintKind::None);
+    CHECK(AlphaTintFor(true, AlphaInput::SrOutput) == TintKind::Sr);
+    CHECK(AlphaTintFor(true, AlphaInput::NrOutput) == TintKind::Nr);
+    // the bring-up result gets its own tint pass: once per result, only for the NR result source, only with the tint on
+    CHECK(ResultTintPassDue(true, ConsumerSource::NrResult, 0, 7));    // never tinted
+    CHECK(ResultTintPassDue(true, ConsumerSource::NrResult, 6, 7));    // a newer result
+    CHECK(!ResultTintPassDue(true, ConsumerSource::NrResult, 7, 7));   // the target already shows this result
+    CHECK(!ResultTintPassDue(false, ConsumerSource::NrResult, 0, 7));  // tint off
+    CHECK(!ResultTintPassDue(true, ConsumerSource::SrResult, 0, 7));   // the SR image is tinted by its alpha pass
+    CHECK(!ResultTintPassDue(true, ConsumerSource::ProductionResult, 0, 7));
+    CHECK(!ResultTintPassDue(true, ConsumerSource::Native, 0, 7));
+
+    // log once per cause
+    CauseLog causes;
+    CHECK(causes.First(1) && !causes.First(1) && causes.First(2) && !causes.First(2) && !causes.First(1));
+    CHECK(!causes.First(CauseLog::kCauses)); // out of range: never
 
     // The NR result is asked for by ONE rule, for an image with an SR slot and for one without (before, the no-slot branch of the consumer
     // repeated it inline and dropping its flood term passed every test): NR may run, no flood, SR result not there, a preview output.

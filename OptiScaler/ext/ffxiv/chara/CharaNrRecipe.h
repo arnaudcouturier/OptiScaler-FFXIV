@@ -25,12 +25,12 @@ namespace ext::ffxiv::chara::nr
 {
 enum class Tex : uint8_t
 {
-    Colour0,  // shared: the native preview image copied in (read); the late variant alternates two of them
+    Colour0,  // shared: the native preview image (bring-up) or the super-resolution output (production) copied in; the late variant alternates two
     Colour1,
     Proxy,    // private
     Original, // private
-    Depth,    // shared: a cleared depth image (bring-up) or the preview's depth (production)
-    Motion,   // shared: a zeroed motion image (bring-up) or the preview's motion (production)
+    Depth,    // shared: a cleared depth image (bring-up) or a copy of the preview's depth (production, render size)
+    Motion,   // shared: a zeroed motion image (bring-up) or a copy of the preview's motion (production, render size)
     ModelOut, // private: the model's answer
     Result0,  // shared: the result images the D3D11 side draws (two, alternating; the plan names the one this run writes)
     Result1,
@@ -151,13 +151,40 @@ struct ModelCall
     float mvScaleX = 1.0f, mvScaleY = 1.0f;
 };
 
-// The model works at the image's size; depth and motion cover the whole image; the depth is not inverted (the bring-up depth is
-// cleared to far); the motion scale is 1 (the motion image is zero in the bring-up).
-inline ModelCall MakeModelCall(uint32_t width, uint32_t height, bool reset, const ModelTuning& t)
+// Where the model's depth and motion guides stand relative to the colour image.
+//   Bring-up (the default): the guides cover the whole image, the depth is not inverted (the bring-up depth is cleared to far) and the
+//   motion scale is 1 (the motion image is zero).
+//   Production: the guides are the preview's own, at render size while the colour (the super-resolution output) is at output size. This is
+//   the main NR pass's convention for a frame whose motion vectors are low resolution (guide sub-rectangles = render size, the depth
+//   convention of the upscaler, motion scale = the scale given to the upscaler), see MakeProductionGuides.
+struct GuideSetup
+{
+    uint32_t width = 0;  // size of the depth and motion images; 0 = the size of the colour image
+    uint32_t height = 0;
+    bool depthInverted = false;
+    float mvScaleX = 1.0f;
+    float mvScaleY = 1.0f;
+};
+
+// The guides of a production run for a preview rendered at `renderWidth` x `renderHeight`: the depth and motion images have the render
+// size, the depth is inverted when the feature of the super-resolution evaluate was created that way, and the motion vectors (fractions of
+// the render image) are scaled by the render size, the same scale the super-resolution evaluate is given.
+constexpr GuideSetup MakeProductionGuides(uint32_t renderWidth, uint32_t renderHeight, bool reversedZ)
+{
+    return GuideSetup { renderWidth, renderHeight, reversedZ, static_cast<float>(renderWidth), static_cast<float>(renderHeight) };
+}
+
+// The model works at the colour image's size; depth and motion are described by `guides`.
+inline ModelCall MakeModelCall(uint32_t width, uint32_t height, bool reset, const ModelTuning& t, const GuideSetup& guides = {})
 {
     ModelCall m;
-    m.width = m.guideWidth = m.motionWidth = width;
-    m.height = m.guideHeight = m.motionHeight = height;
+    m.width = width;
+    m.height = height;
+    m.guideWidth = m.motionWidth = guides.width != 0 ? guides.width : width;
+    m.guideHeight = m.motionHeight = guides.height != 0 ? guides.height : height;
+    m.depthInverted = guides.depthInverted ? 1 : 0;
+    m.mvScaleX = guides.mvScaleX;
+    m.mvScaleY = guides.mvScaleY;
     m.reset = reset ? 1 : 0;
     m.intensity = t.intensity;
     m.style = t.style;
@@ -170,9 +197,10 @@ inline ModelCall MakeModelCall(uint32_t width, uint32_t height, bool reset, cons
 
 struct FramePlan
 {
-    uint32_t width = 0;
+    uint32_t width = 0;  // the colour image and the model's input size
     uint32_t height = 0;
-    bool initGuides = false; // the first run of a stream: the motion image is zeroed on the GPU
+    GuideSetup guides {}; // where the depth and motion guides stand (default: the bring-up's)
+    bool initGuides = false; // the first run of a bring-up stream: the motion image is zeroed on the GPU (never in production: it holds the real motion)
     bool reset = false;
     Settings settings {};
     ModelTuning tuning {};
@@ -207,7 +235,7 @@ template <class R> bool RecordRun(R& r, const FramePlan& p)
 
     r.Barrier(Tex::Depth, State::Common, State::Srv);
     r.Barrier(Tex::Motion, State::Common, State::Srv);
-    if (!r.Evaluate(MakeModelCall(p.width, p.height, p.reset, p.tuning)))
+    if (!r.Evaluate(MakeModelCall(p.width, p.height, p.reset, p.tuning, p.guides)))
         return false;
     r.Barrier(Tex::ModelOut, State::Uav, State::Srv);
     r.Barrier(Tex::Depth, State::Srv, State::Common);
