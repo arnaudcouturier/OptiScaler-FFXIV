@@ -431,6 +431,70 @@ void TestPassState()
     CHECK(pass.counter == 2 && pass.width == 288 && pass.height == 480);
 }
 
+// Two renders in one presented frame: an accepted finisher closes the render, so the next prepass or G-buffer draw starts a new pass
+// (a new counter, hence a new jitter phase and fresh guides) instead of sharing the first render's pass.
+void TestSecondRenderInOneFrame()
+{
+    PassState pass;
+    const DrawFacts first = Gbuffer(8);
+    CHECK(pass.OnGeometry(first) && pass.counter == 1);
+    CHECK(!pass.OnGeometry(Gbuffer(13)));
+    pass.OnFinisher(FinisherVerdict::Accepted);
+
+    // same size: the second render is its own pass
+    CHECK(pass.OnGeometry(Gbuffer(8)));
+    CHECK(pass.counter == 2 && pass.active && pass.width == 576 && pass.height == 960);
+    pass.OnFinisher(FinisherVerdict::Accepted);
+
+    // another size: its own pass at its own size
+    DrawFacts other = Gbuffer(8);
+    other.targetWidth = 288;
+    other.targetHeight = 480;
+    CHECK(pass.OnGeometry(other));
+    CHECK(pass.counter == 3 && pass.width == 288 && pass.height == 480);
+
+    // a finisher that is rejected ends the pass; the next geometry draw starts a new one as before
+    pass.OnFinisher(FinisherVerdict::SizeMismatch);
+    CHECK(!pass.active);
+    CHECK(pass.OnGeometry(first) && pass.counter == 4);
+
+    // an accepted finisher alone (no geometry after it) leaves the facts of its render readable
+    pass.OnFinisher(FinisherVerdict::Accepted);
+    CHECK(pass.active && pass.width == 576 && pass.height == 960);
+    pass.End();
+    CHECK(!pass.active);
+    CHECK(pass.OnGeometry(first) && pass.counter == 5); // End() followed by a draw: new pass, nothing stays finished
+}
+
+// A geometry draw of another size than the running pass (a second render that begins before the first one finished) does not follow
+// the pass: the module leaves it native and unjittered.
+void TestGeometryFollowsPass()
+{
+    PassState pass;
+    const DrawFacts first = Gbuffer(8);
+    CHECK(pass.OnGeometry(first));
+    CHECK(GeometryFollowsPass(pass.width, pass.height, first.targetWidth, first.targetHeight));
+
+    DrawFacts other = Gbuffer(8);
+    other.targetWidth = 288;
+    other.targetHeight = 480;
+    CHECK(Classify(other) == DrawKind::GBuffer);
+    CHECK(!pass.OnGeometry(other)); // it joins the running pass as far as the counter goes ...
+    CHECK(pass.counter == 1 && pass.width == 576 && pass.height == 960);
+    CHECK(!GeometryFollowsPass(pass.width, pass.height, other.targetWidth, other.targetHeight)); // ... but is not followed
+    other = Prepass(18);
+    other.targetWidth = 576; // one dimension equal is not enough
+    other.targetHeight = 540;
+    CHECK(!GeometryFollowsPass(pass.width, pass.height, other.targetWidth, other.targetHeight));
+    other.targetWidth = 288;
+    other.targetHeight = 960;
+    CHECK(!GeometryFollowsPass(pass.width, pass.height, other.targetWidth, other.targetHeight));
+
+    // no pass yet (size 0): nothing follows
+    CHECK(!GeometryFollowsPass(0, 0, 0, 0));
+    CHECK(!GeometryFollowsPass(0, 0, 576, 960));
+}
+
 // The second in-game test: no pass ever reached the finisher. An untagged draw that writes the same output with a depth test
 // ended the pass before the tagged finisher arrived.
 void TestPassStartObservedSignatures()
@@ -500,12 +564,16 @@ FinisherCheck ObservedCheck(const PassState& pass, bool depthTest)
     return c;
 }
 
-// One render as the second in-game log shows it, step by step as the dispatcher runs it.
+// One render as the second in-game log shows it, step by step as the dispatcher runs it. The pass state is NOT reset between
+// renders: a render starts a new pass because the previous one ended (a rejected finisher) or finished (an accepted one), exactly
+// as in the game.
 FinisherVerdict RunRender(PassState& pass, bool tagKnown)
 {
-    pass = PassState {};
+    const uint32_t before = pass.counter;
     CHECK(pass.OnGeometry(Gbuffer(8)));
+    CHECK(pass.counter == before + 1);
     CHECK(!pass.OnGeometry(Gbuffer(13)));
+    CHECK(pass.counter == before + 1); // the transparent draws of the same render continue the pass
 
     // the draw that only has the finisher's shape, with a depth test
     const DrawFacts shape = ObservedShapeOnlyDraw(tagKnown, pass);
@@ -527,13 +595,20 @@ void TestPassSurvivesShapeOnlyDraw()
     CHECK(HasFinisherShape(shape) && IsShapeOnlyFinisher(shape) && !IsFinisher(shape));
     CHECK(Classify(shape) == DrawKind::Ignore);
     CHECK(RunRender(pass, true) == FinisherVerdict::Accepted);
-    CHECK(pass.active); // an accepted finisher does not end the pass
+    CHECK(pass.active); // the render is closed but its facts stay: a second finisher of the same render is still checked against it
+    CHECK(RunRender(pass, true) == FinisherVerdict::Accepted); // the next render (same state object) is a new pass
+    CHECK(pass.counter == 2);
+    CHECK(RunRender(pass, true) == FinisherVerdict::Accepted);
+    CHECK(pass.counter == 3);
 
     // before any tagged finisher shader exists (a finisher created before the hooks), the shape still counts: the old behaviour
     const auto early = ObservedShapeOnlyDraw(false, [] { PassState p; p.OnGeometry(Gbuffer(8)); return p; }());
     CHECK(IsFinisher(early) && !IsShapeOnlyFinisher(early) && Classify(early) == DrawKind::Finisher);
     CHECK(RunRender(pass, false) == FinisherVerdict::NoPass); // the bug of the second in-game test, kept only where it is meant
     CHECK(!pass.active);
+    CHECK(pass.counter == 4);
+    CHECK(RunRender(pass, true) == FinisherVerdict::Accepted); // the next render starts again from the ended pass
+    CHECK(pass.counter == 5);
 
     // a tagged finisher that fails the check still ends the pass
     PassState rejected;
@@ -582,6 +657,8 @@ int main()
     TestFinisherCheck();
     TestFinisherVerdict();
     TestPassState();
+    TestSecondRenderInOneFrame();
+    TestGeometryFollowsPass();
     TestPassStartObservedSignatures();
     TestShapeOnlyRules();
     TestPassSurvivesShapeOnlyDraw();

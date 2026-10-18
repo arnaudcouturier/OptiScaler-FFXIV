@@ -1119,7 +1119,9 @@ bool Around(const DrawView& view, DrawCall draw)
     {
     case DrawKind::Prepass:
     {
-        if (!sr || !g_pass.live)
+        // A render of another size than the running pass is neither jittered nor replayed (the guides and the motion target belong to
+        // the pass's size).
+        if (!sr || !g_pass.live || !GeometryFollowsPass(g_pass.width, g_pass.height, view.facts.targetWidth, view.facts.targetHeight))
             return false;
         {
             JitterScope shift(context, g_pass.jitter);
@@ -1130,7 +1132,7 @@ bool Around(const DrawView& view, DrawCall draw)
     }
     case DrawKind::GBuffer:
     {
-        if (!sr || !g_pass.live)
+        if (!sr || !g_pass.live || !GeometryFollowsPass(g_pass.width, g_pass.height, view.facts.targetWidth, view.facts.targetHeight))
             return false;
         if (!g_pass.prepassSeen && !g_pass.jitterZeroed)
         {

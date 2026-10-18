@@ -214,34 +214,54 @@ inline FinisherVerdict CheckFinisher(const FinisherCheck& c)
 
 inline bool FinisherAccepted(const FinisherCheck& c) { return CheckFinisher(c) == FinisherVerdict::Accepted; }
 
-// The render a pass belongs to: starts at the first accepted geometry draw while no pass is active, ends at a finisher
-// that fails the check or at the end of the frame.
+// The render a pass belongs to: starts at the first accepted geometry draw while no pass is active (or the previous render
+// finished), ends at a finisher that fails the check or at the end of the frame.
+//
+// One deliberate deviation from the specification of Nickle's build: there a pass ends only at the bridge's present, so two renders
+// of one presented frame share one pass (the same jitter phase, the guides and motion target of the first render). Here an accepted
+// finisher closes the render ("finished"): its facts stay readable (a second finisher of the same render is still checked against
+// them), but the next prepass or G-buffer draw starts a new pass and bumps the counter.
 struct PassState
 {
     bool active = false;
-    uint32_t counter = 0; // passes started so far; also the jitter phase
+    bool finished = false; // an accepted finisher closed the render; the next geometry draw starts a new pass
+    uint32_t counter = 0;  // passes started so far; also the jitter phase
     uint32_t width = 0;
     uint32_t height = 0;
 
     // Returns true when this draw started a new pass.
     bool OnGeometry(const DrawFacts& f)
     {
-        if (active)
+        if (active && !finished)
             return false;
         active = true;
+        finished = false;
         ++counter;
         width = f.targetWidth;
         height = f.targetHeight;
         return true;
     }
 
-    void End() { active = false; }
+    void End()
+    {
+        active = false;
+        finished = false;
+    }
 
-    // The outcome of a finisher draw: a finisher that fails the check drops the pass, an accepted one leaves it as it is.
+    // The outcome of a finisher draw: a finisher that fails the check drops the pass, an accepted one closes the render.
     void OnFinisher(FinisherVerdict verdict)
     {
         if (verdict != FinisherVerdict::Accepted)
             End();
+        else if (active)
+            finished = true;
     }
 };
+
+// A prepass or G-buffer draw belongs to the running pass only at the pass's size. A differently sized draw (a second preview
+// render that begins before the first one finished) is neither jittered nor replayed: it runs natively.
+constexpr bool GeometryFollowsPass(uint32_t passWidth, uint32_t passHeight, uint32_t targetWidth, uint32_t targetHeight)
+{
+    return passWidth != 0 && passHeight != 0 && targetWidth == passWidth && targetHeight == passHeight;
+}
 } // namespace ext::ffxiv::chara

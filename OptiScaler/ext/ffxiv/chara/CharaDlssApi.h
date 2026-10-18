@@ -12,7 +12,10 @@
 //    `draw` natively once, plus at most one replay of the same draw under ReplayScope: the callable is the bare original
 //    call); false makes the dispatcher call `draw` itself. It must never leave pipeline state changed.
 //  * The pass bookkeeping (view.pass) belongs to the dispatcher: the pass starts at the first accepted geometry draw
-//    (view.passStarted is true for exactly that draw) and ends at a rejected finisher or at the end of the frame.
+//    (view.passStarted is true for exactly that draw) and ends at a rejected finisher or at the end of the frame. An accepted
+//    finisher closes the render: the next prepass or G-buffer draw starts a new pass (a deliberate deviation from the
+//    specification, where two renders of one frame share a pass). A geometry draw whose target is not the pass's size does not
+//    belong to the pass and is left native.
 //    For a finisher, view.finisherAccepted is the verdict of the finisher check, evaluated before the draw from the state
 //    the draw runs with; the dispatcher ends the pass itself when it is false, after Around returned.
 //  * A replay of a native draw by another module (the HDR mask replays) never reaches Around: the dispatcher skips it.
