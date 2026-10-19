@@ -120,6 +120,9 @@ class AutoMfgController
     static constexpr uint64_t kWarmupMs = 3000;     // self-test: before the first change
     static constexpr double kSelfTestPassMs = 40.0; // self-test: worst interval to call it in-place
     static constexpr int kSelfTestSteps = 5;
+    static constexpr int kSignatureSamples = 2;     // the re-creation stall is the interval right after the switch
+    static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
+    static constexpr int kForgetAfterClean = 10;    // clean switches after which earlier strikes are forgotten
 
     AutoMfgOut Tick(const AutoMfgTick& in)
     {
@@ -175,8 +178,13 @@ class AutoMfgController
         // Watch of the last switch.
         if (w_.open)
         {
+            ++w_.ticks;
             if (std::isfinite(in.realMs))
+            {
                 w_.worst = std::max(w_.worst, in.realMs);
+                if (w_.ticks <= kSignatureSamples)
+                    w_.early = std::max(w_.early, in.realMs);
+            }
             if (in.stateValid)
             {
                 ++w_.samples;
@@ -247,7 +255,9 @@ class AutoMfgController
         bool open = false;
         uint64_t since = 0;
         int from = 0, to = 0;
-        double worst = 0.0;
+        double worst = 0.0; // longest interval of the whole watch
+        double early = 0.0; // longest of the first kSignatureSamples intervals after the switch
+        int ticks = 0;
         double baselineMs = 0.0;
         bool statusBad = false;
         uint32_t statusCode = 0;
@@ -329,25 +339,36 @@ class AutoMfgController
                 SelfTestFinish(out, false, std::format("{}", why));
             return;
         }
-        if (w.worst >= costlyAt)
+        if (w.early >= costlyAt)
         {
+            // The signature is a long interval right after the switch; a long frame later in the watch is the game's.
             ++costly_;
+            ++streak_;
+            cleanRun_ = 0;
             sel_.SetHoldMs(DynamicMfg::kReducedTrustHoldMs);
             Warn(out, std::format("AutoMFG: switch {}x -> {}x cost a {:.0f} ms frame (a re-creation of DLS-G looks like "
                                   "this), holding {} s between changes and no more probes",
-                                  w.from, w.to, w.worst, DynamicMfg::kReducedTrustHoldMs / 1000));
+                                  w.from, w.to, w.early, DynamicMfg::kReducedTrustHoldMs / 1000));
             if (st_.running)
             {
                 ++st_.costly;
                 st_.worst = std::max(st_.worst, w.worst);
             }
-            else if (costly_ >= 2)
+            else if (streak_ >= kStrikesToStop)
             {
                 stopped_ = true;
                 Warn(out, "AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped");
             }
             lastGood_ = w.to;
             return;
+        }
+        streak_ = 0; // a clean switch breaks the row
+        if (++cleanRun_ >= kForgetAfterClean && costly_ > 0)
+        {
+            costly_ = 0;
+            sel_.SetHoldMs(DynamicMfg::kDefaultHoldMs);
+            Info(out, std::format("AutoMFG: {} clean changes since the last long frame, normal hold and probes again",
+                                  kForgetAfterClean));
         }
         Info(out, std::format("AutoMFG: {}x settled (worst interval {:.0f} ms, applied {}x)", w.to, w.worst, w.to));
         if (st_.running)
@@ -395,7 +416,7 @@ class AutoMfgController
                                   st_.changes, st_.worst));
         else
             Warn(out, std::format("AutoMFG self-test: FAIL ({})", detail));
-        if (costly_ >= 2 && !stopped_)
+        if (streak_ >= kStrikesToStop && !stopped_)
         {
             stopped_ = true;
             Warn(out, "AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped");
@@ -477,7 +498,9 @@ class AutoMfgController
     uint64_t lastTick_ = 0;
     bool restart_ = true;
     bool stopped_ = false;
-    int costly_ = 0;
+    int costly_ = 0;    // strikes, forgotten after kForgetAfterClean clean switches; > 0 = reduced trust (long hold, no probes)
+    int streak_ = 0;    // signatures on consecutive switches
+    int cleanRun_ = 0;  // clean switches since the last signature
     int lastGood_ = 0;
 };
 } // namespace ext::fg

@@ -27,6 +27,12 @@ struct Rig
     int detectedOverride = -1; // the plugin applies another count than requested
     uint32_t status = 0;
     bool stuckAtOne = false;
+    // an unrelated long frame `hitchDelay` ms after each of the next `hitchLeft` switches (a game hitch, not a re-creation)
+    double hitchLen = 0.0;
+    uint64_t hitchDelay = 800;
+    int hitchLeft = 0;
+    uint64_t hitchDue = 0;
+    int stallLeft = -1; // with `recreate`: how many switches still stall (-1 = all)
     GateInputs gate;
     std::vector<AutoMfgLine> lines;
     std::vector<Switch> switches;
@@ -48,7 +54,12 @@ struct Rig
     {
         AutoMfgTick in;
         in.nowMs = t;
-        const double ms = pendingStall > 0.0 ? pendingStall : plant.Ms(factor);
+        double ms = pendingStall > 0.0 ? pendingStall : plant.Ms(factor);
+        if (hitchDue != 0 && t >= hitchDue && pendingStall <= 0.0)
+        {
+            ms = hitchLen;
+            hitchDue = 0;
+        }
         pendingStall = 0.0;
         in.realMs = ms;
         in.appliedFactor = factor;
@@ -71,8 +82,17 @@ struct Rig
         {
             switches.push_back({ t, factor, out.factor, Why::None });
             factor = out.factor;
-            if (recreate)
+            if (recreate && stallLeft != 0)
+            {
                 pendingStall = stallMs;
+                if (stallLeft > 0)
+                    --stallLeft;
+            }
+            if (hitchLeft > 0)
+            {
+                hitchDue = t + hitchDelay;
+                --hitchLeft;
+            }
         }
         if (out.recover)
         {
@@ -223,6 +243,82 @@ void CostlyThresholdFollowsTheUsualInterval()
     r.Run(20000);
     CHECK(!r.switches.empty()); // it did switch up
     CHECK_MSG(r.c.CostlyCount() == 0, "a 190 ms frame in an 80 ms scene counted as a re-creation");
+}
+
+void UnrelatedHitchesDoNotStopTheMode()
+{
+    // Two 150 ms game hitches, five minutes apart, each 0.8 s after a switch: nothing to do with a count change.
+    Rig r;
+    r.hitchLen = 150.0;
+    r.hitchLeft = 1;
+    r.Run(20000); // heavy scene: 2x -> 3x -> 4x, the first switch has the hitch inside its watch
+    CHECK(r.factor == 4 && r.switches.size() == 2);
+    CHECK_MSG(r.c.CostlyCount() == 0 && !r.c.Stopped(), "a hitch 0.8 s after a switch counted as a strike (%d)",
+              r.c.CostlyCount());
+    r.Run(300000);        // five minutes of steady play
+    r.plant.base2x = 4.0; // light scene: only the probe-down finds 2x (probes are off after a strike)
+    r.hitchLeft = 1;
+    r.Run(60000);
+    CHECK_MSG(!r.c.Stopped() && r.factor == 2, "stopped %d, factor %dx", (int) r.c.Stopped(), r.factor);
+    CHECK(r.c.CostlyCount() == 0);
+}
+
+void LongFrameLaterInTheWatchIsNotTheSignature()
+{
+    // 150 ms, 0.8 s after the switch, normal intervals around it: no strike, no reduced trust, the settled line says so.
+    Rig r;
+    r.hitchLen = 150.0;
+    r.hitchLeft = 1;
+    r.Run(8000);
+    CHECK(!r.switches.empty());
+    CHECK(r.c.CostlyCount() == 0 && !r.c.Stopped() && r.c.Selector().HoldMs() == DynamicMfg::kDefaultHoldMs);
+    CHECK(r.Count("AutoMFG: switch") == 0);
+    CHECK(r.Find("AutoMFG: 3x settled (worst interval 150 ms") != nullptr);
+}
+
+void TheSignatureHasToRepeatInARow()
+{
+    // The first switch stalls, the second is clean (the row breaks), a stall much later is a single one again.
+    Rig r;
+    r.plant.refresh = 0;
+    r.plant.limit = 0;
+    r.recreate = true;
+    r.stallLeft = 1;
+    r.Run(8000);
+    CHECK(r.c.CostlyCount() == 1 && !r.c.Stopped() && r.c.Selector().HoldMs() == 12000);
+    r.Run(60000);
+    CHECK_MSG(r.factor == 4 && r.c.CostlyCount() == 1 && !r.c.Stopped(), "factor %dx stopped %d", r.factor,
+              (int) r.c.Stopped());
+    r.plant.base2x = 4.0; // light: 4x -> 3x -> 2x by the rate rules
+    r.stallLeft = 1;
+    r.Run(90000);
+    CHECK_MSG(r.c.CostlyCount() == 2 && !r.c.Stopped(), "two strikes but not in a row: stopped %d", (int) r.c.Stopped());
+    CHECK_MSG(r.factor == 2, "factor %dx", r.factor);
+}
+
+void StrikesAreForgottenAfterTenCleanSwitches()
+{
+    Rig r;
+    r.plant.refresh = 0;
+    r.plant.limit = 0;
+    r.recreate = true;
+    r.stallLeft = 1;
+    r.Run(8000);
+    CHECK(r.c.CostlyCount() == 1 && r.c.Selector().HoldMs() == 12000);
+    r.recreate = false;
+    for (int i = 0; i < 14; ++i)
+    {
+        r.plant.base2x = i % 2 == 0 ? 4.0 : 30.0; // alternating scene: every half cycle switches twice
+        r.Run(90000);
+        const size_t clean = r.switches.size() - 1; // every switch after the first was clean
+        if (clean < 9)
+            CHECK_MSG(r.c.CostlyCount() == 1, "forgot after %zu clean switches", clean);
+        if (clean >= 11)
+            break;
+    }
+    CHECK_MSG(r.c.CostlyCount() == 0 && !r.c.Stopped(), "strikes %d after %zu switches", r.c.CostlyCount(),
+              r.switches.size());
+    CHECK(r.c.Selector().HoldMs() == DynamicMfg::kDefaultHoldMs);
 }
 
 void BrokenOutcomesRecoverOnceAndStop()
@@ -458,6 +554,10 @@ int main()
     FreshControllerProbesOnARefreshBoundScene();
     CostlyOutcomeSlowsDownThenStops();
     CostlyThresholdFollowsTheUsualInterval();
+    UnrelatedHitchesDoNotStopTheMode();
+    LongFrameLaterInTheWatchIsNotTheSignature();
+    TheSignatureHasToRepeatInARow();
+    StrikesAreForgottenAfterTenCleanSwitches();
     BrokenOutcomesRecoverOnceAndStop();
     ActivationAndGapCloseTheWatchWithoutAVerdict();
     GapStartsANewHold();
