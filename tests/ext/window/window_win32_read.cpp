@@ -91,7 +91,8 @@ int main()
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         CHECK(foreign.valid);
         CHECK((foreign.style & WS_POPUP) != 0 && foreign.right - foreign.left == 400 && foreign.bottom - foreign.top == 300);
-        CHECK(elapsedMs < 2000);        SetEvent(done);
+        CHECK(elapsedMs < 2000);
+        SetEvent(done);
         worker.join();
         CloseHandle(ready);
         CloseHandle(done);

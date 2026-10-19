@@ -53,7 +53,7 @@ class FgOffGate
     // `reachedFg` = the present got as far as the frame generation present (the swapchain Present Streamline sees). A present
     // that returned early (an error path before it) says nothing about Streamline: the count starts again. `nowMs` = the clock
     // at this present end; it is kept as FirstOffMs() when the count goes from 0 to 1 and forgotten when the count starts again.
-    void OnPresentEnd(const FgSnapshot& fg, bool reachedFg = true, uint64_t nowMs = 0)
+    void OnPresentEnd(const FgSnapshot& fg, bool reachedFg, uint64_t nowMs)
     {
         if (reachedFg && _startedOff && FgIsOff(fg))
         {

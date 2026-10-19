@@ -15,7 +15,7 @@ const FgSnapshot kOff { true, false, false };
 void Present(FgOffGate& gate, const FgSnapshot& entry, const FgSnapshot& exit)
 {
     gate.OnPresentBegin(entry);
-    gate.OnPresentEnd(exit);
+    gate.OnPresentEnd(exit, true, 0);
 }
 } // namespace
 
@@ -76,7 +76,7 @@ int main()
         // Reset in the middle of a present: that present's entry state is forgotten as well.
         gate.OnPresentBegin(kOff);
         gate.Reset();
-        gate.OnPresentEnd(kOff);
+        gate.OnPresentEnd(kOff, true, 0);
         CHECK(!gate.Confirmed(true));
         Present(gate, kOff, kOff);
         CHECK(gate.Confirmed(true));
@@ -85,7 +85,7 @@ int main()
     // An exit without an entry does not count.
     {
         FgOffGate gate;
-        gate.OnPresentEnd(kOff);
+        gate.OnPresentEnd(kOff, true, 0);
         CHECK(!gate.Confirmed(true));
     }
 

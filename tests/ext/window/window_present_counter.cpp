@@ -84,17 +84,17 @@ int main()
     {
         FgOffGate gate;
         gate.OnPresentBegin(kOff);
-        gate.OnPresentEnd(kOff, true);
+        gate.OnPresentEnd(kOff, true, 0);
         CHECK(gate.Count() == 1);
         gate.OnPresentBegin(kOff);
-        gate.OnPresentEnd(kOff, false);
+        gate.OnPresentEnd(kOff, false, 0);
         CHECK(gate.Count() == 0);
         gate.OnPresentBegin(kOff);
-        gate.OnPresentEnd(kOff); // the default is a counted present
+        gate.OnPresentEnd(kOff, true, 0); // a counted present
         CHECK(gate.Count() == 1);
         gate.OnPresentBegin(kOff);
-        gate.OnPresentEnd(kOff, false);
-        gate.OnPresentEnd(kOff, true); // an end without a begin since the aborted present counts nothing
+        gate.OnPresentEnd(kOff, false, 0);
+        gate.OnPresentEnd(kOff, true, 0); // an end without a begin since the aborted present counts nothing
         CHECK(gate.Count() == 0);
     }
 
@@ -356,7 +356,8 @@ int main()
         CHECK(env.replays.size() == 1);
         CHECK(Count(env, "hard wait limit reached without a confirmation") == 1);
         CHECK_CONTAINS(env.All(), "after 100 presents, 500 ms");
-    }    // The same by time: 6 s pass with fewer than 24 failed presents.
+    }
+    // The same by time: 6 s pass with fewer than 24 failed presents.
     {
         FakeEnv env;
         Controller c;
@@ -622,6 +623,26 @@ int main()
             CHECK(env.replays.empty());
         }
         env.nowMs = 1150; // 50 ms after the resize
+        Present(c, env, Mode::On, kOff, kOff, true);
+        CHECK(env.replays.size() == 1);
+    }
+
+    // A clock that goes backwards never satisfies a floor (`now - x` would wrap to a huge number): complete off presents that
+    // reach Streamline, with the clock below the request time, replay nothing, neither as a confirmation nor as the soft limit
+    // (eight presents pass the soft count of six); when the clock is back past the floor the replay comes.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 8; ++i)
+        {
+            env.nowMs = 1000 - 10 * i;
+            Present(c, env, Mode::On, kOff, kOff, true);
+            CHECK(env.replays.empty());
+        }
+        env.nowMs = 1100;
         Present(c, env, Mode::On, kOff, kOff, true);
         CHECK(env.replays.size() == 1);
     }

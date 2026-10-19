@@ -435,6 +435,28 @@ int main()
         CHECK(env.applied.size() == 1);
         CHECK(!env.applied[0].fgActiveAtCall);
     }
+    // A clock that goes backwards never satisfies the floor (the stamp of the first off present is later than now) and does not
+    // expire the armed fix either; once it is back past the floor the fix applies.
+    {
+        FakeEnv env;
+        Controller c; // defaults
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 1005;
+        Present(c, env, Mode::On, kPaused, kPaused); // the first complete off present, stamped 1005
+        for (uint64_t t : { 900ull, 800ull, 700ull })
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kPaused, kPaused);
+            CHECK(env.applied.empty());
+        }
+        CHECK(c.FixArmed());
+        env.nowMs = 1055;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
     {
         // plenty of time but only one complete present: not enough
         FakeEnv env;
