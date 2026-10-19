@@ -13,7 +13,8 @@
 // they carry an explicit proof in MenuManifest.h kKeyEvidence (a menu file and a text that must be in it).
 // The generated NR Pass4..Pass30 keys are built by a loop, not by a literal b.Add, so they are outside the rule.
 //
-// Every rule also runs against deliberately broken models, so it is mutation-checked by construction.
+// Every rule also runs against deliberately broken models, so it is mutation-checked by construction: among them the control of
+// EVERY bound key (not one example) is removed in turn, and the rule has to name exactly that key.
 #include "ext/core/MenuManifest.h"
 #include "menu_scan.h"
 
@@ -64,6 +65,21 @@ bool Names(const std::string& text, const std::string& member)
             return true;
     }
     return false;
+}
+
+
+// `text` with every `.member` / `->member` (whole identifier, the form Names() looks for) renamed to `.xx`
+std::string RenameMember(std::string text, const std::string& member)
+{
+    for (size_t at = text.find(member); at != std::string::npos; at = text.find(member, at + 1))
+    {
+        const bool after = at + member.size() >= text.size() || !IsIdent(text[at + member.size()]);
+        const bool dot = at >= 1 && text[at - 1] == '.';
+        const bool arrow = at >= 2 && text[at - 1] == '>' && text[at - 2] == '-';
+        if (after && (dot || arrow))
+            text.replace(at, member.size(), "xx");
+    }
+    return text;
 }
 
 std::string Strip(const std::string& s) { return menuscan::StripComments(s); }
@@ -252,6 +268,31 @@ int main(int argc, char** argv)
                 s.text.replace(at, 15, "xx");
         }
         CHECK(!Problems(bound, broken).empty());
+    }
+    {   // every key's control, removed one by one: the rule has to name exactly that key (this exercises the rule for each key,
+        //  not for one; it does not remove the generic-name limit described in the header)
+        size_t mutated = 0;
+        for (const Bound& b : bound)
+        {
+            const std::string name = b.Name();
+            if (std::find(world.iniOnly.begin(), world.iniOnly.end(), name) != world.iniOnly.end())
+                continue;
+            if (std::any_of(world.evidence.begin(), world.evidence.end(), [&](const Evidence& e) { return e.key == name; }))
+                continue; // the shared "mode" names carry an evidence entry instead, mutated above
+            World broken = world;
+            if (b.upstream)
+                broken.upstreamMenu = RenameMember(broken.upstreamMenu, b.member);
+            else
+                for (Source& s : broken.menuFiles)
+                    s.text = RenameMember(s.text, b.member);
+            bool named = false;
+            for (const std::string& problem : Problems(bound, broken))
+                named = named || problem.rfind(name + " (", 0) == 0;
+            const std::string what = "removing the control of " + name + " (member " + b.member + ") is not reported";
+            Check(named, what.c_str(), __LINE__);
+            ++mutated;
+        }
+        CHECK(mutated >= 100);
     }
     {   // an ini-only entry removed: the developer gate has no control and is no longer excused
         World broken = world;
