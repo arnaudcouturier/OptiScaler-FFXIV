@@ -6,8 +6,8 @@
 // Rules (Check): ids unique; every layout card registered by exactly one source file and the other way round; the
 // registered tab is the layout tab and a real tab of the menu; the FFXIV tab row exists once; FFXIV-only cards are
 // exactly the cards of the FFXIV tab and their files test the game; every anchor resolves; every card appears once in
-// the final order and none sits between two upstream boxes of one shared function; every id that was ever released
-// resolves (live or alias); aliases are sane; ini-only keys are real. Budget: the `// ext:` seam lines of the upstream
+// the final order, every tab is one run of it, and none sits between two upstream boxes of one shared function; every
+// id that was ever released resolves (live or alias); aliases are sane; ini-only keys are real. Budget: the `// ext:` seam lines of the upstream
 // menu files stay at the agreed number.
 //
 // Each rule is also run against a deliberately broken model and must complain: that is the mutation check of the rule.
@@ -178,6 +178,33 @@ Violations Check(const Model& m)
         if (merged.size() != m.upstream.size() + m.slots.size())
             add("one-tab", "the final order has " + std::to_string(merged.size()) + " cards, expected " +
                                std::to_string(m.upstream.size() + m.slots.size()));
+    }
+    // every tab is ONE run of the final order (the Custom Tab picker and its pins walk the array and start a heading at
+    // each change of tab: a tab that comes back is listed twice)
+    {
+        std::vector<std::string> closed;
+        std::string prev;
+        for (size_t i = 0; i < merged.size(); i++)
+        {
+            std::string tab;
+            if (isFork[i])
+            {
+                if (const Slot* s = FindSlot(m, merged[i]))
+                    tab = s->tab;
+            }
+            else
+            {
+                for (const auto& b : m.upstream)
+                    if (b.id == merged[i])
+                        tab = b.tab;
+            }
+            if (i > 0 && tab == prev)
+                continue;
+            if (Contains<std::string>(closed, tab))
+                add("tab-run", "'" + tab + "' comes back at " + merged[i] + ": its cards are not one run of the final order");
+            closed.push_back(tab);
+            prev = tab;
+        }
     }
     // no fork card between two upstream boxes of one shared function
     std::set<std::string> sources;
@@ -426,6 +453,15 @@ void Broken(const Model& real)
         m = real;
         Find(m, "window_mode")->after = "hudless_diag";
         CHECK(Has(Check(m), "anchor"));
+    }
+    { // a tab that comes back: a Textures card anchored on an FFXIV card lands behind the FFXIV block, before Latency & FPS
+        Model m = real;
+        m.slots.push_back({ "stray_textures", "Textures", "window_mode" });
+        CHECK(Has(Check(m), "tab-run"));
+        // the same card anchored in its own tab is fine
+        m = real;
+        m.slots.push_back({ "stray_textures", "Textures", "anisotropy" });
+        CHECK(!Has(Check(m), "tab-run"));
     }
     { // a fork card inside a shared group (Frame Gen runtime cards, Textures)
         Model m = real;

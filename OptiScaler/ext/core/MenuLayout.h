@@ -6,16 +6,21 @@
 // units. Pure data and logic (no ImGui, no upstream types): the menu manifest test builds the final order from the same code.
 //
 // kSlots is processed in TABLE order. Each slot says which card its card follows (`after`): an upstream card or a fork
-// card that comes earlier in the table. Cards that follow the same anchor keep their table order. When `after` is null or
-// names no card, the card goes after the last card of its own tab, and when the tab has no card yet, at the end of the
-// table. A registered card that has no slot is placed after the table cards in id order, at the end of its tab (fail
-// open: it shows, it never disappears). A slot whose card is not registered is skipped; the cards after it still find
-// their anchors by id.
+// card that comes earlier in the table. Cards that follow the same anchor keep their table order, and a card goes behind
+// the whole block that already follows its anchor: the cards that follow the anchor, the cards that follow those, and so
+// on (a chain is never split by a later card). When `after` is null or names no card, the card goes after the last card
+// of its own tab, and when the tab has no card yet, at the end of the table. A registered card that has no slot is
+// placed after the table cards in id order, at the end of its tab (fail open: it shows, it never disappears). A slot
+// whose card is not registered is skipped, and a card that follows such a skipped card finds no anchor: it goes to the
+// end of its own tab (or, when the tab has no card yet, to the end of the table).
 //
-// Rule for the people editing the table: a fork card sits BEFORE or AFTER a group of upstream boxes that share one
+// Rules for the people editing the table: a fork card sits BEFORE or AFTER a group of upstream boxes that share one
 // `source` function, never inside it. The tab loop draws a shared function once, at the position of its first box
 // (ext/core/SourceTracker.h), so a card inside the group would show after the whole group anyway; the manifest test
-// rejects it so the table says what is drawn. Card ids are permanent (the Custom Tab saves pins by id).
+// rejects it so the table says what is drawn. Every tab must stay ONE run of the merged order (the Custom Tab picker
+// and its pins walk the array and start a heading at each change of tab): list the cards of a later tab after the
+// cards of the tab before it, and anchor its first card on the last card of the block it follows. The manifest test
+// checks that too. Card ids are permanent (the Custom Tab saves pins by id).
 
 #include <algorithm>
 #include <cstddef>
@@ -100,7 +105,8 @@ inline std::vector<Placed> MergeOrder(const Item* base, size_t baseCount, const 
         size_t pos = entries.size();
         bool found = false;
 
-        // after the anchor, behind the fork cards that already follow the same anchor
+        // after the anchor, behind the whole block of fork cards that already follow it: the cards that follow the anchor
+        // and the cards that follow those (a chain), so a later card never lands in the middle of a chain
         if (!after.empty())
         {
             for (size_t i = 0; i < entries.size(); i++)
@@ -108,9 +114,14 @@ inline std::vector<Placed> MergeOrder(const Item* base, size_t baseCount, const 
                 if (entries[i].id != after)
                     continue;
 
+                std::vector<std::string_view> block { after };
                 pos = i + 1;
-                while (pos < entries.size() && entries[pos].ref.fork && entries[pos].after == after)
+                while (pos < entries.size() && entries[pos].ref.fork &&
+                       std::find(block.begin(), block.end(), entries[pos].after) != block.end())
+                {
+                    block.push_back(entries[pos].id);
                     pos++;
+                }
                 found = true;
                 break;
             }

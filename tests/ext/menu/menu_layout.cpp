@@ -68,9 +68,31 @@ std::string Join(const Ids& ids)
     return s;
 }
 
+// Each tab is ONE run of the merged order (the Custom Tab picker and the pinned cards walk the array in order and start
+// a new heading at every change of tab, so a tab that comes back would be listed twice)
+bool TabsContiguous(const Ids& tabOfEntry)
+{
+    std::vector<std::string> closed;
+    for (size_t i = 0; i < tabOfEntry.size(); i++)
+    {
+        if (i > 0 && tabOfEntry[i] == tabOfEntry[i - 1])
+            continue;
+        if (std::find(closed.begin(), closed.end(), tabOfEntry[i]) != closed.end())
+            return false;
+        closed.push_back(tabOfEntry[i]);
+    }
+    return true;
+}
+
 // ---- 1. synthetic ---------------------------------------------------------------------------------------------------
 void Synthetic()
 {
+    // the contiguity check itself: it must complain about a tab that comes back
+    CHECK(TabsContiguous({ "A", "A", "B", "C", "C" }));
+    CHECK(!TabsContiguous({ "A", "B", "A" }));
+    CHECK(!TabsContiguous({ "A", "A", "B", "B", "A" }));
+    CHECK(TabsContiguous({}));
+
     Menu m;
     m.base = { { "a1", "T1" }, { "a2", "T1" }, { "a3", "T1" }, { "b1", "T2" }, { "b2", "T2" } };
     m.slots = { { "f1", "T1", "a1" }, { "f2", "T1", "f1" }, { "f3", "T1", "a3" },
@@ -139,6 +161,31 @@ void Synthetic()
         CHECK(Join(Merge(s)) == "a x y b");
     }
 
+    // the cards that follow an anchor form a block (its direct followers and the followers of those, and so on): a later
+    // card with the same anchor goes behind the WHOLE block, never into the middle of a chain
+    {
+        Menu s;
+        s.base = { { "S", "T" }, { "Z", "U" } };
+        s.slots = { { "W", "V", "S" }, { "H", "V", "W" }, { "A", "T", "S" } };
+        s.cards = { { "A", "T" }, { "H", "V" }, { "W", "V" } };
+        CHECK(Join(Merge(s)) == "S W H A Z");
+        s.cards = { { "W", "V" }, { "A", "T" }, { "H", "V" } };
+        CHECK(Join(Merge(s)) == "S W H A Z");
+        // a longer chain: W's followers (H, then I behind H) stay right behind W, the sibling B comes after that block
+        s.slots = { { "W", "V", "S" }, { "B", "V", "S" }, { "H", "V", "W" }, { "I", "V", "H" }, { "A", "T", "S" } };
+        s.cards = { { "A", "T" }, { "I", "V" }, { "H", "V" }, { "B", "V" }, { "W", "V" } };
+        CHECK(Join(Merge(s)) == "S W H I B A Z");
+    }
+
+    // a card that follows an unregistered card does not find its anchor: it goes to the end of its tab
+    {
+        Menu s;
+        s.base = { { "a", "T" }, { "b", "T" }, { "c", "U" } };
+        s.slots = { { "x", "T", "a" }, { "gone", "T", "x" }, { "y", "T", "gone" } };
+        s.cards = { { "y", "T" }, { "x", "T" } };
+        CHECK(Join(Merge(s)) == "a x b y c");
+    }
+
     // a card registered for another tab than the anchor's follows the anchor (cards may move between tabs)
     {
         Menu s;
@@ -188,21 +235,48 @@ void RealTable(const std::string& repo)
     const Ids reference = Merge(m);
     CHECK(reference.size() == upstream.size() + kSlotCount);
 
+    // the tab of an id of the merged menu: upstream boxes by id, fork cards by their slot
+    auto tabOfId = [&](const std::string& id)
+    {
+        std::string tab;
+        for (const auto& b : upstream)
+            if (b.id == id)
+                tab = b.tab;
+        for (const Slot& s : kSlots)
+            if (id == s.id)
+                tab = s.tab;
+        return tab;
+    };
+    auto contiguous = [&](const Ids& order)
+    {
+        Ids tabs;
+        for (const auto& id : order)
+            tabs.push_back(tabOfId(id));
+        return TabsContiguous(tabs);
+    };
+    CHECK(contiguous(reference));
+
     std::mt19937 rng(20261019);
-    size_t different = 0;
+    size_t different = 0, scattered = 0;
     for (int i = 0; i < 500; i++)
     {
         std::vector<Item> shuffled = registered;
         std::shuffle(shuffled.begin(), shuffled.end(), rng);
         m.cards = shuffled;
-        if (Merge(m) != reference)
+        const Ids got = Merge(m);
+        if (got != reference)
             ++different;
+        if (!contiguous(got))
+            ++scattered;
     }
     m.cards = registered;
     std::reverse(m.cards.begin(), m.cards.end());
     if (Merge(m) != reference)
         ++different;
+    if (!contiguous(Merge(m)))
+        ++scattered;
     CHECK(different == 0);
+    CHECK(scattered == 0); // every tab is one run in the merged order, whatever the registration order
 
     // the expected order of every tab (cards that are not registered would simply be missing)
     Ids tabOf;
