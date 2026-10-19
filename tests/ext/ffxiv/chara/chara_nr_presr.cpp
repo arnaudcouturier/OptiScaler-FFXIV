@@ -9,6 +9,7 @@
 // What it cannot prove (the game session does): that the driver accepts the shared image as Color, and the picture quality.
 #include "check.h"
 
+#include "ext/ffxiv/chara/CharaDlssNgx.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaNrRules.h"
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 using namespace ext::ffxiv::chara::nr;
+namespace ngx = ext::ffxiv::chara::dlss::ngx;
 
 namespace
 {
@@ -224,6 +226,76 @@ void TestEvaluateOutcomes()
         Fake e;
         const SrEvaluation r = Decide(n, true, true, e);
         CHECK(r.placement == Placement::PostSr && e.log == (Log { "eval-plain" }));
+    }
+}
+
+// The glue's evaluate, recorded through the real ApplyEvaluate (the CharaDlssNgx.h pattern): the same lambda body as RunSlot's, with a fake in place of
+// the NGX parameter object. Color is the NR result when the pre-SR run produced one and the evaluate took it, the plain colour otherwise; the retry
+// differs from the first evaluate in Color only.
+struct NgxRecorder
+{
+    const void* colour = nullptr;
+    std::vector<std::string> others; // every other value set by this evaluate, in order
+    void SetUInt(const char* n, uint32_t v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
+    void SetInt(const char* n, int v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
+    void SetFloat(const char* n, float v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
+    void SetResource(const char* n, const void* r)
+    {
+        if (std::string(n) == ngx::kColor)
+            colour = r;
+        else
+            others.push_back(std::string(n) + "@" + std::to_string(reinterpret_cast<uintptr_t>(r)));
+    }
+};
+
+void TestColourGivenToTheEvaluate()
+{
+    int nrImage = 0, plainImage = 0, outImage = 0, depthImage = 0, motionImage = 0;
+    ngx::EvaluateInputs in;
+    in.width = 576;
+    in.height = 960;
+    in.jitterX = 0.25f;
+    in.jitterY = -0.5f;
+    in.reset = true;
+    struct Case
+    {
+        bool keyOn;
+        ProductionAnswer answer;
+        bool nrEvaluate;
+        std::vector<const void*> want; // the Color of each evaluate, in order
+        bool latch;
+    };
+    const Case cases[] = {
+        { true, { RunOutcome::Ran, true }, true, { &nrImage }, false },               // NR ran, the evaluate took it
+        { true, { RunOutcome::Ran, true }, false, { &nrImage, &plainImage }, true },  // refused: again on the plain colour, latch
+        { true, { RunOutcome::Preparing, false }, true, { &plainImage }, false },     // no image yet
+        { true, { RunOutcome::Failed, false }, true, { &plainImage }, false },
+        { true, { RunOutcome::Skipped, true }, true, { &plainImage }, false },        // an image next to a non-Ran outcome is not used
+        { false, { RunOutcome::Ran, true }, true, { &plainImage }, false },           // key off: never the NR image
+    };
+    for (const Case& c : cases)
+    {
+        PlumbingFacts f = BothOn();
+        f.preSrWanted = c.keyOn;
+        std::vector<NgxRecorder> recorded;
+        const SrEvaluation r = DecideSrEvaluate(
+            f, true, true, [&] { return c.answer; },
+            [&](SrColourSource source)
+            {
+                NgxRecorder rec;
+                // RunSlot's lambda: Color is SrColourFor(source, the NR result, g.color); the rest does not depend on it
+                ngx::ApplyEvaluate<NgxRecorder, const void*>(rec, in, SrColourFor<const void*>(source, &nrImage, &plainImage), &outImage, &depthImage,
+                                                              &motionImage);
+                recorded.push_back(rec);
+                return source == SrColourSource::PreSr ? c.nrEvaluate : true;
+            });
+        CHECK(recorded.size() == c.want.size());
+        for (size_t i = 0; i < recorded.size() && i < c.want.size(); ++i)
+        {
+            CHECK(recorded[i].colour == c.want[i]);
+            CHECK(recorded[i].others == recorded[0].others); // the retry carries the same jitter, reset, guides and output
+        }
+        CHECK(r.ok && r.latchPreSr == c.latch);
     }
 }
 
@@ -537,6 +609,7 @@ int main()
     TestKeyOffIsUnchanged();
     TestEvaluateOutcomes();
     TestSlotRenderPreSr();
+    TestColourGivenToTheEvaluate();
     TestTintFor();
     TestShapes();
     TestResultKinds();

@@ -229,6 +229,8 @@ nr::PlumbingFacts PlumbingNow()
     f.srGateOpen = static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available;
     f.nrHoldsResources = nr::HoldsResources();
     f.srSlotsHeld = g_slotsHeld.load(std::memory_order_relaxed);
+    f.preSrWanted = ext::Cfg().ffxiv.chara.previewNrBeforeSr.value_or_default();
+    f.preSrLatched = nr::SharedLatches().PreSrLatched();
     return f;
 }
 void ReportAvailability(Availability a)
@@ -699,6 +701,14 @@ struct ProductionCall
 };
 ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR production entry, defined below
 
+// What the pre-SR entry gave back: the NR result as the texture the SR evaluate takes (only for a produced one) and what the module said.
+struct PreSrCall
+{
+    ComPtr<ID3D11Texture2D> texture;
+    nr::ProductionAnswer answer; // a value-initialised call is a failed one
+};
+PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR pre-SR entry, defined below
+
 void RunSlot(int index, const DrawView& view)
 {
     ReplayScope own; // the upscaler may copy or clear on this context: the hooks must not treat that as the game's work
@@ -764,10 +774,42 @@ void RunSlot(int index, const DrawView& view)
     in.jitterY = g_pass.jitter.y;
     in.reset = g_slots.ShouldReset(index, view.now);
     ParamSetter setter { g.params };
-    ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, in, g.color.texture.Get(), g.output.texture.Get(),
-                                                     g.depth.texture.Get(), g.motion.texture.Get());
-    const NVSDK_NGX_Result result = evaluate(context, g.handle, g.params, nullptr);
-    if (result != NVSDK_NGX_Result_Success)
+
+    // NR before SR (PreviewNRBeforeSR): with that placement NR runs on the render-size colour first and its result is the evaluate's Color. The
+    // decisions (is it offered, which colour does each evaluate get, what happens when the evaluate refuses the NR image) are nr::DecideSrEvaluate's:
+    // with the key off it runs the evaluate once on g.color, as before. A refused NR image is run again on g.color in this same render and latches
+    // NR before SR off for the session (one log line); that is never a failure of this slot or of the SR path.
+    ComPtr<ID3D11Texture2D> preSrColour; // the pre-SR NR result, with a reference of its own for the evaluate
+    NVSDK_NGX_Result result = NVSDK_NGX_Result_Success;
+    NVSDK_NGX_Result nrColourResult = NVSDK_NGX_Result_Success;
+    const nr::SrEvaluation ev = nr::DecideSrEvaluate(
+        PlumbingNow(), true, nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs),
+        [&]
+        {
+            PreSrCall call = RunNrPreSr(view, g, s, in);
+            preSrColour = std::move(call.texture);
+            return call.answer;
+        },
+        [&](nr::SrColourSource source)
+        {
+            ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, in, nr::SrColourFor<ID3D11Resource*>(source, preSrColour.Get(), g.color.texture.Get()),
+                                                             g.output.texture.Get(), g.depth.texture.Get(), g.motion.texture.Get());
+            result = evaluate(context, g.handle, g.params, nullptr);
+            if (source == nr::SrColourSource::PreSr)
+                nrColourResult = result;
+            return result == NVSDK_NGX_Result_Success;
+        });
+    if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())
+    {
+        if (ev.preSrProduced)
+            LOG_WARN("CharaView NR: the DLSS evaluate refused the pre-SR NR image (result {:#x}); this render used the plain image, NR before DLSS is "
+                     "switched off for this session and NR runs after DLSS",
+                     static_cast<unsigned>(nrColourResult));
+        else
+            LOG_WARN("CharaView NR: the pre-SR run reported a result but gave no image; NR before DLSS is switched off for this session and NR runs "
+                     "after DLSS");
+    }
+    if (!ev.ok)
     {
         char text[64];
         std::snprintf(text, sizeof(text), "evaluate %X", static_cast<unsigned>(result));
@@ -785,7 +827,7 @@ void RunSlot(int index, const DrawView& view)
     ComPtr<ID3D11ShaderResourceView> nrOutput; // outlives the alpha pass
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
     const nr::SlotRender render = nr::DecideSlotRender(
-        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, nr::Placement::PostSr, false,
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, ev.placement, ev.usedPreSrColour,
         [&]
         {
             ProductionCall call = RunNrProduction(view, g, s, in);
@@ -804,10 +846,10 @@ void RunSlot(int index, const DrawView& view)
     }
     g.composedFromNr = render.composedFromNr;
     g_nrProductionThisRender = render.composedFromNr;
-    if (g.composedFromNr)
-        ++g_stats.nrProductionRuns;
+    if (g.composedFromNr && !render.preSrColour)
+        ++g_stats.nrProductionRuns; // the alpha pass used the post-SR NR output (NR before SR has its own counters in the module)
     if (tinted)
-        ++g_stats.tintApplied; // the composed image: magenta for SR, cyan when its colour came from NR
+        ++g_stats.tintApplied; // the composed image: magenta for SR, cyan when its colour came from NR (after or before the evaluate)
 
     {
         ReplayScope own; // the query End goes through the hooked context
@@ -948,6 +990,59 @@ ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const Slo
                        {
                            if (nr::SharedLatches().LatchNr())
                                LOG_WARN("CharaView NR: an unexpected exception in the dispatcher's production step; switched off for this session, the super-resolution output is used");
+                           return {};
+                       });
+}
+
+// Pre-SR entry: between the guide passes and the SR evaluate of RunSlot, with the real guides (nr::RunPreSrNow). The module copies the render-size
+// colour and the slot's depth and motion into its shared images, queues the NR list on the bridge's D3D12 queue and waits for it on this context
+// (same-frame hand-off), then hands back the NR output (RGBA16F, render size), which RunSlot gives the SR evaluate as its Color. Anything else
+// (the model is still being built, no list free, the module is switched off or failed) returns no image and the evaluate runs on the plain colour:
+// counted by the module, logged here once per cause. The post-SR entry is not started for such a render (nr::DecideSlotRender).
+nr::CauseLog g_preSrCauses; // one log line per cause of a pre-SR fallback (the module counts every one)
+
+PreSrCall RunNrPreSrInner(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
+{
+    if (view.rtvTexture == nullptr || in.width > kNrMaxSide || in.height > kNrMaxSide)
+    {
+        nr::NotePreSrDeclined();
+        if (g_preSrCauses.First(kProductionCauseDeclined))
+            LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: the preview texture is unknown or its size ({}x{}) is larger than NR "
+                     "takes (counted; this cause is logged once)",
+                     in.width, in.height);
+        return { nullptr, { nr::RunOutcome::NotAvailable, false } };
+    }
+    nr::ProductionRequest request;
+    request.base.context = view.context;
+    request.base.native = view.rtvTexture;
+    request.base.width = in.width;
+    request.base.height = in.height;
+    request.base.now = view.now;
+    request.colour = g.color.texture.Get();
+    request.depth = g.depth.texture.Get();
+    request.motion = g.motion.texture.Get();
+    request.guides = nr::GuidesOf(in, s.reversedZ); // the guides the SR evaluate of this render is given; the depth convention its feature was created with
+    request.superResolutionReset = in.reset;        // the SR history restarts with this render: so does the NR model's
+    nr::ProductionResult result = nr::RunPreSr(request);
+    const nr::ProductionAnswer answer { result.outcome, result.view != nullptr && result.texture != nullptr };
+    if (nr::ProductionProduced(answer))
+        return { std::move(result.texture), answer };
+    if (g_preSrCauses.First(static_cast<unsigned>(result.outcome)))
+        LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: {} (counted; this cause is logged once)", ProductionCauseText(result.outcome));
+    if (diag::TraceEnabled())
+        diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR pre-SR outcome {} for {}x{}", static_cast<int>(result.outcome), in.width, in.height));
+    return { nullptr, answer };
+}
+
+// The second line of defence behind the module's own boundary (nr::RunPreSr never throws), like RunNrProduction: an exception here latches preview
+// NR and the evaluate runs on the plain colour.
+PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
+{
+    return nr::Guarded([&] { return RunNrPreSrInner(view, g, s, in); },
+                       []() -> PreSrCall
+                       {
+                           if (nr::SharedLatches().LatchNr())
+                               LOG_WARN("CharaView NR: an unexpected exception in the dispatcher's pre-SR step; switched off for this session, the plain image is used");
                            return {};
                        });
 }
