@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 
+#include <chrono>
 #include <cstdio>
 #include <thread>
 
@@ -66,6 +67,9 @@ int main()
         HWND other = nullptr;
         HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        CHECK(ready != nullptr && done != nullptr);
+        if (ready == nullptr || done == nullptr)
+            return 1;
         std::thread worker(
             [&]
             {
@@ -76,12 +80,18 @@ int main()
                 if (other != nullptr)
                     DestroyWindow(other);
             });
-        WaitForSingleObject(ready, 10000);
+        CHECK(WaitForSingleObject(ready, 10000) == WAIT_OBJECT_0);
         CHECK(other != nullptr);
         CHECK(otherThread != 0 && otherThread != GetCurrentThreadId());
+        // The worker sits in WaitForSingleObject and never pumps messages. The module's reads must not send a message to the
+        // window (a SendMessage-based read would block here until the worker's 10 s wait ends): they return at once.
+        const auto start = std::chrono::steady_clock::now();
         CHECK(win32::OwnerThread(Id(other)) == otherThread);
-        CHECK(win32::Read(Id(other)).valid);
-        SetEvent(done);
+        const WindowInfo foreign = win32::Read(Id(other));
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        CHECK(foreign.valid);
+        CHECK((foreign.style & WS_POPUP) != 0 && foreign.right - foreign.left == 400 && foreign.bottom - foreign.top == 300);
+        CHECK(elapsedMs < 2000);        SetEvent(done);
         worker.join();
         CloseHandle(ready);
         CloseHandle(done);
