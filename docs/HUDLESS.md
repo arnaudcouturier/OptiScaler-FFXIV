@@ -226,7 +226,7 @@ Diagnostics = false        ; D1 / diagnostic builds only (bound by A's UiConfig,
 ReShadePresets = auto      ; auto | on | off: apply the user's ReShade presets in place at the UI boundary (S10 E); auto = a ReShade runtime exists and >= 1 technique is enabled
 ```
 
-Menu card "HUD-less (UI-free frame generation)": status line (state, reason, counters), mode combo, an "Advanced" fold with the tuning keys, "Show detected UI (HUD-less)". Changing Mode to/from `recomposition` shows "applies after a game restart". The old `[FrameGen] ExternalUI*` / `ExternalHudless` keys are not read or written.
+Menu card "HUD-less (UI-free frame generation)": status line (state, reason, counters), mode combo, an "Advanced" fold with the tuning keys, "Show detected UI (HUD-less)", a "ReShade presets at the UI boundary" combo (`[HudLess] ReShadePresets`, applies at once) and, in the Advanced fold, a "UI recomposition (restart)" combo (`[DLSSG] UIRecomposition`). Changing Mode to/from `recomposition` shows "applies after a game restart". The old `[FrameGen] ExternalUI*` / `ExternalHudless` keys are not read or written.
 
 ## 12. Diagnostic build D1 (observation only; `Mode = off` behaviour unchanged)
 
