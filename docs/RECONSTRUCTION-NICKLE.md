@@ -362,3 +362,4 @@ output-size colour image, image quality on the alpha-masked silhouette, cost wit
 The design, the reasons for running the model on the Direct3D 12 side of the bridge, and the independence of the NR and
 Super Resolution paths are described in the feature section of FEATURES.md. The debug probe (`PreviewProbe`, `PreviewDebugFlood`,
 `chara-probe.cmd`) is also new work and has no counterpart in that build.
+`[FFXIV] PreviewNRBeforeSR` (a third placement, NR on the render-size picture before the Super Resolution evaluate, off by default) is new work in the same way: Nickle's build has no key or code for it.
