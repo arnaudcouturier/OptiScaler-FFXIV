@@ -223,6 +223,7 @@ const std::vector<Fragment> kDlss = {
     { "tinted, ev.placement, ev.usedPreSrColour,", 1, "the slot step is told the placement and whether the evaluate used the NR image" },
     { "if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())", 1, "a refused NR image latches NR before SR once, with one log line" },
     { "if (!ev.ok)", 1, "only a failed plain evaluate fails the slot" },
+    { "g.preSrColour = false;", 1, "every render clears the pre-SR flag before the slot step, so an alpha failure never leaves a stale bit" },
     { "g.preSrColour = render.preSrColour;", 1, "the slot remembers whether its picture's colour was the pre-SR image" },
     { "if (nr::MadeFromPostSrNr(g.composedFromNr, g.preSrColour))", 1, "the run statistic does not count pre-SR images" },
     { "if (nr::MadeFromPostSrNr(g->composedFromNr, g->preSrColour))", 1, "the UI-draw statistic does not count pre-SR images either" },
@@ -272,6 +273,7 @@ const std::vector<Chain> kDlssOrder = {
         "if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())",
         "if (!ev.ok)",
         "g.composedFromNr = false;",
+        "g.preSrColour = false;",
         "nr::DecideSlotRender(PlumbingNow(),",
         "g.composedFromNr = render.composedFromNr;",
         "request.input = ev.usedPreSrColour ? preSrColour.Get() : g.color.texture.Get();" },
@@ -354,6 +356,10 @@ int main(int argc, char** argv)
     Report("CharaNr.cpp", nr, kNr);
     CHECK(PlanFieldAssignments(nr) == 0);
     CHECK(WrongOrder(dlss, kDlssOrder, true) == 0);
+    // The two slot flags are pinned by their number of assignments too, not only by fragment and order: an unconditional second `g.lastColour = ...;` or
+    // `g.preSrColour = ...;` elsewhere in the file would leave every count-1 fragment true.
+    CHECK(AssignmentsTo(dlss, "g.lastColour") == 1);   // the store after a successful evaluate
+    CHECK(AssignmentsTo(dlss, "g.preSrColour") == 2);  // the clear before the slot step and the copy-back after the alpha pass
     // the stripper does not understand raw strings: none may appear in the files it reads
     CHECK(dlssSource.find("R\"(") == std::string::npos && nrSource.find("R\"(") == std::string::npos);
 
