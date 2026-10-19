@@ -108,6 +108,22 @@ static size_t Count(const std::string& text, const char* part)
     return n;
 }
 
+// Weak test 3: the call is a statement of the body itself (brace depth 0), directly after another statement or at its start:
+// not under an `if`, `else`, a loop or a block, and not behind a preprocessor line (what precedes it is `;`, `}` or nothing).
+static bool TopLevelStatement(const std::string& body, const char* call)
+{
+    const size_t at = body.find(call);
+    if (at == std::string::npos)
+        return false;
+    int depth = 0;
+    for (size_t i = 0; i < at; ++i)
+        depth += body[i] == '{' ? 1 : body[i] == '}' ? -1 : 0;
+    if (depth != 0 || body.find('#') != std::string::npos)
+        return false;
+    const size_t prev = body.find_last_not_of(" \t\r\n", at == 0 ? 0 : at - 1);
+    return at == 0 || prev == std::string::npos || body[prev] == ';' || body[prev] == '}';
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2)
@@ -141,6 +157,13 @@ int main(int argc, char** argv)
         CHECK(dtor.find("return") == std::string::npos);                                                    // no early exit around it
     }
 
+    CHECK(TopLevelStatement(ctor, "window::OnPresentBegin();"));
+    CHECK(TopLevelStatement(dtor, "window::OnPresentEnd();"));
+    CHECK(!TopLevelStatement("if (a) window::OnPresentEnd();", "window::OnPresentEnd();")); // the helper itself
+    CHECK(!TopLevelStatement("if (a) { b(); window::OnPresentEnd(); }", "window::OnPresentEnd();"));
+    CHECK(!TopLevelStatement("b();\n#if 0\nwindow::OnPresentEnd();\n#endif", "window::OnPresentEnd();"));
+    CHECK(TopLevelStatement("b();\nwindow::OnPresentEnd();", "window::OnPresentEnd();"));
+
     // The resize and destroy seams: the call is the first statement of the body, so no early return can skip it.
     const std::string resize = Body(bridge, "HRESULT OnResizeDone(Dx11wDx12SC& sc)");
     const std::string destroy = Body(bridge, "void OnDestroy(Dx11wDx12SC& sc)");
@@ -148,11 +171,13 @@ int main(int argc, char** argv)
     {
         const size_t call = resize.find("window::OnResizeDone(sc);");
         CHECK(call != std::string::npos && resize.find("return") > call);
+        CHECK(call != std::string::npos && resize.find_first_not_of(" \t\r\n") == call); // the first statement
         CHECK(Count(bridge, "window::OnResizeDone(sc);") == 1);
     }
     {
         const size_t call = destroy.find("window::OnDestroy(sc);");
         CHECK(call != std::string::npos && destroy.find("return") > call);
+        CHECK(call != std::string::npos && destroy.find_first_not_of(" \t\r\n") == call); // the first statement
         CHECK(Count(bridge, "window::OnDestroy(sc);") == 1);
     }
 

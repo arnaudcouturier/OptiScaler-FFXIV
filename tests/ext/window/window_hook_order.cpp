@@ -87,6 +87,42 @@ int main(int argc, char** argv)
     // the snapshot says active), which is the condition upstream guards the three steps with.
     CHECK(body.find("fg != nullptr") != std::string::npos && body.find("fg != nullptr") < active);
 
+    // Weak test 5: all three steps sit inside the braces of that guard, and the guard is exactly this condition (no extra
+    // condition between the `)` and the `{`, none added to the test), so a refactor that moves one step out or under another
+    // condition is noticed.
+    {
+        const char* guardText = "if (fg != nullptr && fg->IsActive())";
+        const size_t guard = body.find(guardText);
+        CHECK(guard != std::string::npos && Count(body, guardText) == 1);
+        const size_t open = guard == std::string::npos ? std::string::npos : body.find('{', guard);
+        CHECK(open != std::string::npos);
+        if (open != std::string::npos)
+        {
+            const std::string between = body.substr(guard + std::string(guardText).size(), open - guard - std::string(guardText).size());
+            CHECK(between.find_first_not_of(" \t\r\n") == std::string::npos); // nothing between the condition and the brace
+            int depth = 0;
+            size_t close = std::string::npos;
+            for (size_t i = open; i < body.size(); ++i)
+            {
+                if (body[i] == '{')
+                    ++depth;
+                else if (body[i] == '}' && --depth == 0)
+                {
+                    close = i;
+                    break;
+                }
+            }
+            CHECK(close != std::string::npos);
+            if (close != std::string::npos)
+            {
+                const std::string block = body.substr(open + 1, close - open - 1);
+                CHECK(Count(block, "fgChanged = true") == 1 && Count(block, "UpdateTarget()") == 1 && Count(block, "Deactivate()") == 1);
+                CHECK(block.find("fgChanged = true") < block.find("UpdateTarget()") && block.find("UpdateTarget()") < block.find("Deactivate()"));
+                CHECK(close < body.find("FGXeFGForceBorderless"));
+            }
+        }
+    }
+
     // The helper itself: a function body ends at the first "}" alone on a line.
     CHECK(FunctionBody("void f()\n{\n  if (a) {\n  }\n  return;\n}\nvoid g()\n{\n}\n", "void f()") ==
           "void f()\n{\n  if (a) {\n  }\n  return;");
