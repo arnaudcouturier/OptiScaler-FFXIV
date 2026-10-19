@@ -138,7 +138,7 @@ void DrawDebugSection(CharaConfig& cfg, bool inert)
 {
     // The tuning and diagnostic keys of the preview. All four are read live, so a change applies at once.
     int lingerSeconds = static_cast<int>(cfg.previewNrLingerSeconds.value_or_default());
-    if (ImGui::SliderInt("Keep preview NR models after closing (seconds)", &lingerSeconds, 0, 60))
+    if (ImGui::SliderInt("Keep preview NR models after closing (seconds)", &lingerSeconds, 0, 60, "%d", ImGuiSliderFlags_AlwaysClamp))
         cfg.previewNrLingerSeconds = static_cast<uint32_t>(lingerSeconds);
     ext::menu::Tooltip("How long a preview's NR model is kept after its window closes, so reopening the window is instant. "
                        "0 releases it as soon as the window is no longer drawn (a quarter of a second). Default 5. "

@@ -857,6 +857,25 @@ inline std::string ResolveRouter(uint32_t archId, const std::string& gpuName = "
     return "SM86";
 }
 
+/// The menu's choice for a stored [DLSSG] AmpereMfgKernelImage value: 0 = Auto, 1 = PTX, 2 = Cubin. Exact spelling, the same
+/// rule the settings writer applies (FormatIniContent030 and AmpereMfgLoader.cpp keep only "PTX" and "Cubin", anything else
+/// is written as Auto), so a hand-edited value the runtime would reject is not shown as selected.
+inline int KernelImageChoice(const std::string& stored)
+{
+    return stored == "PTX" ? 1 : (stored == "Cubin" ? 2 : 0);
+}
+
+/// The menu's choice for a stored [DLSSG] AmpereMfgRouter value: 0 = Auto, 1 = SM75, 2 = SM86. The spellings ResolveRouter
+/// forces ("SM75"/"sm75", "SM86"/"sm86"); anything else is resolved from the GPU like Auto.
+inline int RouterChoice(const std::string& stored)
+{
+    if (stored == "SM75" || stored == "sm75")
+        return 1;
+    if (stored == "SM86" || stored == "sm86")
+        return 2;
+    return 0;
+}
+
 /// Resolves router string for current hardware.
 std::string ResolveRouter();
 

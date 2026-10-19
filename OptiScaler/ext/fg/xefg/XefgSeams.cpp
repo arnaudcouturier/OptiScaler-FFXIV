@@ -158,7 +158,7 @@ void XeFgExtras(IFGFeature* fgOutput)
 
     int maxMultiplier = std::clamp(fgCfg.xefgMaxInterpolatedFrames.value_or_default(), 1, ext::kXeFgMaxInterpolations) + 1;
     ImGui::BeginDisabled(!unlockMfg);
-    if (ImGui::SliderInt("Max XeFG multiplier (restart)", &maxMultiplier, 2, ext::kXeFgMaxInterpolations + 1, "%dX"))
+    if (ImGui::SliderInt("Max XeFG multiplier (restart)", &maxMultiplier, 2, ext::kXeFgMaxInterpolations + 1, "%dX", ImGuiSliderFlags_AlwaysClamp))
         fgCfg.xefgMaxInterpolatedFrames = maxMultiplier - 1;
     Tooltip("The highest multiplier the XeFG menu offers, 2X to 8X (default 8X). If a high multiplier turns out to be\n"
             "unstable, try 4X first.\n\n"

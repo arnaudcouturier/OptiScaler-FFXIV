@@ -14,8 +14,9 @@
 
 namespace
 {
-// Position of the stored text in the list of choices (case-insensitive); anything unknown reads as the first entry (Auto),
-// the same way the runtime's settings writer treats it.
+// Position of the stored text in the list of choices, case-insensitive (only the Preset combo uses it: the settings writer takes A/B
+// in either case); anything unknown reads as the first entry (Auto), the same way the runtime's settings writer treats it.
+// The Kernel image and Kernel family combos compare exactly like the writer: AmpereMfgLoader::KernelImageChoice / RouterChoice.
 int IndexOfValue(const std::string& value, const char* const* values, int count)
 {
     for (int i = 0; i < count; ++i)
@@ -45,14 +46,14 @@ void DrawAmpereAdvanced(ext::FgConfig& cfg)
                        "change here applies after a restart. Leave everything on Auto unless you are tuning the runtime.");
 
     static const char* const kKernelImages[] = { "Auto", "PTX", "Cubin" };
-    int kernelImage = IndexOfValue(cfg.ampereMfgKernelImage.value_or_default(), kKernelImages, 3);
+    int kernelImage = AmpereMfgLoader::KernelImageChoice(cfg.ampereMfgKernelImage.value_or_default());
     if (ImGui::Combo("Kernel image (restart)", &kernelImage, "Auto\0PTX\0Cubin\0"))
         cfg.ampereMfgKernelImage = std::string(kKernelImages[kernelImage]);
     ext::menu::Tooltip("Interpolation kernel image of the runtime. Auto picks one for your GPU (and for Linux/Proton); PTX or Cubin force it.\n"
                        "Written to the runtime's settings file: applies after a restart.");
 
     static const char* const kRouters[] = { "Auto", "SM75", "SM86" };
-    int router = IndexOfValue(cfg.ampereMfgRouter.value_or_default(), kRouters, 3);
+    int router = AmpereMfgLoader::RouterChoice(cfg.ampereMfgRouter.value_or_default());
     if (ImGui::Combo("Kernel family (restart)", &router, "Auto\0SM75\0SM86\0"))
         cfg.ampereMfgRouter = std::string(kRouters[router]);
     ext::menu::Tooltip("Kernel family the runtime routes to. Auto picks SM75 on RTX 20 (when the runtime has it) and SM86 on RTX 30. "
@@ -66,7 +67,7 @@ void DrawAmpereAdvanced(ext::FgConfig& cfg)
                        "Written to the runtime's settings file: applies after a restart.");
 
     int optimized = cfg.ampereMfgOptimized.value_or_default();
-    if (ImGui::SliderInt("Optimization level (restart)", &optimized, 0, 3))
+    if (ImGui::SliderInt("Optimization level (restart)", &optimized, 0, 3, "%d", ImGuiSliderFlags_AlwaysClamp))
         cfg.ampereMfgOptimized = optimized;
     ext::menu::Tooltip("Optimization level the runtime is configured with, 0 to 3 (default 1).\n"
                        "Written to the runtime's settings file: applies after a restart.");
@@ -87,7 +88,7 @@ void DrawAmpereAdvanced(ext::FgConfig& cfg)
                        "Written to the runtime's settings file: applies after a restart.");
 
     int logLevel = cfg.ampereMfgLogLevel.value_or_default();
-    if (ImGui::SliderInt("Runtime log level (restart)", &logLevel, 0, 3))
+    if (ImGui::SliderInt("Runtime log level (restart)", &logLevel, 0, 3, "%d", ImGuiSliderFlags_AlwaysClamp))
         cfg.ampereMfgLogLevel = logLevel;
     ext::menu::Tooltip("Log level of the runtime, 0 to 3 (default 1); a diagnostic setting, its logs go to the dlssg_sm86 logs folder.\n"
                        "Written to the runtime's settings file: applies after a restart.");

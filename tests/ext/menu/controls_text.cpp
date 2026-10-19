@@ -101,7 +101,7 @@ const Row kRows[] = {
       .write = "fgCfg.xefgUnlock=unlockMfg", .keyPrefix = "fgCfg.xefgUnlock=", .block = { "applies after a restart", "never changed" } },
     { .home = kXeFg, .file = "fg/xefg/XefgSeams.cpp", .widget = "ImGui::SliderInt(\"Max XeFG multiplier (restart)\"",
       .write = "fgCfg.xefgMaxInterpolatedFrames=maxMultiplier-1", .keyPrefix = "fgCfg.xefgMaxInterpolatedFrames=",
-      .block = { "applies after a restart", "handed to the provider" }, .fileHas = { "BeginDisabled(!unlockMfg)" } },
+      .block = { "applies after a restart", "handed to the provider", "ImGuiSliderFlags_AlwaysClamp" }, .fileHas = { "BeginDisabled(!unlockMfg)" } },
 
     // WP4 item 4 (a): the two FFXIV-only NR options stay in the NR card, drawn only on the FFXIV build match, "(FFXIV)" in the label
     { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Spread alternating NR across two frames (FFXIV, experimental)\"",
@@ -143,7 +143,7 @@ const Row kRows[] = {
     // fold: chara_menu_text pins that DrawDebugSection is called only from that fold). All four are read live.
     { .home = kChara, .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::SliderInt(\"Keep preview NR models after closing (seconds)\"",
       .write = "cfg.previewNrLingerSeconds=static_cast<uint32_t>(lingerSeconds)", .keyPrefix = "cfg.previewNrLingerSeconds=",
-      .block = { "applies at once", "0 releases it" } },
+      .block = { "applies at once", "0 releases it", "ImGuiSliderFlags_AlwaysClamp" } },
     { .home = kChara, .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Preview NR: show the previous frame's result (bring-up)\"",
       .write = "cfg.previewNrLate=late", .keyPrefix = "cfg.previewNrLate=", .block = { "applies at once", "one frame of lag" } },
     { .home = kChara, .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Write preview DLSS guide dumps (diagnostics)\"",
@@ -166,7 +166,7 @@ const Row kRows[] = {
       .block = { "applies after a restart", "Off by default" }, .fold = kAmpereAdvanced },
     { .home = kAmpere, .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::SliderInt(\"Optimization level (restart)\"",
       .write = "cfg.ampereMfgOptimized=optimized", .keyPrefix = "cfg.ampereMfgOptimized=",
-      .block = { "applies after a restart", "0 to 3" }, .fold = kAmpereAdvanced },
+      .block = { "applies after a restart", "0 to 3", "ImGuiSliderFlags_AlwaysClamp" }, .fold = kAmpereAdvanced },
     { .home = kAmpere, .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Combo(\"Preset (restart)\"",
       .write = "cfg.ampereMfgPreset=std::string(kPresets[preset])", .keyPrefix = "cfg.ampereMfgPreset=",
       .block = { "applies after a restart", "A or B" }, .fold = kAmpereAdvanced },
@@ -175,7 +175,7 @@ const Row kRows[] = {
       .block = { "applies after a restart", "Auto writes nothing" }, .fold = kAmpereAdvanced },
     { .home = kAmpere, .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::SliderInt(\"Runtime log level (restart)\"",
       .write = "cfg.ampereMfgLogLevel=logLevel", .keyPrefix = "cfg.ampereMfgLogLevel=",
-      .block = { "applies after a restart", "diagnostic" }, .fold = kAmpereAdvanced },
+      .block = { "applies after a restart", "diagnostic", "ImGuiSliderFlags_AlwaysClamp" }, .fold = kAmpereAdvanced },
 };
 
 // Squashed code of the file with the widget's block cut out: from the widget to the next input widget, fold or TreePop
