@@ -56,6 +56,7 @@ inline constexpr Slot kSlots[] = {
     { "fg_hudless",               "FFXIV",         "ffxiv_character_preview" },
     { "ffxiv_companion",          "FFXIV",         "fg_hudless" },
     { "hudless_diag",             "FFXIV",         "ffxiv_companion" },
+    { "ffxiv_advanced",           "FFXIV",         "hudless_diag" },
 
     // Textures: Mipmap Bias and Anisotropic Filtering are one shared function
     { "mipmap_auto",              "Textures",      "anisotropy" },

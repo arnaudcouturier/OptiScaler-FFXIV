@@ -21,6 +21,7 @@ inline constexpr const char* kFfxivTab = "FFXIV";
 // the build match (`ext::game::Current()`), so the card hides itself even when it is pinned to the Custom Tab.
 inline constexpr const char* kFfxivOnlyIds[] = {
     "window_mode", "ffxiv_hdr", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless", "ffxiv_companion", "hudless_diag",
+    "ffxiv_advanced",
 };
 
 // Every fork card id that has been in a released menu. The Custom Tab saves pins by id (`[Menu] CustomTabCards`), so each
@@ -29,6 +30,7 @@ inline constexpr const char* kPersistedForkIds[] = {
     "dlss_nr",       "ffxiv_character_preview", "forced_quality", "ffxiv_jitter", "fg_unlocks",
     "ffxiv_hdr",     "fg_hudless",              "fg_auto_mfg",    "window_mode",  "hudless_diag",
     "mipmap_auto",   "ffxiv_companion",         "reshade_addon_probe",
+    "ffxiv_advanced", // new in the menu cleanup (not in session-final)
 };
 
 // A retired card id and the card that took its place (a merged or removed card keeps its id here)

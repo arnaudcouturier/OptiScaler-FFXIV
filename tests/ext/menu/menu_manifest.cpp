@@ -349,8 +349,8 @@ void Report(const char* what, const Violations& v)
 void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw)
 {
     CHECK(m.upstream.size() >= 40);
-    CHECK(m.slots.size() == 13);
-    CHECK(m.regs.size() == 13);
+    CHECK(m.slots.size() == 14);
+    CHECK(m.regs.size() == 14);
 
     const Violations v = Check(m);
     Report("manifest", v);
@@ -362,8 +362,8 @@ void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw
 
     // facts the manifest test relies on, so a broken scanner cannot make the rules vacuous
     CHECK(Contains<std::string>(m.tabLabels, "FFXIV") && Contains<std::string>(m.tabLabels, "Frame Gen"));
-    CHECK(m.ffxivOnly.size() == 7);
-    CHECK(m.persisted.size() == 13);
+    CHECK(m.ffxivOnly.size() == 8);
+    CHECK(m.persisted.size() == 14);
     bool anyShared = false;
     for (const auto& b2 : m.upstream)
         anyShared = anyShared || b2.source == "RenderFrameGenerationRuntimeSettings";
