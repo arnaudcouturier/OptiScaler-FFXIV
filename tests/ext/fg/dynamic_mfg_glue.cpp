@@ -105,11 +105,25 @@ struct Rig
     bool forceDmfg = false;     // [DLSSG] ForceDMFG
     bool pluginFollows = true;  // the plugin reports the count it was given (one frame later)
     int gameGenerated = 2;      // the count the game asks for in Frame Gen "Default" (Config::FGInterpolationCount)
+    // The Streamline state AfterDlssgSetOptions reads after each frame (off unless a case turns `observing` on).
+    bool observing = false;
+    bool obsQueryOk = true;
+    uint32_t obsStatus = 0;     // DLSSGState::status
+    int obsPresented = -1;      // DLSSGState::numFramesActuallyPresented, -1 = the factor of the frame (a healthy plugin)
 
     Rig() { w.fg.autoMfg = true; }
 
     int Count() { return w.cfg.FGDLSSGInterpolationCount.value_or_default(); }
     std::optional<int> Saved() { return w.cfg.FGDLSSGInterpolationCount.value_for_config(); }
+
+    // What DlssgSeams.cpp does after SetOptions: hand the GetState answer to the glue.
+    void Observe()
+    {
+        sl::DLSSGState state {};
+        state.status = static_cast<sl::DLSSGStatus>(obsStatus);
+        state.numFramesActuallyPresented = obsPresented >= 0 ? (uint32_t) obsPresented : opt.numFramesToGenerate + 1;
+        glue.Observe(w, obsQueryOk, state);
+    }
 
     // One game frame of `ms`: DLSSG_Common::SetOptions builds the options from the configured count, the seam adjusts them.
     void Frame(double ms)
@@ -122,6 +136,8 @@ struct Rig
         glue.Adjust(w, opt);
         if (pluginFollows)
             w.st.dlssgDetectedInterpolationCount = (int) opt.numFramesToGenerate;
+        if (observing)
+            Observe();
     }
     // The same frame with the two seam steps apart, to see what the tick answered.
     bool FrameSplit(double ms)
@@ -482,6 +498,130 @@ void SelfTestEndStateReachesTheCount()
     CHECK_MSG(g.opt.numFramesToGenerate == 1, "the glue wrote %d over the game's count", (int) g.opt.numFramesToGenerate);
     CHECK_MSG(g.Count() == 2 && g.Saved() == std::optional<int>(2), "the configured count was left at %d", g.Count());
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The Streamline observation (status, presented frames) driven through the glue: AfterDlssgSetOptions hands it over, the next
+// tick feeds the kill-switch. Frames are 20 ms; the watch after a switch closes on the 50th frame after the switching one,
+// and an observation made after frame j is read by the tick of frame j + 1.
+
+// A rig whose selector has just switched up (from 3x to 4x), observed healthy until then; returns after the switching frame.
+void SwitchWithObservation(Rig& r)
+{
+    r.observing = true;
+    r.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
+    const int at = r.RunUntilCountLeaves(2, 20.0, 1500);
+    CHECK_MSG(at > 0, "the selector never changed the count");
+    CHECK(r.Count() == 3 && !r.w.st.fgChanged && r.w.Lines("AutoMFG:", 1) == 0);
+}
+
+void ObservedPresentedStuckAtOneIsABrokenChange()
+{
+    Rig r;
+    SwitchWithObservation(r);
+    r.obsPresented = 1; // the plugin keeps presenting one frame per real frame, 5 samples and more, from the switching frame on
+    r.Observe();        // (the sample of the switching frame itself, taken after its options)
+    int at = -1;
+    for (int j = 1; j <= 60 && at < 0; ++j)
+    {
+        r.Frame(20.0);
+        if (r.w.st.fgChanged)
+            at = j;
+    }
+    CHECK_MSG(at == 50, "recovery after %d frames (the watch is 50 frames long)", at);
+    CHECK(r.w.Lines("presented frames stuck at 1, switch 3x -> 4x; going back to 3x, automatic mode stopped", 1) == 1);
+    CHECK(r.opt.numFramesToGenerate == 2 && r.Count() == 2); // back to the last good count, in the very options of that frame
+    // once, through the toggle path: nothing sets the flag again and nothing is logged again
+    r.w.st.fgChanged = false;
+    r.Run(400, 20.0);
+    CHECK(!r.w.st.fgChanged);
+    CHECK(r.w.Lines("presented frames stuck at 1") == 1 && r.w.Lines("automatic mode stopped") == 1);
+}
+
+void ObservedStatusAtTheEndOfAWatchIsABrokenChange()
+{
+    Rig r;
+    SwitchWithObservation(r);
+    int at = -1;
+    for (int j = 1; j <= 60 && at < 0; ++j)
+    {
+        if (j == 40)
+            r.obsStatus = 0x2; // read by the ticks 41 to 50: the last 10 of the watch, 180 ms
+        r.Frame(20.0);
+        if (r.w.st.fgChanged)
+            at = j;
+    }
+    CHECK_MSG(at == 50, "recovery after %d frames", at);
+    CHECK(r.w.Lines("AutoMFG: Streamline status 0x2, switch 3x -> 4x; going back to 3x, automatic mode stopped", 1) == 1);
+    CHECK(r.w.Lines("presented frames stuck") == 0 && r.w.Lines("applied count") == 0);
+    CHECK(r.opt.numFramesToGenerate == 2 && r.Count() == 2);
+}
+
+void AHealthyObservationLetsTheChangeSettle()
+{
+    // Status 0 and the presented count of the new factor, the whole watch: settled, nothing to recover.
+    Rig r;
+    SwitchWithObservation(r);
+    r.Run(60, 20.0);
+    CHECK(!r.w.st.fgChanged && !r.glue.controller.Stopped());
+    CHECK(r.w.Lines("AutoMFG: 4x settled", 0) == 1);
+    CHECK(r.w.Lines("AutoMFG:", 1) == 0);
+    CHECK(r.Count() == 3);
+}
+
+void AStatusThatWasThereBeforeTheSwitchIsNotItsFault()
+{
+    Rig r;
+    r.observing = true;
+    r.obsStatus = 0x2; // set before the switch, and it stays
+    r.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
+    CHECK(r.RunUntilCountLeaves(2, 20.0, 1500) > 0);
+    r.Run(200, 20.0);
+    CHECK(!r.w.st.fgChanged && !r.glue.controller.Stopped());
+    CHECK(r.w.Lines("Streamline status") == 0);
+    CHECK(r.w.Lines("settled", 0) >= 1);
+    CHECK(r.Count() == 3); // and the selector goes on working
+}
+
+void TheObservationIsOnlyKeptWhereItCanBeUsed()
+{
+    // Key on: the values arrive as given, status and presented in their own fields.
+    Rig s;
+    s.obsStatus = 0x2;
+    s.obsPresented = 3;
+    s.Observe();
+    CHECK(s.glue.observed.valid && s.glue.observed.status == 0x2 && s.glue.observed.presented == 3);
+    s.obsQueryOk = false; // a failed GetState query is not a sample
+    s.Observe();
+    CHECK(!s.glue.observed.valid);
+
+    // Only the self-test key on: still watched.
+    Rig t;
+    t.w.fg.autoMfg = false;
+    t.w.fg.autoMfgSelfTest = true;
+    t.obsStatus = 0x2;
+    t.obsPresented = 3;
+    t.Observe();
+    CHECK(t.glue.observed.valid && t.glue.observed.status == 0x2);
+
+    // Both keys off and never active: nothing is kept, no lock taken.
+    Rig k;
+    k.w.fg.autoMfg = false;
+    k.obsStatus = 0x2;
+    k.obsPresented = 3;
+    k.Observe();
+    CHECK(!k.glue.observed.valid && k.w.locks == 0);
+
+    // Closed for good (here: not NVIDIA): nothing is kept, no lock taken.
+    Rig c;
+    c.w.isNvidia = false;
+    c.Run(2, 20.0);
+    CHECK(c.glue.ClosedForGood());
+    const int locks = c.w.locks;
+    c.obsStatus = 0x2;
+    c.obsPresented = 3;
+    c.Observe();
+    CHECK(!c.glue.observed.valid && c.w.locks == locks);
+}
 } // namespace
 
 int main()
@@ -497,6 +637,11 @@ int main()
     AFailingTickFailsOpen();
     ALogFailureDoesNotLoseACommittedSwitch();
     SelfTestEndStateReachesTheCount();
+    ObservedPresentedStuckAtOneIsABrokenChange();
+    ObservedStatusAtTheEndOfAWatchIsABrokenChange();
+    AHealthyObservationLetsTheChangeSettle();
+    AStatusThatWasThereBeforeTheSwitchIsNotItsFault();
+    TheObservationIsOnlyKeptWhereItCanBeUsed();
     if (g_failures)
     {
         std::printf("dynamic_mfg_glue: %d check(s) failed\n", g_failures);

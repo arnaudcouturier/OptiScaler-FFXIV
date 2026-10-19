@@ -114,7 +114,7 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
     const auto sampleTime = GetTickCount64();
     const auto mode = static_cast<int>(options.mode);
     const auto count = runtimeState.numFramesActuallyPresented;
-    AutoMfgObserve(queryResult == sl::Result::eOk, static_cast<unsigned>(runtimeState.status), count);
+    AutoMfgObserve(queryResult == sl::Result::eOk, runtimeState);
     if (dx12Ext.sampleMode == mode && options.mode == sl::DLSSGMode::eDynamic &&
         dlssgSetOptionsResult == sl::Result::eOk && queryResult == sl::Result::eOk &&
         static_cast<unsigned>(runtimeState.status) == 0 && count >= 1 &&

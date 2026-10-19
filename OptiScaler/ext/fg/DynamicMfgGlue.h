@@ -79,6 +79,20 @@ class AutoMfgGlue
         return controls;
     }
 
+    // What AfterDlssgSetOptions (DlssgSeams.cpp) read with slDLSSGGetState right after this frame's options: the next tick feeds
+    // it to the kill-switch. Kept only where it can be used: not once the gate is closed for good, not while neither key was
+    // ever on. The status and the presented count are read from the Streamline state here, by name, so that a swap of the two
+    // cannot happen at the call.
+    template <class World> void Observe(World& w, bool queryOk, const sl::DLSSGState& state)
+    {
+        if (ClosedForGood())
+            return;
+        if (!EverActive() && !w.fgConfig().autoMfg.value_or_default() && !w.fgConfig().autoMfgSelfTest.value_or_default())
+            return;
+        [[maybe_unused]] auto lock = w.lock();
+        observed = { queryOk, static_cast<uint32_t>(state.status), state.numFramesActuallyPresented };
+    }
+
     // The DLSSGOptions guard (DynamicMfgGate.h has the rules): where Streamline reports dynamic MFG as unsupported the
     // forced dynamic mode falls back to the fixed one, and on a card whose ceiling the Ada unlock opened an automatic choice
     // never uses more than 3 generated frames. The clamp is for Streamline only: the configured count (the slider the user

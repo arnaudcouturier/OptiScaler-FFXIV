@@ -85,17 +85,12 @@ void AutoMfgAdjustOptions(IFGFeature* fg, sl::DLSSGOptions& options)
     g_glue.Adjust(world, options);
 }
 
-void AutoMfgObserve(bool queryOk, uint32_t status, uint32_t presented)
+void AutoMfgObserve(bool queryOk, const sl::DLSSGState& state)
 {
-    // Nothing to watch once the gate is closed for good (RTX 50, not NVIDIA, not D3D12, stopped).
-    if (g_glue.ClosedForGood())
-        return;
-
-    if (!g_glue.EverActive() && !ext::Cfg().fg.autoMfg.value_or_default() && !ext::Cfg().fg.autoMfgSelfTest.value_or_default())
-        return;
-
-    std::scoped_lock lock(g_mutex);
-    g_glue.observed = { queryOk, status, presented };
+    // The skips (gate closed for good, neither key ever on) and the store are DynamicMfgGlue.h's Observe; only the config
+    // object and the lock are read from the world here.
+    LiveWorld world { nullptr };
+    g_glue.Observe(world, queryOk, state);
 }
 
 void ResetAutoMfg()

@@ -8,6 +8,7 @@ class IFGFeature;
 namespace sl
 {
 struct DLSSGOptions;
+struct DLSSGState;
 }
 
 namespace ext::fg
@@ -21,7 +22,7 @@ void ResetDlssgPresentStats();
 // automatic selection (or the self-test) may change `options`, then the ForceDMFG / Ada-ceiling guard runs on the result.
 void AutoMfgAdjustOptions(IFGFeature* fg, sl::DLSSGOptions& options);
 // AfterDlssgSetOptions: what GetState said right after this frame's options, for the next tick's kill-switch.
-void AutoMfgObserve(bool queryOk, uint32_t status, uint32_t presented);
+void AutoMfgObserve(bool queryOk, const sl::DLSSGState& state);
 // DLSS-G (re)activated (OnActivated): new observation window; the kill-switch's memory stays.
 void ResetAutoMfg();
 // For the menu card.
