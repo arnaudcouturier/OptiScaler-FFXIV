@@ -1,5 +1,6 @@
 #include "check.h"
 #include "ext/ffxiv/jitter/FfxivJitterProbe.h"
+#include "ext/upscaler/RenderGeometry.h"
 
 #include <cmath>
 #include <cstring>
@@ -164,22 +165,53 @@ void TestReadChain()
     auto limits = Image({ 0.5f, -0.5f, 1.0f, -1.0f, 0 }); // the limits themselves are fine
     CHECK(Read(limits, out) == Guard::None);
 
-    // torn reads: memory that changes on every read is refused; one change that then settles is accepted
+    // Torn reads. `beforeRead` runs BEFORE read number k (counted from 0) copies its bytes: reads 0-2 are the three pointers, read 3 is
+    // the first look at the object, reads 4 and 5 are the two confirmations ReadChain may make (at most 6 reads in all).
     {
+        // memory that changes on every read is refused
         auto t = Image({ 0.1f, 0.1f, 0.001f, 0.001f, 1 });
         int n = 0;
         t.beforeRead = [&](FakeMemory& mem) { PutObject(mem, { 0.1f, 0.1f, 0.001f, 0.001f, 1000 + n++ }); };
         CHECK(Read(t, out) == Guard::ObjectUnstable);
+
+        // a change before the first look is not a torn read: both looks see the new object and agree at once (5 reads, no retry)
+        auto early = Image({ 0.1f, 0.1f, 0.001f, 0.001f, 1 });
+        int e = 0;
+        early.beforeRead = [&](FakeMemory& mem)
+        {
+            if (e == 3)
+                PutObject(mem, { 0.2f, 0.2f, 0.001f, 0.001f, 2 });
+            ++e;
+        };
+        CHECK(Read(early, out) == Guard::None && Near(out.jx, 0.2) && early.reads == 5);
+
+        // one change between the first look (old) and the first confirmation (new): the first comparison differs, the retry reads the
+        // new object again and the second comparison agrees -> accepted, with the NEW values, after all 6 reads
         auto s = Image({ 0.1f, 0.1f, 0.001f, 0.001f, 1 });
         int k = 0;
         s.beforeRead = [&](FakeMemory& mem)
         {
-            if (k == 3) // the second read of the object (reads 0-2 are the pointers, read 3 is the first look at the object)
+            if (k == 4)
                 PutObject(mem, { 0.2f, 0.2f, 0.001f, 0.001f, 2 });
             ++k;
         };
+        out = RawObject {};
         CHECK(Read(s, out) == Guard::None);
-        CHECK(Near(out.jx, 0.2));
+        CHECK(out.jx == 0.2f && out.jy == 0.2f && out.counter == 2);
+        CHECK(s.reads == 6);
+
+        // two different changes (before read 4 and before read 5): both comparisons differ, the retry budget is spent -> refused
+        auto two = Image({ 0.1f, 0.1f, 0.001f, 0.001f, 1 });
+        int j = 0;
+        two.beforeRead = [&](FakeMemory& mem)
+        {
+            if (j == 4)
+                PutObject(mem, { 0.2f, 0.2f, 0.001f, 0.001f, 2 });
+            if (j == 5)
+                PutObject(mem, { 0.3f, 0.3f, 0.001f, 0.001f, 3 });
+            ++j;
+        };
+        CHECK(Read(two, out) == Guard::ObjectUnstable && two.reads == 6);
     }
 }
 
@@ -210,6 +242,31 @@ void TestRenderSize()
     CHECK(!s.trusted && s.width == 0 && s.height == 0);
     s = ResolveRenderSize(3840, 2160, 1920, 0); // half-known parameters are not used
     CHECK(!s.trusted);
+
+    // The size is the one the shared rule ext::upscaler::ResolveRenderExtentValue gives (per-axis minimum of the subrect and the
+    // Width/Height parameters), over a grid that has every ordering of the two numbers on each axis, equal values included. The two
+    // functions intentionally differ only when the subrect is absent (0): this one then trusts Width/Height, the shared rule starts from
+    // a size of 0 and changes nothing; so the grid holds non-zero values only.
+    const uint32_t values[] = { 1, 640, 720, 1080, 1270, 1280, 1920, 2160, 2258, 3840 };
+    uint32_t cells = 0;
+    for (uint32_t subW : values)
+        for (uint32_t subH : values)
+            for (uint32_t paramW : values)
+                for (uint32_t paramH : values)
+                {
+                    unsigned int w = subW, h = subH;
+                    ext::upscaler::ResolveRenderExtentValue(true, paramW, paramH, w, h);
+                    const RenderSize got = ResolveRenderSize(subW, subH, paramW, paramH);
+                    CHECK(got.trusted && got.width == w && got.height == h);
+                    ++cells;
+                }
+    CHECK(cells == 10000);
+    // an absent subrect: the shared rule has no size to correct, this one takes the parameters (and says so)
+    {
+        unsigned int w = 0, h = 0;
+        CHECK(!ext::upscaler::ResolveRenderExtentValue(true, 1920, 1080, w, h) && w == 0 && h == 0);
+        CHECK(ResolveRenderSize(0, 0, 1920, 1080).width == 1920 && ResolveRenderSize(0, 0, 1920, 1080).trusted);
+    }
 }
 
 const RenderSize kHd { 1920, 1080, true, "test" };
@@ -250,6 +307,17 @@ void TestAnalysis()
         o = ObjectFor(0.3f, 0.3f, 2.0f, 1920, 1080);
         o.ndcX = -o.ndcX;
         CHECK(Analyse(o, kHd).signMismatchX);
+    }
+
+    // An anchor that does not use ObjectFor (which is the algebraic inverse of Analyse): the literal numbers of the FSR/XeSS convention
+    // (include/fsr2/ffx_fsr2.h: ndcX = 2 * jx / width, ndcY = -2 * jy / height). jx = 0.25 at 1920 -> 2 * 0.25 / 1920 = 2.604167e-4;
+    // jy = 0.25 at 1080 -> -2 * 0.25 / 1080 = -4.62963e-4. A game that follows it applies exactly what it reports: both ratios 1, and the
+    // width belongs to X and the height to Y (a swap would give 0.5625 and 1.7778).
+    {
+        const auto fsr = Analyse({ 0.25f, 0.25f, 2.604167e-4f, -4.62963e-4f, 1 }, kHd);
+        CHECK(fsr.haveRx && fsr.haveRy && Near(fsr.rx, 1.0, 1e-5) && Near(fsr.ry, 1.0, 1e-5));
+        CHECK(Near(fsr.ax, 0.25, 1e-5) && Near(fsr.ay, 0.25, 1e-5));
+        CHECK(!fsr.signMismatchX && !fsr.signMismatchY && fsr.verdict == Verdict::Consistent);
     }
 
     // division guard: a jitter of 0 (or tiny) has no ratio, and nothing is NaN or infinite
@@ -469,17 +537,34 @@ void TestText()
     CHECK(FormatCorrection(a, d) == "Jitter correction: reported (0.3000,-0.2000) replaced by applied (0.1500,-0.1000), ratio 0.500/0.500");
     CHECK(Has(FormatPassThrough(Guard::ObjectNotThisEvaluate), "passed through unchanged, guard failed: jitter object does not match this evaluate"));
 
-    // the configuration key follows the fields that matter
+    // the configuration key follows every field that matters: each one, changed alone, changes the key
     Context c2 = ctx;
     CHECK(ConfigurationKey(ctx) == ConfigurationKey(c2));
-    c2.widthParam = 1280;
-    CHECK(ConfigurationKey(ctx) != ConfigurationKey(c2));
+    const std::function<void(Context&)> changes[] = {
+        [](Context& c) { c.subrectW = 1280; },
+        [](Context& c) { c.subrectH = 720; },
+        [](Context& c) { c.widthParam = 1280; },
+        [](Context& c) { c.heightParam = 720; },
+        [](Context& c) { c.outW = 1920; },
+        [](Context& c) { c.outH = 1080; },
+        [](Context& c) { c.perfQuality = 0; },
+        [](Context& c) { c.perfQuality.reset(); },
+        [](Context& c) { c.forcedQuality = 3; },
+        [](Context& c) { c.forcedQuality.reset(); },
+    };
+    for (const auto& change : changes)
+    {
+        c2 = ctx;
+        change(c2);
+        CHECK(ConfigurationKey(ctx) != ConfigurationKey(c2));
+    }
+    // and the key ignores what is only informational (the sizes of the last answer): a plain log difference is no new configuration
     c2 = ctx;
-    c2.perfQuality = 0;
-    CHECK(ConfigurationKey(ctx) != ConfigurationKey(c2));
-    c2 = ctx;
-    c2.forcedQuality.reset();
-    CHECK(ConfigurationKey(ctx) != ConfigurationKey(c2));
+    c2.answeredRenderW = 123;
+    c2.answeredRenderH = 456;
+    c2.answeredDisplayW = 789;
+    c2.answeredDisplayH = 12;
+    CHECK(ConfigurationKey(ctx) == ConfigurationKey(c2));
 }
 } // namespace
 
