@@ -130,7 +130,8 @@ void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
     }
     catch (...)
     {
-        // Never into the evaluate path: the game's parameters stay as they are.
+        // Never into the evaluate path. The engine already catches and logs what a step throws; this net is for what it cannot log: a lock
+        // that cannot be taken, or the construction of the environment. The game's parameters stay as they are.
     }
 }
 } // namespace ext::ffxiv::jitter

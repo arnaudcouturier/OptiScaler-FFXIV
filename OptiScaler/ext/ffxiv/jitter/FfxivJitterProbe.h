@@ -627,6 +627,11 @@ inline std::string FormatSampleBudgetUsedUp(std::uint32_t lines)
     return std::format("Game jitter: sample line budget of {} lines used up for this session, further samples are not logged", lines);
 }
 
+inline std::string FormatStepException(const char* what)
+{
+    return std::format("Game jitter: step abandoned after an exception: {} (the game's values are left as they are; one line per episode)", what);
+}
+
 inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements)
 {
     return std::format("Game jitter: log line budget used up, episodes not logged so far: {} probe failures, {} pass-throughs, {} replacements",

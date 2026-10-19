@@ -5,7 +5,8 @@
 // write unless every guard passed) are pinned by tests instead of by reading. FfxivJitterProbe.cpp supplies the real environment and
 // keeps OnUpscaleBoundary as a thin wrapper.
 //
-// The environment `Env` provides (all noexcept-free; the wrapper catches):
+// The environment `Env` provides (none of it needs to be noexcept: Step catches what the calls throw and logs it once per episode, and
+// the wrapper keeps a last silent catch for env.Lock() itself):
 //   auto Lock();                                  RAII guard for the engine state (called once per active step, after the key gate)
 //   const GameBuild* Build();                     the executable identity (lazy: asked only after the key gate, at most once per step)
 //   std::uintptr_t ModuleBase();
@@ -26,6 +27,7 @@
 #include "ext/ffxiv/jitter/FfxivJitterProbe.h"
 
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <optional>
 #include <string>
@@ -85,14 +87,60 @@ struct ForcedQualityAnswer
 class Engine
 {
   public:
+    // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons that step, which fails open (a write
+    // only follows a complete proof, so whatever was not reached was not written), and is logged once per episode of exceptions, so a
+    // feature that has turned into a no-op leaves a trace.
     template <class Env> void Step(Env& env, bool probe, bool correct)
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
-        // no parameter read, no memory read, no log.
+        // no parameter read, no memory read, no log, no state touched.
         if (!probe && !correct)
             return;
 
         [[maybe_unused]] auto lock = env.Lock();
+        try
+        {
+            Run(env, probe, correct);
+            _exceptions.Event(false); // a step that ran to its end (whatever path it took) ends an episode of exceptions
+        }
+        catch (const std::exception& ex)
+        {
+            ReportException(env, ex.what());
+        }
+        catch (...)
+        {
+            ReportException(env, "unknown exception");
+        }
+    }
+
+  private:
+    // The correction is off in this step (the probe alone is on): whatever the same-frame rules and the episode logs remember about the
+    // correction is stale by the time it is switched on again, so it is dropped. (Both keys off touches nothing, by design.)
+    void ForgetCorrectionState()
+    {
+        _frames = FrameRules {};
+        _replacing.Close();
+        _passThrough.Close();
+    }
+
+    template <class Env> void ReportException(Env& env, const char* what) noexcept
+    {
+        try
+        {
+            if (_exceptions.Event(true))
+                env.Log(FormatStepException(what));
+        }
+        catch (...)
+        {
+            // Logging must never make a failed step worse.
+        }
+    }
+
+    template <class Env> void Run(Env& env, bool probe, bool correct)
+    {
+        if (!correct)
+            ForgetCorrectionState();
+
         const GameBuild* build = env.Build();
         if (build == nullptr)
         {
@@ -106,9 +154,10 @@ class Engine
 
         const std::uint64_t now = env.NowMs();
 
-        // Probe only: the clock alone says whether a sample can be due, and nothing is read from the parameters in between. The
-        // configuration key (render size, preset) is the one thing that needs them, so it is looked at on every 16th evaluate. The
-        // correction needs every evaluate and skips this.
+        // Probe only: the clock alone says whether a sample can be due. The configuration key (render size, preset) is the one thing that
+        // needs the parameters in between, so it is looked at on every 16th evaluate: in a stable configuration that is one pass of nine
+        // lookups per 16 evaluates for as long as the session lasts (and none during the first 2 s after a sample, or when the early-sample
+        // budget is spent). It is not "no lookups between samples". The correction needs every evaluate and skips this.
         if (!correct && !SampleMayBeDue(now))
             return;
 
@@ -254,6 +303,7 @@ class Engine
     EpisodeLog _probeFailures;
     EpisodeLog _passThrough;
     EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
+    EpisodeLog _exceptions; // runs of steps that ended in an exception
     bool _buildNoted = false;
     std::uint32_t _sampleLines = 0;
     LineDecimator _statusLog, _suppressedLog; // thinned: the first 60 lines at every sample tick, then one per 60 s

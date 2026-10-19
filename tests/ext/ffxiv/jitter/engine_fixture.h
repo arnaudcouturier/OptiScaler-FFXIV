@@ -5,8 +5,10 @@
 #include "ext/ffxiv/jitter/FfxivJitterCore.h"
 
 #include <cmath>
+#include <functional>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -41,10 +43,23 @@ struct FakeEnv
     std::string frameGenerationInput = "Upscaler"; // State::activeFgInput as text ("" = could not be told)
     int locks = 0, buildLookups = 0, clockReads = 0, qualityQueries = 0, fgQueries = 0, setsEver = 0;
     int fgInputQueries = 0;
+    // Faults: `fault` is called with the name of the operation about to run (GetFloat or SetFloat) and may throw; `logThrows` makes
+    // Log itself throw. `lockDepth` is the number of step guards alive right now (a step that throws must release its lock).
+    std::function<void(const char*)> fault;
+    bool logThrows = false;
+    int lockDepth = 0;
 
     struct Held
     {
-        explicit Held(FakeEnv& e) { ++e.locks; }
+        explicit Held(FakeEnv& e) : env(&e)
+        {
+            ++e.locks;
+            ++e.lockDepth;
+        }
+        Held(const Held&) = delete;
+        Held& operator=(const Held&) = delete;
+        ~Held() { --env->lockDepth; }
+        FakeEnv* env;
     };
     Held Lock() { return Held(*this); }
     const GameBuild* Build()
@@ -57,6 +72,8 @@ struct FakeEnv
 
     std::optional<float> GetFloat(Param p)
     {
+        if (fault)
+            fault("GetFloat");
         const auto it = floats.find(p);
         ops.push_back({ false, p, it == floats.end() ? 0.0f : it->second });
         if (it == floats.end())
@@ -76,6 +93,8 @@ struct FakeEnv
     }
     void SetFloat(Param p, float v)
     {
+        if (fault)
+            fault("SetFloat");
         ops.push_back({ true, p, v });
         ++setsEver;
         if (eraseOnWrite)
@@ -93,7 +112,12 @@ struct FakeEnv
         ++clockReads;
         return now;
     }
-    void Log(const std::string& line) { logs.push_back(line); }
+    void Log(const std::string& line)
+    {
+        if (logThrows)
+            throw std::runtime_error("log failed");
+        logs.push_back(line);
+    }
     std::optional<bool> FrameGenerationActive()
     {
         ++fgQueries;

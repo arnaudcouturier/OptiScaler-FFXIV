@@ -184,6 +184,125 @@ void TestSuppressedReportIsThinnedAndKeepsTheFinalTotal()
     CHECK(!reportAtTick.empty() && reportAtTick.back() == 399);
 }
 
+// L5 (fix round 2): a step that throws is abandoned (fail open) and says so ONCE per episode of exceptions; a good step ends the episode;
+// the logging itself can never throw out of the step; the lock is released.
+void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
+{
+    auto exceptionLines = [](const std::vector<std::string>& logs) { return CountLines(logs, "step abandoned after an exception"); };
+    {
+        // ten evaluates that all throw while reading the block: no escape, no write, one line, the lock free after every one
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        e.fault = [](const char* where)
+        {
+            if (std::string(where) == "GetFloat")
+                throw std::runtime_error("block exploded");
+        };
+        for (int i = 0; i < 10; ++i)
+        {
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true);
+            CHECK(e.lockDepth == 0);
+        }
+        CHECK(e.setsEver == 0);
+        CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "block exploded") == 1);
+        // the game recovers: the correction works again without a restart, and a NEW failure is a new episode with a new line
+        e.fault = nullptr;
+        Evaluate(e, engine, At(110, 1, 200), false, true);
+        Evaluate(e, engine, At(111, 1, 216), false, true);
+        CHECK(e.setsEver == 2);
+        e.fault = [](const char* where)
+        {
+            if (std::string(where) == "GetFloat")
+                throw std::runtime_error("second failure");
+        };
+        Evaluate(e, engine, At(112, 1, 232), false, true);
+        Evaluate(e, engine, At(113, 1, 248), false, true);
+        CHECK(exceptionLines(e.logs) == 2 && CountLines(e.logs, "second failure") == 1);
+    }
+    {
+        // not a std::exception
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        e.fault = [](const char*) { throw 42; };
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "unknown exception") == 1);
+    }
+    {
+        // a write that throws half way (X stored, Y throws) is abandoned too, and the next good step is untouched by it
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        int sets = 0;
+        e.fault = [&sets](const char* where)
+        {
+            if (std::string(where) == "SetFloat" && ++sets == 2)
+                throw std::runtime_error("Y refused");
+        };
+        Evaluate(e, engine, At(101, 1, 16), false, true);
+        CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "Y refused") == 1 && e.lockDepth == 0);
+    }
+    {
+        // the log line cannot make things worse: a Log that throws is swallowed, the step still does not escape
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        e.logThrows = true;
+        e.fault = [](const char* where)
+        {
+            if (std::string(where) == "GetFloat")
+                throw std::runtime_error("boom");
+        };
+        for (int i = 0; i < 3; ++i)
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true);
+        CHECK(e.logs.empty() && e.setsEver == 0 && e.lockDepth == 0);
+    }
+    {
+        // flapping between good and failing steps cannot flood the log: the episode budget applies (32 lines)
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        bool failing = false;
+        e.fault = [&failing](const char* where)
+        {
+            if (failing && std::string(where) == "GetFloat")
+                throw std::runtime_error("flap");
+        };
+        for (int i = 0; i < 100; ++i)
+        {
+            failing = i % 2 == 1;
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true);
+        }
+        CHECK(exceptionLines(e.logs) == 32);
+    }
+    {
+        // probe only: the same, and nothing is ever written
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        e.fault = [](const char*) { throw std::runtime_error("probe side"); };
+        for (int i = 0; i < 5; ++i)
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), true, false);
+        CHECK(exceptionLines(e.logs) == 1 && e.setsEver == 0);
+    }
+}
+
+// L4 (fix round 2): switching the correction off (a step with the key off, the probe still on) forgets the same-frame reference, so the
+// first evaluate after it is a first frame again instead of being compared with one from before the pause.
+void TestSwitchingTheCorrectionOffForgetsTheReference()
+{
+    auto replacementLines = [](const Outcome& o) { return CountLines(o.logs, "replaced by applied"); };
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    Evaluate(e, engine, At(100, 1, 0), false, true);
+    const Outcome on = Evaluate(e, engine, At(101, 1, 16), false, true);
+    CHECK(on.sets.size() == 2 && replacementLines(on) == 1);
+    CHECK(Evaluate(e, engine, At(102, 1, 32), false, true).sets.size() == 2); // the same episode, no new line
+    // the key is off for a while (probe only), then back on: the counter went up and the ratio is the same, and still it must not replace
+    Evaluate(e, engine, At(103, 1, 48), true, false);
+    const Outcome back = Evaluate(e, engine, At(104, 1, 64), false, true);
+    CHECK(back.sets.empty());
+    const Outcome again = Evaluate(e, engine, At(105, 1, 80), false, true);
+    CHECK(again.sets.size() == 2);
+    CHECK(replacementLines(again) == 1); // a new episode: the read-back line is written again
+}
+
 } // namespace
 
 int main()
@@ -191,6 +310,8 @@ int main()
     TestStatusLineCountsHeldBackFrames();
     TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestLogLinesAreCappedPerSession();
+    TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode();
+    TestSwitchingTheCorrectionOffForgetsTheReference();
     TestStatusLinesAreThinnedAndCarryTotals();
     TestSuppressedReportIsThinnedAndKeepsTheFinalTotal();
     TestSuppressedEpisodesAreReportedFromEveryMode();
