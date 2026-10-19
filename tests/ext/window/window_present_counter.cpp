@@ -543,6 +543,89 @@ int main()
         CHECK(Count(env, "wait limit reached") >= 1);
     }
 
+
+    // R3-M1: a re-request restarts the 50 ms floor. The hold is at 1000 and frame generation comes back at 1200 (the present
+    // asks it off again: the request time is now 1200). Complete off presents at 1205, 1210, 1220 and 1240 are two or more, and
+    // more than 50 ms after the HOLD, but not 50 ms after the re-request: no replay. The replay comes at 1250. (A floor measured
+    // from the hold would replay at 1210.)
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.nowMs = 1200;
+        Present(c, env, Mode::On, kActive, kActive, true); // frame generation is back: asked off again
+        CHECK(env.fgOffRequests == 2);
+        CHECK(env.replays.empty());
+        const uint64_t offTimes[] = { 1205, 1210, 1220, 1240 };
+        for (const uint64_t t : offTimes)
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kPaused, kPaused, true);
+            CHECK(env.replays.empty());
+        }
+        env.nowMs = 1250; // 50 ms after the re-request
+        Present(c, env, Mode::On, kPaused, kPaused, true);
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "frame generation confirmed off") == 1);
+    }
+    // The same for the soft limit: six presents have gone by (none reached Streamline), frame generation comes back at 1040, and
+    // a present that did reach it ends with the feature off at 1070 and 1080: 30 and 40 ms after the re-request, 70 and 80 ms
+    // after the hold. No replay; the floor is over at 1090. (A floor measured from the hold would soft-replay at 1070.)
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 6; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kOff, kOff, false);
+        }
+        CHECK(env.replays.empty());
+        env.nowMs = 1040;
+        Present(c, env, Mode::On, kActive, kActive, true); // frame generation is back: asked off again
+        CHECK(env.fgOffRequests == 2);
+        env.nowMs = 1070;
+        Present(c, env, Mode::On, kPaused, kPaused, true);
+        CHECK(env.replays.empty());
+        env.nowMs = 1080;
+        Present(c, env, Mode::On, kPaused, kPaused, true);
+        CHECK(env.replays.empty());
+        env.nowMs = 1090; // 50 ms after the re-request
+        Present(c, env, Mode::On, kPaused, kPaused, true);
+        CHECK(env.replays.size() == 1);
+    }
+    // R3-L1: a bridge resize while a call is held deactivates frame generation again, so it restarts the floor too. Five failed
+    // presents, a resize at 1100, then presents that reach Streamline with the feature off at 1105, 1110 and 1140: no replay
+    // (present 6 would soft-replay at once with a floor measured from the original request); the replay comes at 1150.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 5; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kOff, kOff, false);
+        }
+        env.nowMs = 1100;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        const uint64_t offTimes[] = { 1105, 1110, 1140 };
+        for (const uint64_t t : offTimes)
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kOff, kOff, true);
+            CHECK(env.replays.empty());
+        }
+        env.nowMs = 1150; // 50 ms after the resize
+        Present(c, env, Mode::On, kOff, kOff, true);
+        CHECK(env.replays.size() == 1);
+    }
+
     // ---- the border fix uses the same gate ----
     {
         FakeEnv env;

@@ -121,6 +121,9 @@ class Controller
         // counted before it says nothing about the new state, and no present has reached Streamline since this request.
         _gate.Reset();
         _fgPresentSinceRequest = false;
+        // ... and the floors count from this new deactivation, as after a re-request (R3-L1).
+        if (_deferral.State() == DeferState::Pending)
+            _requestMs = env.NowMs();
     }
 
     // A bridge swapchain is being destroyed (ext::dx11bridge::OnDestroy): a call held for it is dropped, unreplayed, and the
