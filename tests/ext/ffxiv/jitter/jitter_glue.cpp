@@ -224,9 +224,18 @@ void TestProbeLineShowsTheValuesBeforeTheWrite()
     bool sampleSeen = false;
     for (int i = 0; i < 4; ++i)
     {
+        if (i > 0)
+        {
+            // The evaluate just before the tick: the pause between two ticks is a gap for the same-frame rules (L3, third review), so
+            // the tick itself must follow an evaluate to be a replacement.
+            Frame before;
+            before.counter = 100 + 2 * i - 1;
+            before.timeMs = static_cast<std::uint64_t>(i) * 10000 - 16;
+            Evaluate(e, engine, before, true, true);
+        }
         Frame f;
-        f.counter = 100 + i;
-        f.timeMs = static_cast<std::uint64_t>(i) * 10000; // a sample is due at every evaluate
+        f.counter = 100 + 2 * i;
+        f.timeMs = static_cast<std::uint64_t>(i) * 10000; // a sample is due at every tick
         const Outcome o = Evaluate(e, engine, f, true, true);
         if (o.sets.empty())
             continue;

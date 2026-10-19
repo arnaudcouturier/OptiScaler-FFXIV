@@ -700,7 +700,7 @@ void TestText()
         counts.heldFirst = 1;
         CHECK(FormatStatus(counts, true, "Upscaler") ==
               "Jitter correction: on; totals since the start of the session: 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
-              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap or a rejected evaluate); "
+              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap or after a rejected evaluate); "
               "frame generation active yes (input Upscaler)");
         CHECK(Has(FormatStatus(counts, false, "NoFG"), "frame generation active no (input NoFG)"));
         CHECK(Has(FormatStatus(counts, true, "DLSSG"), "frame generation active yes (input DLSSG)"));

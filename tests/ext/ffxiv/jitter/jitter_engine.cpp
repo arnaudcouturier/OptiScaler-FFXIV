@@ -54,14 +54,16 @@ void TestStatusLineCountsHeldBackFrames()
     Evaluate(e, engine, At(101, 1.0f, 100), false, true);   // replaced
     Evaluate(e, engine, At(101, 1.0f, 200), false, true);   // the counter did not increase
     Evaluate(e, engine, At(102, 1.5f, 300), false, true);   // the ratio changed
-    const Outcome last = Evaluate(e, engine, At(103, 1.5f, 10000), false, true); // replaced; a status line is due
+    // The status line is due 10 s after the first sample; the evaluate comes 9.7 s after the previous one, which is a pause (L3, third
+    // review): a first frame again, passed through.
+    const Outcome last = Evaluate(e, engine, At(103, 1.5f, 10000), false, true);
     std::string status;
     for (const std::string& line : last.logs)
         if (Has(line, "Jitter correction: on;"))
             status = line;
     CHECK(!status.empty());
-    CHECK(Has(status, "5 evaluates seen") && Has(status, "2 replaced") && Has(status, "3 passed through unchanged"));
-    CHECK(Has(status, "1 frame counter did not increase") && Has(status, "1 ratio not steady") && Has(status, "1 first frame after a gap"));
+    CHECK(Has(status, "5 evaluates seen") && Has(status, "1 replaced") && Has(status, "4 passed through unchanged"));
+    CHECK(Has(status, "1 frame counter did not increase") && Has(status, "1 ratio not steady") && Has(status, "2 first frame after a gap"));
 }
 
 // L3: the sample lines are capped per session (an hour of 10-second samples), then one line says so.
@@ -107,12 +109,16 @@ void TestSuppressedEpisodesAreReportedFromEveryMode()
         FakeEnv e = MakeEnv();
         Engine engine;
         std::uint64_t t = 0;
-        Evaluate(e, engine, At(100, 1, t += 10000), false, true);
-        for (int n = 101; n < 101 + 40; ++n)
+        int counter = 100;
+        for (int n = 0; n < 40; ++n)
         {
-            Evaluate(e, engine, At(n, 1, t += 10000), false, true);
-            Evaluate(e, engine, At(n, 1, t += 10000), false, true); // the same counter again: held back
+            t += 10000;
+            Evaluate(e, engine, At(counter, 1, t), false, true);          // the first frame after the pause between two ticks
+            Evaluate(e, engine, At(counter + 1, 1, t + 16), false, true); // replaced
+            Evaluate(e, engine, At(counter + 1, 1, t + 32), false, true); // the same counter again: held back
+            counter += 2;
         }
+        Evaluate(e, engine, At(counter, 1, t += 10000), false, true); // one more tick: the report of the final totals
         std::string last;
         for (const std::string& line : e.logs)
             if (Has(line, "log line budget used up"))
@@ -128,16 +134,18 @@ void TestStatusLinesAreThinnedAndCarryTotals()
     Engine engine;
     std::vector<int> statusAtTick;
     std::string last;
-    for (int i = 0; i < 420; ++i) // 70 minutes, one evaluate per 10 s
+    for (int i = 0; i < 420; ++i) // 70 minutes, a sample tick every 10 s followed by one more evaluate (the pause between ticks is a gap)
     {
-        const Outcome o = Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), false, true);
+        const std::uint64_t t0 = static_cast<std::uint64_t>(i) * 10000;
+        const Outcome o = Evaluate(e, engine, At(100 + 2 * i, 1, t0), false, true);
+        Evaluate(e, engine, At(101 + 2 * i, 1, t0 + 16), false, true);
         for (const std::string& line : o.logs)
             if (Has(line, "Jitter correction: on;"))
             {
                 statusAtTick.push_back(i);
                 last = line;
                 if (i == 1)
-                    CHECK(Has(line, "2 evaluates seen")); // totals since the start, not since the previous line
+                    CHECK(Has(line, "3 evaluates seen")); // totals since the start, not since the previous line
             }
     }
     CHECK(statusAtTick.size() == 120);
@@ -147,8 +155,8 @@ void TestStatusLinesAreThinnedAndCarryTotals()
         CHECK(statusAtTick[k] == 65 + 6 * static_cast<int>(k - 60)); // then one per 60 s: the first tick a minute after line 60 (tick 59)
     CHECK(!statusAtTick.empty() && statusAtTick.back() == 419);
     // nothing was zeroed after line 60: the last line says everything since the start
-    CHECK(Has(last, "420 evaluates seen") && Has(last, "419 replaced") && Has(last, "1 passed through unchanged"));
-    CHECK(Has(last, "1 first frame after a gap"));
+    CHECK(Has(last, "839 evaluates seen") && Has(last, "419 replaced") && Has(last, "420 passed through unchanged"));
+    CHECK(Has(last, "420 first frame after a gap"));
     CHECK(CountLines(e.logs, "budget") == 0); // thinned, not cut off: no budget line any more
     CHECK(e.fgQueries == 120);                 // frame generation is asked only when a line is written
 }
@@ -429,6 +437,57 @@ void TestAHalfWrittenPairIsPutBack()
     }
 }
 
+// L3 (third review): a long pause between two evaluates makes the next one a first frame again (the same-frame rules compare
+// consecutive evaluates; one from before a pause is not "the previous one"). The bound is Engine::kFrameGapMs.
+void TestALongPauseForgetsTheReference()
+{
+    static_assert(Engine::kFrameGapMs == 1000);
+    const std::uint64_t gap = Engine::kFrameGapMs;
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    auto replaced = [&](const Frame& f) { return !Evaluate(e, engine, f, false, true).sets.empty(); };
+    CHECK(!replaced(At(100, 1, 0)));                // a first frame
+    CHECK(replaced(At(101, 1, 16)));                // two consecutive proven evaluates
+    CHECK(replaced(At(102, 1, 16 + gap)));          // exactly the bound is still "the next frame" (a slow moment, not a pause)
+    CHECK(!replaced(At(103, 1, 16 + 2 * gap + 1))); // one millisecond more is a gap: a first frame again, passed through
+    CHECK(replaced(At(104, 1, 16 + 2 * gap + 17))); // and the next one is proven against it
+    // a clock that goes backwards is "no time passed", not a gap
+    CHECK(replaced(At(105, 1, 5)));
+    // the status line (due at 10 s of sample time) names the two first frames: the very first evaluate and the one after the gap
+    Outcome last;
+    int counter = 106;
+    for (std::uint64_t t = 505; t <= 10005; t += 500) // every 500 ms: no gap
+        last = Evaluate(e, engine, At(counter++, 1, t), false, true);
+    std::string line;
+    for (const std::string& l : last.logs)
+        if (Has(l, "Jitter correction: on;"))
+            line = l;
+    CHECK_MSG(Has(line, "2 first frame after a gap or after a rejected evaluate"), "%s", line.c_str());
+}
+
+// L7 (third review): the first-frame count is the evaluate AFTER a rejected evaluate (the rejected one itself is in "passed through"),
+// so the label says "after a rejected evaluate".
+void TestFirstFrameCountsTheEvaluateAfterARejectedOne()
+{
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    Evaluate(e, engine, At(100, 1, 0), false, true);   // first frame
+    Evaluate(e, engine, At(101, 1, 100), false, true); // replaced
+    Frame rejected = At(102, 1, 200);
+    rejected.ngxJx = 0.31f; // the block carries another frame's jitter: the proof rejects this evaluate
+    CHECK(Evaluate(e, engine, rejected, false, true).sets.empty());
+    CHECK(Evaluate(e, engine, At(103, 1, 300), false, true).sets.empty()); // the first frame after the rejected one
+    Outcome last;
+    int counter = 104;
+    for (std::uint64_t t = 800; t <= 10300; t += 500) // 20 more evaluates, every 500 ms: replaced; the last carries the status line
+        last = Evaluate(e, engine, At(counter++, 1, t), false, true);
+    std::string status;
+    for (const std::string& line : last.logs)
+        if (Has(line, "Jitter correction: on;"))
+            status = line;
+    CHECK_MSG(Has(status, "24 evaluates seen") && Has(status, "21 replaced") && Has(status, "3 passed through unchanged"), "%s", status.c_str());
+    CHECK_MSG(Has(status, "2 first frame after a gap or after a rejected evaluate"), "%s", status.c_str());
+}
 // L4 (fix round 2): switching the correction off (a step with the key off, the probe still on) forgets the same-frame reference, so the
 // first evaluate after it is a first frame again instead of being compared with one from before the pause.
 void TestSwitchingTheCorrectionOffForgetsTheReference()
@@ -460,6 +519,8 @@ int main()
     TestAnExceptionAfterTheLimiterArmedIsOneEpisode();
     TestExceptionEpisodesBeyondTheBudgetAreCounted();
     TestAHalfWrittenPairIsPutBack();
+    TestALongPauseForgetsTheReference();
+    TestFirstFrameCountsTheEvaluateAfterARejectedOne();
     TestSwitchingTheCorrectionOffForgetsTheReference();
     TestStatusLinesAreThinnedAndCarryTotals();
     TestSuppressedReportIsThinnedAndKeepsTheFinalTotal();

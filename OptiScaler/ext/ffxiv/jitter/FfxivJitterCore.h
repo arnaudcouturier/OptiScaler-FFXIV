@@ -133,6 +133,7 @@ class Engine
     void ForgetCorrectionState()
     {
         _frames = FrameRules {};
+        _haveLastEvaluate = false;
         _replacing.Close();
         _passThrough.Close();
     }
@@ -224,6 +225,12 @@ class Engine
             // The same-frame rules look at every evaluate and need the previous one. An evaluate the proof rejected (for any reason,
             // not only an unreadable object) is not a reference: it makes the next evaluate a first frame again. Only a replacement
             // the rules refuse is counted as held back.
+            // Evaluates further apart than kFrameGapMs are not consecutive (a pause, a loading screen, alt-tab): the reference from before
+            // the pause is dropped, so the first evaluate after it is a first frame again. A clock that goes backwards is no time.
+            if (_haveLastEvaluate && now > _lastEvaluateMs && now - _lastEvaluateMs > kFrameGapMs)
+                _frames = FrameRules {};
+            _lastEvaluateMs = now;
+            _haveLastEvaluate = true;
             const Guard frame = _frames.Observe(proven.guard, analysis);
             const CorrectionDecision decision = ApplyFrameRules(proven, frame);
             if (proven.replace && !decision.replace)
@@ -333,6 +340,9 @@ class Engine
   public:
     // An hour of one line per 10 seconds: a session cannot grow its log without bound.
     static constexpr std::uint32_t kMaxSampleLines = 360;
+    // Two correction evaluates further apart than this are not "consecutive" for the same-frame rules. The game evaluates every frame
+    // (tens of milliseconds); a second without one is a pause, and the rules would otherwise compare with an evaluate from before it.
+    static constexpr std::uint64_t kFrameGapMs = 1000;
 
   private:
     static constexpr std::uint32_t kKeyCheckEvery = 16;
@@ -361,6 +371,8 @@ class Engine
     LineDecimator _statusLog, _suppressedLog; // thinned: the first 60 lines at every sample tick, then one per 60 s
     std::uint64_t _reportedSuppressed = 0; // the total of suppressed episodes the last report showed
     FrameRules _frames;
+    std::uint64_t _lastEvaluateMs = 0; // the clock of the last correction evaluate that reached the same-frame rules
+    bool _haveLastEvaluate = false;
     StatusCounts _counts; // totals since the start of the session
 };
 } // namespace ext::ffxiv::jitter

@@ -650,7 +650,7 @@ inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>
     const std::string inputText = input.empty() ? std::string() : std::format(" (input {})", input);
     return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} replaced by the applied jitter, {} passed through "
                        "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
-                       "not steady, {} first frame after a gap or a rejected evaluate); frame generation active {}{}",
+                       "not steady, {} first frame after a gap or after a rejected evaluate); frame generation active {}{}",
                        c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,
                        frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown", inputText);
 }
