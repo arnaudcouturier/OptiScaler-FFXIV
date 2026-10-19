@@ -141,24 +141,55 @@ class Latches
     // Each returns true for the call that set the latch (the caller writes the one log line).
     bool LatchSr() { return !_sr.exchange(true); }
     bool LatchNr() { return !_nr.exchange(true); }
+    // NR before SR (the pre-SR placement) is switched off for the session: the super-resolution evaluate refused the NR image. A third latch of its
+    // own: it ends neither the SR path nor preview NR, which carries on after SR (the default placement).
+    bool LatchPreSr() { return !_preSr.exchange(true); }
     bool SrLatched() const { return _sr.load(std::memory_order_relaxed); }
     bool NrLatched() const { return _nr.load(std::memory_order_relaxed); }
+    bool PreSrLatched() const { return _preSr.load(std::memory_order_relaxed); }
 
   private:
     std::atomic<bool> _sr { false };
     std::atomic<bool> _nr { false };
+    std::atomic<bool> _preSr { false };
 };
 
 // ---- Streams: binding, linger and release -------------------------------------------------------------------------------------
 // What a stream's GPU objects were built for. A change of any of these needs a new stream: the size, the model's creation-time
 // preset and style, the hand-off variant (the late variant is decided when the stream is created) and the mode.
 //
-// Two modes share the stream table, keyed by the preview image's texture pointer (one stream per image, whichever mode runs):
+// Where NR runs for a preview image, relative to the super-resolution (SR) step.
+enum class Placement : uint8_t
+{
+    BringUp, // on the native image, synthetic guides (PreviewNR without PreviewDLSS, or a preview the SR path does not serve)
+    PostSr,  // on the SR output (production): the default when both are on
+    PreSr,   // on the render-size colour the SR step is about to read (PreviewNRBeforeSR): the result becomes the SR evaluate's Color
+};
+
+// The labels of the log lines (the stream's first run, its model, a rebuild, the cost lines).
+constexpr const char* PlacementName(Placement p)
+{
+    switch (p)
+    {
+    case Placement::BringUp: return "bring-up";
+    case Placement::PostSr: return "production";
+    case Placement::PreSr: return "pre-SR";
+    }
+    return "?";
+}
+
+// A placement carries the preview's own depth and motion (copied into the stream at the render size) instead of synthetic guides.
+constexpr bool CarriesGuides(Placement p) { return p != Placement::BringUp; }
+
+// Three modes share the stream table, keyed by the preview image's texture pointer (one stream per image, whichever mode runs):
 //   bring-up   : colour = the native image (width x height), guides = synthetic images of the same size; the result is drawn instead of
 //                the native image by the UI draws (ResultFor); PreviewNR without PreviewDLSS, and previews the SR path does not serve (latched, a failed slot, too large for it).
 //   production : colour = the super-resolution output (width x height = twice the render size), guides = copies of the preview's own
 //                depth and motion at the render size (guideWidth x guideHeight); the result is read by the alpha pass of the SR path.
-// The two never run at once for one image. When the wanted mode changes the stream is rebuilt once the change has held still for the
+//   pre-SR     : colour = the render-size colour image the SR path is about to evaluate (RGBA8, width x height = render size), guides = copies
+//                of the preview's own depth and motion (the same size); the result (RGBA16F, the same size) is given to the SR evaluate as its
+//                Color. A third mode, so the shape carries `preSr` beside `production` (at most one of them; neither is the bring-up).
+// The modes never run at once for one image. When the wanted mode changes the stream is rebuilt once the change has held still for the
 // settle time (DecideRebuild), exactly like a size change; a render in between keeps the native image or the SR result.
 struct StreamShape
 {
@@ -168,15 +199,38 @@ struct StreamShape
     int style = 0;
     bool late = false;
     bool production = false;
-    uint32_t guideWidth = 0;  // production only: size of the depth and motion images (0 in bring-up: same as width x height)
+    bool preSr = false;       // NR before SR; never together with `production`
+    uint32_t guideWidth = 0;  // production and pre-SR: size of the depth and motion images (0 in bring-up: same as width x height)
     uint32_t guideHeight = 0;
 
     friend bool operator==(const StreamShape&, const StreamShape&) = default;
 };
 
-// The late hand-off variant (PreviewNRLate) belongs to the bring-up streams only: a production stream always uses this frame's result (the alpha
-// pass recomposes the original alpha onto this render's colour). So the key alone says nothing about what is on screen; this does.
-constexpr bool LateVariantInUse(const StreamShape& shape) { return shape.late && !shape.production; }
+constexpr Placement PlacementFrom(bool production, bool preSr) { return preSr ? Placement::PreSr : (production ? Placement::PostSr : Placement::BringUp); }
+constexpr Placement PlacementOf(const StreamShape& s) { return PlacementFrom(s.production, s.preSr); }
+
+// The shape a stream is built for, from the placement and the sizes the caller works at. PreviewNRLate (`lateWanted`) belongs to the bring-up
+// only: a stream that carries the preview's guides always uses this frame's result. The guide sizes are carried only by such a stream.
+constexpr StreamShape ShapeFor(Placement p, uint32_t width, uint32_t height, uint32_t preset, int style, bool lateWanted, uint32_t guideWidth,
+                               uint32_t guideHeight)
+{
+    StreamShape s;
+    s.width = width;
+    s.height = height;
+    s.preset = preset;
+    s.style = style;
+    s.late = p == Placement::BringUp && lateWanted;
+    s.production = p == Placement::PostSr;
+    s.preSr = p == Placement::PreSr;
+    s.guideWidth = CarriesGuides(p) ? guideWidth : 0;
+    s.guideHeight = CarriesGuides(p) ? guideHeight : 0;
+    return s;
+}
+
+// The late hand-off variant (PreviewNRLate) belongs to the bring-up streams only: a production or pre-SR stream always uses this frame's result
+// (the alpha pass recomposes the original alpha onto this render's colour, and the SR evaluate reads the result right after the run). So the key
+// alone says nothing about what is on screen; this does.
+constexpr bool LateVariantInUse(const StreamShape& shape) { return shape.late && !shape.production && !shape.preSr; }
 
 struct StreamState
 {
@@ -234,21 +288,34 @@ enum class ResultKind : uint8_t
     None,       // no current result
     BringUp,    // the NR result of the native image (native size, original alpha): UI draws sample it instead of the native image
     Production, // the raw NR output of the super-resolution image (2x, before the alpha pass): only the SR path's alpha pass reads it
+    PreSr,      // the NR output of the render-size colour (RGBA16F, before the SR evaluate): only the SR evaluate reads it
 };
-// The probe's image note (CharaProbeFiles.h NrImageNote) takes these values as plain integers: reordering the enum would swap its two texts.
-static_assert(static_cast<int>(ResultKind::None) == 0 && static_cast<int>(ResultKind::BringUp) == 1 && static_cast<int>(ResultKind::Production) == 2,
+// The probe's image note (CharaProbeFiles.h NrImageNote) takes these values as plain integers: reordering the enum would swap its texts. It has no
+// text for PreSr (3): an unknown kind gives an empty note, and ResultTextureServes keeps a pre-SR result out of the dump.
+static_assert(static_cast<int>(ResultKind::None) == 0 && static_cast<int>(ResultKind::BringUp) == 1 && static_cast<int>(ResultKind::Production) == 2 &&
+                  static_cast<int>(ResultKind::PreSr) == 3,
               "NrImageNote(int) relies on the values of ResultKind");
 
 inline ResultKind ResultKindOf(const StreamState& st)
 {
     if (!st.hasBuilt || !st.ResultIsCurrent())
         return ResultKind::None;
-    return st.built.production ? ResultKind::Production : ResultKind::BringUp;
+    switch (PlacementOf(st.built))
+    {
+    case Placement::PostSr: return ResultKind::Production;
+    case Placement::PreSr: return ResultKind::PreSr;
+    case Placement::BringUp: break;
+    }
+    return ResultKind::BringUp;
 }
 
 // A UI draw that asks for the bring-up result of an image is given only a bring-up result. A production stream's image has no alpha
-// recomposition and a different size; handing it out would show the SR path's intermediate image on screen.
+// recomposition and a different size; handing it out would show the SR path's intermediate image on screen. A pre-SR image is an input of the
+// SR evaluate and is never shown.
 constexpr bool ServesBringUpConsumer(ResultKind kind) { return kind == ResultKind::BringUp; }
+
+// The preview image dump (the probe's nr.png) labels a result as bring-up or production; a pre-SR result has no label there, so it is not offered.
+constexpr bool ResultTextureServes(ResultKind kind) { return kind == ResultKind::BringUp || kind == ResultKind::Production; }
 
 // The images a production run copies into its stream, as the D3D11 side reports them (DXGI format numbers). A copy between images of a
 // different size or format is not allowed by Direct3D, so the module checks first and treats a mismatch as a failure of the module.
@@ -258,16 +325,67 @@ struct ImageInfo
     uint32_t height = 0;
     uint32_t format = 0;
 };
+inline constexpr uint32_t kFormatRgba8Unorm = 28;   // DXGI_FORMAT_R8G8B8A8_UNORM: the render-size colour the SR path evaluates (the pre-SR input)
 inline constexpr uint32_t kFormatRgba16Float = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT: the super-resolution output
 inline constexpr uint32_t kFormatR32Float = 41;    // DXGI_FORMAT_R32_FLOAT: the guides pass's depth
 inline constexpr uint32_t kFormatRg16Float = 34;   // DXGI_FORMAT_R16G16_FLOAT: the guides pass's motion
 
+// The format of a stream's colour image: it receives a copy of the input, so it is the input's format (bring-up: the native image's).
+constexpr uint32_t ColourFormatFor(Placement p, uint32_t nativeFormat)
+{
+    return p == Placement::PostSr ? kFormatRgba16Float : (p == Placement::PreSr ? kFormatRgba8Unorm : nativeFormat);
+}
+
 constexpr bool ProductionInputsFit(const StreamShape& s, const ImageInfo& colour, const ImageInfo& depth, const ImageInfo& motion)
 {
-    return s.production && s.width != 0 && s.height != 0 && s.guideWidth != 0 && s.guideHeight != 0 &&
+    return s.production && !s.preSr && s.width != 0 && s.height != 0 && s.guideWidth != 0 && s.guideHeight != 0 &&
            colour.width == s.width && colour.height == s.height && colour.format == kFormatRgba16Float &&
            depth.width == s.guideWidth && depth.height == s.guideHeight && depth.format == kFormatR32Float &&
            motion.width == s.guideWidth && motion.height == s.guideHeight && motion.format == kFormatRg16Float;
+}
+
+// The pre-SR sibling: the colour is the render-size RGBA8 image of the SR path, and the guides have the colour's own size (the render size).
+constexpr bool PreSrInputsFit(const StreamShape& s, const ImageInfo& colour, const ImageInfo& depth, const ImageInfo& motion)
+{
+    return s.preSr && !s.production && s.width != 0 && s.height != 0 && s.guideWidth == s.width && s.guideHeight == s.height &&
+           colour.width == s.width && colour.height == s.height && colour.format == kFormatRgba8Unorm &&
+           depth.width == s.guideWidth && depth.height == s.guideHeight && depth.format == kFormatR32Float &&
+           motion.width == s.guideWidth && motion.height == s.guideHeight && motion.format == kFormatRg16Float;
+}
+
+// The check a run makes before it copies its inputs: the sibling of the stream's placement. The bring-up copies no extra images; asking is an error.
+constexpr bool CopiedInputsFit(const StreamShape& s, const ImageInfo& colour, const ImageInfo& depth, const ImageInfo& motion)
+{
+    switch (PlacementOf(s))
+    {
+    case Placement::PostSr: return ProductionInputsFit(s, colour, depth, motion);
+    case Placement::PreSr: return PreSrInputsFit(s, colour, depth, motion);
+    case Placement::BringUp: break;
+    }
+    return false;
+}
+
+// What a run copies into the stream's shared images, in the order it issues the copies. Every copy is issued before the ready signal
+// (RunFrame), so the D3D12 queue starts after all of them.
+enum class CopyKind : uint8_t
+{
+    Colour, // the input colour (bring-up: the native image; production: the SR output; pre-SR: the render-size colour)
+    Depth,
+    Motion,
+};
+
+struct CopyPlan
+{
+    std::array<CopyKind, 3> kinds {};
+    size_t count = 0;
+};
+
+constexpr CopyPlan CopyPlanFor(Placement p)
+{
+    CopyPlan plan;
+    plan.kinds = { CopyKind::Colour, CopyKind::Depth, CopyKind::Motion };
+    plan.count = CarriesGuides(p) ? 3 : 1;
+    return plan;
 }
 
 // A size, preset, style or variant change must hold still before the stream is rebuilt: a window dragged to a new size reports a new
@@ -646,7 +764,8 @@ class TimerRing
         _slots[_current] = Slot {};
     }
     // The timed list of the current slot was executed and its done signal queued with fence value `done`.
-    void NoteSubmitted(uint64_t done, bool production) { _slots[_current] = Slot { true, done, production }; }
+    void NoteSubmitted(uint64_t done, bool production) { _slots[_current] = Slot { true, done, production ? Placement::PostSr : Placement::BringUp }; }
+    void NoteSubmitted(uint64_t done, Placement mode) { _slots[_current] = Slot { true, done, mode }; }
 
     // The slot ReadGpuTime reads next holds a finished measurement (`gpuDone(value)`: the done fence reached it).
     template <class GpuDone> bool CanRead(GpuDone&& gpuDone) const
@@ -655,14 +774,15 @@ class TimerRing
         return s.submitted && gpuDone(s.done);
     }
     // The mode of the run in that slot.
-    bool ReadIsProduction() const { return _slots[(_current + 1) % kSlots].production; }
+    Placement ReadMode() const { return _slots[(_current + 1) % kSlots].mode; }
+    bool ReadIsProduction() const { return ReadMode() == Placement::PostSr; }
 
   private:
     struct Slot
     {
         bool submitted = false;
         uint64_t done = 0;
-        bool production = false;
+        Placement mode = Placement::BringUp;
     };
     size_t _current = 0;
     std::array<Slot, kSlots> _slots {};
@@ -677,12 +797,22 @@ struct FallbackTally
 {
     std::atomic<uint64_t> all { 0 };
     std::atomic<uint64_t> production { 0 };
+    std::atomic<uint64_t> preSr { 0 };
 
     void Note(bool fromProduction)
     {
         all.fetch_add(1, std::memory_order_relaxed);
         if (fromProduction)
             production.fetch_add(1, std::memory_order_relaxed);
+    }
+    // The same by placement: `production` and `preSr` are subsets of `all`, each for its own entry.
+    void NoteFor(Placement p)
+    {
+        all.fetch_add(1, std::memory_order_relaxed);
+        if (p == Placement::PostSr)
+            production.fetch_add(1, std::memory_order_relaxed);
+        else if (p == Placement::PreSr)
+            preSr.fetch_add(1, std::memory_order_relaxed);
     }
 };
 
@@ -693,6 +823,15 @@ template <class Steps, class Ran> auto CountedCall(FallbackTally& tally, bool fr
     auto outcome = steps();
     if (!ran(outcome))
         tally.Note(fromProduction);
+    return outcome;
+}
+
+// The same, counted by placement.
+template <class Steps, class Ran> auto CountedCall(FallbackTally& tally, Placement placement, Steps&& steps, Ran&& ran) -> decltype(steps())
+{
+    auto outcome = steps();
+    if (!ran(outcome))
+        tally.NoteFor(placement);
     return outcome;
 }
 

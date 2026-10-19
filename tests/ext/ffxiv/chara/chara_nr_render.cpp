@@ -70,7 +70,7 @@ struct Effects
 
 SlotRender Slot(const PlumbingFacts& facts, bool consumerRecent, bool tintOn, Effects& e)
 {
-    return DecideSlotRender(facts, consumerRecent, tintOn, [&] { return e.Production(); }, [&](AlphaInput i, TintKind t) { return e.Alpha(i, t); });
+    return DecideSlotRender(facts, consumerRecent, tintOn, Placement::PostSr, false, [&] { return e.Production(); }, [&](AlphaInput i, TintKind t) { return e.Alpha(i, t); });
 }
 
 FinisherRender Finisher(const PlumbingFacts& facts, bool accepted, bool consumerRecent, bool srInCharge, bool productionComposed, Effects& e)
@@ -349,7 +349,7 @@ void TestAlphaColourFor()
                 e.answer = { outcome, hasView };
                 const int* given = nullptr;
                 const SlotRender r = DecideSlotRender(
-                    facts, recent, false, [&] { return e.Production(); },
+                    facts, recent, false, Placement::PostSr, false, [&] { return e.Production(); },
                     [&](AlphaInput input, TintKind)
                     {
                         given = AlphaColourFor(input, nr, sr);

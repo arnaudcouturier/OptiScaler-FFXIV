@@ -22,6 +22,8 @@ struct PlumbingFacts
     bool srGateOpen = false;      // the SR gate says the isolated DLSS path can run (NGX, device, entry points)
     bool nrHoldsResources = false; // NR streams or GPU objects still exist
     uint32_t srSlotsHeld = 0;     // SR slots whose GPU objects still exist
+    bool preSrWanted = false;     // [FFXIV] PreviewNRBeforeSR: run NR before the SR evaluate (needs both paths; the default is after)
+    bool preSrLatched = false;    // the SR evaluate refused the pre-SR NR image once: NR before SR is off for the session
 };
 
 // The SR path may do work: wanted, not latched, gate open.
@@ -203,6 +205,21 @@ constexpr bool RunProductionNow(const PlumbingFacts& f, bool srEvaluateSucceeded
     return srEvaluateSucceeded && consumerRecent && NrUsable(f);
 }
 
+// ---- NR before SR (the pre-SR placement) ----------------------------------------------------------------------------------------------
+// Where preview NR runs for a render the SR path is evaluating (`srInCharge`: the slot is served by SR, as it is whenever RunSlot runs). NR runs
+// before SR only when the key says so, both paths can work, and the SR evaluate has not refused an NR image before; in every other case it runs
+// after SR, exactly as without the key. With the key off the answer is PostSr for every input.
+constexpr Placement PlacementFor(const PlumbingFacts& f, bool srInCharge)
+{
+    return (f.preSrWanted && !f.preSrLatched && srInCharge && SrUsable(f) && NrUsable(f)) ? Placement::PreSr : Placement::PostSr;
+}
+
+// The pre-SR entry runs before the SR evaluate, for a window somebody shows (the same liveness rule as both other entries).
+constexpr bool RunPreSrNow(const PlumbingFacts& f, Placement placement, bool consumerRecent)
+{
+    return placement == Placement::PreSr && consumerRecent && NrUsable(f) && SrUsable(f);
+}
+
 // NR produced a result for this render when either entry did. The dispatcher withdraws the older NR result of the image otherwise
 // (InvalidateNow); the production entry runs inside the SR step, before that decision, so its success has to count: without it every
 // production result would be marked stale in the render that made it.
@@ -235,10 +252,11 @@ enum class TintKind : uint8_t
     Nr, // cyan
 };
 
-// The alpha pass of the SR path: tinted when PreviewDebugTint is on, cyan when its colour came from NR.
-constexpr TintKind AlphaTintFor(bool tintOn, AlphaInput input)
+// The alpha pass of the SR path: tinted when PreviewDebugTint is on, cyan when its colour came from NR (after the SR evaluate, or `preSrColour`:
+// the SR evaluate itself was given the NR image).
+constexpr TintKind AlphaTintFor(bool tintOn, AlphaInput input, bool preSrColour = false)
 {
-    return !tintOn ? TintKind::None : (input == AlphaInput::NrOutput ? TintKind::Nr : TintKind::Sr);
+    return !tintOn ? TintKind::None : ((input == AlphaInput::NrOutput || preSrColour) ? TintKind::Nr : TintKind::Sr);
 }
 
 // The bring-up result is a finished image that a UI draw samples as it is, so its tint is an extra pass over it (the result image is
@@ -301,25 +319,90 @@ struct SlotRender
 {
     bool offered = false;       // the production entry was run for this render
     bool produced = false;      // it returned an NR image
+    bool preSrColour = false;   // the SR evaluate of this render was given the pre-SR NR image as its colour
     AlphaInput alphaInput = AlphaInput::SrOutput;
     TintKind tint = TintKind::None;
     bool alphaOk = false;       // the alpha pass succeeded
-    bool composedFromNr = false; // the slot's composed picture was made from the NR image (needs the alpha pass to have succeeded)
+    bool composedFromNr = false; // the slot's composed picture was made from an NR image (after SR: the alpha input; before SR: the SR colour); needs the alpha pass to have succeeded
 };
 
+// `placement` is the one DecideSrEvaluate chose for this render and `preSrUsed` whether its SR evaluate was given the pre-SR image. With the
+// PreSr placement the production entry is never offered, whatever happened to the pre-SR run: a render for which NR before SR gave no image
+// keeps the plain SR output and does not start the larger post-SR model (that would flip back and forth).
 // `runProduction() -> ProductionAnswer` runs the production entry; it is called only when RunProductionNow allows it, and before the alpha
 // pass. `alphaPass(AlphaInput, TintKind) -> bool` runs the alpha pass with the colour and tint decided here; it runs once, in every case.
 template <class RunProduction, class AlphaPass>
-SlotRender DecideSlotRender(const PlumbingFacts& facts, bool consumerRecent, bool tintOn, RunProduction&& runProduction, AlphaPass&& alphaPass)
+SlotRender DecideSlotRender(const PlumbingFacts& facts, bool consumerRecent, bool tintOn, Placement placement, bool preSrUsed, RunProduction&& runProduction,
+                            AlphaPass&& alphaPass)
 {
     SlotRender r;
-    r.offered = RunProductionNow(facts, true, consumerRecent); // the SR evaluate succeeded: this step is only reached after it
+    r.offered = placement != Placement::PreSr && RunProductionNow(facts, true, consumerRecent); // the SR evaluate succeeded: this step is only reached after it
     if (r.offered)
         r.produced = ProductionProduced(runProduction());
+    r.preSrColour = placement == Placement::PreSr && preSrUsed;
     r.alphaInput = ChooseAlphaInput(r.produced);
-    r.tint = AlphaTintFor(tintOn, r.alphaInput);
+    r.tint = AlphaTintFor(tintOn, r.alphaInput, r.preSrColour);
     r.alphaOk = alphaPass(r.alphaInput, r.tint);
-    r.composedFromNr = r.alphaOk && r.alphaInput == AlphaInput::NrOutput;
+    r.composedFromNr = r.alphaOk && (r.alphaInput == AlphaInput::NrOutput || r.preSrColour);
+    return r;
+}
+
+// ---- The SR evaluate with NR before it -------------------------------------------------------------------------------------------------
+// With the PreSr placement the NR result is the SR evaluate's colour. The evaluate is the one place the driver can refuse it (a shared image
+// written by Direct3D 12 read as Color by the Direct3D 11 feature is a combination no log had shown), so a refused evaluate is run again on the plain
+// colour in the same render, and NR before SR is then latched off for the session (PlumbingFacts::preSrLatched). The picture of that render is
+// the plain SR picture (magenta tint, not composed from NR) and the post-SR NR does not start for it (DecideSlotRender above).
+enum class SrColourSource : uint8_t
+{
+    Plain, // the render-size colour the SR path made (what the evaluate reads without NR before it)
+    PreSr, // the pre-SR NR result
+};
+
+// The colour handle an evaluate is given. A template on the handle type: the glue passes D3D11 resources, the tests two distinct pointers.
+template <class Image> constexpr Image SrColourFor(SrColourSource source, Image preSrColour, Image plainColour)
+{
+    return source == SrColourSource::PreSr ? preSrColour : plainColour;
+}
+
+struct SrEvaluation
+{
+    Placement placement = Placement::PostSr;
+    bool preSrOffered = false;     // the pre-SR entry was run for this render
+    bool preSrProduced = false;    // it returned an NR image
+    bool usedPreSrColour = false;  // the evaluate that succeeded was given that image
+    bool latchPreSr = false;       // NR before SR must be switched off for the session (write one log line): the image was refused or missing
+    bool ok = false;               // an SR evaluate succeeded
+};
+
+// `runPreSr() -> ProductionAnswer` runs the pre-SR entry (called only when RunPreSrNow allows it, before any evaluate). `evaluate(SrColourSource)
+// -> bool` runs the SR evaluate with that colour and says whether it succeeded. With the key off (or any other reason for PostSr) the pre-SR
+// entry is not called and the evaluate runs once on the plain colour, exactly as before this existed. When both evaluates fail the render fails as
+// it always did, and the latch is not set (the colour was not the cause).
+template <class RunPreSr, class Evaluate>
+SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool srInCharge, bool consumerRecent, RunPreSr&& runPreSr, Evaluate&& evaluate)
+{
+    SrEvaluation r;
+    r.placement = PlacementFor(facts, srInCharge);
+    r.preSrOffered = RunPreSrNow(facts, r.placement, consumerRecent);
+    bool ranWithoutImage = false;
+    if (r.preSrOffered)
+    {
+        const ProductionAnswer answer = runPreSr();
+        r.preSrProduced = ProductionProduced(answer);
+        ranWithoutImage = answer.outcome == RunOutcome::Ran && !answer.hasView; // cannot happen: a defect of the module, not worth another try
+    }
+    bool refused = false;
+    if (r.preSrProduced)
+    {
+        if (evaluate(SrColourSource::PreSr))
+        {
+            r.ok = r.usedPreSrColour = true;
+            return r;
+        }
+        refused = true;
+    }
+    r.ok = evaluate(SrColourSource::Plain);
+    r.latchPreSr = r.ok && (refused || ranWithoutImage);
     return r;
 }
 

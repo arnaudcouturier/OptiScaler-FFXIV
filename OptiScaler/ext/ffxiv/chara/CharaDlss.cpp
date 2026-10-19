@@ -785,7 +785,7 @@ void RunSlot(int index, const DrawView& view)
     ComPtr<ID3D11ShaderResourceView> nrOutput; // outlives the alpha pass
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
     const nr::SlotRender render = nr::DecideSlotRender(
-        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted,
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, nr::Placement::PostSr, false,
         [&]
         {
             ProductionCall call = RunNrProduction(view, g, s, in);
