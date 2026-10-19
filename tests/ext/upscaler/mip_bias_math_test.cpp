@@ -156,6 +156,9 @@ int main()
     CHECK(!ShouldPublish(0.0, 0.0));
     CHECK(!ShouldPublish(-0.584963, -0.584963));
     CHECK(!ShouldPublish(0.0, 0.0005));
+    CHECK(ShouldPublish(0.0, 0.001));          // the boundary itself publishes (>=, and kMinChange is 0.001)
+    CHECK(!ShouldPublish(0.0, 0.00099));       // just under it does not
+    CHECK(ShouldPublish(0.0, -0.001) && !ShouldPublish(0.0, -0.00099));
     CHECK(!ShouldPublish(0.0005, 0.0));
     CHECK(!ShouldPublish(-0.766061, -0.7665));
     CHECK(ShouldPublish(0.0, 0.002));

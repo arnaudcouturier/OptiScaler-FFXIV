@@ -128,6 +128,12 @@ int main(int argc, char** argv)
         CHECK(card.find("\"Follow the upscaling ratio\"") != std::string::npos);
         CHECK(card.find("\"Extra offset\", &offset, -3.0f, 3.0f") != std::string::npos);
 
+        // A value typed with Ctrl+click is limited to the slider range too (otherwise the ini holds 10 while the policy
+        // uses 3), and what is stored goes through ClampOffset.
+        CHECK(card.find("\"%.2f\", ImGuiSliderFlags_AlwaysClamp)") != std::string::npos);
+        CHECK(card.find("settings.mipBiasAutoOffset = static_cast<float>(mipbias::ClampOffset(offset));") !=
+              std::string::npos);
+
         // If a sync renames or drops upstream's card, ours would silently move to the end of the tab.
         const std::string menu = ReadAll(root + "/OptiScaler/menu/menu_common.cpp");
         CHECK(menu.find("{ \"mipmap\", \"Textures\", \"Mipmap Bias\", nullptr, RenderApiAndTextureSettings }") !=

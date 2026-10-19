@@ -51,8 +51,9 @@ void Draw(ext::menu::Ctx& ctx)
     // Applied while dragging (the number is stored at once), published when the slider is let go: one log line per
     // adjustment instead of one per frame.
     float offset = settings.mipBiasAutoOffset.value_or_default();
-    if (ImGui::SliderFloat("Extra offset", &offset, -3.0f, 3.0f, "%.2f"))
-        settings.mipBiasAutoOffset = offset;
+    // AlwaysClamp: a value typed with Ctrl+click stays inside the range too; ClampOffset is the same limit the policy uses.
+    if (ImGui::SliderFloat("Extra offset", &offset, -3.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+        settings.mipBiasAutoOffset = static_cast<float>(mipbias::ClampOffset(offset));
     if (ImGui::IsItemDeactivatedAfterEdit())
         mipbias::OnSettingChanged();
 
