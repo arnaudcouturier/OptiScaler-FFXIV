@@ -5,6 +5,7 @@
 #include "ext/core/HooksBypass.h"
 #include "ext/reshade/ReShadeD3D11.h"
 #include "ext/reshade/ReShadeEvents.h"
+#include "ext/window/WindowSeams.h"
 
 // ReShade's headers and ImGui never share a translation unit (see ReShadeRegister.cpp).
 #ifdef IMGUI_VERSION_NUM
@@ -729,8 +730,41 @@ bool BoundaryTechniqueState(effect_runtime*, effect_technique, bool) noexcept
     return false;
 }
 
+// Window mode (ext/window): fires BEFORE IDXGISwapChain::SetFullscreenState and returns true to prevent the call. With
+// [Window] Mode = off it is one atomic load (and it is not registered at all when the mode is off at load time).
+bool WindowSetFullscreenState(swapchain* sc, bool fullscreen, void* hmonitor) noexcept
+{
+    if (sc == nullptr)
+        return false;
+    try
+    {
+        return ext::window::OnSetFullscreenState(sc->get_native(), reinterpret_cast<uint64_t>(sc->get_hwnd()), fullscreen,
+                                                 reinterpret_cast<uint64_t>(hmonitor));
+    }
+    catch (...)
+    {
+        return false; // fail open: the game's call goes through
+    }
+}
+
 std::atomic<bool> g_boundaryInstalled { false };
+std::atomic<bool> g_windowInstalled { false };
 } // namespace
+
+bool InstallWindowEvent()
+{
+    if (g_windowInstalled.exchange(true))
+        return true;
+    try
+    {
+        ::reshade::register_event<::reshade::addon_event::set_fullscreen_state>(&WindowSetFullscreenState);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
 
 probe::IBackend* NewLiveBackend() { return new LiveBackend; }
 

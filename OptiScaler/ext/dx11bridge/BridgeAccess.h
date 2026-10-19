@@ -1,6 +1,6 @@
 #pragma once
 // ext::Access::Bridge: the fork's window into the private state of Dx11wDx12SC (with_dx12/dx11_with_dx12_sc.h, friend
-// `ext::Access`). A nested class of the friend has its rights. Included only by ext/dx11bridge/*.cpp and ext/hdr/*.cpp;
+// `ext::Access`). A nested class of the friend has its rights. Included only by fork code under ext/ (dx11bridge, hdr, window);
 // upstream files never see it.
 
 #include "ext/Seams.h"
@@ -39,4 +39,10 @@ struct ext::Access::Bridge
     static ID3D12GraphicsCommandList* CopyList(Dx11wDx12SC& sc, UINT slot) { return sc._copyCommandLists[slot]; }
     static HWND Window(Dx11wDx12SC& sc) { return sc._handle; }
     static IFGFeature_Dx12* Fg(Dx11wDx12SC& sc) { return sc._fg; }
+
+    // Window mode (M2): the bridge's back buffer index and buffer count. Dx11wDx12SC::Present advances the index
+    // (_AdvanceFakeBackBufferIndex) only after `_fgSwapChain->Present` returned success, with frame generation on or off;
+    // every early `return DXGI_ERROR_DEVICE_REMOVED` before that call leaves it alone. Read-only.
+    static UINT FakeBackBufferIndex(const Dx11wDx12SC& sc) { return sc._currentFakeIndex; }
+    static UINT BufferCount(const Dx11wDx12SC& sc) { return sc._bufferCount; }
 };

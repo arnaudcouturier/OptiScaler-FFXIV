@@ -1,0 +1,581 @@
+// Step 2 on fakes (B1-a): after the game leaves the fork's borderless "fullscreen" (SCExclusiveFullscreen true -> false, read
+// at the bridge resize) a stray window edge is cleared from the end of a game present, and only when the DLSS-G frame
+// generation is confirmed off, from the window's owner thread, and never for a real windowed mode.
+#include "window_test.h"
+
+using namespace ext::window;
+using wt::FakeEnv;
+
+namespace
+{
+constexpr uint64_t kBridge = 0x1000;
+constexpr uint64_t kHwnd = 0xABC;
+
+const FgSnapshot kActive { true, true, false };
+const FgSnapshot kPaused { true, false, true };
+const FgSnapshot kOff { true, false, false };
+
+// One game present with frame generation in state `entry` at the start and `exit` at the end.
+void Present(Controller& c, FakeEnv& env, Mode mode, const FgSnapshot& entry, const FgSnapshot& exit)
+{
+    if (!env.serial)
+        env.serial = 0; // these flows run with the bridge present counter live (M2): every present here reaches the FG present
+    env.fg = entry;
+    c.OnPresentBegin(env, mode);
+    env.CompletePresent();
+    env.fg = exit;
+    c.OnPresentEnd(env, mode);
+}
+
+// The window as the fork's leave branch plus the game's own style write leave it: frame-less, with a client edge.
+void MakeBorderBug(FakeEnv& env)
+{
+    env.window = wt::BorderlessWindow();
+    env.window.exstyle = 0x00000300u; // WS_EX_OVERLAPPEDWINDOW
+    env.window.clientWidth = 3836;
+    env.window.clientHeight = 2156;
+}
+
+// Enter the pseudo fullscreen, then leave it: the second resize is the one that arms the fix.
+void EnterThenLeave(Controller& c, FakeEnv& env, Mode mode)
+{
+    env.exclusive = true;
+    c.OnResizeDone(env, mode, kBridge, kHwnd, 3840, 2160);
+    env.exclusive = false;
+    c.OnResizeDone(env, mode, kBridge, kHwnd, 3840, 2160);
+}
+
+int Warnings(const FakeEnv& env)
+{
+    int n = 0;
+    for (bool w : env.warns)
+        n += w ? 1 : 0;
+    return n;
+}
+} // namespace
+
+int main()
+{
+    // The reference case: leave with frame generation off. Applied once, after one complete present, never before.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.fg = kOff;
+        MakeBorderBug(env);
+        Present(c, env, Mode::On, kOff, kOff); // earlier presents do not matter
+        EnterThenLeave(c, env, Mode::On);
+        CHECK(env.applied.empty()); // nothing happens inside the resize
+        CHECK_CONTAINS(env.All(), "border fix armed");
+        CHECK_CONTAINS(env.Last(), "fixArmed=yes");
+
+        // The first present after the leave starts and ends with the feature off, but the gate also needs the Deactivate
+        // that the resize did: here the feature was already off, one complete present confirms.
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.size() == 1);
+        CHECK(env.applied[0].hwnd == kHwnd);
+        CHECK(env.applied[0].exstyle == 0u); // both edge bits gone
+        CHECK(!env.applied[0].fgActiveAtCall);
+        CHECK(env.applied[0].thread == env.owner);
+        CHECK_CONTAINS(env.All(), "border fix applied");
+        CHECK(env.window.clientWidth == 3840 && env.window.clientHeight == 2160); // the fake restores the client area
+
+        // Disarmed: later presents change nothing.
+        Present(c, env, Mode::On, kOff, kOff);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.size() == 1);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        CHECK_CONTAINS(env.Last(), "fixArmed=no");
+    }
+
+    // The leave with frame generation running (the resize deactivates it): wait for the complete present, apply after.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kActive;
+        Present(c, env, Mode::On, kActive, kActive);
+        EnterThenLeave(c, env, Mode::On);
+        env.fg = kPaused; // the bridge's resize deactivated frame generation
+        // The present that was running when it was deactivated started with the feature active: not a confirmation.
+        Present(c, env, Mode::On, kActive, kPaused);
+        CHECK(env.applied.empty());
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+        CHECK(!env.applied[0].fgActiveAtCall);
+    }
+
+    // The re-activation race: frame generation comes back after a few presents (the pause is only about ten frames). The fix
+    // never runs while the feature is active, and still runs in the next off period.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.window = wt::BorderlessWindow(); // the game has not rewritten its frame-less style yet
+        env.window.style = 0x16CF0000u;      // the fork's WS_OVERLAPPEDWINDOW | WS_VISIBLE, with a caption
+        env.window.exstyle = 0x300u;
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kOff, kOff);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty()); // caption present: left alone for now, still armed
+        Present(c, env, Mode::On, kOff, kActive); // frame generation is back
+        env.window.style = 0x90000000u;            // the game rewrites its frame-less style while the feature is on
+        Present(c, env, Mode::On, kActive, kActive);
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(env.applied.empty()); // the window needs the fix, but the feature is active
+        Present(c, env, Mode::On, kActive, kPaused); // asked off again
+        CHECK(env.applied.empty()); // the present that ended the activity does not count
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+        for (const auto& a : env.applied)
+            CHECK(!a.fgActiveAtCall);
+    }
+
+    // A real windowed mode (caption and sizing frame) is never touched, however long the check runs.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.window = wt::BorderlessWindow();
+        env.window.style = 0x16CF0000u;
+        env.window.exstyle = 0x300u;
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < 400; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        CHECK_CONTAINS(env.All(), "border fix gave up");
+        CHECK(Warnings(env) == 0);
+        // It gave up once: more presents log nothing more.
+        const size_t logs = env.logs.size();
+        for (int i = 0; i < 50; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.logs.size() == logs);
+    }
+
+    // The logged sequence: the startup enter has no resize behind it, so the last resize saw the flag false. The hook flips the
+    // flag on the enter and again on the leave; only presents see it in between. The leave must still arm the fix: at the
+    // next present (and, with a resize after the leave, at that resize).
+    for (const bool resizeAfterLeave : { false, true })
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.exclusive = false;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // the startup resize: flag false
+        env.exclusive = true;                           // the hook's enter, no resize after it
+        Present(c, env, Mode::On, kOff, kOff);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        env.exclusive = false; // the hook's leave
+        if (resizeAfterLeave)
+        {
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+            CHECK_CONTAINS(env.Last(), "exclusive=0 prevExclusive=1"); // the present's sample is the previous value
+            CHECK_CONTAINS(env.All(), "seen at a bridge resize");
+            CHECK(env.applied.empty());
+            Present(c, env, Mode::On, kOff, kOff);
+        }
+        else
+        {
+            Present(c, env, Mode::On, kOff, kOff); // armed at this present's end and applied in the same call
+            CHECK_CONTAINS(env.All(), "seen at a present");
+        }
+        CHECK(env.applied.size() == 1);
+        CHECK(!env.applied[0].fgActiveAtCall);
+        CHECK(env.window.clientWidth == 3840 && env.window.clientHeight == 2160);
+    }
+
+    // The give-up boundary: a caption window is checked once per gated present. A frame-less style that shows up at check 120
+    // is fixed; at check 121 the fix has given up (logged) and nothing is applied. The caption window is never touched.
+    for (const int captionChecks : { 119, 120 })
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.window = wt::BorderlessWindow();
+        env.window.style = 0x16CF0000u; // caption
+        env.window.exstyle = 0x300u;
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < captionChecks; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        env.window.style = 0x90000000u; // the game writes its frame-less style
+        Present(c, env, Mode::On, kOff, kOff);
+        if (captionChecks == 119)
+        {
+            CHECK(env.applied.size() == 1); // check 120
+        }
+        else
+        {
+            CHECK(env.applied.empty()); // check 121: given up
+            CHECK_CONTAINS(env.All(), "border fix gave up");
+        }
+    }
+
+    // L5: an armed fix also expires by presents (600) and by wall time (30 s) since arming, even if frame generation never goes
+    // off; a later off period then applies nothing.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kActive;
+        EnterThenLeave(c, env, Mode::On);
+        CHECK(c.FixArmed());
+        for (int i = 0; i < 600; ++i)
+            Present(c, env, Mode::On, kActive, kActive);
+        CHECK(c.FixArmed());
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(!c.FixArmed());
+        CHECK_CONTAINS(env.All(), "border fix expired");
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kActive;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 31000; // exactly 30 s
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(c.FixArmed());
+        env.nowMs = 31001;
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(!c.FixArmed());
+    }
+
+    // Not armed without the true -> false change: a first resize with the flag already false, and an enter.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.exclusive = false;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // first sight: no previous value
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // false -> false is no leave
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        CHECK(!c.FixArmed());
+        env.exclusive = true;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // enter
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+
+    // An enter disarms a fix that was still waiting.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.window = wt::BorderlessWindow();
+        env.window.style = 0x16CF0000u; // still the fork's overlapped style: waiting
+        env.window.exstyle = 0x300u;
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kOff, kOff);
+        env.exclusive = true;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        CHECK_CONTAINS(env.Last(), "fixArmed=no");
+        MakeBorderBug(env);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+
+    // Probe never changes a window: the transition is visible in the line, nothing is armed or applied.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::Probe);
+        CHECK_CONTAINS(env.Last(), "exclusive=0 prevExclusive=1");
+        CHECK_CONTAINS(env.Last(), "fixArmed=no");
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::Probe, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+
+    // A different output (not DLSS-G): the gate never confirms, nothing is applied.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.dlssg = false;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+
+    // The window belongs to another thread: SetWindowPos is not called, one warning, fail open.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.owner = 5;
+        env.current = 100;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        CHECK_CONTAINS(env.All(), "owner thread differs, border fix skipped");
+        CHECK(Warnings(env) == 1);
+        // A second leave logs nothing more about it.
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        int mentions = 0;
+        for (const auto& l : env.logs)
+            mentions += l.find("owner thread differs") != std::string::npos ? 1 : 0;
+        CHECK(mentions == 1);
+        // Unknown owner thread (0) is the same: not called.
+        env.owner = 0;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+    }
+
+    // A window that cannot be read: skipped with a warning, not retried every present.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        env.fg = kOff;
+        env.window.valid = false;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.empty());
+        CHECK(Warnings(env) == 1);
+    }
+
+    // The window call fails: one warning, not retried at every present.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.applyResult = false;
+        EnterThenLeave(c, env, Mode::On);
+        for (int i = 0; i < 5; ++i)
+            Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.size() == 1);
+        CHECK(Warnings(env) == 1);
+        CHECK_CONTAINS(env.All(), "border fix FAILED");
+    }
+
+    // The window call runs the game's window procedure, which resizes the swapchain: the controller state is already
+    // settled (disarmed) when that happens, the nested resize is flagged, and nothing is applied twice.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        env.onApply = [&]
+        {
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // WM_SIZE -> game -> ResizeBuffers -> OnResizeDone
+        };
+        Present(c, env, Mode::On, kOff, kOff);
+        env.onApply = nullptr;
+        CHECK(env.applied.size() == 1);
+        bool nested = false;
+        for (const auto& l : env.logs)
+            nested = nested || l.find("nested=yes") != std::string::npos;
+        CHECK(nested);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(env.applied.size() == 1);
+        // Outside a window call of the module the flag is not set.
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        CHECK(env.Last().find("nested=yes") == std::string::npos);
+    }
+
+    // M3, the strict defaults (the other cases above relax the floor to focus on their own rule): the fix needs at least 2
+    // complete off presents AND 50 ms since the first of them, like the replay. After a leave that was NOT held (every guard
+    // that fails open) the very next present is complete and off, and the fix must not restyle the window inside it: the
+    // resize that follows would run in the present in which Streamline first sees eOff.
+    {
+        FakeEnv env;
+        Controller c; // defaults
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 1005;
+        Present(c, env, Mode::On, kPaused, kPaused); // 1 complete off present: the first
+        CHECK(env.applied.empty());
+        for (uint64_t t = 1010; t <= 1050; t += 5)
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kPaused, kPaused); // 2 or more presents, but at most 45 ms since the first
+            CHECK(env.applied.empty());
+        }
+        CHECK(c.FixArmed());
+        env.nowMs = 1055; // 50 ms since the first complete off present
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+        CHECK(!env.applied[0].fgActiveAtCall);
+    }
+    // A clock that goes backwards never satisfies the floor (the stamp of the first off present is later than now) and does not
+    // expire the armed fix either; once it is back past the floor the fix applies.
+    {
+        FakeEnv env;
+        Controller c; // defaults
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 1005;
+        Present(c, env, Mode::On, kPaused, kPaused); // the first complete off present, stamped 1005
+        for (uint64_t t : { 900ull, 800ull, 700ull })
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kPaused, kPaused);
+            CHECK(env.applied.empty());
+        }
+        CHECK(c.FixArmed());
+        env.nowMs = 1055;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
+    {
+        // plenty of time but only one complete present: not enough
+        FakeEnv env;
+        Controller c;
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 5000;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.empty());
+        env.nowMs = 5001;
+        Present(c, env, Mode::On, kPaused, kPaused); // the second, 1 ms after the first
+        CHECK(env.applied.empty());
+        env.nowMs = 5050;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
+    {
+        // An interruption (frame generation comes back, then goes off again) restarts the floor from the next first present;
+        // so does a bridge resize (it deactivates frame generation again and resets the gate).
+        for (const bool interruptByResize : { false, true })
+        {
+            FakeEnv env;
+            Controller c;
+            MakeBorderBug(env);
+            env.fg = kOff;
+            env.nowMs = 1000;
+            EnterThenLeave(c, env, Mode::On);
+            for (uint64_t t = 1005; t <= 1025; t += 5)
+            {
+                env.nowMs = t;
+                Present(c, env, Mode::On, kPaused, kPaused); // count 5, first at 1005
+            }
+            CHECK(env.applied.empty());
+            env.nowMs = 1028;
+            if (interruptByResize)
+                c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+            else
+                Present(c, env, Mode::On, kPaused, kActive); // frame generation is back
+            for (uint64_t t = 1030; t <= 1070; t += 10)
+            {
+                env.nowMs = t;
+                Present(c, env, Mode::On, kPaused, kPaused); // new first present at 1030, at most 40 ms later
+                CHECK(env.applied.empty());                 // a stale first-present time (1005) would apply from 1060
+            }
+            env.nowMs = 1080; // 50 ms since the new first present
+            Present(c, env, Mode::On, kPaused, kPaused);
+            CHECK(env.applied.size() == 1);
+        }
+    }
+    // The present count of the floor on its own (time relaxed to 0): the first complete off present does not apply, the second does.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(2, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.empty());
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
+    // L3: the border fix's window call counts as an action only on its own thread (a resize from another thread meanwhile is not
+    // nested), and a throwing window call does not leave the action depth raised.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        env.onApply = [&]
+        {
+            env.current = 7;
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // another thread
+            env.current = 100;
+        };
+        Present(c, env, Mode::On, kOff, kOff);
+        env.onApply = nullptr;
+        CHECK(env.applied.size() == 1);
+        for (const auto& l : env.logs)
+            CHECK(l.find("nested=yes") == std::string::npos);
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        env.onApply = [&] { throw std::runtime_error("apply"); };
+        bool threw = false;
+        try
+        {
+            Present(c, env, Mode::On, kOff, kOff);
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(env.applied.size() == 1);
+        env.onApply = nullptr;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        CHECK(env.Last().find("nested=yes") == std::string::npos); // the depth is back to 0
+    }
+    // Mode off: no arming, no application, no reads.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0);
+        MakeBorderBug(env);
+        EnterThenLeave(c, env, Mode::Off);
+        Present(c, env, Mode::Off, kOff, kOff);
+        CHECK(env.applied.empty());
+        CHECK(env.logs.empty());
+    }
+
+    return wt::g_failed ? 1 : 0;
+}

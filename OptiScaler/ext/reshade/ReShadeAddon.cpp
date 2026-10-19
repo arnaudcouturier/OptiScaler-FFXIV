@@ -6,6 +6,7 @@
 #include "ext/reshade/ReShadeAddon.h"
 #include "ext/reshade/ReShadeBoundary.h"
 #include "ext/reshade/ReShadeEvents.h"
+#include "ext/window/WindowSeams.h"
 
 #include <atomic>
 #include <format>
@@ -135,6 +136,23 @@ void OnReshadeLoaded(HMODULE reshadeModule)
             LOG_WARN("ReShade built-in add-on: the runtime tracking for the UI boundary threw during setup");
         }
 
+        // Window mode ([Window] Mode = probe | on): the set_fullscreen_state event. Nothing is registered with the mode off.
+        if (ext::window::CurrentMode() != ext::window::Mode::Off)
+        {
+            try
+            {
+                if (InstallWindowEvent())
+                    LOG_INFO("Window: ReShade set_fullscreen_state event registered (mode {})",
+                             ext::window::ModeName(ext::window::CurrentMode()));
+                else
+                    LOG_WARN("Window: the ReShade set_fullscreen_state event could not be registered");
+            }
+            catch (...)
+            {
+                LOG_WARN("Window: the ReShade set_fullscreen_state event threw during setup");
+            }
+        }
+
         // Diagnostics only: subscribe to the runtime events; the report folder is created on its first line.
         if (ProbeEnabled())
         {
@@ -164,5 +182,9 @@ void OnReshadeLoaded(HMODULE reshadeModule)
                  result.missingExport);
     else
         LOG_INFO("ReShade built-in add-on: inert ({})", Describe(result.status));
+
+    // Window mode needs ReShade to see the game's window-mode call; the probe and the border fix run without it.
+    if (result.status != RegisterStatus::Ok && ext::window::CurrentMode() == ext::window::Mode::On)
+        LOG_INFO("Window: ReShade add-on not registered ({}): the mode-switch hold is inactive", Describe(result.status));
 }
 } // namespace ext::reshade

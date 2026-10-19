@@ -177,6 +177,8 @@ void ReShadeConfig::Bind(config::Binder& b)
     b.Add("HudLess", "ReShadePresets", presets);
 }
 
+void WindowConfig::Bind(config::Binder& b) { b.Add("Window", "Mode", mode); }
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -187,6 +189,7 @@ void ExtConfig::Bind(config::Binder& b)
     hudless.Bind(b);
     upscaler.Bind(b);
     reshade.Bind(b);
+    window.Bind(b);
 }
 
 void ExtConfig::PostLoad()
@@ -195,6 +198,7 @@ void ExtConfig::PostLoad()
     nr.PostLoad();
     hdr.PostLoad();
     hudless.PostLoad();
+    window.PostLoad();
 }
 
 ExtConfig& Cfg()

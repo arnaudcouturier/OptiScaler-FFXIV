@@ -9,6 +9,7 @@
 #include "ext/game/Game.h"
 #include "ext/ffxiv/ui/FfxivUiBoundary.h"
 #include "ext/hudless/HudlessSource.h"
+#include "ext/window/WindowSeams.h"
 
 #include <framegen/IFGFeature_Dx12.h>
 
@@ -36,6 +37,8 @@ void ConfigureOutput(Dx11wDx12SC& sc)
 
 void OnDestroy(Dx11wDx12SC& sc)
 {
+    window::OnDestroy(sc); // window mode: drop a call held for this swapchain
+
     if (Access::Bridge::HdrOutput(sc))
         hdr::Deactivate();
 }
@@ -47,6 +50,8 @@ DXGI_FORMAT OutputFormat(Dx11wDx12SC& sc, DXGI_FORMAT requested)
 
 HRESULT OnResizeDone(Dx11wDx12SC& sc)
 {
+    window::OnResizeDone(sc); // window mode: probe record, border fix arming (one atomic load while [Window] Mode = off)
+
     if (Access::Bridge::HdrOutput(sc) && !hdr::Configure(Access::Bridge::FgSwapChain(sc)))
         return DXGI_ERROR_UNSUPPORTED;
 
@@ -152,6 +157,7 @@ PresentScope::PresentScope()
 {
     if (game::Current().hudless)
         ffxiv::ui::OnPresentBegin();
+    window::OnPresentBegin(); // window mode: present thread, frame generation off gate
 }
 
 PresentScope::~PresentScope()
@@ -160,6 +166,7 @@ PresentScope::~PresentScope()
         scene->EndFrame();
     if (auto* hudless = game::Current().hudless)
         hudless->EndFrame();
+    window::OnPresentEnd(); // window mode: gate count, deferred call and border fix run here
 }
 
 void BeforeSharedCopy(Dx11wDx12SC& sc)

@@ -36,6 +36,7 @@
 #include "ext/nr/NrConfig.h"
 #include "ext/reshade/ReShadeConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
+#include "ext/window/WindowConfig.h"
 
 #include <cstdint>
 #include <string>
@@ -172,6 +173,7 @@ struct ExtConfig
     HudlessConfig hudless; // ext/hudless
     UpscalerConfig upscaler; // ext/upscaler
     ReShadeConfig reshade; // ext/reshade
+    WindowConfig window; // ext/window
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
