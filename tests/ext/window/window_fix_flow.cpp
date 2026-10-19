@@ -486,6 +486,19 @@ int main()
             CHECK(env.applied.size() == 1);
         }
     }
+    // The present count of the floor on its own (time relaxed to 0): the first complete off present does not apply, the second does.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(2, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.empty());
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
     // Mode off: no arming, no application, no reads.
     {
         FakeEnv env;
