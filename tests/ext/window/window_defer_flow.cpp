@@ -456,6 +456,7 @@ int main()
         for (int i = 0; i < 30; ++i)
             Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.empty());
+        CHECK(!AnyLogContains(env, "dropped, not replayed")); // cancelled at once, not left for a later present to drop
         env.fg = kActive;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
     }
