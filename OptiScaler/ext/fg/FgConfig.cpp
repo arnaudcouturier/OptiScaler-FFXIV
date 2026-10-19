@@ -4,6 +4,8 @@
 
 #include "ext/core/ExtConfig.h"
 
+#include <cmath>
+
 namespace ext
 {
 void FgConfig::Bind(config::Binder& b)
@@ -11,6 +13,11 @@ void FgConfig::Bind(config::Binder& b)
     b.Add("DLSSG", "AdaMfgUnlock", adaMfgUnlock);
 
     b.Add("DLSSG", "UIRecomposition", uiRecomposition);
+
+    b.Add("DLSSG", "AutoMFG", autoMfg);
+    b.Add("DLSSG", "AutoMFGMax", autoMfgMax);
+    b.Add("DLSSG", "AutoMFGTarget", autoMfgTarget);
+    b.Add("DLSSG", "AutoMFGSelfTest", autoMfgSelfTest);
 
     b.Add("DLSSG", "AmpereMfgUnlock", ampereMfgUnlock);
     b.Add("DLSSG", "AmpereMfgMaxFrames", ampereMfgMaxFrames);
@@ -43,6 +50,13 @@ void FgConfig::PostLoad()
     auto& count = Config::Instance()->FGXeFGInterpolationCount;
     if (count.has_value() && count.value() > kXeFgMaxInterpolations)
         count.reset();
+
+    // Dynamic MFG: the multiplier range is 2x..4x, the target 0 (auto) or a frame rate. Anything else means unset.
+    if (autoMfgMax.has_value() && (autoMfgMax.value() < 2 || autoMfgMax.value() > 4))
+        autoMfgMax.reset();
+    if (autoMfgTarget.has_value() &&
+        (!std::isfinite(autoMfgTarget.value()) || autoMfgTarget.value() < 0.0f || autoMfgTarget.value() > 1000.0f))
+        autoMfgTarget.reset();
 
     if (xefgMaxInterpolatedFrames.has_value() &&
         (xefgMaxInterpolatedFrames.value() < 1 || xefgMaxInterpolatedFrames.value() > kXeFgMaxInterpolations))

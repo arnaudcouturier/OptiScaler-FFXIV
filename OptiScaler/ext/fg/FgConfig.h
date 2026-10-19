@@ -42,6 +42,14 @@ struct FgConfig
     // recomposition, where unset = on (ext::hudless::QueryRecomposition).
     CustomOptional<bool> uiRecomposition { false };
 
+    // Dynamic MFG on RTX 40 ([DLSSG] section, ext/fg/DynamicMfgSeams.cpp). Off by default. AutoMFGMax is the highest
+    // multiplier an automatic choice may use (2..4), AutoMFGTarget the frame rate to reach (0 = the lower of the frame
+    // rate limit and the display refresh). AutoMFGSelfTest runs the one-off 2x,3x,4x,3x,2x check of in-place count changes.
+    CustomOptional<bool> autoMfg { false };         // AutoMFG
+    CustomOptional<int> autoMfgMax { 4 };           // AutoMFGMax
+    CustomOptional<float> autoMfgTarget { 0.0f };   // AutoMFGTarget
+    CustomOptional<bool> autoMfgSelfTest { false }; // AutoMFGSelfTest
+
     // D3: XeFG extras ([XeFG] section, shared with upstream's keys, which stay in Config.h). PostLoad() range-checks
     // InterpolationCount's upper bound, which upstream does not know.
     CustomOptional<bool> xefgDynamic { false };                               // DynamicMFG

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 // D2: the DLSS-G option seams of DLSSG_Common::SetOptions and the observed dynamic-MFG multiplier. These were the
 // DLSSG_Common virtuals AdjustDlssgOptions / AfterDlssgSetOptions and DLSSG_Dx12's overrides (SEAMS 5: free functions
@@ -85,6 +86,9 @@ namespace ext::fg
 {
 void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options)
 {
+    // dynamic MFG on RTX 40 (may change this frame's count), then the ForceDMFG / Ada-ceiling guard on the result
+    AutoMfgAdjustOptions(fg, options);
+
     if (AsDx12(fg) != nullptr)
         AdjustUiRecomposition(options);
 
@@ -110,6 +114,7 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
     const auto sampleTime = GetTickCount64();
     const auto mode = static_cast<int>(options.mode);
     const auto count = runtimeState.numFramesActuallyPresented;
+    AutoMfgObserve(queryResult == sl::Result::eOk, runtimeState);
     if (dx12Ext.sampleMode == mode && options.mode == sl::DLSSGMode::eDynamic &&
         dlssgSetOptionsResult == sl::Result::eOk && queryResult == sl::Result::eOk &&
         static_cast<unsigned>(runtimeState.status) == 0 && count >= 1 &&
