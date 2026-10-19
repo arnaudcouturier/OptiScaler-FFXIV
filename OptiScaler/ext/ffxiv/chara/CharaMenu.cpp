@@ -36,6 +36,15 @@ void DrawNrSection(CharaConfig& cfg)
                        "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
                        "native preview stays.");
 
+    bool before = cfg.previewNrBeforeSr.value_or_default();
+    if (ImGui::Checkbox("Run NR before DLSS (experimental)", &before))
+        cfg.previewNrBeforeSr = before;
+    ext::menu::Tooltip("Runs the NR model on the picture before DLSS instead of on the DLSS result. Needs Preview DLSS and Preview NR. The model then works at "
+                       "the render size, so it uses less GPU time and much less video memory per open window, but it sees a jittered picture that has not "
+                       "been anti-aliased yet: look for shimmer or trails on hair and cloth and switch it off if you see any. If DLSS refuses the NR "
+                       "picture, this render uses the plain picture, this option switches itself off for the session (one log line) and NR runs after "
+                       "DLSS as usual. The previous-frame option does not apply to it. Switching it rebuilds the window's model after half a second.");
+
     const nr::Status st = nr::GetStatus();
     if (!nrOn && st.streams == 0)
         return;
@@ -58,7 +67,8 @@ void DrawNrSection(CharaConfig& cfg)
         ImGui::TextDisabled("Last NR run: GPU %.2f ms, CPU %.2f ms (recording and submitting)", st.lastGpuMs, st.lastCpuMs);
     // The production path (NR on the DLSS result): its own numbers, shown while both options are on or after it ran.
     const bool dlssOn = cfg.previewDlss.value_or_default();
-    if ((nrOn && dlssOn) || st.productionRuns != 0 || st.productionFallbacks != 0)
+    const bool beforeActive = before && !st.preSrLatched; // NR runs before DLSS now: the line below is about NR on the DLSS result
+    if ((nrOn && dlssOn && !beforeActive) || st.productionRuns != 0 || st.productionFallbacks != 0)
     {
         if (st.productionRuns == 0 && st.productionFallbacks == 0)
             ImGui::TextDisabled("NR on the DLSS result: waiting for a preview that DLSS evaluated");
@@ -71,6 +81,21 @@ void DrawNrSection(CharaConfig& cfg)
                                 (unsigned long long) g_stats.nrProductionSwaps.load(std::memory_order_relaxed));
             if (st.productionGpuMs > 0.0 || st.productionCpuMs > 0.0)
                 ImGui::TextDisabled("Last NR run on the DLSS result: GPU %.2f ms, CPU %.2f ms", st.productionGpuMs, st.productionCpuMs);
+        }
+    }
+    // NR before DLSS: its own numbers (runs, renders that used the plain picture, the last cost), or why it is off.
+    if (before || st.preSrRuns != 0 || st.preSrFallbacks != 0 || st.preSrLatched)
+    {
+        if (st.preSrLatched)
+            ImGui::TextWrapped("NR before DLSS: switched off for this session (DLSS refused the NR picture); NR runs after DLSS.");
+        else if (st.preSrRuns == 0 && st.preSrFallbacks == 0)
+            ImGui::TextDisabled("NR before DLSS: waiting for a preview that DLSS evaluates");
+        else
+        {
+            ImGui::TextDisabled("NR before DLSS: %llu runs, %llu renders used the plain picture", (unsigned long long) st.preSrRuns,
+                                (unsigned long long) st.preSrFallbacks);
+            if (st.preSrGpuMs > 0.0 || st.preSrCpuMs > 0.0)
+                ImGui::TextDisabled("Last NR run before DLSS: GPU %.2f ms, CPU %.2f ms", st.preSrGpuMs, st.preSrCpuMs);
         }
     }
     if (st.videoMemoryMb != 0)
