@@ -176,7 +176,7 @@ class AutoMfgGlue
         in.gate.dynamicMode = options.mode == sl::DLSSGMode::eDynamic && w.dmfgSupported();
         in.gate.maxGenerated = w.maxGenerated();
         in.detectedGenerated = state.dlssgDetectedInterpolationCount;
-        in.paused = w.paused();
+        in.paused = w.paused(); // always false in the DLL: DLSSG_Dx12::Dispatch does not reach SetOptions while paused
 
         AutoMfgOut out;
         AutoMfgGate gate = AutoMfgGate::KeyOff;

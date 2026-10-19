@@ -326,6 +326,8 @@ void ABriefBadStatusIsNotEnough()
 void AShortPauseAcrossTheWatchEndIsNotAFailure()
 {
     {
+        // The paused flag: a state the DLL cannot produce today (Dispatch returns before SetOptions while paused), kept for
+        // callers that do tick while paused. The case that matches the DLL is the silent 600 ms one below.
         Rig r; // the pause is reported (paused flag) around the end of the watch
         const uint64_t s = RunToFirstSwitch(r);
         r.pauseFrom = s + 900;

@@ -44,7 +44,11 @@ struct AutoMfgTick
     uint32_t slStatus = 0;   // DLSSGState::status
     uint32_t presented = 0;  // DLSSGState::numFramesActuallyPresented
     int detectedGenerated = 0; // State::dlssgDetectedInterpolationCount (generated frames the plugin evaluates with); 0 = unknown
-    bool paused = false;       // IFGFeature::IsPaused(): the count field reads 0 while frame generation is paused
+    // IFGFeature::IsPaused(): the count field reads 0 while frame generation is paused. NOT produced in the DLL today:
+    // DLSSG_Dx12::Dispatch returns before SetOptions while the feature is paused or inactive, so no tick runs then. The field
+    // stays (harmless, and for a caller that does tick while paused); the protection that really exists against a short
+    // pause is the rule that a 0 count has to persist (kWrongSamples samples over kBadRunMs), with the gap rule (kGapMs).
+    bool paused = false;
 };
 
 struct AutoMfgLine
