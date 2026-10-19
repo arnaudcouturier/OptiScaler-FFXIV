@@ -122,6 +122,7 @@ int main()
         if (zero == nullptr)
             return 1;
         SetWindowLongPtrW(zero, GWL_EXSTYLE, 0); // make the previous value exactly 0 whatever the system added
+        SetLastError(ERROR_INVALID_PARAMETER); // an error left by something else before the call must not count either
         CHECK(win32::ApplyExStyle(Id(zero), WS_EX_TOOLWINDOW));
         CHECK((win32::Read(Id(zero)).exstyle & WS_EX_TOOLWINDOW) != 0);
         DestroyWindow(zero);
