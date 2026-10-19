@@ -216,8 +216,12 @@ int main(int argc, char** argv)
     }
     {
         const std::string text = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/ext/ffxiv/companion/Companion.cpp"));
-        CHECK(Count(Squash(text), "if(!ImGui::CollapsingHeader(\"FFXIVOptiScalerCompanion\"))return;") == 1);
+        // WP4 item 8: the card title is the only heading (no second collapsed header below it); the settings draw at once
+        CHECK(text.find("CollapsingHeader") == std::string::npos);
+        CHECK(text.find("FFXIV OptiScaler Companion") == std::string::npos);
+        CHECK(Count(Squash(text), "voidDrawSettings(){Snapshotsnapshot;Statusstatus;constboolfresh=mailbox.Read(snapshot,status,Now());") == 1);
         CHECK(Count(Squash(text), "ImGui::TreeNode(\"Companiondiagnostics\")") == 1);
+        CHECK(Count(Squash(text), "if(!DiagnosticsEnabled()||!ImGui::TreeNode(\"Companiondiagnostics\"))return;") == 1);
     }
 
     if (failures)

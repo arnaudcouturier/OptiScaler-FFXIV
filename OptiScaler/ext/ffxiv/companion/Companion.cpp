@@ -140,7 +140,7 @@ void DrawSourceMarkers(ID3D11DeviceContext* context, ID3D11Texture2D* target)
 }
 void DrawSettings()
 {
-    if (!ImGui::CollapsingHeader("FFXIV OptiScaler Companion")) return;
+    // The card title ("FFXIV Companion (nameplates)") is the only heading; the settings draw at once.
     Snapshot snapshot;
     Status status;
     const bool fresh = mailbox.Read(snapshot, status, Now());
