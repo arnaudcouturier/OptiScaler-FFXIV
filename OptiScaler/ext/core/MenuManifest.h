@@ -1,0 +1,47 @@
+#pragma once
+// The menu manifest: the fork's part of the menu as pure data, checked offline by tests/ext/menu/menu_manifest.cpp.
+//
+// Which card sits in which tab, and in what order, is the layout table (ext/core/MenuLayout.h: every slot has the card id
+// and its tab). This file adds what the layout cannot say: which cards need the FFXIV build match, which card ids exist
+// in users' configs, the ids that were retired, and the config keys that deliberately have no control.
+//
+// Adding a card: register it, add its slot to kSlots, and (when it needs the FFXIV build match) its id to kFfxivOnlyIds;
+// the manifest test fails until all of those agree. Retiring a card: remove its slot and add an alias.
+
+#include "ext/core/MenuLayout.h"
+
+#include <array>
+
+namespace ext::menu::manifest
+{
+// The tab that is shown only on the FFXIV build match (a row of upstream's tabs[] array, see FfxivTabVisible)
+inline constexpr const char* kFfxivTab = "FFXIV";
+
+// Fork cards that need the FFXIV build match: they live in the FFXIV tab, and only they do. Their visible predicates are
+// the build match (`ext::game::Current()`), so the card hides itself even when it is pinned to the Custom Tab.
+inline constexpr const char* kFfxivOnlyIds[] = {
+    "window_mode", "ffxiv_hdr", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless", "ffxiv_companion", "hudless_diag",
+};
+
+// Every fork card id that has been in a released menu. The Custom Tab saves pins by id (`[Menu] CustomTabCards`), so each
+// of these must still resolve: a live card (a slot of kSlots) or an alias.
+inline constexpr const char* kPersistedForkIds[] = {
+    "dlss_nr",       "ffxiv_character_preview", "forced_quality", "ffxiv_jitter", "fg_unlocks",
+    "ffxiv_hdr",     "fg_hudless",              "fg_auto_mfg",    "window_mode",  "hudless_diag",
+    "mipmap_auto",   "ffxiv_companion",         "reshade_addon_probe",
+};
+
+// A retired card id and the card that took its place (a merged or removed card keeps its id here)
+struct Alias
+{
+    const char* oldId;
+    const char* newId;
+};
+inline constexpr std::array<Alias, 0> kAliases {};
+
+// Config keys ("[Section] Key") that stay without a control on purpose: developer gates that are read from the ini only.
+inline constexpr const char* kIniOnlyKeys[] = {
+    "[HudLess] Diagnostics", // shows the HUD-less diagnostics card
+    "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
+};
+} // namespace ext::menu::manifest
