@@ -40,7 +40,7 @@ void DrawNrSection(CharaConfig& cfg)
     if (ImGui::Checkbox("Run NR before DLSS (experimental)", &before))
         cfg.previewNrBeforeSr = before;
     ext::menu::Tooltip("Runs the NR model on the picture before DLSS instead of on the DLSS result. Needs Preview DLSS and Preview NR. The model then works at "
-                       "the render size, so it uses less GPU time and much less video memory per open window, but it sees a jittered picture that has not "
+                       "the render size, so it is expected to use less GPU time and video memory per open window (not measured yet), but it sees a jittered picture that has not "
                        "been anti-aliased yet: look for shimmer or trails on hair and cloth and switch it off if you see any. If DLSS refuses the NR "
                        "picture, this render uses the plain picture, this option switches itself off for the session (one log line) and NR runs after "
                        "DLSS as usual. The previous-frame option does not apply to it. Switching it rebuilds the window's model after half a second.");
