@@ -156,6 +156,14 @@ void StackRules()
     CHECK(ReturnInside("{ ImGui::BeginDisabled(x); auto f = [&](int v) { return v; }; return; ImGui::EndDisabled(); }",
                        "ImGui::BeginDisabled(")); // ... but one after the lambda is
     CHECK(ReturnInside("{ ImGui::PushItemWidth(5); if (z) { return; } ImGui::PopItemWidth(); }", "ImGui::PushItemWidth("));
+    // a close on a branch that leaves (continue/break/return) is that branch's own: the normal path still needs its close
+    CHECK(Balanced("{ ImGui::PushID(i); if (a) { ImGui::PopID(); continue; } ImGui::PopID(); }", "ImGui::PushID("));
+    CHECK(!Balanced("{ ImGui::PushID(i); if (a) { ImGui::PopID(); continue; } }", "ImGui::PushID("));
+    CHECK(!Balanced("{ ImGui::PushID(i); if (a) { ImGui::PopID(); return; } }", "ImGui::PushID("));
+    CHECK(!ReturnInside("{ ImGui::PushID(i); if (a) { ImGui::PopID(); continue; } ImGui::PopID(); }", "ImGui::PushID("));
+    CHECK(!ReturnInside("{ ImGui::PushID(i); if (a) { ImGui::PopID(); return; } ImGui::PopID(); }", "ImGui::PushID("));
+    CHECK(ReturnInside("{ ImGui::PushID(i); if (a) { ImGui::PopID(); continue; } if (b) return; ImGui::PopID(); }",
+                       "ImGui::PushID(")); // the normal path is still open at the second return
     CHECK(!ReturnInside("{ ImGui::PushItemWidth(5); const char* returnValue = \"return\"; ImGui::PopItemWidth(); }",
                         "ImGui::PushItemWidth(")); // the word in a string or a longer name is not a return
 }

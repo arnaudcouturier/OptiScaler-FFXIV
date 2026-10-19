@@ -732,10 +732,17 @@ inline const std::vector<StackPair>& StackPairs()
     return pairs;
 }
 
-// The calls of `call` ("ImGui::PopStyleColor(") in `body`, with their argument text (trimmed)
-inline std::vector<std::string> CallArgs(const std::string& body, const std::string& call)
+// One call of a family member in a body
+struct CallSite
 {
-    std::vector<std::string> args;
+    std::string arg;        // argument text (trimmed)
+    bool exitPath = false;  // the statement is followed by `continue;`, `break;` or `return`: a close on a branch that leaves
+};
+
+// The calls of `call` ("ImGui::PopStyleColor(") in `body`, with their argument text and whether the branch leaves right after
+inline std::vector<CallSite> CallSites(const std::string& body, const std::string& call)
+{
+    std::vector<CallSite> sites;
     for (size_t p = body.find(call); p != std::string::npos; p = body.find(call, p + call.size()))
     {
         int depth = 1;
@@ -754,19 +761,38 @@ inline std::vector<std::string> CallArgs(const std::string& body, const std::str
                 break;
             ++i;
         }
-        args.push_back(Trim(body.substr(from, i - from)));
+        CallSite site { Trim(body.substr(from, i - from)), false };
+        size_t q = i + 1; // after ')'
+        while (q < body.size() && (std::isspace(static_cast<unsigned char>(body[q])) || body[q] == ';'))
+            ++q;
+        for (const char* leave : { "continue", "break", "return" })
+            if (body.compare(q, std::string(leave).size(), leave) == 0)
+                site.exitPath = true;
+        sites.push_back(site);
     }
-    return args;
+    return sites;
 }
 
+inline std::vector<std::string> CallArgs(const std::string& body, const std::string& call)
+{
+    std::vector<std::string> args;
+    for (const CallSite& s : CallSites(body, call))
+        args.push_back(s.arg);
+    return args;
+}
 // Opens and closes of one family in `body` (a count argument such as PopStyleColor(2) is added up; any other argument
-// counts as 1). Returns false and a text when the totals differ.
+// counts as 1). A close that is followed by `continue;`, `break;` or `return` closes the branch that leaves, not the normal
+// path, and is not counted (so `Push; if (a) { Pop; continue; } Pop;` is one open and one close, and `Push; if (a) { Pop;
+// continue; }` with the final Pop missing is not balanced). Returns false and a text when the totals differ.
 inline bool StackBalanced(const std::string& body, const StackPair& pair, std::string& problem)
 {
     const size_t opened = CallArgs(body, pair.open).size();
     size_t closed = 0;
-    for (const std::string& a : CallArgs(body, pair.close))
+    for (const CallSite& s : CallSites(body, pair.close))
     {
+        if (s.exitPath)
+            continue;
+        const std::string& a = s.arg;
         const bool number =
             !a.empty() && std::all_of(a.begin(), a.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
         closed += (pair.countArg && number) ? static_cast<size_t>(std::stoul(a)) : 1;
@@ -783,6 +809,7 @@ inline bool ReturnInsideStack(const std::string& body, const StackPair& pair, si
     const size_t openLen = std::string(pair.open).size(), closeLen = std::string(pair.close).size();
     int open = 0;
     std::vector<size_t> lambdaEnds; // closing positions of the lambda bodies we are inside
+    size_t exitLeaveAt = std::string::npos; // the leave statement that belongs to a close on an exiting branch
     for (size_t i = 0; i < body.size();)
     {
         if (body[i] == '"')
@@ -828,8 +855,26 @@ inline bool ReturnInsideStack(const std::string& body, const StackPair& pair, si
         if (wordStart && body.compare(i, openLen, pair.open) == 0)
             ++open;
         else if (wordStart && body.compare(i, closeLen, pair.close) == 0)
-            open = open > 0 ? open - 1 : 0;
-        else if (open > 0 && lambdaEnds.empty() && wordStart && body.compare(i, 6, "return") == 0 &&
+        {
+            // a close that is followed by continue/break/return closes the branch that leaves: the normal path stays open,
+            // and the leave statement right after it is the close's own
+            size_t q = body.find(')', i);
+            size_t leaveAt = std::string::npos;
+            if (q != std::string::npos)
+            {
+                ++q;
+                while (q < body.size() && (std::isspace(static_cast<unsigned char>(body[q])) || body[q] == ';'))
+                    ++q;
+                for (const char* leave : { "continue", "break", "return" })
+                    if (body.compare(q, std::string(leave).size(), leave) == 0)
+                        leaveAt = q;
+            }
+            if (leaveAt != std::string::npos)
+                exitLeaveAt = leaveAt;
+            else
+                open = open > 0 ? open - 1 : 0;
+        }
+        else if (open > 0 && lambdaEnds.empty() && wordStart && i != exitLeaveAt && body.compare(i, 6, "return") == 0 &&
                  (i + 6 >= body.size() || !IsIdentChar(body[i + 6])))
         {
             at = i;
