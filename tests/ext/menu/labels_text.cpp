@@ -55,6 +55,15 @@ const Row kRows[] = {
     { "fg/xefg/XefgSeams.cpp",
       { "SliderFloat(\"Target FPS (XeFG dynamic)##XeDynamic\"" },
       { "\"Target FPS##XeDynamic\"" } },
+    // Automatic Mipmap Bias: the Mipmap Bias and Anisotropic Filtering cards are drawn together, so "the card above" would
+    // point at Anisotropic Filtering: the texts name the Mipmap Bias card
+    { "upscaler/menu/MipBiasMenu.cpp",
+      { "calculator in the Mipmap Bias card above gives", "\\\"MB Override All Textures\\\" in the Mipmap Bias card above",
+        "\\\"MB Scale Override\\\" in the Mipmap Bias card above is noticed", "SectionTitle(\"Automatic Mipmap Bias\")" },
+      { "calculator above gives", "\\\"MB Scale Override\\\" in the card above" } },
+    { "upscaler/MipBias.h",
+      { "\\\"Reset\\\" in the Mipmap Bias card above are overwritten" },
+      { "\\\"Reset\\\" in the card above" } },
     // HUD-less: the debug tint says which feature it belongs to
     { "hudless/HudlessMenu.cpp",
       { "Checkbox(\"Show detected UI (HUD-less)\", &tint)", "SectionTitle(\"HUD-less (UI-free frame generation)\")" },

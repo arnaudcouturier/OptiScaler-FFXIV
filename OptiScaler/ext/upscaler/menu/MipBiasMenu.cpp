@@ -11,7 +11,8 @@
 
 #include <string>
 
-// "Automatic Mipmap Bias" card (tab Textures, right after upstream's "Mipmap Bias" card). The decisions and the texts
+// "Automatic Mipmap Bias" card (tab Textures, after upstream's "Mipmap Bias" and "Anisotropic Filtering" cards, which the menu
+// draws together: the Mipmap Bias card the texts point to is the first of the two). The decisions and the texts
 // are in ext/upscaler/MipBias.h (tested); this file only draws them and stores the two settings.
 namespace ext::upscaler::menu
 {
@@ -49,12 +50,12 @@ void Draw(ext::menu::Ctx& ctx)
 
     ext::menu::Tooltip("Sets the texture sharpening from the upscaling ratio,\n"
                        "log2(render width / display width). This is the number\n"
-                       "the calculator above gives. It replaces the manual value\n"
+                       "the calculator in the Mipmap Bias card above gives. It replaces the manual value\n"
                        "while it is on.\n\n"
                        "Like the manual value it only reaches textures created\n"
                        "after a change, and only those the game already biases\n"
-                       "(tick \"MB Override All Textures\" above for the rest).\n\n"
-                       "A tick of \"MB Scale Override\" in the card above is noticed while this card is on screen,\n"
+                       "(tick \"MB Override All Textures\" in the Mipmap Bias card above for the rest).\n\n"
+                       "A tick of \"MB Scale Override\" in the Mipmap Bias card above is noticed while this card is on screen,\n"
                        "otherwise at the next quality change.");
 
     // Applied while dragging (the number is stored at once), published when the slider is let go: one log line per

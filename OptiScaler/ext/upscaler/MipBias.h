@@ -439,7 +439,7 @@ inline std::string BlockedLine(bool blocked)
 // The note under the card: how the automatic value meets the upstream buttons and modes, and the known limits.
 inline std::string CardNote()
 {
-    return "While this is on, \"Set\" and \"Reset\" in the card above are overwritten at the next quality change. "
+    return "While this is on, \"Set\" and \"Reset\" in the Mipmap Bias card above are overwritten at the next quality change. "
            "Fixed replaces the game's own per-sampler biases with the single value; Scale cannot be used with it. "
            "Turn it off from the menu while no level is loading, or edit the ini: the texture hooks read the value without "
            "a lock. A screen turned to portrait is not followed, because a display taller than wide is ignored.";
