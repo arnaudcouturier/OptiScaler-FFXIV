@@ -370,14 +370,15 @@ struct SrEvaluation
     bool preSrOffered = false;     // the pre-SR entry was run for this render
     bool preSrProduced = false;    // it returned an NR image
     bool usedPreSrColour = false;  // the evaluate that succeeded was given that image
-    bool latchPreSr = false;       // NR before SR must be switched off for the session (write one log line): the image was refused or missing
+    bool latchPreSr = false;       // NR before SR must be switched off for the session (write one log line): the image was refused (the plain retry may have failed too) or missing
     bool ok = false;               // an SR evaluate succeeded
 };
 
 // `runPreSr() -> ProductionAnswer` runs the pre-SR entry (called only when RunPreSrNow allows it, before any evaluate). `evaluate(SrColourSource)
 // -> bool` runs the SR evaluate with that colour and says whether it succeeded. With the key off (or any other reason for PostSr) the pre-SR
 // entry is not called and the evaluate runs once on the plain colour, exactly as before this existed. When both evaluates fail the render fails as
-// it always did, and the latch is not set (the colour was not the cause).
+// it always did, but the latch is set all the same when the NR image was given to an evaluate or was missing (a failure with no NR image involved
+// latches nothing).
 template <class RunPreSr, class Evaluate>
 SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool srInCharge, bool consumerRecent, RunPreSr&& runPreSr, Evaluate&& evaluate)
 {
@@ -402,7 +403,10 @@ SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool srInCharge, bool 
         refused = true;
     }
     r.ok = evaluate(SrColourSource::Plain);
-    r.latchPreSr = r.ok && (refused || ranWithoutImage);
+    // Latched whether or not the plain retry worked: an evaluate that was given the NR image failed first, and a refused foreign image can leave the
+    // feature unusable for the plain call of the same render. Without the latch that render would fail the slot, the released slot would come back
+    // and fail the same way, and four failures within a minute would end the whole SR path for a problem of the NR image.
+    r.latchPreSr = refused || ranWithoutImage;
     return r;
 }
 

@@ -802,9 +802,10 @@ void RunSlot(int index, const DrawView& view)
     if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())
     {
         if (ev.preSrProduced)
-            LOG_WARN("CharaView NR: the DLSS evaluate refused the pre-SR NR image (result {:#x}); this render used the plain image, NR before DLSS is "
+            LOG_WARN("CharaView NR: the DLSS evaluate refused the pre-SR NR image (result {:#x}); {}NR before DLSS is "
                      "switched off for this session and NR runs after DLSS",
-                     static_cast<unsigned>(nrColourResult));
+                     static_cast<unsigned>(nrColourResult),
+                     ev.ok ? "this render used the plain image, " : "the plain evaluate failed too, so this preview falls back to the game's own image for a while; ");
         else
             LOG_WARN("CharaView NR: the pre-SR run reported a result but gave no image; NR before DLSS is switched off for this session and NR runs "
                      "after DLSS");

@@ -177,27 +177,32 @@ void TestEvaluateOutcomes()
         const SrEvaluation n = Decide(latched, true, true, next);
         CHECK(n.placement == Placement::PostSr && next.log == (Log { "eval-plain" }) && !n.latchPreSr);
     }
-    // both evaluates fail: the render fails as it always did (the caller fails the slot); the colour was not the cause, so nothing is latched
+    // both evaluates fail: the render fails as it always did (the caller fails the slot), and NR before SR is latched off all the same: the NR image
+    // was given to the evaluate that failed first, so the failure may be the image's (a refused foreign image can leave the feature unusable for the
+    // plain call of the same render); without the latch the slot would be released and fail again and again until the SR failure latch ends the path
     {
         Fake e;
         e.nrEvaluate = false;
         e.plainEvaluate = false;
         const SrEvaluation r = Decide(f, true, true, e);
         CHECK(e.log == (Log { "presr", "eval-nr", "eval-plain" }));
-        CHECK(!r.ok && !r.latchPreSr && !r.usedPreSrColour);
+        CHECK(!r.ok && r.latchPreSr && !r.usedPreSrColour && r.preSrProduced);
     }
-    // the pre-SR run gave no image, whatever the reason: the evaluate runs once on the plain colour, nothing is latched
+    // the pre-SR run gave no image, whatever the reason: the evaluate runs once on the plain colour, nothing is latched (also when that evaluate fails:
+    // the NR image was never given to anything, so a plain-only failure is not the image's)
     for (const RunOutcome outcome : kNotRan)
         for (const bool hasImage : { false, true })
-        {
-            Fake e;
-            e.answer = { outcome, hasImage }; // an image next to a non-Ran outcome is not trusted
-            e.nrEvaluate = false;
-            const SrEvaluation r = Decide(f, true, true, e);
-            CHECK(e.log == (Log { "presr", "eval-plain" }));
-            CHECK(e.colours[0] == &e.plainImage);
-            CHECK(r.placement == Placement::PreSr && r.preSrOffered && !r.preSrProduced && !r.usedPreSrColour && r.ok && !r.latchPreSr);
-        }
+            for (const bool plainOk : { true, false })
+            {
+                Fake e;
+                e.answer = { outcome, hasImage }; // an image next to a non-Ran outcome is not trusted
+                e.nrEvaluate = false;
+                e.plainEvaluate = plainOk;
+                const SrEvaluation r = Decide(f, true, true, e);
+                CHECK(e.log == (Log { "presr", "eval-plain" }));
+                CHECK(e.colours[0] == &e.plainImage);
+                CHECK(r.placement == Placement::PreSr && r.preSrOffered && !r.preSrProduced && !r.usedPreSrColour && r.ok == plainOk && !r.latchPreSr);
+            }
     // Ran without an image: a defect of the module; plain colour this render, latched off (one line), not another try every render
     {
         Fake e;
@@ -208,7 +213,8 @@ void TestEvaluateOutcomes()
         Fake both;
         both.answer = { RunOutcome::Ran, false };
         both.plainEvaluate = false;
-        CHECK(!Decide(f, true, true, both).latchPreSr); // the render failed for another reason
+        const SrEvaluation failed = Decide(f, true, true, both);
+        CHECK(!failed.ok && failed.latchPreSr); // a defect of the module: latched whether or not the plain evaluate worked
     }
     // a window nobody shows: the entry is not called
     {
@@ -227,6 +233,41 @@ void TestEvaluateOutcomes()
         const SrEvaluation r = Decide(n, true, true, e);
         CHECK(r.placement == Placement::PostSr && e.log == (Log { "eval-plain" }));
     }
+}
+
+// A problem of the NR image never reaches the SR failure latch: a slot that fails every time the NR image is given to the evaluate would be released
+// after 10 s, come back and fail again until four failures within a minute end the whole SR path. The latch set by the first render (RunSlot does
+// `if (ev.latchPreSr) LatchPreSr()`, here fed back into the facts) makes the next render run after SR, so the NR image costs one failure at most.
+void TestNrImageProblemCostsOneFailure()
+{
+    PlumbingFacts facts = BothOn();
+    int slotFailures = 0, offered = 0;
+    for (int render = 0; render < 8; ++render)
+    {
+        bool imageGiven = false;
+        const SrEvaluation r = DecideSrEvaluate(
+            facts, true, true,
+            [&]
+            {
+                ++offered;
+                return ProductionAnswer { RunOutcome::Ran, true };
+            },
+            [&](SrColourSource source)
+            {
+                if (source == SrColourSource::PreSr)
+                {
+                    imageGiven = true; // refused, and the feature stays unusable for the plain call of this same render
+                    return false;
+                }
+                return !imageGiven;
+            });
+        if (!r.ok)
+            ++slotFailures;
+        if (r.latchPreSr)
+            facts.preSrLatched = true;
+    }
+    CHECK(slotFailures == 1 && offered == 1);
+    CHECK(facts.preSrLatched);
 }
 
 // The glue's evaluate, recorded through the real ApplyEvaluate (the CharaDlssNgx.h pattern): the same lambda body as RunSlot's, with a fake in place of
@@ -608,6 +649,7 @@ int main()
     TestPlacementFor();
     TestKeyOffIsUnchanged();
     TestEvaluateOutcomes();
+    TestNrImageProblemCostsOneFailure();
     TestSlotRenderPreSr();
     TestColourGivenToTheEvaluate();
     TestTintFor();
