@@ -2,6 +2,7 @@
 #include "engine_fixture.h"
 #include "ext/ffxiv/jitter/FfxivJitterCore.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -165,7 +166,7 @@ void TestSameFrameRules()
             py = jy;
         }
         CHECK(matched == 63);
-        CHECK(lagged <= 3);
+        CHECK(lagged == 0); // the sequence is deterministic: a lag of one frame is always caught, not "almost" always
     }
 }
 // L1: the first replacement of an episode asks the block what it holds and logs that next to the intended values.
@@ -283,20 +284,24 @@ void TestProbeOnlyDoesNoLookupsBetweenSamples()
     }
     CHECK(e.mem.reads == memoryReads && e.qualityQueries == qualityQueries);
 
-    // 2 s to 10 s, configuration unchanged: the parameters are read on every 16th evaluate only, and that is all
-    int evaluates = 0, passes = 0;
+    // 2 s to 10 s, configuration unchanged: the parameters are read on every 16th evaluate only, and that is all. The cadence is pinned
+    // exactly: the 60 evaluates above already counted (60 = 3 x 16 + 12, the counter stands at 12), so the first pass is the 4th evaluate
+    // of this phase and the spacing is 16 (a key check every 15th or 17th evaluate gives a different first pass and a different spacing).
+    int evaluates = 0;
+    std::vector<int> passAt;
     for (std::uint64_t t = 2000; t < 10000; t += 100)
     {
         const Outcome o = Evaluate(e, engine, At(200 + evaluates, 1, t), true, false);
         ++evaluates;
         if (!o.ops.empty())
         {
-            ++passes;
+            passAt.push_back(evaluates);
             CHECK(o.ops.size() == kLookups);
         }
         CHECK(o.logs.empty()); // and no sample: the configuration did not change
     }
-    CHECK(evaluates == 80 && passes >= 4 && passes <= 6);
+    CHECK(evaluates == 80);
+    CHECK(passAt == (std::vector<int> { 4, 20, 36, 52, 68 }));
     CHECK(e.mem.reads == memoryReads); // the process was not read either
 
     // the interval over: the very next evaluate samples
@@ -333,6 +338,80 @@ void TestProbeOnlyStillSamplesAConfigurationChangeEarly()
     Engine correction;
     for (int i = 0; i < 20; ++i)
         CHECK(Evaluate(c, correction, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true).ops.size() >= 9);
+}
+
+// The sample line carries the context of THIS evaluate, field by field. Every parameter has its own value here, so reading a field from
+// the wrong parameter (or leaving it out) shows in the text.
+void TestSampleLineCarriesTheContextOfThisEvaluate()
+{
+    FakeEnv e = MakeEnv();
+    e.uints[Param::SubrectWidth] = 1800;
+    e.uints[Param::SubrectHeight] = 1000;
+    e.uints[Param::Width] = 1920;
+    e.uints[Param::Height] = 1080;
+    e.uints[Param::OutWidth] = 3840;
+    e.uints[Param::OutHeight] = 2160;
+    e.perfQuality = 1;
+    e.answer = { true, 3, 1280, 720, 2560, 1440 };
+    Engine engine;
+    const Outcome o = Evaluate(e, engine, At(100, 1, 0), true, false);
+    CHECK(o.logs.size() == 1);
+    CHECK(!o.logs.empty() &&
+          Has(o.logs[0], "NGX subrect 1800x1000, Width/Height 1920x1080, OutWidth/OutHeight 3840x2160, PerfQualityValue 1; last forced-quality "
+                         "answer: quality 3, render 1280x720, display 2560x1440"));
+
+    // nothing answered yet and no quality parameter: n/a everywhere, never the value of another field
+    FakeEnv none = MakeEnv();
+    none.perfQuality.reset();
+    Engine fresh;
+    const Outcome blank = Evaluate(none, fresh, At(100, 1, 0), true, false);
+    CHECK(blank.logs.size() == 1 && Has(blank.logs[0], "PerfQualityValue n/a; last forced-quality answer: quality n/a, render n/a, display n/a"));
+}
+
+// A change of any field of the configuration (render size, output size, preset, the answer the fork gave the game's quality query) is
+// sampled early, inside the 2 s to 10 s window, and the new value is in the line that results.
+void TestEveryConfigurationFieldIsSampledEarlyAndPrinted()
+{
+    struct Change
+    {
+        const char* name;
+        std::function<void(FakeEnv&)> apply;
+        const char* shownAs;
+    };
+    const std::vector<Change> changes = {
+        { "subrect width", [](FakeEnv& e) { e.uints[Param::SubrectWidth] = 1600; }, "NGX subrect 1600x1080" },
+        { "subrect height", [](FakeEnv& e) { e.uints[Param::SubrectHeight] = 900; }, "NGX subrect 1920x900" },
+        { "width", [](FakeEnv& e) { e.uints[Param::Width] = 2000; }, "Width/Height 2000x1080" },
+        { "height", [](FakeEnv& e) { e.uints[Param::Height] = 1100; }, "Width/Height 1920x1100" },
+        { "output width", [](FakeEnv& e) { e.uints[Param::OutWidth] = 2560; }, "OutWidth/OutHeight 2560x2160" },
+        { "output height", [](FakeEnv& e) { e.uints[Param::OutHeight] = 1440; }, "OutWidth/OutHeight 3840x1440" },
+        { "PerfQualityValue", [](FakeEnv& e) { e.perfQuality = 3; }, "PerfQualityValue 3" },
+        { "forced-quality answer", [](FakeEnv& e) { e.answer.quality = 4; }, "last forced-quality answer: quality 4" },
+    };
+    for (const Change& c : changes)
+    {
+        FakeEnv e = MakeEnv();
+        e.answer = { true, 2, 1280, 720, 2560, 1440 };
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), true, false);
+        c.apply(e);
+        std::string line;
+        for (int i = 1; i <= 40 && line.empty(); ++i)
+        {
+            const Outcome o = Evaluate(e, engine, At(100 + i, 1, 2000 + static_cast<std::uint64_t>(i) * 10), true, false);
+            if (!o.logs.empty())
+                line = o.logs[0];
+        }
+        if (!Has(line, c.shownAs))
+            std::printf("  change not sampled or not shown: %s\n", c.name);
+        CHECK(Has(line, c.shownAs));
+    }
+    // the control: nothing changed, nothing is sampled before the interval is over
+    FakeEnv quiet = MakeEnv();
+    Engine engine;
+    Evaluate(quiet, engine, At(100, 1, 0), true, false);
+    for (int i = 1; i <= 40; ++i)
+        CHECK(Evaluate(quiet, engine, At(100 + i, 1, 2000 + static_cast<std::uint64_t>(i) * 10), true, false).logs.empty());
 }
 
 // M1 (fix round 2): an evaluate the proof REJECTED forgets the reference, like a failed read. The first replacement of a run needs two
@@ -426,75 +505,121 @@ void TestRejectedEvaluatesForgetTheReference()
     }
 }
 
+// Every failed guard: no write, whatever else is true, and the evaluate is turned away for the guard the case NAMES (not merely by some
+// rule: the first evaluate of every run is held by the frame rules anyway, so "no write" alone would pass for a wrong reason). Each case
+// spoils exactly one thing; the same rig without the spoiler writes.
 void TestEveryFailedGuardWritesNothing()
 {
     const JitterBuild& b = kCurrentBuild.jitter;
     struct Case
     {
         const char* name;
+        Guard expect;      // the guard the evaluate must be turned away for (None = nothing is wrong, nothing to replace)
+        bool readFailure;  // the probe also reports it as a failure to read the object
         std::function<void(FakeEnv&, Frame&)> spoil;
     };
     const std::vector<Case> cases = {
-        { "build mismatch", [](FakeEnv& e, Frame&) { e.build = nullptr; } },
-        { "global unreadable", [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kBase + b.cameraGlobalRva); } },
-        { "global null", [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0); } },
-        { "camera unreadable", [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0x5000000000ull); } },
-        { "camera null", [&](FakeEnv& e, Frame&) { e.mem.PutU64(kGlobal + b.cameraOffset, 0); } },
-        { "object pointer null", [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0); } },
-        { "object unreadable", [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0x5000000000ull); } },
-        { "object unstable",
+        { "build mismatch", Guard::BuildMismatch, false, [](FakeEnv& e, Frame&) { e.build = nullptr; } },
+        { "global unreadable", Guard::GlobalUnreadable, true, [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kBase + b.cameraGlobalRva); } },
+        { "global null", Guard::GlobalInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0); } },
+        { "camera unreadable", Guard::CameraUnreadable, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0x5000000000ull); } },
+        { "camera null", Guard::CameraInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kGlobal + b.cameraOffset, 0); } },
+        { "object pointer slot unreadable", Guard::ObjectPointerUnreadable, true,
+          [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kCamera + b.jitterPointerOffset); } },
+        { "object pointer null", Guard::ObjectPointerInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0); } },
+        { "object unreadable", Guard::ObjectUnreadable, true,
+          [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0x5000000000ull); } },
+        { "object unstable", Guard::ObjectUnstable, true,
           [](FakeEnv& e, Frame&)
           {
               auto n = std::make_shared<int>(0);
               e.mem.beforeRead = [n](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 0.00015f, 0.0001f, 5000 + (*n)++ }); };
           } },
-        { "jitter out of range", [](FakeEnv&, Frame& f) { f.jx = 0.9f; } },
-        { "ndc out of range",
+        { "jitter out of range", Guard::JitterOutOfRange, true, [](FakeEnv&, Frame& f) { f.jx = 0.9f; } },
+        { "ndc out of range", Guard::NdcOutOfRange, true,
           [](FakeEnv& e, Frame&)
           {
-              e.mem.beforeRead = [](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 5.0f, 0.0001f, 5000 }); };
+              // just above 1; with the 1 pixel cap also in the way, only the guard's NAME can tell which check stopped it
+              e.mem.beforeRead = [](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 1.5f, 0.0001f, 5000 }); };
           } },
-        { "NGX jitter missing", [](FakeEnv&, Frame& f) { f.ngxMissing = true; } },
-        { "object belongs to another frame", [](FakeEnv&, Frame& f) { f.ngxJx = 0.29f; } },
-        { "render size unknown (no Width/Height)", [](FakeEnv& e, Frame&) { e.uints.erase(Param::Width); e.uints.erase(Param::Height); } },
-        { "applied jitter implausible", [](FakeEnv&, Frame& f) { f.jx = 0.4f; f.jy = 0.4f; f.s = 8.0f; } },
-        { "game already consistent", [](FakeEnv&, Frame& f) { f.s = 2.0f; } },
-        { "jitter too small to tell", [](FakeEnv&, Frame& f) { f.jx = 0.01f; f.jy = -0.01f; } },
+        { "NGX jitter missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissing = true; } },
+        { "only Jitter.Offset.X missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissingX = true; } },
+        { "only Jitter.Offset.Y missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissingY = true; } },
+        { "NGX jitter is NaN", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxJx = std::nanf(""); } },
+        { "object belongs to another frame", Guard::ObjectNotThisEvaluate, false, [](FakeEnv&, Frame& f) { f.ngxJx = 0.29f; } },
+        { "render size unknown (no Width/Height)", Guard::RenderSizeUnknown, false,
+          [](FakeEnv& e, Frame&)
+          {
+              e.uints.erase(Param::Width);
+              e.uints.erase(Param::Height);
+          } },
+        { "Width present, Height missing", Guard::RenderSizeUnknown, false, [](FakeEnv& e, Frame&) { e.uints.erase(Param::Height); } },
+        { "applied jitter implausible", Guard::AppliedImplausible, false,
+          [](FakeEnv&, Frame& f)
+          {
+              f.jx = 0.4f;
+              f.jy = 0.4f;
+              f.s = 8.0f;
+          } },
+        { "sign mismatch", Guard::SignMismatch, false, [](FakeEnv&, Frame& f) { f.flipNdcY = true; } },
+        { "game already consistent", Guard::None, false, [](FakeEnv&, Frame& f) { f.s = 2.0f; } },
+        { "jitter too small to tell", Guard::None, false,
+          [](FakeEnv&, Frame& f)
+          {
+              f.jx = 0.01f;
+              f.jy = -0.01f;
+          } },
     };
+    const std::string passThroughMarker = "passed through unchanged, guard failed";
     for (const Case& c : cases)
         for (int probe = 0; probe < 2; ++probe)
         {
             FakeEnv e = MakeEnv();
             Engine engine;
+            std::vector<std::string> all;
             for (int i = 0; i < 5; ++i)
             {
                 Frame f;
                 f.counter = 100 + i;
                 f.timeMs = static_cast<std::uint64_t>(i) * 16;
                 c.spoil(e, f); // the spoiler of the memory or the block is applied before each evaluate (Evaluate rewrites the object)
-                Evaluate(e, engine, f, probe != 0, true);
+                const Outcome o = Evaluate(e, engine, f, probe != 0, true);
+                all.insert(all.end(), o.logs.begin(), o.logs.end());
             }
             if (e.setsEver != 0)
                 std::printf("  case that wrote: %s (probe %d)\n", c.name, probe);
             CHECK(e.setsEver == 0);
-        }
 
-    // the sign guard needs a flipped axis in the object itself
-    {
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        for (int i = 0; i < 5; ++i)
-        {
-            RawObject o = ObjectFor(0.3f, -0.2f, 1.0f, 1920, 1080, 100 + i);
-            o.ndcY = -o.ndcY;
-            PutObject(e.mem, o);
-            e.floats[Param::JitterX] = 0.3f;
-            e.floats[Param::JitterY] = -0.2f;
-            e.ops.clear();
-            engine.Step(e, false, true);
+            const auto count = [&](const std::string& line) { return static_cast<int>(std::count(all.begin(), all.end(), line)); };
+            int passThroughLines = 0;
+            for (const std::string& line : all)
+                passThroughLines += Has(line, passThroughMarker.c_str()) ? 1 : 0;
+            int wrongReason = 0;
+            if (c.expect == Guard::BuildMismatch)
+            {
+                // nothing is read at all; the one note names the guard
+                wrongReason += CountLines(all, GuardName(Guard::BuildMismatch)) == 1 && passThroughLines == 0 ? 0 : 1;
+            }
+            else if (c.expect != Guard::None)
+            {
+                wrongReason += count(FormatPassThrough(c.expect)) == 1 && passThroughLines == 1 ? 0 : 1; // one episode, named for this guard
+                if (probe != 0 && c.readFailure)
+                    wrongReason += count(FormatProbeFailure(c.expect)) == 1 ? 0 : 1;
+            }
+            else
+            {
+                wrongReason += passThroughLines == 0 ? 0 : 1; // nothing was refused, there was simply nothing to replace
+                if (probe != 0)
+                    wrongReason += CountLines(all, std::string(c.name) == "game already consistent" ? "(consistent)" : "undetermined: jitter too small") == 1 ? 0 : 1;
+            }
+            if (wrongReason != 0)
+            {
+                std::printf("  case stopped for another reason: %s (probe %d)\n", c.name, probe);
+                for (const std::string& line : all)
+                    std::printf("    log: %s\n", line.c_str());
+            }
+            CHECK(wrongReason == 0);
         }
-        CHECK(e.setsEver == 0);
-    }
 
     // the control: the same rig with nothing spoiled does write, so the cases above are not passing for a reason of their own
     {
@@ -537,6 +662,8 @@ int main()
     TestProbeOnlyNeverWrites();
     TestProbeOnlyDoesNoLookupsBetweenSamples();
     TestProbeOnlyStillSamplesAConfigurationChangeEarly();
+    TestSampleLineCarriesTheContextOfThisEvaluate();
+    TestEveryConfigurationFieldIsSampledEarlyAndPrinted();
     TestRejectedEvaluatesForgetTheReference();
     TestEveryFailedGuardWritesNothing();
     return TEST_RESULT("jitter_glue");

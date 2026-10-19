@@ -612,7 +612,7 @@ void TestFrameRules()
             prevY = jy;
         }
         CHECK(matchedReplaced == 63);
-        CHECK(frames == 63 && laggedReplaced <= 3);  // a lag of one frame is (almost) always caught ...
+        CHECK(frames == 63 && laggedReplaced == 0);  // a lag of one frame is caught on every frame of this (deterministic) sequence ...
         CHECK(laggedWithoutTheRules >= 40);          // ... and without the rules most of those frames would have been replaced
     }
 }

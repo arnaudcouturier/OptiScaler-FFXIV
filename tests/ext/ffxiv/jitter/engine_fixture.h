@@ -70,7 +70,7 @@ struct FakeEnv
     std::optional<int> GetInt(Param p)
     {
         ops.push_back({ false, p, 0.0f });
-        return perfQuality;
+        return p == Param::PerfQuality ? perfQuality : std::nullopt; // only the quality parameter is an int
     }
     void SetFloat(Param p, float v)
     {
@@ -138,6 +138,7 @@ struct Frame
     std::uint64_t timeMs = 0;
     std::optional<float> ngxJx, ngxJy;
     bool ngxMissing = false; // the block has no Jitter.Offset at all
+    bool ngxMissingX = false, ngxMissingY = false; // only one of the two Jitter.Offset entries is absent
     std::optional<std::pair<float, float>> ndcFrom; // the object's NDC values are those of THIS jitter (another frame's) instead of jx/jy
     bool flipNdcY = false;  // the object's ndcY has the opposite sign (a convention the correction does not understand)
 };
@@ -168,6 +169,10 @@ inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, 
         e.floats.erase(Param::JitterX);
         e.floats.erase(Param::JitterY);
     }
+    if (f.ngxMissingX)
+        e.floats.erase(Param::JitterX);
+    if (f.ngxMissingY)
+        e.floats.erase(Param::JitterY);
     e.now = f.timeMs;
     e.ops.clear();
     const std::size_t logsBefore = e.logs.size();
