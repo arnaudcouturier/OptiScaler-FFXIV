@@ -9,8 +9,9 @@
 // Kill-switch, after each switch (study 3.2):
 //   clean   - worst real-frame interval below the threshold, applied count = requested, Streamline status 0;
 //   costly  - a worst interval >= max(100 ms, 3 x the interval before the switch): the signature of a feature
-//             re-creation. The hold becomes 12 s and probing stops; a second one in a row, or a third without ten clean
-//             switches between, stops automatic mode for the session;
+//             re-creation. The hold becomes 12 s and probing stops; a second one in a row, or a third in all, stops automatic
+//             mode for the session. An earlier one is forgotten only after ten clean switches in a row: counted in switches,
+//             not in time, and the mode switches rarely after the first one, so it can stay for hours;
 //   broken  - Streamline status != 0, applied count not reached after the second, or presented stuck at 1: one recovery
 //             through the existing toggle path to the last good count, then automatic mode stops for the session. A bad
 //             status or count that began in the last kBadRunMs of the second is not dropped: the watch stays open (at most
@@ -136,7 +137,7 @@ class AutoMfgController
     static constexpr int kSignatureSamples = DynamicMfg::kSettleSamples; // the re-creation stall is one of the first intervals
                                                     // after the switch: the same ones the selector drops from its average
     static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
-    static constexpr int kStrikesInTotalToStop = 3; // so do this many signatures without ten clean switches between (a
+    static constexpr int kStrikesInTotalToStop = 3; // so do this many signatures unless ten clean switches in a row followed one of them (a
                                                     // plugin that re-creates DLS-G only on up steps breaks the row every time)
     static constexpr int kForgetAfterClean = 10;    // clean switches after which earlier strikes are forgotten
 
@@ -346,8 +347,10 @@ class AutoMfgController
 
     static constexpr int kCycle[kSelfTestSteps] = { 2, 3, 4, 3, 2 };
 
-    // The re-creation signature on two switches in a row, or on three without ten clean switches between (costly_ is
-    // forgotten after kForgetAfterClean clean ones, so isolated hitches minutes apart never add up).
+    // The re-creation signature on two switches in a row, or on three in all. costly_ is forgotten only after
+    // kForgetAfterClean clean switches in a row (a strike restarts that count): it is counted in switches, not in time, and
+    // after the first strike the selector is in reduced trust (long hold, no probes) and switches rarely, so a strike can
+    // stay for hours and later ones add up. Pinned by NineCleanSwitchesDoNotForgetAStrikeButTenDo.
     bool TooManySignatures() const { return streak_ >= kStrikesToStop || costly_ >= kStrikesInTotalToStop; }
 
     void Line(AutoMfgOut& out, bool warn, std::string text) { out.lines.push_back({ warn, std::move(text) }); }

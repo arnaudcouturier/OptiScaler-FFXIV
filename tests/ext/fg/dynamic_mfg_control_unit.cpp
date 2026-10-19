@@ -472,6 +472,68 @@ void StrikesAreForgottenAfterTenCleanSwitches()
     CHECK(r.c.Selector().HoldMs() == DynamicMfg::kDefaultHoldMs);
 }
 
+// Runs the alternating scene until the rig has made `n` switches in all, then a few seconds more so that the last one has its
+// verdict. The scene changes every 90 s; one second steps so that the count is hit exactly.
+void RunToSwitchCount(Rig& r, size_t n, int& scene)
+{
+    for (int guard = 0; guard < 400 && r.switches.size() < n; ++guard)
+    {
+        r.plant.base2x = scene % 2 == 0 ? 4.0 : 30.0;
+        for (int s = 0; s < 90 && r.switches.size() < n; ++s)
+            r.Run(1000);
+        ++scene;
+    }
+    r.Run(3000);
+}
+
+// One switch whose first interval stalls (the re-creation signature), then back to clean switches.
+void OneStrike(Rig& r, int& scene)
+{
+    const size_t n = r.switches.size();
+    r.recreate = true;
+    r.stallLeft = 1;
+    RunToSwitchCount(r, n + 1, scene);
+    r.recreate = false;
+}
+
+// The strikes are forgotten by the NUMBER of clean switches, not by time (the third review, L1): after a strike the selector
+// is in reduced trust and switches rarely, a strike restarts the count, so nine clean switches between two strikes forget
+// nothing (the third strike stops the mode) and ten forget the earlier one (the third strike is then a first one).
+void NineCleanSwitchesDoNotForgetAStrikeButTenDo()
+{
+    for (const int clean : { 9, 10 })
+    {
+        Rig r;
+        r.plant.refresh = 0;
+        r.plant.limit = 0;
+        int scene = 0;
+        OneStrike(r, scene);
+        CHECK_MSG(r.switches.size() == 1 && r.c.CostlyCount() == 1, "clean %d: switches %zu strikes %d", clean, r.switches.size(),
+                  r.c.CostlyCount());
+        RunToSwitchCount(r, r.switches.size() + clean, scene);
+        const int afterClean = r.c.CostlyCount();
+        CHECK_MSG(afterClean == (clean == 9 ? 1 : 0), "clean %d: strikes %d after the clean switches", clean, afterClean);
+        OneStrike(r, scene);
+        CHECK_MSG(r.c.CostlyCount() == (clean == 9 ? 2 : 1) && !r.c.Stopped(), "clean %d: strikes %d stopped %d", clean,
+                  r.c.CostlyCount(), (int) r.c.Stopped());
+        RunToSwitchCount(r, r.switches.size() + clean, scene);
+        CHECK_MSG(r.c.CostlyCount() == (clean == 9 ? 2 : 0), "clean %d: strikes %d before the last strike", clean,
+                  r.c.CostlyCount());
+        OneStrike(r, scene);
+        if (clean == 9)
+        {
+            CHECK_MSG(r.c.Stopped() && r.c.CostlyCount() == 3, "clean 9: strikes %d stopped %d", r.c.CostlyCount(),
+                      (int) r.c.Stopped());
+            CHECK(r.Count("AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped") == 1);
+        }
+        else
+        {
+            CHECK_MSG(!r.c.Stopped() && r.c.CostlyCount() == 1, "clean 10: strikes %d stopped %d", r.c.CostlyCount(),
+                      (int) r.c.Stopped());
+        }
+    }
+}
+
 void BrokenOutcomesRecoverOnceAndStop()
 {
     struct Case
@@ -789,6 +851,7 @@ int main()
     TheSignatureHasToRepeatInARow();
     ARecreationOnUpStepsOnlyStillStopsOnTheThirdStrike();
     StrikesAreForgottenAfterTenCleanSwitches();
+    NineCleanSwitchesDoNotForgetAStrikeButTenDo();
     BrokenOutcomesRecoverOnceAndStop();
     ActivationAndGapCloseTheWatchWithoutAVerdict();
     GapStartsANewHold();

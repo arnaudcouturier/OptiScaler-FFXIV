@@ -56,6 +56,7 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
                        "saved with Save Settings.\n"
                        "A change can still cost one long frame (about 0.2 s) if DLSS-G re-creates itself on this setup:\n"
                        "the mode then waits 12 s between changes and stops after two in a row or three in all.\n"
+                       "An earlier one is forgotten only after ten clean changes in a row, not after a time.\n"
                        "Needs the built-in RTX 40 MFG unlock for 3X and 4X. Untested in game.\n"
                        "Turning it off keeps the multiplier currently in use until you move the Frame Gen slider.");
 
