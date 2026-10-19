@@ -64,13 +64,19 @@ struct Case
     const char* drawFn;    // signature of the card function
     const char* bodyFn;    // function the fold calls ("" = the card keeps its own fold, see foldText)
     const char* foldLabel; // the closed TreeNode of the card ("" = none to check)
+    // Side effects of the old card body that must keep running with the fold closed: the card calls `beforeFold` before the fold,
+    // and each `effects` entry (separated by '|') is written once, inside `effectFn`, never inside the fold's body function.
+    const char* beforeFold = "";
+    const char* effectFn = "";
+    const char* effects = "";
 };
 
 const Case kCases[] = {
     { "ffxiv/ui/UiMenu.cpp", "hudless_diag", "FFXIV", "HUD-less diagnostics", "void DrawDiagCard(ext::menu::Ctx&)", "DrawDiagBody",
       "Show diagnostics##hudless_diag" },
     { "reshade/ReShadeMenu.cpp", "reshade_addon_probe", "Compatibility", "ReShade built-in add-on (diagnostics)",
-      "void DrawReShadeCard(ext::menu::Ctx&)", "DrawReShadeBody", "Show probe details##reshade_probe" },
+      "void DrawReShadeCard(ext::menu::Ctx&)", "DrawReShadeBody", "Show probe details##reshade_probe", "CardSideEffects();",
+      "void CardSideEffects()", "ext::reshade::EnsureReportStarted();|session->Note(\"[F1] WARNING|LOG_WARN(\"ReShade built-in add-on: registered but ReShade has delivered no event\")" },
     { "ffxiv/companion/Companion.cpp", "ffxiv_companion", "FFXIV", "FFXIV Companion (nameplates)",
       "void DrawCompanionCard(ext::menu::Ctx&)", "", "" },
     { "hudless/HudlessMenu.cpp", "fg_hudless", "FFXIV", "HUD-less (UI-free frame generation)", "void DrawHudless(ext::menu::Ctx&)", "",
@@ -126,6 +132,33 @@ std::vector<std::string> Problems(const Case& c, const std::string& text)
     // the details are only reachable through the fold: the body function is called once, from the card
     if (Count(all, std::string(c.bodyFn) + "();") != 1)
         bad("the body function is called other than once, from the fold");
+
+    // side effects that must not depend on the fold being open: called before the fold, written once in the helper, and
+    // absent from the fold's body function
+    if (!std::string(c.beforeFold).empty())
+    {
+        const std::string call = Squash(c.beforeFold);
+        const size_t at = card.find(call), foldAt = card.find("if(ImGui::TreeNode(");
+        if (Count(card, call) != 1 || at == std::string::npos || foldAt == std::string::npos || at > foldAt)
+            bad("the side effects are not called once, before the fold");
+        const std::string helper = Squash(BodyOf(stripped, c.effectFn));
+        const std::string body = Squash(BodyOf(stripped, std::string("void ") + c.bodyFn + "()"));
+        if (helper.empty() || body.empty())
+            bad("the side-effect helper or the body function was not found");
+        std::string list = c.effects;
+        for (size_t start = 0; start <= list.size();)
+        {
+            const size_t bar = list.find('|', start);
+            const std::string needle = Squash(list.substr(start, bar == std::string::npos ? std::string::npos : bar - start));
+            start = bar == std::string::npos ? list.size() + 1 : bar + 1;
+            if (needle.empty())
+                continue;
+            if (Count(all, needle) != 1 || Count(helper, needle) != 1)
+                bad("the side effect is not written exactly once, in the helper: " + needle);
+            if (body.find(needle) != std::string::npos)
+                bad("the side effect sits in the fold's body again: " + needle);
+        }
+    }
     return p;
 }
 
@@ -162,6 +195,12 @@ int main(int argc, char** argv)
             const std::string label = c.foldLabel;
             CHECK(!Problems(c, Replace(text, "ImGui::TreeNode(\"" + label + "\")", "ImGui::TreeNodeEx(\"" + label + "\", ImGuiTreeNodeFlags_DefaultOpen)")).empty());
             CHECK(!Problems(c, Replace(text, "ImGui::TreePop();", "")).empty());
+            if (!std::string(c.beforeFold).empty())
+            {
+                CHECK(!Problems(c, Replace(text, c.beforeFold, "")).empty());
+                CHECK(!Problems(c, Replace(text, "ImGui::Text(\"Effect runtimes alive:", "ext::reshade::EnsureReportStarted();\n    ImGui::Text(\"Effect runtimes alive:")).empty());
+                CHECK(!Problems(c, Replace(text, "LOG_WARN(", "LOG_INFO(")).empty());
+            }
             CHECK(!Problems(c, Replace(text, "ImGui::TreeNode(\"" + label + "\")", "true")).empty());
             CHECK(!Problems(c, Replace(text, std::string(c.bodyFn) + "();\n        ImGui::TreePop();", "ImGui::TreePop();\n        " + std::string(c.bodyFn) + "();")).empty());
             CHECK(!Problems(c, Replace(text, std::string(c.bodyFn) + "();\n        ImGui::TreePop();", "if (false)\n            return;\n        " + std::string(c.bodyFn) + "();\n        ImGui::TreePop();")).empty());

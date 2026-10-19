@@ -32,8 +32,39 @@ const char* StateText(Session::ProbeState s)
     return "?";
 }
 
+// What the card does besides drawing: start the report file (otherwise the first event creates it) and, once, write a note
+// in the report when ReShade registered the add-on but has delivered no event. This happened whenever the card was drawn
+// (the Compatibility tab open) before the card had a fold, so it stays OUTSIDE the fold: with the fold closed the report
+// still gets its note.
+void CardSideEffects()
+{
+    ext::reshade::probe::Session* session = ext::reshade::ProbeSession();
+    if (session == nullptr)
+        return;
+
+    ext::reshade::EnsureReportStarted();
+
+    ext::reshade::probe::FileReport* report = ext::reshade::ProbeReport();
+    const std::string folder = report != nullptr ? report->Folder().string() : std::string();
+    const auto status = session->Status(folder, report != nullptr && report->Failed());
+    if (ext::reshade::Status().registered && status.counts.Total() == 0)
+    {
+        // Once: the report must say so even though no ReShade callback ever started it (registered, but nothing arrives).
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+        {
+            session->Note("[F1] WARNING: registered with ReShade but NO event has been delivered (seen from the menu card). "
+                          "Either the registration made in DllMain was too early for this ReShade (it searches for add-ons later, "
+                          "at the first device creation) or this build restricts the events. This note is written when the card is drawn with zero events so far; if event lines follow it, ignore it. A report with no "
+                          "event lines after it IS the answer for F1-F5: nothing can be probed. Next registration point to try: the "
+                          "existing ext::game::OnD3D11DeviceHooked seam.");
+            LOG_WARN("ReShade built-in add-on: registered but ReShade has delivered no event");
+        }
+    }
+}
+
 // The body of the card: drawn only while the fold of DrawReShadeCard is open (it may return early: the TreePop is the
-// caller's).
+// caller's). Drawing and reading only: the side effects are in CardSideEffects.
 void DrawReShadeBody()
 {
     const auto addon = ext::reshade::Status();
@@ -49,8 +80,6 @@ void DrawReShadeBody()
         return;
     }
 
-    ext::reshade::EnsureReportStarted();
-
     ext::reshade::probe::FileReport* report = ext::reshade::ProbeReport();
     const std::string folder = report != nullptr ? report->Folder().string() : std::string();
     const auto status = session->Status(folder, report != nullptr && report->Failed());
@@ -59,22 +88,9 @@ void DrawReShadeBody()
                 static_cast<unsigned long long>(status.framesSeen));
     ImGui::TextWrapped("Events: %s", ext::reshade::probe::FormatEventCounts(status.counts).c_str());
     if (addon.registered && status.counts.Total() == 0)
-    {
-        // Once: the report must say so even though no ReShade callback ever started it (registered, but nothing arrives).
-        static std::atomic<bool> warned { false };
-        if (!warned.exchange(true))
-        {
-            session->Note("[F1] WARNING: registered with ReShade but NO event has been delivered (seen from the menu card). "
-                          "Either the registration made in DllMain was too early for this ReShade (it searches for add-ons later, "
-                          "at the first device creation) or this build restricts the events. This note is written when the card is drawn with zero events so far; if event lines follow it, ignore it. A report with no "
-                          "event lines after it IS the answer for F1-F5: nothing can be probed. Next registration point to try: the "
-                          "existing ext::game::OnD3D11DeviceHooked seam.");
-            LOG_WARN("ReShade built-in add-on: registered but ReShade has delivered no event");
-        }
         ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
                            "Registered, but ReShade has delivered no event yet. If this stays so while the game renders, the "
                            "registration was too early or this ReShade build restricts events (see reshade-probe.txt).");
-    }
     if (status.reportFailed)
         ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "The report file could not be created.");
     else if (!status.reportFolder.empty())
@@ -121,6 +137,8 @@ void DrawReShadeBody()
 void DrawReShadeCard(ext::menu::Ctx&)
 {
     ext::menu::SectionTitle("ReShade built-in add-on (diagnostics)");
+
+    CardSideEffects(); // whenever the card is drawn, with the fold open or closed
 
     // closed by default
     if (ImGui::TreeNode("Show probe details##reshade_probe"))
