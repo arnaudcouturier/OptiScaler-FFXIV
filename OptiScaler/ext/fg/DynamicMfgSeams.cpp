@@ -41,7 +41,9 @@ double CachedRefresh(uint64_t now)
     if (lastRead == 0 || now - lastRead >= 5000)
     {
         lastRead = now;
-        refresh = static_cast<double>(Util::GetActiveRefreshRate(State::Instance().currentSwapchainDesc.OutputWindow));
+        // 0 or 1 Hz means "unspecified" for Windows: UsableRefresh turns that into unknown.
+        refresh = ext::fg::UsableRefresh(
+            static_cast<double>(Util::GetActiveRefreshRate(State::Instance().currentSwapchainDesc.OutputWindow)));
     }
     return refresh;
 }

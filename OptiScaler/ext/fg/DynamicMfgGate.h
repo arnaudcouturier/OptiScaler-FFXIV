@@ -93,6 +93,13 @@ inline AutoMfgGate EvaluateGate(const GateInputs& in)
     return AutoMfgGate::Open;
 }
 
+// The display refresh as Windows reports it: dmDisplayFrequency is 0 or 1 when the mode does not say ("unspecified"), and
+// no real display runs below 24 Hz. Below that the refresh is unknown (0), so it never becomes a 30 fps target.
+inline double UsableRefresh(double hz)
+{
+    return std::isfinite(hz) && hz >= 24.0 ? hz : 0.0;
+}
+
 // Target frame rate: [DLSSG] AutoMFGTarget when set, else the lower of the frame rate limit and the display refresh
 // (whichever of the two is known), clamped to 30..500. 0 = unknown, the selector then stays inert.
 inline double ResolveTarget(double configured, double limit, double refresh)

@@ -99,6 +99,24 @@ void TargetResolution()
     CHECK(ResolveTarget(30, 0, 0) == 30);
 }
 
+void RefreshIsUnknownBelow24Hz()
+{
+    // L2: Windows reports 0 or 1 for "unspecified"; 1 Hz must not become a 30 fps target.
+    CHECK(UsableRefresh(0) == 0);
+    CHECK(UsableRefresh(1) == 0);
+    CHECK(UsableRefresh(23.9) == 0);
+    CHECK(UsableRefresh(-60) == 0);
+    CHECK(UsableRefresh(NAN) == 0);
+    CHECK(UsableRefresh(INFINITY) == 0);
+    CHECK(UsableRefresh(24) == 24);
+    CHECK(UsableRefresh(59.94) == 59.94);
+    CHECK(UsableRefresh(240) == 240);
+    // end to end: an "unspecified" refresh leaves the limit as the target, and a missing limit stays inert
+    CHECK(ResolveTarget(0, 224, UsableRefresh(1)) == 224);
+    CHECK(ResolveTarget(0, 0, UsableRefresh(1)) == 0);
+    CHECK(ResolveTarget(0, 224, UsableRefresh(240)) == 224);
+}
+
 void CeilingArithmetic()
 {
     CHECK(HardMaxFactor(4, 5) == 4); // never 5x/6x, whatever the unlock allows
@@ -166,6 +184,7 @@ int main()
 {
     GatingTable();
     TargetResolution();
+    RefreshIsUnknownBelow24Hz();
     CeilingArithmetic();
     OptionsGuard();
     if (g_failures)
