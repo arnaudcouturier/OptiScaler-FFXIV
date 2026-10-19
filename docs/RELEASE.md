@@ -39,7 +39,7 @@ Left out on purpose: `.pdb`, `.exp`, `.lib` (use `-IncludeSymbols` to ship the `
 ### Checks to do before publishing
 
 - A test run against the package folder of a development build (the one played shortly before the first release candidate) produced 23 files plus `SHA256SUMS.txt`, 126 MB. That folder held no NVIDIA or Streamline file, so nothing had to be excluded; the same run was repeated on a synthetic folder with such files and the script left them out.
-- **`libxell.dll`**: the only licence file the build ships for it is `XeSS_LICENSE.txt`, which does not name it. The script packs it with a warning. Confirm with Intel's licence for the XeSS SDK that it covers the Xe low latency library, or ship without it (`-Exclude libxell.dll`; the XeFG output and XeLL low latency then need you to supply it yourself).
+- **`libxell.dll`**: the only licence file the build ships for it is `XeSS_LICENSE.txt`, which does not name it. The script leaves it out by default (`-Exclude` defaults to `libxell.dll`; the XeFG output and XeLL low latency then need the user to supply it). Pass `-Exclude @()` only after confirming with Intel's licence for the XeSS SDK that it covers the Xe low latency library.
 - Everything under `OptiScaler\` is redistributed on the same terms as upstream OptiScaler's own releases; check upstream's current practice if its list of bundled libraries changes.
 - Read `INSTALL.txt` and `NOTICE.txt` in the extracted archive once.
 - Run the smoke test in [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 9 with the archive extracted over a clean copy of the game folder.
