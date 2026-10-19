@@ -498,6 +498,33 @@ class EpisodeLog
     std::uint32_t _lines = 0, _suppressed = 0;
 };
 
+// Thins a periodic line instead of cutting it off: the first kFullLines lines are written whenever they are offered (every sample tick,
+// about every 10 s), after that at most one per kSlowIntervalMs, however often one is offered. The lines this guards carry TOTALS since
+// the start of the session, so a thinned line loses nothing and the last line of a long session still says everything.
+class LineDecimator
+{
+  public:
+    static constexpr std::uint32_t kFullLines = 60;
+    static constexpr std::uint64_t kSlowIntervalMs = 60000;
+
+    // True when a line may be written now; taking it counts it. A clock that goes backwards counts as "no time passed".
+    bool Take(std::uint64_t nowMs)
+    {
+        if (_lines >= kFullLines && Elapsed(nowMs) < kSlowIntervalMs)
+            return false;
+        ++_lines;
+        _last = nowMs;
+        return true;
+    }
+    std::uint32_t Lines() const { return _lines; }
+
+  private:
+    std::uint64_t Elapsed(std::uint64_t nowMs) const { return nowMs >= _last ? nowMs - _last : 0; }
+
+    std::uint32_t _lines = 0;
+    std::uint64_t _last = 0;
+};
+
 // ---- text ----------------------------------------------------------------------------------------------------------------------
 
 struct Context
@@ -582,7 +609,8 @@ inline std::string FormatPassThrough(Guard g)
     return std::format("Jitter correction: game values passed through unchanged, guard failed: {}", GuardName(g));
 }
 
-// What happened to the evaluates since the last status line. `held*` count the evaluates in which the values differed and every guard
+// What happened to the evaluates since the correction started (totals for the whole session, never reset: the status lines are thinned,
+// so each one has to carry everything). `held*` count the evaluates in which the values differed and every guard
 // of DecideCorrection passed, but a same-frame rule refused the replacement: a session in which these dominate is one in which the
 // correction is inert (the game does not give the proof the rules ask for).
 struct StatusCounts
@@ -591,16 +619,12 @@ struct StatusCounts
     std::uint64_t heldCounter = 0, heldRatio = 0, heldFirst = 0;
 };
 
-// What a session still logs once the budgets run out (EpisodeLog::kMaxLines per kind of episode, Engine::kMaxSampleLines sample lines and
-// Engine::kMaxStatusLines status lines): one line per budget, and the counts of the episodes that were not logged.
+// What a session still logs once the budgets run out (EpisodeLog::kMaxLines per kind of episode, Engine::kMaxSampleLines sample lines): one
+// line for the sample budget, and the counts of the episodes that were not logged. The status lines have no budget, they are thinned
+// (LineDecimator).
 inline std::string FormatSampleBudgetUsedUp(std::uint32_t lines)
 {
     return std::format("Game jitter: sample line budget of {} lines used up for this session, further samples are not logged", lines);
-}
-
-inline std::string FormatStatusBudgetUsedUp(std::uint32_t lines)
-{
-    return std::format("Jitter correction: status line budget of {} lines used up for this session, further status lines are not logged", lines);
 }
 
 inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements)
@@ -612,7 +636,7 @@ inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t p
 // `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too.
 inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration)
 {
-    return std::format("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through "
+    return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} replaced by the applied jitter, {} passed through "
                        "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
                        "not steady, {} first frame after a gap or a rejected evaluate); frame generation active {}",
                        c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,

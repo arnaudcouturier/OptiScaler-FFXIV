@@ -617,6 +617,36 @@ void TestFrameRules()
     }
 }
 
+// L1 (fix round 2): the periodic lines are thinned, not cut off.
+void TestLineDecimator()
+{
+    LineDecimator d;
+    // the first 60 lines are written whenever offered, however close together
+    for (std::uint32_t i = 0; i < LineDecimator::kFullLines; ++i)
+        CHECK(d.Take(i));
+    CHECK(d.Lines() == LineDecimator::kFullLines);
+    // after that, one per kSlowIntervalMs counted from the last line written
+    const std::uint64_t last = LineDecimator::kFullLines - 1;
+    CHECK(!d.Take(last + 1));
+    CHECK(!d.Take(last + LineDecimator::kSlowIntervalMs - 1));
+    CHECK(d.Take(last + LineDecimator::kSlowIntervalMs));
+    CHECK(!d.Take(last + LineDecimator::kSlowIntervalMs + 1));
+    CHECK(!d.Take(last + 2 * LineDecimator::kSlowIntervalMs - 1));
+    CHECK(d.Take(last + 2 * LineDecimator::kSlowIntervalMs));
+    CHECK(d.Lines() == LineDecimator::kFullLines + 2);
+    // a clock that goes backwards counts as no time passed: nothing is written until it catches up a full interval
+    LineDecimator b;
+    for (std::uint32_t i = 0; i < LineDecimator::kFullLines; ++i)
+        b.Take(1000000 + i);
+    CHECK(!b.Take(5));
+    CHECK(!b.Take(1000000 + 59 + LineDecimator::kSlowIntervalMs - 1));
+    CHECK(b.Take(1000000 + 59 + LineDecimator::kSlowIntervalMs));
+    // nothing is ever refused before the 60th line, whatever the clock does
+    LineDecimator c;
+    for (std::uint32_t i = 0; i < LineDecimator::kFullLines; ++i)
+        CHECK(c.Take(i % 2 == 0 ? 100000 : 3));
+}
+
 void TestText()
 {
     Context ctx;
@@ -669,7 +699,7 @@ void TestText()
         counts.heldRatio = 2;
         counts.heldFirst = 1;
         CHECK(FormatStatus(counts, true) ==
-              "Jitter correction: on; since the last status line 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
+              "Jitter correction: on; totals since the start of the session: 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
               "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap or a rejected evaluate); "
               "frame generation active yes");
         CHECK(Has(FormatStatus(counts, false), "frame generation active no") && Has(FormatStatus(counts, std::nullopt), "frame generation active unknown"));
@@ -678,7 +708,7 @@ void TestText()
 
     CHECK(FormatSuppressed(1, 2, 3) ==
           "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements");
-    CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up") && Has(FormatStatusBudgetUsedUp(360), "status line budget of 360 lines used up"));
+    CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up"));
     // the configuration key follows every field that matters: each one, changed alone, changes the key
     Context c2 = ctx;
     CHECK(ConfigurationKey(ctx) == ConfigurationKey(c2));
@@ -722,6 +752,7 @@ int main()
     TestLimiterAndEpisodes();
     TestCorrection();
     TestFrameRules();
+    TestLineDecimator();
     TestText();
     return TEST_RESULT("jitter_probe");
 }

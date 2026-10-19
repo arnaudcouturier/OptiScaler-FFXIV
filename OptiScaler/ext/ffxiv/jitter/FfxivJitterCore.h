@@ -214,21 +214,16 @@ class Engine
                 }
             }
         }
-        if (correct)
-        {
-            if (_statusLines < kMaxStatusLines)
-            {
-                ++_statusLines;
-                env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
-                if (_statusLines == kMaxStatusLines)
-                    env.Log(FormatStatusBudgetUsedUp(kMaxStatusLines));
-            }
-            _counts = StatusCounts {};
-        }
+        // The status line carries the totals since the start, so thinning it (the first 60 lines at every tick, then one per 60 s) loses
+        // nothing; the counts are never zeroed.
+        if (correct && _statusLog.Take(now))
+            env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
 
-        // The episodes the three logs had no budget left for, in either mode, and only when the total changed since the last report.
+        // The episodes the three logs had no budget left for, in either mode, only when the total changed since the last report and
+        // thinned the same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that
+        // comes between two permitted reports is written at the next permitted one.
         const std::uint64_t suppressed = _probeFailures.Suppressed() + _passThrough.Suppressed() + _replacing.Suppressed();
-        if (suppressed != _reportedSuppressed)
+        if (suppressed != _reportedSuppressed && _suppressedLog.Take(now))
         {
             _reportedSuppressed = suppressed;
             env.Log(FormatSuppressed(_probeFailures.Suppressed(), _passThrough.Suppressed(), _replacing.Suppressed()));
@@ -238,7 +233,6 @@ class Engine
   public:
     // An hour of one line per 10 seconds: a session cannot grow its log without bound.
     static constexpr std::uint32_t kMaxSampleLines = 360;
-    static constexpr std::uint32_t kMaxStatusLines = 360;
 
   private:
     static constexpr std::uint32_t kKeyCheckEvery = 16;
@@ -260,9 +254,10 @@ class Engine
     EpisodeLog _passThrough;
     EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
     bool _buildNoted = false;
-    std::uint32_t _sampleLines = 0, _statusLines = 0;
+    std::uint32_t _sampleLines = 0;
+    LineDecimator _statusLog, _suppressedLog; // thinned: the first 60 lines at every sample tick, then one per 60 s
     std::uint64_t _reportedSuppressed = 0; // the total of suppressed episodes the last report showed
     FrameRules _frames;
-    StatusCounts _counts; // since the last status line
+    StatusCounts _counts; // totals since the start of the session
 };
 } // namespace ext::ffxiv::jitter
