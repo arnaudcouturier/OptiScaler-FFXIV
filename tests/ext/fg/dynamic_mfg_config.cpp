@@ -108,6 +108,23 @@ void IniFragmentDocumentsTheKeys(const std::string& repo)
     // strikes are forgotten by the number of clean changes in a row, not by time (the code: kForgetAfterClean)
     CHECK(ini.find("after ten clean changes in a row, counted in changes and not in time") != std::string::npos);
     CHECK(ini.find("ten clean changes forget") == std::string::npos);
+    // the stall rule (the code: DynamicMfgControl.h kStallMs 30 ms = about 33 fps, kStallGiveUpMs 5 s, kSelfTestCalmMs 20 s)
+    CHECK(ini.find("A game stall (a loading screen, a menu change that re-creates DLSS) is never held against the mode") !=
+          std::string::npos);
+    CHECK(ini.find("rate is below about 33 fps (an average above 30 ms) no change is made and the last one is not judged") !=
+          std::string::npos);
+    CHECK(ini.find("\"judging the change at Nx skipped, the game was stalled\") when that is not") != std::string::npos);
+    CHECK(ini.find("; possible within 5 seconds. On a setup that always runs below about 33 real fps") != std::string::npos);
+    CHECK(ini.find("Starts after 20 seconds without a stall (a stall during it ends it") != std::string::npos);
+    CHECK(ini.find("Takes about 40 seconds in the game world") == std::string::npos);
+    {
+        const std::string code = ReadFile(repo + "/OptiScaler/ext/fg/DynamicMfgControl.h");
+        CHECK(code.find("kStallMs = 30.0;") != std::string::npos);
+        CHECK(code.find("kStallCalmMs = 1000;") != std::string::npos);
+        CHECK(code.find("kStallGiveUpMs = 5000;") != std::string::npos);
+        CHECK(code.find("kSelfTestCalmMs = 20000;") != std::string::npos);
+        CHECK(code.find("judging the change at {}x skipped, the game was stalled") != std::string::npos);
+    }
     CHECK(ini.find("stops after a second such change") == std::string::npos);
     // the one side effect of the Ada clamp (the frame limiter still paces for the slider count) is told next to the key
     CHECK(ini.find("with a frame limit keep the slider on 4X") != std::string::npos);
@@ -124,8 +141,16 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
     // the kill-switch rule as the controller has it (DynamicMfgControl.h kStrikesToStop, kStrikesInTotalToStop)
     CHECK(card.find("waits 12 s between changes and stops after two in a row or three in all.") != std::string::npos);
     CHECK(card.find("An earlier one is forgotten only after ten clean changes in a row, not after a time.") != std::string::npos);
+    CHECK(card.find("A game stall (below about 33 real fps) is never held against it: nothing changes while it lasts.") !=
+          std::string::npos);
     CHECK(card.find("stops after a second one") == std::string::npos);
     CHECK(card.find("Untested in game") != std::string::npos);
+    // the self-test key is a checkbox of the card: read from the key, written back to the key, nothing else writes it
+    CHECK(card.find("bool selfTest = cfg.autoMfgSelfTest.value_or_default();") != std::string::npos);
+    CHECK(card.find("if (ImGui::Checkbox(\"Run the self-test once##AutoMfg\", &selfTest))") != std::string::npos);
+    CHECK(card.find("cfg.autoMfgSelfTest = selfTest;") != std::string::npos);
+    CHECK(card.find("cfg.autoMfgSelfTest = ") == card.rfind("cfg.autoMfgSelfTest = ")); // exactly one write
+    CHECK(card.find("It starts after 20 calm seconds") != std::string::npos);
     // the visibility rule itself is tested in dynamic_mfg_gate_unit (AutoMfgCardVisible); here only that the card asks it
     // the GPU is asked only after the cheap output check (a lambda, so a card that is not shown never enumerates adapters)
     CHECK(card.find("AutoMfgCardVisibleAsking(ctx.state.activeFgOutput == FGOutput::DLSSG, [] { return IsBlackwell(); })") !=

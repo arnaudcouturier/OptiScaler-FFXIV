@@ -57,6 +57,7 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
                        "A change can still cost one long frame (about 0.2 s) if DLSS-G re-creates itself on this setup:\n"
                        "the mode then waits 12 s between changes and stops after two in a row or three in all.\n"
                        "An earlier one is forgotten only after ten clean changes in a row, not after a time.\n"
+                       "A game stall (below about 33 real fps) is never held against it: nothing changes while it lasts.\n"
                        "Needs the built-in RTX 40 MFG unlock for 3X and 4X. Untested in game.\n"
                        "Turning it off keeps the multiplier currently in use until you move the Frame Gen slider.");
 
@@ -69,6 +70,14 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
     if (ImGui::SliderFloat("Target FPS##AutoMfg", &target, 0.0f, 500.0f, target > 0.0f ? "%.0f" : "Auto"))
         cfg.autoMfgTarget = target;
     ext::menu::Tooltip("Frame rate to reach. Auto is the lower of the frame rate limit and the display refresh rate.");
+
+    bool selfTest = cfg.autoMfgSelfTest.value_or_default();
+    if (ImGui::Checkbox("Run the self-test once##AutoMfg", &selfTest))
+        cfg.autoMfgSelfTest = selfTest;
+    ext::menu::Tooltip("One-off check of the in-place changes: 2X, 3X, 4X, 3X, 2X, six seconds apart; one log line starts with\n"
+                       "\"AutoMFG self-test: PASS\" or \"AutoMFG self-test: FAIL\". It starts after 20 calm seconds (a stall waits\n"
+                       "or interrupts it), needs the Frame Gen slider on a fixed 3X or 4X and the INFO log level, and takes\n"
+                       "about 45 seconds. It runs once per session.");
 
     const auto status = ext::fg::AutoMfgGetStatus();
     if (enabled && status.gate == ext::fg::AutoMfgGate::Open)
