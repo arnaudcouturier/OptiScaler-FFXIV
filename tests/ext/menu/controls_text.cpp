@@ -49,6 +49,8 @@ struct Row
 
 constexpr const char* kNrAdvanced = "ImGui::TreeNode(\"Advanced##nr_card\")"; // closed by default: plain TreeNode, no DefaultOpen
 
+constexpr const char* kCharaDebug = "void DrawDebugSection(CharaConfig& cfg, bool inert)\n{"; // body of the closed Advanced (debug) fold
+
 const Row kRows[] = {
     // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card, read at every UI boundary = applies at once
     { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"ReShade presets at the UI boundary\"",
@@ -104,6 +106,21 @@ const Row kRows[] = {
     { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Work shift (vertical)\"",
       .write = "&nr.spatialShiftY,shiftLimitsY.first,shiftLimitsY.second,0.0f", .keyPrefix = "&nr.spatialShiftY",
       .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
+
+    // WP4 item 5: the four diagnostic/tuning keys of the Character preview, inside DrawDebugSection (= the closed "Advanced (debug)"
+    // fold: chara_menu_text pins that DrawDebugSection is called only from that fold). All four are read live.
+    { .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::SliderInt(\"Keep preview NR models after closing (seconds)\"",
+      .write = "cfg.previewNrLingerSeconds=static_cast<uint32_t>(lingerSeconds)", .keyPrefix = "cfg.previewNrLingerSeconds=",
+      .block = { "applies at once", "0 releases it" }, .guard = kCharaDebug },
+    { .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Preview NR: show the previous frame's result (bring-up)\"",
+      .write = "cfg.previewNrLate=late", .keyPrefix = "cfg.previewNrLate=", .block = { "applies at once", "one frame of lag" },
+      .guard = kCharaDebug },
+    { .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Write preview DLSS guide dumps (diagnostics)\"",
+      .write = "cfg.previewGuideCapture=guideCapture", .keyPrefix = "cfg.previewGuideCapture=",
+      .block = { "applies at once", "Leave off unless you are investigating" }, .guard = kCharaDebug },
+    { .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Trace preview NR in the log (diagnostics)\"",
+      .write = "cfg.previewNrTrace=trace", .keyPrefix = "cfg.previewNrTrace=", .block = { "applies at once", "changes nothing" },
+      .guard = kCharaDebug },
 };
 
 // Squashed code of the file with the widget's block cut out: from the widget to the next input widget, fold or TreePop

@@ -136,6 +136,35 @@ void DrawNrCounters(const CharaConfig& cfg)
 // for this session (the reason is shown in the main view).
 void DrawDebugSection(CharaConfig& cfg, bool inert)
 {
+    // The tuning and diagnostic keys of the preview. All four are read live, so a change applies at once.
+    int lingerSeconds = static_cast<int>(cfg.previewNrLingerSeconds.value_or_default());
+    if (ImGui::SliderInt("Keep preview NR models after closing (seconds)", &lingerSeconds, 0, 60))
+        cfg.previewNrLingerSeconds = static_cast<uint32_t>(lingerSeconds);
+    ext::menu::Tooltip("How long a preview's NR model is kept after its window closes, so reopening the window is instant. "
+                       "0 releases it as soon as the window is no longer drawn (a quarter of a second). Default 5. "
+                       "Read every frame: applies at once.");
+
+    bool late = cfg.previewNrLate.value_or_default();
+    if (ImGui::Checkbox("Preview NR: show the previous frame's result (bring-up)", &late))
+        cfg.previewNrLate = late;
+    ext::menu::Tooltip("Show the NR result of the previous frame instead of waiting for this frame's: no GPU wait on the DirectX 11 "
+                       "side, one frame of lag. Try it only if the wait is visible in the frame time. It applies to NR on the native "
+                       "preview image only. A change applies at once and rebuilds the preview's model after half a second.");
+
+    bool guideCapture = cfg.previewGuideCapture.value_or_default();
+    if (ImGui::Checkbox("Write preview DLSS guide dumps (diagnostics)", &guideCapture))
+        cfg.previewGuideCapture = guideCapture;
+    ext::menu::Tooltip("Diagnostics for the DLSS path: writes up to 12 files (100 MiB) of guide and image dumps into "
+                       "OptiScaler\\PreviewDLSSDiagnostics next to the DLL, twice per session, and logs the camera and motion "
+                       "ranges. Leave off unless you are investigating. Read live: applies at once.");
+
+    bool trace = cfg.previewNrTrace.value_or_default();
+    if (ImGui::Checkbox("Trace preview NR in the log (diagnostics)", &trace))
+        cfg.previewNrTrace = trace;
+    ext::menu::Tooltip("Rate-limited log lines for the preview NR path (finisher verdicts, evaluations, UI swaps). Only logs, "
+                       "changes nothing. Read live: applies at once.");
+    ImGui::Separator();
+
     const dlss::Counters counters = dlss::GetCounters();
     ImGui::Text("DLSS previews: %u active; %llu evaluations; %llu fallbacks", counters.activeSlots,
                 (unsigned long long) counters.evaluations, (unsigned long long) counters.fallbacks);
