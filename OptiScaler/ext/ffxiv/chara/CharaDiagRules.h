@@ -57,19 +57,40 @@ constexpr uint32_t RoleBytesPerPixel(Role r)
 }
 constexpr uint32_t RoleScale(Role r) { return (r == Role::Dlss || r == Role::Composed) ? 2u : 1u; }
 
-// Size of one file: the header plus the packed rows.
-constexpr uint64_t FileBytes(Role r, uint32_t renderWidth, uint32_t renderHeight)
+// Bytes per pixel of the image that is really copied, from its DXGI format value (dxgiformat.h: 1-4 R32G32B32A32, 9-14
+// R16G16B16A16, 15-18 R32G32, 19-22 the 8 byte depth/stencil pairs; 23-43 the 4 byte R10G10B10A2, R11G11B10, R8G8B8A8,
+// R16G16 and R32 families; 87-93 the BGRA/BGRX family). The role's usual size is only the answer for a format that is not
+// listed. The row copy and the size budget must both use this: an image that arrives in a bigger format than its role
+// usually has (the NR before DLSS image is RGBA16F where the colour input is RGBA8) would otherwise be written with its
+// rows cut short under a header that names the real format.
+constexpr uint32_t FormatBytesPerPixel(uint32_t dxgiFormat, uint32_t fallback)
+{
+    if (dxgiFormat >= 1 && dxgiFormat <= 4)
+        return 16;
+    if (dxgiFormat >= 9 && dxgiFormat <= 22)
+        return 8;
+    if ((dxgiFormat >= 23 && dxgiFormat <= 43) || (dxgiFormat >= 87 && dxgiFormat <= 93))
+        return 4;
+    return fallback;
+}
+constexpr uint32_t RoleBytesPerPixel(Role r, uint32_t dxgiFormat) { return FormatBytesPerPixel(dxgiFormat, RoleBytesPerPixel(r)); }
+
+// Size of one file: the header plus the packed rows, for the real format of the copied image.
+constexpr uint64_t FileBytes(Role r, uint32_t renderWidth, uint32_t renderHeight, uint32_t dxgiFormat)
 {
     const uint64_t w = static_cast<uint64_t>(renderWidth) * RoleScale(r);
     const uint64_t h = static_cast<uint64_t>(renderHeight) * RoleScale(r);
-    return kHeaderBytes + w * h * RoleBytesPerPixel(r);
+    return kHeaderBytes + w * h * RoleBytesPerPixel(r, dxgiFormat);
 }
 
-constexpr uint64_t DumpBytes(uint32_t renderWidth, uint32_t renderHeight)
+// The DXGI format of each file of a dump, in kRoles order.
+using DumpFormats = std::array<uint32_t, kFilesPerDump>;
+
+constexpr uint64_t DumpBytes(uint32_t renderWidth, uint32_t renderHeight, const DumpFormats& formats)
 {
     uint64_t total = 0;
-    for (Role r : kRoles)
-        total += FileBytes(r, renderWidth, renderHeight);
+    for (size_t i = 0; i < kFilesPerDump; ++i)
+        total += FileBytes(kRoles[i], renderWidth, renderHeight, formats[i]);
     return total;
 }
 

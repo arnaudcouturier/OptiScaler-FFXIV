@@ -9,16 +9,21 @@ using namespace ext::ffxiv::chara::diag;
 
 namespace
 {
+// DXGI format values (dxgiformat.h), written as numbers so the rules header stays free of D3D.
+constexpr uint32_t kRgba32Float = 2, kRgba16Float = 10, kRg32Float = 16, kRgba8 = 28, kRg16Float = 34, kR32Float = 41, kBgra8 = 87;
+// The formats a dump has in the normal case: BGRA8 game picture, RGBA8 colour, RGBA16F DLSS output, RGBA8 composed, R32F depth, RG16F motion.
+constexpr DumpFormats kUsual { kBgra8, kRgba8, kRgba16Float, kRgba8, kR32Float, kRg16Float };
+
 void TestSizes()
 {
     constexpr uint64_t pixels = 576ull * 960;
-    CHECK(FileBytes(Role::Native, 576, 960) == kHeaderBytes + pixels * 4);
-    CHECK(FileBytes(Role::Input, 576, 960) == kHeaderBytes + pixels * 4);
-    CHECK(FileBytes(Role::Dlss, 576, 960) == kHeaderBytes + pixels * 4 * 8);       // 2x in both directions, 8 bytes per pixel
-    CHECK(FileBytes(Role::Composed, 576, 960) == kHeaderBytes + pixels * 4 * 4);
-    CHECK(FileBytes(Role::Depth, 576, 960) == kHeaderBytes + pixels * 4);
-    CHECK(FileBytes(Role::Motion, 576, 960) == kHeaderBytes + pixels * 4);
-    CHECK(DumpBytes(576, 960) == 6 * kHeaderBytes + pixels * (4 + 4 + 32 + 16 + 4 + 4));
+    CHECK(FileBytes(Role::Native, 576, 960, kBgra8) == kHeaderBytes + pixels * 4);
+    CHECK(FileBytes(Role::Input, 576, 960, kRgba8) == kHeaderBytes + pixels * 4);
+    CHECK(FileBytes(Role::Dlss, 576, 960, kRgba16Float) == kHeaderBytes + pixels * 4 * 8);       // 2x in both directions, 8 bytes per pixel
+    CHECK(FileBytes(Role::Composed, 576, 960, kRgba8) == kHeaderBytes + pixels * 4 * 4);
+    CHECK(FileBytes(Role::Depth, 576, 960, kR32Float) == kHeaderBytes + pixels * 4);
+    CHECK(FileBytes(Role::Motion, 576, 960, kRg16Float) == kHeaderBytes + pixels * 4);
+    CHECK(DumpBytes(576, 960, kUsual) == 6 * kHeaderBytes + pixels * (4 + 4 + 32 + 16 + 4 + 4));
     CHECK(std::string(RoleName(Role::Native)) == "native" && std::string(RoleName(Role::Motion)) == "motion");
 
     CHECK(SizeAllowed(576, 960));
@@ -27,10 +32,37 @@ void TestSizes()
     CHECK(!SizeAllowed(0, 960) && !SizeAllowed(576, 0));
 }
 
+// The bytes of a file follow the real format of the copied image, not the usual one of its role: the NR before DLSS image
+// (RGBA16F) can be the colour input, and its rows are 8 bytes per pixel. The row copy of CharaDiag.cpp and the budget both use
+// these functions; a table by role alone wrote half-width rows under a header that said RGBA16F.
+void TestBytesFollowTheRealFormat()
+{
+    CHECK(FormatBytesPerPixel(kRgba16Float, 4) == 8);
+    // the 4 byte formats of the dump are 4 whatever the role's usual size is (no over-read of a smaller image)
+    CHECK(FormatBytesPerPixel(kRgba8, 8) == 4 && FormatBytesPerPixel(kBgra8, 8) == 4 && FormatBytesPerPixel(kR32Float, 8) == 4 && FormatBytesPerPixel(kRg16Float, 8) == 4);
+    CHECK(FormatBytesPerPixel(kRgba8, 4) == 4 && FormatBytesPerPixel(kBgra8, 4) == 4 && FormatBytesPerPixel(kR32Float, 4) == 4 && FormatBytesPerPixel(kRg16Float, 4) == 4);
+    CHECK(FormatBytesPerPixel(61, 4) == 4 && FormatBytesPerPixel(61, 8) == 8);             // an unlisted format (R8_UNORM): the fallback
+    CHECK(FormatBytesPerPixel(0, 4) == 4 && FormatBytesPerPixel(0, 8) == 8);               // UNKNOWN: the role's size
+    CHECK(FormatBytesPerPixel(kRgba32Float, 4) == 16);
+    CHECK(FormatBytesPerPixel(kRg32Float, 4) == 8);
+
+    constexpr uint64_t pixels = 576ull * 960;
+    // An 8 byte colour input: the file and the dump are bigger by exactly 4 bytes per pixel.
+    CHECK(RoleBytesPerPixel(Role::Input, kRgba16Float) == 8 && RoleBytesPerPixel(Role::Input, kRgba8) == 4);
+    CHECK(FileBytes(Role::Input, 576, 960, kRgba16Float) == kHeaderBytes + pixels * 8);
+    DumpFormats withNrImage = kUsual;
+    withNrImage[1] = kRgba16Float;
+    CHECK(DumpBytes(576, 960, withNrImage) == DumpBytes(576, 960, kUsual) + pixels * 4);
+    CHECK(DumpBytes(576, 960, withNrImage) == 6 * kHeaderBytes + pixels * (4 + 8 + 32 + 16 + 4 + 4));
+    // The role is still used when the format is not known; the DLSS output keeps its 8 bytes even then.
+    CHECK(RoleBytesPerPixel(Role::Dlss, 0) == 8 && RoleBytesPerPixel(Role::Native, 0) == 4);
+    CHECK(RoleBytesPerPixel(Role::Native, kRgba16Float) == 8); // a native image in a bigger format is not cut short either
+}
+
 void TestBudget()
 {
     Budget b;
-    const uint64_t dump = DumpBytes(576, 960);
+    const uint64_t dump = DumpBytes(576, 960, kUsual);
     CHECK(b.Fits(6, dump));
     b.Add(6, dump);
     CHECK(b.Fits(6, dump));   // the second dump fits: 12 files, about 67 MiB
@@ -112,6 +144,7 @@ void TestTraceLimiter()
 int main()
 {
     TestSizes();
+    TestBytesFollowTheRealFormat();
     TestBudget();
     TestPhases();
     TestHalfAndStats();
