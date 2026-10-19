@@ -9,7 +9,8 @@
 
 #include <imgui/imgui.h>
 
-// "Preset" card (docs/SEAMS-catalog.md "menu": forced_quality, Upscaling, after = "upscale_ratio"'s predecessor).
+// "Forced quality level" card (id forced_quality, tab Upscaling, right after the Upscale Ratio Override card; position:
+// ext/core/MenuLayout.h; docs/SEAMS-catalog.md "menu").
 // Mirrors the oracle's menu/menu_common.cpp RenderUpscaleRatioSettings "Quality Preset" section (menu_common.cpp
 // ~6701-6795 there), promoted to its own MenuRegistry card per the catalog's design rather than inlined into the
 // Upscale Ratio Override card.
@@ -38,7 +39,7 @@ bool Visible(const ext::menu::Ctx& ctx) { return ctx.currentFeature != nullptr &
 
 void Draw(ext::menu::Ctx& ctx)
 {
-    ext::menu::SectionTitle("Quality Preset");
+    ext::menu::SectionTitle("Forced quality level");
 
     const int currentForced = ext::Cfg().upscaler.forcePerfQuality.value_or_default();
     int index = IndexOf(currentForced);
@@ -100,7 +101,7 @@ void Draw(ext::menu::Ctx& ctx)
         ImGui::TextDisabled("Preset pending a new resolution query; apply or restart the game.");
 }
 
-const ext::menu::AutoRegister registration { { "forced_quality", "Upscaling", "Quality Preset", Draw, "sharpness",
+const ext::menu::AutoRegister registration { { "forced_quality", "Upscaling", "Forced quality level", Draw, "sharpness",
                                                  Visible } };
 } // namespace
 } // namespace ext::upscaler::menu

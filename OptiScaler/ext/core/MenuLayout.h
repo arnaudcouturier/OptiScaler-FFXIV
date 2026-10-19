@@ -41,7 +41,7 @@ struct Slot
 inline constexpr Slot kSlots[] = {
     // Upscaling
     { "dlss_nr",                  "Upscaling",     "upscaler" },
-    { "forced_quality",           "Upscaling",     "sharpness" },
+    { "forced_quality",           "Upscaling",     "upscale_ratio" },
 
     // Frame Gen: the runtime cards (fg_fsrfg .. fg_sl_inputs) are one shared function, our card follows its last box
     { "fg_unlocks",               "Frame Gen",     "fg_selection" },

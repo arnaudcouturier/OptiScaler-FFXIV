@@ -296,7 +296,7 @@ void RealTable(const std::string& repo)
     }
     auto tabIds = [&](const std::string& tab) { return Join(OfTab(reference, tabOf, tab)); };
 
-    CHECK_EQ(tabIds("Upscaling"), "upscaler dlss_nr sharpness forced_quality upscale_ratio output_scaling shader_times magnifier");
+    CHECK_EQ(tabIds("Upscaling"), "upscaler dlss_nr sharpness upscale_ratio forced_quality output_scaling shader_times magnifier");
     CHECK_EQ(tabIds("Frame Gen"),
              "fg_selection fg_unlocks fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx fg_fsrfg_inputs "
              "fg_sl_inputs fg_auto_mfg");
