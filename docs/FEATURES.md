@@ -288,7 +288,7 @@ The in-game menu keeps upstream's tabs and cards; the fork's cards join them thr
 
 | Key | Card (tab) and control | Applies |
 |-----|------------------------|---------|
-| `[HudLess] ReShadePresets` | HUD-less (UI-free frame generation): "ReShade presets at the UI boundary" (Auto, On, Off), only used in UI-free mode | at once |
+| `[HudLess] ReShadePresets` | HUD-less (UI-free frame generation): "ReShade presets at the UI boundary" (Auto, On, Off), only used in UI-free mode | switching to Off at once; switching on again after a start with Off, restart |
 | `[DLSSG] UIRecomposition` | HUD-less, closed Advanced fold: "UI recomposition (restart)" (Auto, On, Off) | restart |
 | `[XeFG] UnlockMFG`, `MaxInterpolatedFrames` | upstream's XeFG card: "Unlock multi frame generation (restart)", "Max XeFG multiplier (restart)" (2X to 8X) | restart |
 | `[DLSSG] AmpereMfgKernelImage`, `Router`, `HardwareBilinear`, `Optimized`, `Preset`, `SpoofArchToGame`, `LogLevel` | Frame generation unlocks, in the RTX 20/30 runtime fold, a closed "Advanced (RTX 20/30 runtime)" fold drawn only while the runtime is switched on; written to the runtime's own `dlssg_sm86.ini` | restart |
