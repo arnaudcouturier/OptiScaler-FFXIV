@@ -146,6 +146,7 @@ struct SlotGpu
     uint32_t ngxGeneration = 0; // the NGX instance (g_ngxGeneration) that created params and handle
     bool failureLogged = false;
     bool composedFromNr = false; // the composed image was made from the production NR output (written by every alpha pass)
+    bool preSrColour = false;    // the SR evaluate of that render was given the pre-SR NR image as its colour (written beside composedFromNr)
     nr::SrColourSource lastColour = nr::SrColourSource::Plain; // the colour source of the last successful SR evaluate (the history reset on a change)
 };
 
@@ -834,6 +835,7 @@ void RunSlot(int index, const DrawView& view)
     const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
     ComPtr<ID3D11ShaderResourceView> nrOutput; // outlives the alpha pass
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
+    g.preSrColour = false;
     const nr::SlotRender render = nr::DecideSlotRender(
         PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, ev.placement, ev.usedPreSrColour,
         [&]
@@ -853,8 +855,9 @@ void RunSlot(int index, const DrawView& view)
         return;
     }
     g.composedFromNr = render.composedFromNr;
+    g.preSrColour = render.preSrColour;
     g_nrProductionThisRender = render.composedFromNr;
-    if (g.composedFromNr && !render.preSrColour)
+    if (nr::MadeFromPostSrNr(g.composedFromNr, g.preSrColour))
         ++g_stats.nrProductionRuns; // the alpha pass used the post-SR NR output (NR before SR has its own counters in the module)
     if (tinted)
         ++g_stats.tintApplied; // the composed image: magenta for SR, cyan when its colour came from NR (after or before the evaluate)
@@ -874,7 +877,7 @@ void RunSlot(int index, const DrawView& view)
     {
         diag::Request request;
         request.native = view.rtvTexture;
-        request.input = g.color.texture.Get();
+        request.input = ev.usedPreSrColour ? preSrColour.Get() : g.color.texture.Get(); // the colour the evaluate really read
         request.dlss = g.output.texture.Get();
         request.composed = g.composed.texture.Get();
         request.depth = g.depth.texture.Get();
@@ -1203,7 +1206,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
     bool any = false;
     bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
     bool anyNr = false;   // at least one slot got the bring-up NR result
-    bool anyProduction = false; // at least one slot got a composed image made from the production NR output
+    bool anyProduction = false; // at least one slot got a composed image made from NR (after SR: the production NR output; before SR: the SR colour)
+    bool anyPostSrNr = false;   // ... and at least one of them was made from the production NR output (what the production statistics count)
     ComPtr<ID3D11ShaderResourceView> nrHold[kSrvSlots]; // the NR results in use (also the cyan copies), alive until after the draw and the restore
     const bool floodOn = flood::On();
     const bool tintOn = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
@@ -1281,6 +1285,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
             replaced[i] = g->composed.srv.Get();
             any = true;
             anyProduction = true;
+            if (nr::MadeFromPostSrNr(g->composedFromNr, g->preSrColour))
+                anyPostSrNr = true;
             break;
         case nr::ConsumerSource::SrResult: // SR wins over the bring-up NR result
             replaced[i] = g->composed.srv.Get();
@@ -1317,7 +1323,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         else
         {
             ++g_stats.consumerSwaps;
-            if (anyProduction)
+            if (anyPostSrNr)
             {
                 ++g_stats.nrProductionSwaps;
                 if (g_lines.ShouldLog(kLineProductionSwap, identify::BurstNumber()))

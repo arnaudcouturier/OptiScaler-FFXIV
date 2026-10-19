@@ -316,6 +316,11 @@ struct ProductionAnswer
 // An image of the NR output exists only for Ran with a view; every other answer leaves the SR output as it is (fail open).
 constexpr bool ProductionProduced(const ProductionAnswer& answer) { return answer.outcome == RunOutcome::Ran && answer.hasView; }
 
+// The picture of a slot was made from the production NR output (NR after SR). The production statistics (runs, and UI draws given such a picture)
+// count these only: a picture whose SR evaluate was given the pre-SR NR image is also "composed from NR", but NR before SR has its own counters in the
+// module.
+constexpr bool MadeFromPostSrNr(bool composedFromNr, bool preSrColour) { return composedFromNr && !preSrColour; }
+
 struct SlotRender
 {
     bool offered = false;       // the production entry was run for this render

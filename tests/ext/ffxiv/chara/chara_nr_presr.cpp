@@ -528,6 +528,37 @@ void TestSlotRenderPreSr()
     }
 }
 
+// The production statistics (runs and UI draws given a composed image) count the pictures made from the post-SR NR output, never those whose SR
+// evaluate was given the pre-SR image: the two counters used to disagree for a pre-SR picture.
+void TestPostSrNrStatistic()
+{
+    CHECK(MadeFromPostSrNr(true, false));
+    CHECK(!MadeFromPostSrNr(true, true));
+    CHECK(!MadeFromPostSrNr(false, false));
+    CHECK(!MadeFromPostSrNr(false, true));
+    PlumbingFacts f = BothOn();
+    f.nrHoldsResources = true;
+    long cases = 0;
+    for (const Placement placement : { Placement::PostSr, Placement::PreSr })
+        for (const bool preSrUsed : { false, true })
+            for (const bool recent : { false, true })
+                for (const RunOutcome outcome : kOutcomes)
+                    for (const bool hasView : { false, true })
+                        for (const bool alphaOk : { false, true })
+                        {
+                            SlotFake e;
+                            e.answer = { outcome, hasView };
+                            e.alphaOk = alphaOk;
+                            const SlotRender s = Slot(f, recent, false, placement, preSrUsed, e);
+                            // typed from the rules: only a production-entry image that went through the alpha pass counts
+                            CHECK(MadeFromPostSrNr(s.composedFromNr, s.preSrColour) == (s.produced && s.alphaOk));
+                            if (placement == Placement::PreSr)
+                                CHECK(!MadeFromPostSrNr(s.composedFromNr, s.preSrColour));
+                            ++cases;
+                        }
+    CHECK(cases == 2 * 2 * 2 * 5 * 2 * 2);
+}
+
 void TestTintFor()
 {
     for (const AlphaInput input : { AlphaInput::SrOutput, AlphaInput::NrOutput })
@@ -757,6 +788,7 @@ int main()
     TestSlotRenderPreSr();
     TestColourGivenToTheEvaluate();
     TestResetRule();
+    TestPostSrNrStatistic();
     TestTintFor();
     TestShapes();
     TestResultKinds();
