@@ -44,7 +44,7 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
                        "without the off/on cycle of the Frame Gen slider. Never above 4X; the multiplier it picks is not\n"
                        "saved with Save Settings.\n"
                        "A change can still cost one long frame (about 0.2 s) if DLSS-G re-creates itself on this setup:\n"
-                       "the mode then waits 12 s between changes and stops after a second one.\n"
+                       "the mode then waits 12 s between changes and stops after two in a row or three in all.\n"
                        "Needs the built-in RTX 40 MFG unlock for 3X and 4X. Untested in game.\n"
                        "Turning it off keeps the multiplier currently in use until you move the Frame Gen slider.");
 

@@ -103,6 +103,9 @@ void IniFragmentDocumentsTheKeys(const std::string& repo)
     CHECK(ini.find("[DLSSG]") == std::string::npos); // a header would be dropped by the packager
     CHECK(ini.find("Default (auto) is 4") != std::string::npos); // AutoMFGMax
     CHECK(ini.find("untested in game") != std::string::npos);
+    // the kill-switch rule as the controller has it: two long frames in a row or three in all (not "a second one")
+    CHECK(ini.find("stops after two such changes in a row, or three in all (ten clean changes forget the") != std::string::npos);
+    CHECK(ini.find("stops after a second such change") == std::string::npos);
     // the one side effect of the Ada clamp (the frame limiter still paces for the slider count) is told next to the key
     CHECK(ini.find("with a frame limit keep the slider on 4X") != std::string::npos);
 }
@@ -115,6 +118,9 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
     CHECK(card.find("\"fg_auto_mfg\", \"Frame Gen\"") != std::string::npos);
     CHECK(card.find("\"fg_dlssg\"") != std::string::npos); // right after the DLSSG card
     CHECK(card.find("can still cost one long frame (about 0.2 s)") != std::string::npos);
+    // the kill-switch rule as the controller has it (DynamicMfgControl.h kStrikesToStop, kStrikesInTotalToStop)
+    CHECK(card.find("waits 12 s between changes and stops after two in a row or three in all.") != std::string::npos);
+    CHECK(card.find("stops after a second one") == std::string::npos);
     CHECK(card.find("Untested in game") != std::string::npos);
     // the visibility rule itself is tested in dynamic_mfg_gate_unit (AutoMfgCardVisible); here only that the card asks it
     CHECK(card.find("AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell())") != std::string::npos);
