@@ -554,12 +554,15 @@ inline std::string FormatSample(const Analysis& a, NgxMatch ngx, const std::opti
 
 inline std::string FormatProbeFailure(Guard g) { return std::format("Game jitter: not read, guard failed: {}", GuardName(g)); }
 
-inline std::string FormatCorrection(const Analysis& a, const CorrectionDecision& d)
+// `readX/readY` are what the parameter block returned when it was asked again after the write (nullopt = the read failed): the line
+// shows the intended values and the stored ones side by side, so a block that did not take the write is visible.
+inline std::string FormatCorrection(const Analysis& a, const CorrectionDecision& d, const std::optional<float>& readX,
+                                    const std::optional<float>& readY)
 {
-    return std::format("Jitter correction: reported ({:.4f},{:.4f}) replaced by applied ({:.4f},{:.4f}), ratio {:.3f}/{:.3f}", a.object.jx,
-                       a.object.jy, d.ax, d.ay, a.haveRx ? a.rx : 0.0f, a.haveRy ? a.ry : 0.0f);
+    const std::string stored = readX && readY ? std::format("({:.4f},{:.4f})", *readX, *readY) : std::string("unavailable");
+    return std::format("Jitter correction: reported ({:.4f},{:.4f}) replaced by applied ({:.4f},{:.4f}), ratio {:.3f}/{:.3f}; parameter block read back: {}",
+                       a.object.jx, a.object.jy, d.ax, d.ay, a.haveRx ? a.rx : 0.0f, a.haveRy ? a.ry : 0.0f, stored);
 }
-
 inline std::string FormatPassThrough(Guard g)
 {
     return std::format("Jitter correction: game values passed through unchanged, guard failed: {}", GuardName(g));
@@ -574,11 +577,13 @@ struct StatusCounts
     std::uint64_t heldCounter = 0, heldRatio = 0, heldFirst = 0;
 };
 
-inline std::string FormatStatus(const StatusCounts& c)
+// `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too.
+inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration)
 {
     return std::format("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through "
                        "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
-                       "not steady, {} first frame after a gap)",
-                       c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst);
+                       "not steady, {} first frame after a gap); frame generation active {}",
+                       c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,
+                       frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown");
 }
 } // namespace ext::ffxiv::jitter

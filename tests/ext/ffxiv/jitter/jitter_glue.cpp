@@ -41,6 +41,8 @@ struct FakeEnv
     ForcedQualityAnswer answer;
     std::uint64_t now = 0;
     std::optional<bool> frameGeneration = false;
+    bool dropWrites = false;   // a block that does not take the write (the stored value stays)
+    bool eraseOnWrite = false; // a block that loses the entry when it is written (a later read finds nothing)
 
     std::vector<Op> ops;
     std::vector<std::string> logs;
@@ -82,7 +84,10 @@ struct FakeEnv
     {
         ops.push_back({ true, p, v });
         ++setsEver;
-        floats[p] = v;
+        if (eraseOnWrite)
+            floats.erase(p);
+        else if (!dropWrites)
+            floats[p] = v;
     }
     ForcedQualityAnswer ForcedQuality()
     {
@@ -179,8 +184,9 @@ Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool co
     return o;
 }
 
-// Checks one evaluate's order: both Jitter.Offset reads come before the first write, and the write is exactly X then Y.
-void CheckReadsThenWrite(const Outcome& o, double ax, double ay)
+// Checks one evaluate's order: both Jitter.Offset reads come before the first write, and the write is exactly X then Y. After the write
+// the only Jitter.Offset reads allowed are the read-back of the first replacement of an episode: X then Y, nothing else.
+void CheckReadsThenWrite(const Outcome& o, double ax, double ay, bool readBack)
 {
     CHECK(o.sets.size() == 2);
     if (o.sets.size() != 2)
@@ -198,9 +204,17 @@ void CheckReadsThenWrite(const Outcome& o, double ax, double ay)
             readY = i;
     }
     CHECK(readX < firstSet && readY < firstSet);
-    // and no read of the jitter values at all after the first write (the later reads would see our own output)
+    // after the write: the two Sets, then (episode start only) the read-back, and no other read of the jitter values at all
+    std::vector<Op> after;
     for (std::size_t i = firstSet; i < o.ops.size(); ++i)
-        CHECK(o.ops[i].set || (o.ops[i].param != Param::JitterX && o.ops[i].param != Param::JitterY));
+        if (!o.ops[i].set)
+            after.push_back(o.ops[i]);
+    if (readBack)
+        CHECK(after.size() == 2 && after[0].param == Param::JitterX && after[1].param == Param::JitterY);
+    else
+        CHECK(after.empty());
+    if (readBack && after.size() == 2)
+        CHECK(o.ops[o.ops.size() - 1].param == Param::JitterY && o.ops[o.ops.size() - 2].param == Param::JitterX && !o.ops.back().set);
 }
 
 // (a) Both keys off: nothing at all happens.
@@ -241,7 +255,7 @@ void TestCorrectionReadsBeforeItWrites()
         if (!o.sets.empty())
         {
             ++written;
-            CheckReadsThenWrite(o, 0.15, -0.1);
+            CheckReadsThenWrite(o, 0.15, -0.1, i == 1); // the read-back belongs to the first replacement of the episode
         }
     }
     CHECK(written == 5);
@@ -338,6 +352,75 @@ void TestSameFrameRules()
         CHECK(lagged <= 3);
     }
 }
+// L1: the first replacement of an episode asks the block what it holds and logs that next to the intended values.
+void TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds()
+{
+    auto correctionLines = [](const Outcome& o)
+    {
+        std::vector<std::string> out;
+        for (const std::string& line : o.logs)
+            if (Has(line, "replaced by applied"))
+                out.push_back(line);
+        return out;
+    };
+    {
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
+        CHECK(correctionLines(start).size() == 1 && Has(correctionLines(start)[0], "parameter block read back: (0.1500,-0.1000)"));
+        const Outcome later = Evaluate(e, engine, At(102, 1, 200), false, true); // same episode: no line, no extra read
+        CHECK(correctionLines(later).empty() && later.sets.size() == 2);
+        // a pass-through ends the episode; the next replacement starts a new one with a new read-back
+        Evaluate(e, engine, At(102, 1, 300), false, true); // counter did not increase
+        const Outcome again = Evaluate(e, engine, At(103, 1, 400), false, true);
+        CHECK(correctionLines(again).size() == 1 && Has(correctionLines(again)[0], "parameter block read back: (0.1500,-0.1000)"));
+        CHECK(correctionLines(Evaluate(e, engine, At(104, 1, 500), false, true)).empty());
+    }
+    {
+        // a block that does not take the write: the line shows the values it still holds, not the intended ones
+        FakeEnv e = MakeEnv();
+        e.dropWrites = true;
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
+        CHECK(correctionLines(start).size() == 1);
+        CHECK(Has(correctionLines(start)[0], "applied (0.1500,-0.1000)") && Has(correctionLines(start)[0], "parameter block read back: (0.3000,-0.2000)"));
+    }
+    {
+        // a block that returns nothing after the write: the line says so
+        FakeEnv e = MakeEnv();
+        e.eraseOnWrite = true;
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
+        CHECK(correctionLines(start).size() == 1 && Has(correctionLines(start)[0], "parameter block read back: unavailable"));
+    }
+}
+
+// M3: the status line says whether frame generation is active (the replaced pair feeds it too), and asks only when it writes the line.
+void TestStatusLineSaysWhetherFrameGenerationIsActive()
+{
+    for (int mode = 0; mode < 3; ++mode)
+    {
+        FakeEnv e = MakeEnv();
+        e.frameGeneration = mode == 0 ? std::optional<bool> { true } : mode == 1 ? std::optional<bool> { false } : std::nullopt;
+        Engine engine;
+        int statusLines = 0;
+        for (int i = 0; i < 40; ++i)
+        {
+            const Outcome o = Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 1000), false, true);
+            for (const std::string& line : o.logs)
+                if (Has(line, "Jitter correction: on;"))
+                {
+                    ++statusLines;
+                    CHECK(Has(line, mode == 0 ? "frame generation active yes" : mode == 1 ? "frame generation active no" : "frame generation active unknown"));
+                }
+        }
+        CHECK(statusLines == 4 && e.fgQueries == 4); // one every 10 s of the fake clock, and nothing asked in between
+    }
+}
+
 // M2: what the status line says about it, so a session shows whether the correction is inert.
 void TestStatusLineCountsHeldBackFrames()
 {
@@ -515,6 +598,8 @@ int main()
     TestCorrectionReadsBeforeItWrites();
     TestSameFrameRules();
     TestStatusLineCountsHeldBackFrames();
+    TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds();
+    TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestProbeLineShowsTheValuesBeforeTheWrite();
     TestProbeOnlyNeverWrites();
     TestEveryFailedGuardWritesNothing();

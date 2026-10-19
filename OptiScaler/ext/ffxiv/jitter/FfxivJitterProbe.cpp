@@ -7,6 +7,10 @@
 #include "ext/core/ProcessMemory.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
+#include <Config.h>
+#include <State.h>
+#include <framegen/IFGFeature_Dx12.h>
+
 #include <mutex>
 
 namespace ext::ffxiv::jitter
@@ -25,15 +29,15 @@ static_assert(SameText(ParamName(Param::OutWidth), NVSDK_NGX_Parameter_OutWidth)
 static_assert(SameText(ParamName(Param::OutHeight), NVSDK_NGX_Parameter_OutHeight));
 static_assert(SameText(ParamName(Param::PerfQuality), NVSDK_NGX_Parameter_PerfQualityValue));
 
-struct State
+struct JitterState
 {
     std::mutex mutex;
     Engine engine;
 };
 
-State& S()
+JitterState& S()
 {
-    static State state;
+    static JitterState state;
     return state;
 }
 
@@ -96,7 +100,16 @@ struct NgxEnvironment
 
     std::uint64_t NowMs() { return GetTickCount64(); }
     void Log(const std::string& line) { LOG_INFO("{}", line); }
-    std::optional<bool> FrameGenerationActive() { return std::nullopt; }
+    // The fork's own accessor expression for "frame generation is running" (the same test ext/hudless/HudlessEngine.cpp uses). Called only
+    // when a status line is written (every 10 s), on the evaluate thread that already hands the same object the jitter right after the
+    // upscaler Evaluate (UpscaleStart).
+    std::optional<bool> FrameGenerationActive()
+    {
+        auto* fg = ::State::Instance().currentFG;
+        if (fg == nullptr)
+            return false;
+        return fg->IsActive() && !fg->IsPaused() && Config::Instance()->IsFGEnabled();
+    }
 };
 } // namespace
 

@@ -164,7 +164,12 @@ class Engine
                 env.SetFloat(Param::JitterY, decision.ay);
                 ++_counts.replaced;
                 if (_replacing.Event(true))
-                    env.Log(FormatCorrection(analysis, decision));
+                {
+                    // The first replacement of an episode: ask the block what it holds now, so the line shows what it really took.
+                    const std::optional<float> storedX = env.GetFloat(Param::JitterX);
+                    const std::optional<float> storedY = env.GetFloat(Param::JitterY);
+                    env.Log(FormatCorrection(analysis, decision, storedX, storedY));
+                }
                 _passThrough.Close();
             }
             else
@@ -198,7 +203,7 @@ class Engine
         }
         if (correct)
         {
-            env.Log(FormatStatus(_counts));
+            env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
             if (_replacing.Suppressed() != 0 || _passThrough.Suppressed() != 0)
                 env.Log(std::format("Jitter correction: log line budget used up, {} further episodes were not logged",
                                     _replacing.Suppressed() + _passThrough.Suppressed()));

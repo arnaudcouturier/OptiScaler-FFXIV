@@ -610,7 +610,25 @@ void TestText()
     CHECK(FormatProbeFailure(Guard::CameraInvalid) == "Game jitter: not read, guard failed: camera object pointer null or not a user address");
     const auto a = Analyse(ObjectFor(0.3f, -0.2f, 1.0f, 1920, 1080), size);
     const auto d = DecideCorrection(Guard::None, a, NgxMatch::Same);
-    CHECK(FormatCorrection(a, d) == "Jitter correction: reported (0.3000,-0.2000) replaced by applied (0.1500,-0.1000), ratio 0.500/0.500");
+    CHECK(FormatCorrection(a, d, 0.15f, -0.1f) ==
+          "Jitter correction: reported (0.3000,-0.2000) replaced by applied (0.1500,-0.1000), ratio 0.500/0.500; parameter block read back: (0.1500,-0.1000)");
+    // a block that did not take the write shows its old values; a failed read-back says so
+    CHECK(Has(FormatCorrection(a, d, 0.3f, -0.2f), "read back: (0.3000,-0.2000)"));
+    CHECK(Has(FormatCorrection(a, d, std::nullopt, -0.2f), "read back: unavailable") && Has(FormatCorrection(a, d, 0.3f, std::nullopt), "read back: unavailable"));
+    {
+        StatusCounts counts;
+        counts.evaluated = 7;
+        counts.replaced = 3;
+        counts.passed = 4;
+        counts.heldCounter = 1;
+        counts.heldRatio = 2;
+        counts.heldFirst = 1;
+        CHECK(FormatStatus(counts, true) ==
+              "Jitter correction: on; since the last status line 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
+              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap); "
+              "frame generation active yes");
+        CHECK(Has(FormatStatus(counts, false), "frame generation active no") && Has(FormatStatus(counts, std::nullopt), "frame generation active unknown"));
+    }
     CHECK(Has(FormatPassThrough(Guard::ObjectNotThisEvaluate), "passed through unchanged, guard failed: jitter object does not match this evaluate"));
 
     // the configuration key follows every field that matters: each one, changed alone, changes the key
