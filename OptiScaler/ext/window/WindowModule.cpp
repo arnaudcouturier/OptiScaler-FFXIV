@@ -24,26 +24,17 @@ namespace
 std::recursive_mutex& ModuleLock();
 
 // Entry points hold the module lock once per call (re-entrant calls on the same thread nest). `t_lockDepth` says how often
-// this thread holds it, so a call out can give it up completely: the controller has settled its state before every call
-// out, and a window call that waits for another thread must not do so while holding the lock.
+// this thread holds it, so a call out can give it up completely (live::UnlockedScope, tested on a fake mutex): the controller
+// has settled its state before every call out (and clears the request bookkeeping again after the one that asks frame
+// generation off), and a window call that waits for another thread must not do so while holding the lock.
 thread_local int t_lockDepth = 0;
-struct LockDepth
+struct LockDepth : live::LockDepthGuard
 {
-    LockDepth() { ++t_lockDepth; }
-    ~LockDepth() { --t_lockDepth; }
+    LockDepth() : live::LockDepthGuard(t_lockDepth) {}
 };
-struct Unlocked
+struct Unlocked : live::UnlockedScope<std::recursive_mutex>
 {
-    Unlocked()
-    {
-        for (int i = 0; i < t_lockDepth; ++i)
-            ModuleLock().unlock();
-    }
-    ~Unlocked()
-    {
-        for (int i = 0; i < t_lockDepth; ++i)
-            ModuleLock().lock();
-    }
+    Unlocked() : live::UnlockedScope<std::recursive_mutex>(ModuleLock(), t_lockDepth) {}
 };
 
 class LiveEnv final : public Env
