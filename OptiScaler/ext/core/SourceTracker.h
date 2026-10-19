@@ -22,12 +22,13 @@ namespace ext::menu
 template <class Fn> class SourceTracker
 {
   public:
-    // Distinct shared functions seen in one tab pass; upstream has 4 in total
+    // Distinct shared functions seen in one tab pass; upstream has 5 in total (frame generation runtime, API and
+    // texture, advanced, quirks, status)
     static constexpr size_t kCapacity = 16;
 
     // True when the caller must draw `source` now: the first time it is seen in this pass. A null source has nothing to
-    // draw. If more than kCapacity distinct sources were seen, the extra ones are drawn every time (fail open: a card
-    // may show twice, it is never hidden).
+    // draw. If more than kCapacity distinct sources were seen, the extra ones are drawn for EVERY box of their group
+    // (fail open: a function may draw several times, it is never hidden).
     bool Claim(Fn source)
     {
         if (source == nullptr)

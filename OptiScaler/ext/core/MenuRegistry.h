@@ -7,7 +7,7 @@
 //   static void DrawNrCard(ext::menu::Ctx& c) { ext::menu::SectionTitle("DLSS NR"); ... }
 //   static bool NrVisible(const ext::menu::Ctx& c) { return ext::Active(ext::F::Nr); }
 //   static ext::menu::AutoRegister reg { { "nr_settings", "Upscaling", "DLSS Neural Rendering", DrawNrCard,
-//                                         "output_scaling" /* after */, NrVisible } };
+//                                         nullptr /* after: legacy, ignored */, NrVisible } };
 //
 // The draw callback runs inside an upstream ScopedCard, so tab filtering and Custom Tab pinning work like for any
 // upstream card. `tab` is the label of a tab of the menu. WHERE the card sits is decided by the layout table in

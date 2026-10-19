@@ -11,7 +11,7 @@
 
 #include <string>
 
-// "Window mode (FFXIV)" card (tab Frame Gen, right after the DLSSG settings): the [Window] Mode key as a drop-down. The mode
+// "Window mode (FFXIV)" card (tab FFXIV, first card of the tab; position: ext/core/MenuLayout.h): the [Window] Mode key as a drop-down. The mode
 // is published once, when the settings are loaded (the ReShade event is registered then), so a change here is stored for the
 // NEXT start (saved in the ini with the other settings) and the card says which mode is active in this session.
 namespace ext::window::menu

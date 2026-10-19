@@ -7,7 +7,7 @@
 
 #include <imgui/imgui.h>
 
-// "Game jitter (FFXIV)" card (tab Upscaling, right after Output Scaling): the two [FFXIV] jitter keys as live switches.
+// "Game jitter (FFXIV)" card (tab FFXIV, after the FFXIV HDR10 card; position: ext/core/MenuLayout.h): the two [FFXIV] jitter keys as live switches.
 // The hook (FfxivJitterProbe.cpp) reads both keys at every DLSS evaluate, so a tick applies at once; like every other menu
 // setting it is stored in the ini only when the settings are saved. Nothing else lives here: the decisions are in
 // FfxivJitterCore.h (tested).
