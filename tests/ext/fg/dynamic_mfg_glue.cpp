@@ -239,6 +239,12 @@ void TheGuardClampsForStreamlineOnly()
         CHECK(r.Saved() == std::optional<int>(5));
     }
     CHECK(r.w.Lines("limited to 4x", 1) == 1);      // logged once
+    // The warning also tells how to avoid the one side effect: the frame limiter still paces for the slider count (5 generated
+    // frames here), so with a frame limit the slider has to be on 4X (the whole line is pinned, numbers included).
+    CHECK_MSG(r.w.Lines("DLSSG: automatic multi frame generation is limited to 4x on this card, 5 generated frames were "
+                        "requested; using 3 (set the Frame Gen slider to 4X when a frame limit is used)",
+                        1) == 1,
+              "the clamp warning text changed");
     // ForceDMFG off: the manual 6x is back at once, with nothing to restore.
     r.forceDmfg = false;
     r.Frame(10.0);

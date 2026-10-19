@@ -103,6 +103,8 @@ void IniFragmentDocumentsTheKeys(const std::string& repo)
     CHECK(ini.find("[DLSSG]") == std::string::npos); // a header would be dropped by the packager
     CHECK(ini.find("Default (auto) is 4") != std::string::npos); // AutoMFGMax
     CHECK(ini.find("untested in game") != std::string::npos);
+    // the one side effect of the Ada clamp (the frame limiter still paces for the slider count) is told next to the key
+    CHECK(ini.find("with a frame limit keep the slider on 4X") != std::string::npos);
 }
 
 // The menu card cannot be run here (ImGui); its registration and the honest caveat of its tooltip are pinned by text.

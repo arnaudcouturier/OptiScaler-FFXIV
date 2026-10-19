@@ -107,8 +107,11 @@ class AutoMfgGlue
             {
                 try
                 {
+                    // The frame limiter (InputCommon) still paces for the slider count, which this clamp does not change: with
+                    // a frame limit the slider has to be on 4X, hence the advice in the line.
                     w.log(true, std::format("DLSSG: automatic multi frame generation is limited to {}x on this card, {} "
-                                            "generated frames were requested; using {}",
+                                            "generated frames were requested; using {} (set the Frame Gen slider to 4X "
+                                            "when a frame limit is used)",
                                             kAutoMaxGenerated + 1, options.numFramesToGenerate, out.generated));
                 }
                 catch (...)
