@@ -337,7 +337,26 @@ int main()
         CHECK(Count(env, "frame generation confirmed off") == 0);
         CHECK(Warns(env) >= 1);
     }
-    // The same by time: 6 s pass with fewer than 24 failed presents.
+    // L8: the hard limit by presents also needs 500 ms. Failed presents 5 ms apart (a 200 fps game): no replay at present 24, the
+    // replay comes at 500 ms.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 99; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kOff, kOff, false);
+            CHECK(env.replays.empty()); // past 24 presents after present 24, but under 500 ms
+        }
+        env.nowMs = 1500;
+        Present(c, env, Mode::On, kOff, kOff, false); // present 100, 500 ms
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "hard wait limit reached without a confirmation") == 1);
+        CHECK_CONTAINS(env.All(), "after 100 presents, 500 ms");
+    }    // The same by time: 6 s pass with fewer than 24 failed presents.
     {
         FakeEnv env;
         Controller c;

@@ -283,7 +283,10 @@ int main()
         env.autoOff = false;
         env.owner = 5; // the presenting thread is not the window thread
         for (int i = 0; i < 24; ++i)
+        {
+            env.nowMs += 30; // 24 presents and 500 ms are the hard limit (L8)
             Present(c, env, Mode::On, kActive, kActive);
+        }
         CHECK(env.replays.empty());
         CHECK_CONTAINS(env.All(), "does not own the window");
         CHECK(Warnings(env) >= 1);
@@ -584,8 +587,12 @@ int main()
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         env.autoOff = false; // frame generation cannot be turned off
         for (int i = 0; i < 23; ++i)
+        {
+            env.nowMs += 30; // 24 presents and 500 ms are the hard limit (L8)
             Present(c, env, Mode::On, kActive, kActive);
+        }
         CHECK(env.replays.empty());
+        env.nowMs += 30;
         Present(c, env, Mode::On, kActive, kActive);
         CHECK(env.replays.size() == 1);
         CHECK(env.replays[0].fgActiveAtCall); // documented: this is the fail-open case
@@ -668,10 +675,16 @@ int main()
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
         env.current = 7;
         for (int i = 0; i < 20; ++i)
+        {
+            env.nowMs += 30; // 24 presents and 500 ms are the hard limit (L8)
             Present(c, env, Mode::On, kPaused, kPaused);
+        }
         CHECK(env.replays.empty());
         for (int i = 0; i < 4; ++i)
+        {
+            env.nowMs += 30;
             Present(c, env, Mode::On, kPaused, kPaused);
+        }
         CHECK(env.replays.empty()); // M6: the hard limit on a thread that does not own the window drops the hold, no replay
         CHECK_CONTAINS(env.All(), "does not own the window");
         CHECK(Warnings(env) >= 1);

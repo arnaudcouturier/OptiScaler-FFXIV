@@ -102,8 +102,8 @@ int main()
         Deferral d; // not allowed: the hard limit still replays, by presents...
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 23; ++i)
-            CHECK(d.OnPresentEnd(false, false, i + 1, true, false) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, false, 24, true, false) == WaitResult::ReplayAtHardLimit);
+            CHECK(d.OnPresentEnd(false, false, (i + 1) * 25, true, false) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, false, 600, true, false) == WaitResult::ReplayAtHardLimit);
     }
     {
         Deferral d; // ... and by time
@@ -128,11 +128,11 @@ int main()
 
     // Hard limit by presents and by time: replay regardless (fail open).
     {
-        Deferral d; // hard 24 presents
+        Deferral d; // hard 24 presents (and 500 ms)
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 23; ++i)
-            CHECK(d.OnPresentEnd(true, false, i + 1, true, true) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(true, false, 24, true, true) == WaitResult::ReplayAtHardLimit);
+            CHECK(d.OnPresentEnd(true, false, (i + 1) * 25, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 600, true, true) == WaitResult::ReplayAtHardLimit);
     }
     {
         Deferral d; // hard 6000 ms
@@ -146,8 +146,8 @@ int main()
         Deferral d;
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 23; ++i)
-            CHECK(d.OnPresentEnd(false, true, i + 1, false, true) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, true, 24, false, true) == WaitResult::ReplayAtHardLimit);
+            CHECK(d.OnPresentEnd(false, true, (i + 1) * 25, false, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, true, 600, false, true) == WaitResult::ReplayAtHardLimit);
     }
     {
         Deferral d;
@@ -162,6 +162,36 @@ int main()
         CHECK(d.OnPresentEnd(false, true, 2, true, true) == WaitResult::Replay);
     }
 
+    // L8: the presents limit alone shrinks with the frame rate (24 presents are 100 ms at 240 fps): it also needs 500 ms. The
+    // 6 s time limit stays, and does not need the presents.
+    {
+        Deferral d;
+        CHECK(d.Begin(true, 1000));
+        for (int i = 0; i < 40; ++i)
+            CHECK(d.OnPresentEnd(true, false, 1000 + (i + 1) * 4, true, true) == WaitResult::Wait); // 40 presents in 160 ms
+        CHECK(d.OnPresentEnd(true, false, 1499, true, true) == WaitResult::Wait);  // 499 ms: not yet
+        CHECK(d.OnPresentEnd(true, false, 1500, true, true) == WaitResult::ReplayAtHardLimit); // 500 ms and well over 24 presents
+    }
+    {
+        // 500 ms but fewer than 24 presents: the presents limit is not reached
+        Deferral d;
+        CHECK(d.Begin(true, 0));
+        for (int i = 0; i < 10; ++i)
+            CHECK(d.OnPresentEnd(true, false, 100 * (i + 1), true, true) == WaitResult::Wait); // 1000 ms, 10 presents
+    }
+    {
+        // the floor is a limit field: custom 0 gives the old behaviour, custom 2000 delays it
+        DeferralLimits limits;
+        limits.hardPresents = 3;
+        limits.hardPresentsMinMs = 2000;
+        Deferral d(limits);
+        CHECK(d.Begin(true, 0));
+        CHECK(d.OnPresentEnd(true, false, 1, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 2, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 3, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 1999, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 2000, true, true) == WaitResult::ReplayAtHardLimit);
+    }
     // Custom limits are honoured.
     {
         DeferralLimits limits;
@@ -177,6 +207,7 @@ int main()
         DeferralLimits limits;
         limits.softPresents = 2;
         limits.hardPresents = 3;
+        limits.hardPresentsMinMs = 0;
         Deferral d(limits);
         CHECK(d.Begin(true, 0));
         CHECK(d.OnPresentEnd(true, false, 1, true, true) == WaitResult::Wait);

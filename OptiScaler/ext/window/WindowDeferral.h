@@ -12,7 +12,8 @@
 // during the wait (the pause after a Deactivate is only about ten frames); every present that finds it active asks the
 // controller to switch it off again, and the replay never runs with it active until the hard limit, which replays
 // regardless (also after a run of failed presents, when nothing was ever confirmed): the call then goes through as it would
-// today (fail open), and the controller logs that loudly.
+// today (fail open), and the controller logs that loudly. The hard limit is 6 s, or 24 presents AND at least 500 ms (a presents
+// limit alone shrinks with the frame rate).
 
 #include <cstdint>
 
@@ -43,6 +44,7 @@ struct DeferralLimits
     uint32_t softPresents = 6; // well below the ~10 frame pause after a Deactivate
     uint64_t softMs = 2000;
     uint32_t hardPresents = 24;
+    uint64_t hardPresentsMinMs = 500; // the presents limit also needs this long (24 presents are only 100 ms at 240 fps)
     uint64_t hardMs = 6000;
 };
 
@@ -122,7 +124,7 @@ class Deferral
 
         if (rightThread && !fgMaybeOn && gateConfirmed)
             return WaitResult::Replay;
-        if (_presents >= _limits.hardPresents || elapsed >= _limits.hardMs)
+        if ((_presents >= _limits.hardPresents && elapsed >= _limits.hardPresentsMinMs) || elapsed >= _limits.hardMs)
             return WaitResult::ReplayAtHardLimit;
         if (rightThread && softAllowed && !fgMaybeOn && (_presents >= _limits.softPresents || elapsed >= _limits.softMs))
             return WaitResult::ReplayAtLimit;
