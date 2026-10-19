@@ -168,6 +168,28 @@ int main()
     CHECK(!ShouldPublish(0.0, std::nan("")));  // a broken value is never published
     CHECK(ShouldPublish(std::nan(""), 0.0));   // ... and a broken old value is replaced by the next good one
 
+    // ---- EffectiveOutputScaling: the multiplier counts only where the upscaler really scales its output -------------------
+    for (const bool lowRes : { false, true })
+        for (const bool same : { false, true })
+        {
+            CHECK(EffectiveOutputScaling(false, 1.5, lowRes, same) == 1.0);   // option off: never
+            CHECK(EffectiveOutputScaling(false, 0.0, lowRes, same) == 1.0);
+            CHECK(EffectiveOutputScaling(true, 0.0, lowRes, same) == 1.0);    // a broken multiplier counts as 1
+            CHECK(EffectiveOutputScaling(true, -2.0, lowRes, same) == 1.0);
+            CHECK(EffectiveOutputScaling(true, std::nan(""), lowRes, same) == 1.0);
+            CHECK(EffectiveOutputScaling(true, HUGE_VAL, lowRes, same) == 1.0);
+        }
+    CHECK(EffectiveOutputScaling(true, 1.5, false, false) == 1.0);            // full-res motion vectors, render < display
+    CHECK(EffectiveOutputScaling(true, 1.5, true, false) == 1.5);             // low-res motion vectors
+    CHECK(EffectiveOutputScaling(true, 1.5, false, true) == 1.5);             // render == display
+    CHECK(EffectiveOutputScaling(true, 1.5, true, true) == 1.5);
+    CHECK(EffectiveOutputScaling(true, 2.0, true, false) == 2.0);             // the configured value, unchanged
+
+    // ---- EffectiveLowResMv: the user's DisplayResolution override beats the create flag ------------------------------------
+    CHECK(!EffectiveLowResMv(false, false, false) && EffectiveLowResMv(true, false, false));
+    CHECK(EffectiveLowResMv(false, true, false));   // DisplayResolution=false -> low res motion vectors
+    CHECK(!EffectiveLowResMv(true, true, true));    // DisplayResolution=true -> display resolution vectors
+
     if (g_failed != 0)
     {
         std::printf("%d check(s) failed\n", g_failed);

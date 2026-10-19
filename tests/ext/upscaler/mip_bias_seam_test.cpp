@@ -64,7 +64,23 @@ int main(int argc, char** argv)
     // ---- 1. the call in ApplyForcedQuality ------------------------------------------------------------------------
     {
         const std::string seams = ReadAll(root + "/OptiScaler/ext/upscaler/UpscalerSeams.cpp");
-        CHECK(Count(seams, "mipbias::OnFeatureCreate(width, height, outWidth, outHeight);") == 1);
+        CHECK(Count(seams, "mipbias::OnFeatureCreate(width, height, outWidth, outHeight, MvLowResFlag(params));") == 1);
+
+        // The MVLowRes create flag is read from the NGX parameters the seam is handed (output scaling counts only with
+        // low-res motion vectors or render == display).
+        CHECK(seams.find("params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags)") != std::string::npos);
+        CHECK(seams.find("NVSDK_NGX_DLSS_Feature_Flags_MVLowRes") != std::string::npos);
+
+        // The create path takes no forced-preset input: a login screen in native DLAA and a DLAA the player chose look
+        // the same to it (study 3.2). The glue must not know about the forced-quality state.
+        const std::string glue = ReadAll(root + "/OptiScaler/ext/upscaler/MipBias.cpp");
+        CHECK(glue.find("dlaaRequired") == std::string::npos);
+        CHECK(glue.find("DlaaRequired") == std::string::npos);
+        CHECK(glue.find("forcePerfQuality") == std::string::npos);
+        CHECK(glue.find("ForcedQuality") == std::string::npos);
+        CHECK(glue.find("ForcePerfQuality") == std::string::npos);
+        CHECK(glue.find("PerfQuality") == std::string::npos);
+        CHECK(glue.find("(pq") == std::string::npos && glue.find(" pq") == std::string::npos);
 
         const size_t fn = seams.find("bool ApplyForcedQuality(");
         const size_t call = seams.find("mipbias::OnFeatureCreate(");
@@ -108,7 +124,7 @@ int main(int argc, char** argv)
         CHECK(glue.find("UpscalerConfig::PostLoad") == std::string::npos);
 
         // A create that arrives before the config load's hook was registered still configures the policy first.
-        const size_t ensure = glue.find("EnsureConfigured();\n\n    const Outcome o = OnCreate(");
+        const size_t ensure = glue.find("EnsureConfigured();\n\n    const Outcome o = OnRawCreate(");
         CHECK(ensure != std::string::npos);
     }
 

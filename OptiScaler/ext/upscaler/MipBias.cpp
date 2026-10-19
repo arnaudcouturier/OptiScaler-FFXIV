@@ -61,18 +61,25 @@ void OnConfigLoaded(bool enabled, float offset)
     Write(Configure(CurrentPolicy(), enabled, offset));
 }
 
-void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight)
+void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag)
 {
     const auto* config = Config::Instance();
-    const bool extendedLimits = config->ExtendedLimits.value_or_default();
-    const double outputScaling = config->OutputScalingEnabled.value_or_default()
-                                     ? static_cast<double>(config->OutputScalingMultiplier.value_or_default())
-                                     : 1.0;
+
+    RawCreate create;
+    create.width = width;
+    create.height = height;
+    create.outWidth = outWidth;
+    create.outHeight = outHeight;
+    create.extendedLimits = config->ExtendedLimits.value_or_default();
+    create.outputScalingEnabled = config->OutputScalingEnabled.value_or_default();
+    create.outputScalingMultiplier = static_cast<double>(config->OutputScalingMultiplier.value_or_default());
+    create.lowResMv =
+        EffectiveLowResMv(lowResMvFlag, config->DisplayResolution.has_value(), config->DisplayResolution.value_or(false));
 
     std::scoped_lock lock(PolicyMutex());
     EnsureConfigured();
 
-    const Outcome o = OnCreate(CurrentPolicy(), width, height, outWidth, outHeight, extendedLimits, outputScaling);
+    const Outcome o = OnRawCreate(CurrentPolicy(), create);
     Write(o);
 
     if (!o.log)

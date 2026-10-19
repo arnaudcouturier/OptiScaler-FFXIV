@@ -325,6 +325,77 @@ int main()
                    "(was 0.0000, offset +0.00); applies to samplers created from now on");
     }
 
+    // ---- OnRawCreate: the whole create path the glue runs (output scaling choice, extended limits) -------------------------
+    {
+        RawCreate c;
+        c.width = 2560;
+        c.height = 1440;
+        c.outWidth = 3840;
+        c.outHeight = 2160;
+        c.outputScalingEnabled = true;
+        c.outputScalingMultiplier = 1.5;
+
+        {   // output scaling on, full-res motion vectors, render < display: the upscaler outputs at display size, no multiplier
+            Policy p;
+            Configure(p, true, 0.0);
+            const Outcome o = OnRawCreate(p, c);
+            CHECK(o.accepted && o.outputScaling == 1.0);
+            CHECK(Near(o.value, std::log2(2560.0 / 3840.0)));           // -0.585, not -1.170
+        }
+        {   // the same with low-res motion vectors: the output really is 1.5x the display
+            Policy p;
+            Configure(p, true, 0.0);
+            c.lowResMv = true;
+            const Outcome o = OnRawCreate(p, c);
+            CHECK(o.outputScaling == 1.5);
+            CHECK(Near(o.value, std::log2(2560.0 / (3840.0 * 1.5))));   // -1.170
+            c.lowResMv = false;
+        }
+        {   // render == display: the upscaler scales its output whatever the vector flag says
+            Policy p;
+            Configure(p, true, 0.0);
+            RawCreate d = c;
+            d.width = 3840;
+            d.height = 2160;
+            const Outcome o = OnRawCreate(p, d);
+            CHECK(o.outputScaling == 1.5);
+            CHECK(Near(o.value, std::log2(1.0 / 1.5)));
+        }
+        {   // option off: the multiplier is ignored whatever the flags are
+            Policy p;
+            Configure(p, true, 0.0);
+            RawCreate d = c;
+            d.outputScalingEnabled = false;
+            d.lowResMv = true;
+            const Outcome o = OnRawCreate(p, d);
+            CHECK(o.outputScaling == 1.0);
+            CHECK(Near(o.value, std::log2(2560.0 / 3840.0)));
+        }
+        {   // extended limits are forwarded unchanged: Width/Height stay the render size even when they exceed the display
+            RawCreate d;
+            d.width = 5000;
+            d.height = 2800;
+            d.outWidth = 3840;
+            d.outHeight = 2160;
+            Policy normal;
+            const Outcome swapped = OnRawCreate(normal, d);
+            CHECK(swapped.accepted && swapped.sizes.renderW == 3840 && swapped.sizes.displayW == 5000);
+
+            d.extendedLimits = true;
+            Policy extended;
+            const Outcome as_given = OnRawCreate(extended, d);
+            CHECK(as_given.accepted && as_given.sizes.renderW == 5000 && as_given.sizes.displayW == 3840);
+        }
+        {   // a create that is rejected changes nothing
+            Policy p;
+            Configure(p, true, 0.0);
+            RawCreate d = c;
+            d.outWidth = 0;
+            const Outcome o = OnRawCreate(p, d);
+            CHECK(!o.accepted && o.reject == Reject::OutOfRange && !p.haveSizes);
+        }
+    }
+
     if (g_failed != 0)
     {
         std::printf("%d check(s) failed\n", g_failed);

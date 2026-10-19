@@ -133,6 +133,25 @@ inline double BiasFromSizes(unsigned renderW, unsigned displayW, double outputSc
     return std::log2(ratio);
 }
 
+// The output scaling multiplier the upscaler really applies. Upstream (upscalers/dlss/DLSSFeature.cpp:63 and the FSR / XeSS
+// equivalents) enlarges its output target only when OutputScalingEnabled && (LowResMV() || RenderWidth() == DisplayWidth());
+// in every other case the output has the display size and the multiplier must not enter the bias. Zero, negative, NaN
+// and infinite multipliers count as 1.
+inline double EffectiveOutputScaling(bool enabled, double multiplier, bool lowResMv, bool renderEqualsDisplay)
+{
+    if (!enabled || !(lowResMv || renderEqualsDisplay))
+        return 1.0;
+
+    return (multiplier > 0.0 && std::isfinite(multiplier)) ? multiplier : 1.0;
+}
+
+// The "LowResMV" of the feature being created, as IFeature::SetInitParameters decides it: the user's DisplayResolution
+// override when there is one (display resolution motion vectors = not low res), else the MVLowRes create flag.
+inline bool EffectiveLowResMv(bool createFlagLowRes, bool haveDisplayResolution, bool displayResolution)
+{
+    return haveDisplayResolution ? !displayResolution : createFlagLowRes;
+}
+
 inline double ClampOffset(double offset)
 {
     if (!std::isfinite(offset))
@@ -310,6 +329,30 @@ inline Outcome OnCreate(Policy& p, unsigned width, unsigned height, unsigned out
     return o;
 }
 
+// What the glue reads for one create: the raw NGX sizes plus the settings that decide the output scaling. OnRawCreate is
+// everything the glue does to them besides taking the config, the lock and the log, so it is tested as a whole.
+struct RawCreate
+{
+    unsigned width = 0;
+    unsigned height = 0;
+    unsigned outWidth = 0;
+    unsigned outHeight = 0;
+    bool extendedLimits = false;
+    bool outputScalingEnabled = false;
+    double outputScalingMultiplier = 1.0;
+    bool lowResMv = false; // already resolved by EffectiveLowResMv
+};
+
+inline Outcome OnRawCreate(Policy& p, const RawCreate& c)
+{
+    const auto check = CreateSizes(c.width, c.height, c.outWidth, c.outHeight, c.extendedLimits);
+    const bool renderEqualsDisplay = check.reject == Reject::None && check.sizes.renderW == check.sizes.displayW;
+    const double scaling = EffectiveOutputScaling(c.outputScalingEnabled, c.outputScalingMultiplier, c.lowResMv,
+                                                  renderEqualsDisplay);
+
+    return OnCreate(p, c.width, c.height, c.outWidth, c.outHeight, c.extendedLimits, scaling);
+}
+
 // ---- text: the log lines the in-game check reads and the menu card ---------------------------------------------------
 namespace detail
 {
@@ -462,8 +505,10 @@ template <class Optional> bool Apply(Optional& override_, const Outcome& o)
 void OnConfigLoaded(bool enabled, float offset);
 
 // ext::upscaler::ApplyForcedQuality, first statement after EnsureHooks(): every upscaler feature create, with the
-// NGX Width, Height, OutWidth, OutHeight as the game gave them.
-void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight);
+// NGX Width, Height, OutWidth, OutHeight as the game gave them, and whether the DLSS create flags say the motion vectors
+// are low resolution (NVSDK_NGX_DLSS_Feature_Flags_MVLowRes; the output scaling multiplier counts only then, or when
+// render == display, see EffectiveOutputScaling).
+void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag);
 
 // The menu card changed the checkbox or the offset (they are already stored in ext::Cfg().upscaler).
 void OnSettingChanged();
