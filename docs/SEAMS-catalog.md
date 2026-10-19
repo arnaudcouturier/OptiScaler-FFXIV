@@ -58,7 +58,9 @@ Not seams: `[LowLatency] Input/Output` and `[Vulkan] UseCopyForInputs/Output` pe
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
 |---|---|---|---|---|---|
-| `ext::menu::MergeBoxes(const MenuBox* base, size_t& count) -> const MenuBox*` | decision | `menu_common.cpp` `MenuCommon::GetMenuBoxes` (static array) | A5, A6, A12, C1, C5, C7, C8, C9, C10, C11, D1, D4 | init, once | Replaces the 2 NR/Companion box literals. Fixes the RenderCard/ScopedCard bypass. Registered card order uses `after`. |
+| `ext::menu::MergeBoxes(const MenuBox* base, size_t& count) -> const MenuBox*` | decision | `menu_common.cpp` `MenuCommon::GetMenuBoxes` (static array) | A5, A6, A12, C1, C5, C7, C8, C9, C10, C11, D1, D4 | init, once | Replaces the 2 NR/Companion box literals. Fixes the RenderCard/ScopedCard bypass. The order of the fork cards comes from the layout table (`ext/core/MenuLayout.h`, one slot per card id, independent of registration order), not from `after`. |
+| `ext::menu::SourceTracker<DrawFn>::Claim(DrawFn) -> bool` | decision (one local object) | `menu_common.cpp` `MenuCommon::RenderMainMenuTabs`, the tab body loop (replaces the `lastSource` variable and its comparison) | MENU (BACKLOG B7) | per-frame (menu open) | Draws each shared `source` function once per tab pass. Before, a fork card between two boxes of one function made that function run, and draw all its cards, a second time (Frame Gen runtime cards, Mipmap Bias and Anisotropic Filtering). `ext/core/SourceTracker.h`: a template on upstream's local `DrawFn`, fixed storage, a null source is never claimed, past 16 distinct sources it draws again instead of hiding. A shared function is drawn at the position of its first box, so a fork card goes before or after such a group, never inside it (the layout table and the manifest test keep it so). Upstream lines: +2 -4. |
+| `ext::menu::FfxivTabVisible<RenderMenuContext>(RenderMenuContext&) -> bool` | decision (one row of `tabs[]`) | `menu_common.cpp` `MenuCommon::RenderMainMenuTabs`, `tabs[]`, one row after "Frame Gen" | MENU | per-frame (menu open) | The "FFXIV" tab, third in the bar, hidden unless the game matched the FFXIV build entry (`ext::game::Current().lighting != nullptr`, defined in `ext/core/MenuRegistry.cpp`). Uses the existing `visible` field of upstream's `Tab`. The seven FFXIV-gated cards register for it (ids unchanged). Upstream lines: +1. |
 | `ext::menu::XeFgExtras(IFGFeature* fgOutput)` | hook | `menu_common.cpp` `RenderFrameGenerationRuntimeSettings`, XeFG card, right after the Frame Gen slider | D3 | per-frame (menu open) | Dynamic MFG, target FPS, current XeMFG label, Extra Pacing. In-card because of `SameLine` layout. **S5 (placed):** `ext/fg/xefg/XefgSeams.cpp`; takes the FG object (as `ObservedMultiplier` does), not `Ctx`. |
 | `ext::menu::AdjustFgOutputOptions(OutputOptions&)` | hook | `menu_common.cpp` `RenderFrameGenerationSelection` | C8 | per-frame (menu open) | FSR FG output disabled while OptiHDR active. |
 | `ext::menu::ObservedMultiplier(IFGFeature*)` | hook | `menu_common.cpp` FG status/debug area | D2, C11 | per-frame (menu open) | "Current DMFG: Nx (observed)" and the HUD-less tagged/rejected counters. Replaces the `IFGFeature::GetObservedFrameMultiplier` virtual (ext reads its own state). **S5 (placed, split):** the DMFG readout is `ObservedMultiplier` in the DLSSG card (`ext/fg/MenuFgStatus.cpp`); the HUD-less counters are a separate C11 seam (S10). |
@@ -328,7 +330,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | Group | Seams | Of which inline-guarded / RAII |
 |---|---|---|
 | config | 3 | 0 |
-| menu | 13 (1 provisional) | 0 |
+| menu | 15 (1 provisional) | 0 |
 | upscaler | 5 | 0 |
 | dx11bridge | 17 | 2 RAII |
 | nr | 10 | 2 RAII |
@@ -343,7 +345,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
-| **Total** | **118** | |
+| **Total** | **120** | |
 
 # (a) `[UP]` fix list
 
@@ -426,6 +428,8 @@ Basis: added plus removed lines against upstream base `fd6c2870`, reported by `t
 | IFgMarkers | 672 | +0 | none — every consuming seam was already wired by earlier waves; this wave only added `ext/` provider code |
 
 **W5 E5 (`w5-e5`, `CreateSwapChainForComposition` hook), measured with `tools\footprint.ps1` against base `fd6c2870`:** persistent surface 728 -> 746 (+18; the figure at `b90c9e22` is 728, not the 707 quoted in the W5 brief), `[UP]` unchanged at 787, upstream files touched 67 -> 70 (`wrapped_swapchain.cpp`, `wrapped_swapchain.h` and `DxgiFactory_Hooks.h` are new to the list; `DxgiFactory_Hooks.cpp` was already on it). Per file: `wrapped/wrapped_swapchain.cpp` +9/-3 (include, ctor signature, `_composition = isComposition;`, the two 2-line `Present`/`Present1` guards, the two `!_composition &&` conditions), `wrapped/wrapped_swapchain.h` +3/-1 (ctor declaration split in two lines, member), `hooks/DxgiFactory_Hooks.cpp` +1 (the `HookFactoryComposition(real)` call), `hooks/DxgiFactory_Hooks.h` +1 (the one-line public `SkipFgSwapChainCreation()` accessor). No single edit over 10 lines. This is the only W5 piece that adds upstream-file lines.
+
+**Menu cleanup (`menu-cleanup`, WP1 foundation), measured with `tools\footprint.ps1`:** persistent surface 758 -> 765 (+7), `[UP]` unchanged at 792, upstream files touched unchanged at 71. All of it is in `menu/menu_common.cpp` (+3 -4 against `9ec59342`): the draw-once tab loop (`SourceTracker`, +2 -4) and the one `tabs[]` row of the FFXIV tab (+1). Both are listed in the `menu` group above.
 
 No single wave is the overage's cause: each added only the minimum seam call plus a one-line `// ext:` marker at its host site, spread across 67 upstream files total. No reduction lever beyond what's already applied is documented anywhere in this catalog; cutting further would mean removing a ported feature, not tightening its footprint. The overage is disclosed to and accepted by the user as of the `ffxiv-ref-equiv-fd6c2870` tag (2026-10-15) — see `HANDOFF-phase3.md` for the full decision record.
 
