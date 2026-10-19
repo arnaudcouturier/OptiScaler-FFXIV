@@ -9,7 +9,7 @@
 
 #include <menu/menu_common.h>
 
-// Card `fg_hudless` (tab "Frame Gen"), docs/HUDLESS.md section 11: a status line (state, reason, counters), the mode
+// Card `fg_hudless` (tab "FFXIV"), docs/HUDLESS.md section 11: a status line (state, reason, counters), the mode
 // selector and an "Advanced" fold with the tuning keys. Replaces the reference build's REST HUD box, whose checkbox the
 // missing ReShade add-on kept greyed out; the old [FrameGen] ExternalUI* keys are gone.
 
@@ -139,6 +139,6 @@ void DrawHudless(ext::menu::Ctx&)
     ImGui::TreePop();
 }
 
-ext::menu::AutoRegister reg { { "fg_hudless", "FFXIV", "HUD-less frame generation", DrawHudless, "fg_selection",
+ext::menu::AutoRegister reg { { "fg_hudless", "FFXIV", "HUD-less (UI-free frame generation)", DrawHudless, "fg_selection",
                                 Visible } };
 } // namespace

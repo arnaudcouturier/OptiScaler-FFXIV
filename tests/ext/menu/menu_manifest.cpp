@@ -43,6 +43,8 @@ struct Reg
     std::string id, tab, file;
     bool gated = false; // the card's own visible predicate tests the game build (ext::game::Current()), see TestsGameBuild
     std::string visible; // name of that predicate ("" or "nullptr" when the registration has none)
+    bool titled = false; // a SectionTitle("<picker name>") exists in the card's own directory
+    std::string name;    // picker name
 };
 
 struct Model
@@ -51,7 +53,7 @@ struct Model
     std::vector<std::string> tabLabels;
     std::vector<Reg> regs;
     std::vector<Slot> slots;
-    std::vector<std::string> ffxivOnly, persisted, iniOnly;
+    std::vector<std::string> ffxivOnly, persisted, iniOnly, titleExceptions;
     std::vector<std::pair<std::string, std::string>> aliases;
     std::string extText; // squashed ext sources: where the ini keys are defined
 };
@@ -87,6 +89,10 @@ constexpr const char* kShippedForkIds[] = {
     "ffxiv_hdr",   "fg_hudless",              "fg_auto_mfg",    "window_mode",  "hudless_diag",
     "mipmap_auto", "ffxiv_companion",         "reshade_addon_probe",
 };
+
+// Cards that do not have their SectionTitle yet. Empty when the titles are done: an entry is an error as soon as its card
+// has the title. (WP3 adds the titles of the two Frame Gen cards.)
+constexpr const char* kTitleExceptions[] = { "fg_unlocks", "fg_auto_mfg" };
 
 Violations Check(const Model& m)
 {
@@ -124,6 +130,20 @@ Violations Check(const Model& m)
     for (const Slot& s : m.slots)
         if (!Contains<std::string>(m.tabLabels, s.tab))
             add("tab-label", std::string(s.id) + ": '" + s.tab + "' is not a tab of the menu");
+
+    // every card has a title and the picker name equals it: SectionTitle("<picker name>") in the card's own directory
+    // (the exception list names the cards that are still being titled; an entry must go as soon as its card has the title)
+    for (const Reg& r : m.regs)
+    {
+        const bool excepted = Contains<std::string>(m.titleExceptions, r.id);
+        if (!r.titled && !excepted)
+            add("title", r.id + ": no SectionTitle(\"" + r.name + "\") next to its registration (title and picker name must be equal)");
+        if (r.titled && excepted)
+            add("title", r.id + " has its title now: remove it from the exception list");
+    }
+    for (const std::string& id : m.titleExceptions)
+        if (std::none_of(m.regs.begin(), m.regs.end(), [&](const Reg& r) { return r.id == id; }))
+            add("title", id + " is on the title exception list but is not a registered card");
 
     // the FFXIV tab row exists once
     const auto rows = std::count(m.tabLabels.begin(), m.tabLabels.end(), std::string(manifest::kFfxivTab));
@@ -320,7 +340,20 @@ Model Build(const std::string& repo, std::string& menuCppRaw, std::string& menuH
 
     size_t tokens = 0;
     for (const auto& r : menuscan::ScanRegistrations(repo, tokens))
-        m.regs.push_back({ r.id, r.tab, r.file, menuscan::TestsGameBuild(r), r.visible });
+    {
+        // the title: SectionTitle("<name>") in any .cpp of the registration's directory (the NR card is registered in
+        // NrMenu.cpp and drawn by DlssNr_Menu.cpp)
+        bool titled = false;
+        const fs::path dir = fs::path(repo) / "OptiScaler" / "ext" / fs::path(r.file).parent_path();
+        const std::string wanted = "SectionTitle(\"" + r.name + "\")";
+        for (const auto& e : fs::directory_iterator(dir))
+            if (!r.name.empty() && e.is_regular_file() && e.path().extension() == ".cpp" &&
+                menuscan::StripComments(menuscan::ReadFile(e.path().string())).find(wanted) != std::string::npos)
+                titled = true;
+        m.regs.push_back({ r.id, r.tab, r.file, menuscan::TestsGameBuild(r), r.visible, titled, r.name });
+    }
+    for (const char* id : kTitleExceptions)
+        m.titleExceptions.push_back(id);
     CHECK(tokens == m.regs.size()); // every registration token was understood
 
     m.slots.assign(std::begin(layout::kSlots), std::end(layout::kSlots));
@@ -387,7 +420,7 @@ void ScannerUnits()
 
     { // a gated card
         const auto f = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Vis } };");
-        CHECK(f.size() == 1 && f[0].id == "x" && f[0].tab == "FFXIV" && f[0].visible == "Vis");
+        CHECK(f.size() == 1 && f[0].id == "x" && f[0].tab == "FFXIV" && f[0].visible == "Vis" && f[0].name == "X");
         CHECK(f.size() == 1 && menuscan::TestsGameBuild(f[0]));
     }
     { // the Register(...) form, the argument on the next line
@@ -523,6 +556,21 @@ void Broken(const Model& real)
         m = real;
         Find(m, "window_mode")->after = "hudless_diag";
         CHECK(Has(Check(m), "anchor"));
+    }
+    { // titles: a card whose title differs from the picker name, an exception that is no longer needed, a ghost exception
+        Model m = real;
+        for (Reg& r : m.regs)
+            if (r.id == "ffxiv_hdr")
+                r.titled = false;
+        CHECK(Has(Check(m), "title"));
+        m = real;
+        for (Reg& r : m.regs)
+            if (r.id == "mipmap_auto")
+                m.titleExceptions.push_back(r.id);
+        CHECK(Has(Check(m), "title"));
+        m = real;
+        m.titleExceptions.push_back("no_such_card");
+        CHECK(Has(Check(m), "title"));
     }
     { // a tab that comes back: a Textures card anchored on an FFXIV card lands behind the FFXIV block, before Latency & FPS
         Model m = real;

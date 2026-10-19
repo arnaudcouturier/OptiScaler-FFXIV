@@ -10,17 +10,17 @@
 
 #include <imgui/imgui.h>
 
-// S10 package A: menu card "HUD-less diagnostics" of the D1 build (docs/HUDLESS.md section 12). Visible only while
+// S10 package A: menu card "HUD-less diagnostics" of the D1 build (docs/HUDLESS.md section 12; the details sit in a fold that
+// is closed by default). Visible only while
 // [HudLess] Diagnostics is true on a matched FFXIV build.
 namespace
 {
 using namespace ext::ffxiv::ui;
 
-void DrawDiagCard(ext::menu::Ctx&)
+// The body of the card: drawn only while the fold of DrawDiagCard is open (it may return early: the TreePop is the
+// caller's).
+void DrawDiagBody()
 {
-    ext::menu::SectionTitle("HUD-less diagnostics (D1, observation only)");
-    ImGui::TextWrapped("Nothing here changes a draw, a copy or a Present. Send the run folder back after the session.");
-
     const diag::Status st = diag::GetStatus();
     if (!st.running)
     {
@@ -49,6 +49,20 @@ void DrawDiagCard(ext::menu::Ctx&)
                 st.snapshotImages);
     ImGui::TextWrapped("Press once in a scene with the UI shown; toggle the game's hide-UI key; press again in the same spot. "
                        "Each press saves the boundary capture(s) and the backbuffer of the same frame.");
+}
+
+void DrawDiagCard(ext::menu::Ctx&)
+{
+    ext::menu::SectionTitle("HUD-less diagnostics");
+    ImGui::TextWrapped("Observation only (D1): nothing here changes a draw, a copy or a Present. Send the run folder back after the "
+                       "session.");
+
+    // closed by default
+    if (ImGui::TreeNode("Show diagnostics##hudless_diag"))
+    {
+        DrawDiagBody();
+        ImGui::TreePop();
+    }
 }
 
 bool DiagVisible(const ext::menu::Ctx&) { return ext::game::Current().hudless != nullptr && DiagnosticsOn(); }

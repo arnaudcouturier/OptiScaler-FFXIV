@@ -31,7 +31,8 @@ void DrawHdrCard(ext::menu::Ctx& ctx)
 {
     auto& hdr = ext::Cfg().hdr;
     auto& nr = ext::Cfg().nr;
-    ext::menu::SectionTitle("FFXIV HDR10 output (experimental)");
+    ext::menu::SectionTitle("FFXIV HDR10 output");
+    ImGui::TextDisabled("(experimental) HDR10 output for the FFXIV build match.");
 
     bool enabled = hdr.ffxivHdr.value_or_default();
     if (ImGui::Checkbox("Enable OptiScaler HDR (restart)", &enabled))

@@ -32,10 +32,10 @@ const char* StateText(Session::ProbeState s)
     return "?";
 }
 
-void DrawReShadeCard(ext::menu::Ctx&)
+// The body of the card: drawn only while the fold of DrawReShadeCard is open (it may return early: the TreePop is the
+// caller's).
+void DrawReShadeBody()
 {
-    ext::menu::SectionTitle("ReShade built-in add-on (diagnostics)");
-
     const auto addon = ext::reshade::Status();
     if (addon.registered)
         ImGui::Text("Registration: registered with ReShade (add-on API %u)", addon.apiVersion);
@@ -115,6 +115,18 @@ void DrawReShadeCard(ext::menu::Ctx&)
         ImGui::SameLine();
         if (ImGui::Button("Cancel"))
             session->Disarm();
+    }
+}
+
+void DrawReShadeCard(ext::menu::Ctx&)
+{
+    ext::menu::SectionTitle("ReShade built-in add-on (diagnostics)");
+
+    // closed by default
+    if (ImGui::TreeNode("Show probe details##reshade_probe"))
+    {
+        DrawReShadeBody();
+        ImGui::TreePop();
     }
 }
 

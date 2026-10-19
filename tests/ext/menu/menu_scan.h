@@ -233,6 +233,8 @@ struct Registration
     std::string visible;
     // The body of `bool <visible>(...) { ... }` in the same file, "" when it is not found
     std::string visibleBody;
+    // The picker name: the third field of the Card ("" when it is not a plain string literal)
+    std::string name;
 };
 
 inline bool IsWordChar(char c)
@@ -336,6 +338,8 @@ inline void ScanRegistrationText(const std::string& code, const std::string& rel
                 else if (code[i] == '}' && --depth == 0)
                 {
                     const auto fields = Fields(code.substr(open + 1, i - open - 1));
+                    if (fields.size() > 2)
+                        r.name = Unquote(fields[2]);
                     if (fields.size() > 5)
                         r.visible = fields[5];
                     break;

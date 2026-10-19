@@ -10,6 +10,7 @@
 #include <Config.h>
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
+#include "ext/core/MenuWidgets.h"
 #include "ext/game/Game.h"
 
 namespace ext::ffxiv::companion
@@ -74,10 +75,14 @@ void AroundIndexed(ID3D11DeviceContext* context, UINT count, UINT start, DrawCal
     DrawState call { draw, state };
     Gpu::AroundIndexed(context, count, start, [&] { InvokeDraw(&call); });
 }
-void DrawCompanionCard(ext::menu::Ctx&) { DrawSettings(); }
+void DrawCompanionCard(ext::menu::Ctx&)
+{
+    ext::menu::SectionTitle("FFXIV Companion (nameplates)");
+    DrawSettings();
+}
 bool CompanionVisible(const ext::menu::Ctx&) { return ext::game::Current().hdr != nullptr; }
 const ext::menu::AutoRegister companionCard {
-    { "ffxiv_companion", "FFXIV", "FFXIV Companion", DrawCompanionCard, nullptr, CompanionVisible }
+    { "ffxiv_companion", "FFXIV", "FFXIV Companion (nameplates)", DrawCompanionCard, nullptr, CompanionVisible }
 };
 } // namespace
 
