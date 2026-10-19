@@ -110,6 +110,8 @@ struct NgxEnvironment
             return false;
         return fg->IsActive() && !fg->IsPaused() && Config::Instance()->IsFGEnabled();
     }
+    // State::activeFgInput by its config name (Upscaler, DLSSG, NoFG, ...): only the Upscaler input reads the replaced pair from the block.
+    std::string FrameGenerationInput() { return EnumToCode(::State::Instance().activeFgInput); }
 };
 } // namespace
 

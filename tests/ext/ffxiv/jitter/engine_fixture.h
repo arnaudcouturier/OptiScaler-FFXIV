@@ -38,7 +38,9 @@ struct FakeEnv
 
     std::vector<Op> ops;
     std::vector<std::string> logs;
+    std::string frameGenerationInput = "Upscaler"; // State::activeFgInput as text ("" = could not be told)
     int locks = 0, buildLookups = 0, clockReads = 0, qualityQueries = 0, fgQueries = 0, setsEver = 0;
+    int fgInputQueries = 0;
 
     struct Held
     {
@@ -96,6 +98,11 @@ struct FakeEnv
     {
         ++fgQueries;
         return frameGeneration;
+    }
+    std::string FrameGenerationInput()
+    {
+        ++fgInputQueries;
+        return frameGenerationInput;
     }
 
     std::size_t Gets() const

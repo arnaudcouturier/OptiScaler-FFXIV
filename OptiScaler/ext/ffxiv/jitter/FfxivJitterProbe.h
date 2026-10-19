@@ -633,13 +633,16 @@ inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t p
                        probeFailures, passThroughs, replacements);
 }
 
-// `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too.
-inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration)
+// `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too, but
+// only through the Upscaler input (the others get their jitter elsewhere), so `input` (State::activeFgInput as text, empty = not known)
+// is printed next to it.
+inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration, const std::string& input)
 {
+    const std::string inputText = input.empty() ? std::string() : std::format(" (input {})", input);
     return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} replaced by the applied jitter, {} passed through "
                        "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
-                       "not steady, {} first frame after a gap or a rejected evaluate); frame generation active {}",
+                       "not steady, {} first frame after a gap or a rejected evaluate); frame generation active {}{}",
                        c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,
-                       frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown");
+                       frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown", inputText);
 }
 } // namespace ext::ffxiv::jitter

@@ -18,6 +18,7 @@
 //   std::uint64_t NowMs();
 //   void Log(const std::string&);
 //   std::optional<bool> FrameGenerationActive();  asked only when a status line is written
+//   std::string FrameGenerationInput();           the active frame-generation input as text ("" = not known); asked with it
 //
 // Order inside one step (this is the contract the tests pin): key gate, lock, build, [probe-only time precheck], read the NGX jitter
 // and the other parameters, limiter, read the game's object, decide, write (correction only), then the log lines.
@@ -217,7 +218,7 @@ class Engine
         // The status line carries the totals since the start, so thinning it (the first 60 lines at every tick, then one per 60 s) loses
         // nothing; the counts are never zeroed.
         if (correct && _statusLog.Take(now))
-            env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
+            env.Log(FormatStatus(_counts, env.FrameGenerationActive(), env.FrameGenerationInput()));
 
         // The episodes the three logs had no budget left for, in either mode, only when the total changed since the last report and
         // thinned the same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that

@@ -16,10 +16,14 @@ namespace
 // M3: the status line says whether frame generation is active (the replaced pair feeds it too), and asks only when it writes the line.
 void TestStatusLineSaysWhetherFrameGenerationIsActive()
 {
-    for (int mode = 0; mode < 3; ++mode)
+    // L2 (fix round 2): the field also names the frame-generation INPUT, because only the Upscaler input reads the corrected pair from the
+    // parameter block; for another input "active yes" would be true while the pair never reaches it.
+    const char* inputs[] = { "Upscaler", "NoFG", "", "DLSSG" };
+    for (int mode = 0; mode < 4; ++mode)
     {
         FakeEnv e = MakeEnv();
-        e.frameGeneration = mode == 0 ? std::optional<bool> { true } : mode == 1 ? std::optional<bool> { false } : std::nullopt;
+        e.frameGeneration = mode == 0 ? std::optional<bool> { true } : mode == 1 ? std::optional<bool> { false } : mode == 2 ? std::nullopt : std::optional<bool> { true };
+        e.frameGenerationInput = inputs[mode];
         Engine engine;
         int statusLines = 0;
         for (int i = 0; i < 40; ++i)
@@ -29,10 +33,13 @@ void TestStatusLineSaysWhetherFrameGenerationIsActive()
                 if (Has(line, "Jitter correction: on;"))
                 {
                     ++statusLines;
-                    CHECK(Has(line, mode == 0 ? "frame generation active yes" : mode == 1 ? "frame generation active no" : "frame generation active unknown"));
+                    const char* expected[] = { "frame generation active yes (input Upscaler)", "frame generation active no (input NoFG)",
+                                               "frame generation active unknown", "frame generation active yes (input DLSSG)" };
+                    CHECK(Has(line, expected[mode]));
+                    CHECK(mode != 2 || !Has(line, "(input")); // an input that could not be told is left out, not printed empty
                 }
         }
-        CHECK(statusLines == 4 && e.fgQueries == 4); // one every 10 s of the fake clock, and nothing asked in between
+        CHECK(statusLines == 4 && e.fgQueries == 4 && e.fgInputQueries == 4); // one every 10 s of the fake clock, and nothing asked in between
     }
 }
 
