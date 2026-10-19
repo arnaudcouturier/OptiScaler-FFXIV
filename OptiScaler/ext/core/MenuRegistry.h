@@ -14,6 +14,8 @@
 // card to follow; when it is null or unknown the card goes after the last card of its tab. Cards with the same
 // anchor keep their registration order. At most kMaxCards cards.
 
+#include "ext/core/SourceTracker.h"
+
 #include <array>
 #include <cstddef>
 #include <cstring>

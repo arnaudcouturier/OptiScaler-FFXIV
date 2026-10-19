@@ -8973,7 +8973,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
 
         size_t boxCount = 0;
         const MenuBox* boxes = GetMenuBoxes(boxCount);
-        DrawFn lastSource = nullptr;
+        ext::menu::SourceTracker<DrawFn> drawnSources; // ext: each shared function is drawn once per tab pass
 
         for (size_t i = 0; i < boxCount; i++)
         {
@@ -8983,15 +8983,13 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
             // A function with several boxes is drawn once for all of them
             if (boxes[i].draw == nullptr)
             {
-                if (boxes[i].source != lastSource)
+                if (drawnSources.Claim(boxes[i].source)) // ext: was `source != lastSource`
                     boxes[i].source(ctx);
             }
             else
             {
                 boxes[i].draw(ctx);
             }
-
-            lastSource = boxes[i].source;
         }
 
         ImGui::EndChild();
