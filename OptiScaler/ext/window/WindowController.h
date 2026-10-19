@@ -105,7 +105,7 @@ class Controller
         _swapW = swapWidth;
         _swapH = swapHeight;
 
-        const bool nested = _actionDepth > 0;
+        const bool nested = Nested(env);
         const int prev = SampleExclusive(env, mode, "bridge resize");
 
         ProbeFields f = Fill(env, mode, "resize-done", hwnd);
@@ -227,8 +227,19 @@ class Controller
         const DeferState before = _deferral.State();
         f.deferState = DeferStateName(before);
 
+        // L1: decide first, build and write both log lines, and only then change any state. A log that throws (an allocation, a
+        // formatter, the logger) must leave nothing held: the entry point then returns false and the game's call passes, and a
+        // hold left behind would replay the same call a second time.
+        enum class Commit : uint8_t
+        {
+            None,
+            DropMoot, // the latest request equals the state in effect: the held call is dropped
+            Replace,  // the held call is replaced by this one
+            Hold,     // this call is held, frame generation is asked off
+        };
         bool prevent = false;
         const char* action = nullptr;
+        Commit commit = Commit::None;
         if (mode == Mode::On)
         {
             switch (before)
@@ -244,8 +255,7 @@ class Controller
                 {
                     // The latest request asks for the state that is in effect: the held call is moot, a replay would only
                     // cost another frame generation outage. Drop it; this call passes (a no-op for the window).
-                    _deferral.Cancel();
-                    _pendingNative = 0;
+                    commit = Commit::DropMoot;
                     action = "latest request equals the state in effect: held call dropped, this call passes";
                 }
                 else if (!in.threadsAgree)
@@ -254,7 +264,7 @@ class Controller
                 }
                 else
                 {
-                    _deferral.Replace(ev.fullscreen);
+                    commit = Commit::Replace;
                     prevent = true;
                     action = "replaces the held call (only the latest is kept)";
                 }
@@ -262,11 +272,7 @@ class Controller
             case DeferState::Idle:
                 if (f.verdict == DeferVerdict::Defer)
                 {
-                    // State is settled first, then the calls out.
-                    _pendingNative = ev.native;
-                    _pendingThread = f.currentThread;
-                    _deferral.Begin(ev.fullscreen, env.NowMs());
-                    AskFgOff(env);
+                    commit = Commit::Hold;
                     prevent = true;
                     action = "held back: frame generation asked off, replayed once it is confirmed off";
                 }
@@ -281,7 +287,38 @@ class Controller
             env.Log(std::format("Window: SetFullscreenState({}) {}; handler returns {}", ev.fullscreen ? "TRUE" : "FALSE",
                                 action, prevent ? "true (prevent)" : "false"),
                     false);
-        return prevent;
+
+        // Nothing below logs. State is settled first, then the call out; if the call out throws, the hold is cancelled.
+        switch (commit)
+        {
+        case Commit::None:
+            break;
+        case Commit::DropMoot:
+            _deferral.Cancel();
+            _pendingNative = 0;
+            break;
+        case Commit::Replace:
+            _deferral.Replace(ev.fullscreen);
+            break;
+        case Commit::Hold:
+        {
+            const uint64_t now = env.NowMs();
+            _pendingNative = ev.native;
+            _pendingThread = f.currentThread;
+            _deferral.Begin(ev.fullscreen, now);
+            try
+            {
+                AskFgOff(env);
+            }
+            catch (...)
+            {
+                _deferral.Cancel();
+                _pendingNative = 0;
+                throw;
+            }
+            break;
+        }
+        }        return prevent;
     }
 
     // Test access.
@@ -401,24 +438,45 @@ class Controller
         f.swapWidth = _swapW;
         f.swapHeight = _swapH;
         f.fixArmed = _fixArmed;
-        f.nested = _actionDepth > 0;
+        f.nested = Nested(env);
         return f;
     }
 
-    // While alive: the module is inside its own replay (depth > 0). On every exit, a throwing log included, Replaying ends.
-    struct ReplayGuard
+    // While alive: the module is inside one of its own window calls, on the thread that made it (L3). On every exit, a throwing
+    // call or log included, the depth and the thread go back.
+    struct ActionScope
     {
-        ReplayGuard(Deferral& d, int& depth) : _d(d), _depth(depth) { ++_depth; }
-        ~ReplayGuard()
+        ActionScope(int& depth, uint32_t& thread, uint32_t current) : _depth(depth), _thread(thread), _savedThread(thread)
+        {
+            ++_depth;
+            _thread = current;
+        }
+        ~ActionScope()
         {
             --_depth;
-            _d.EndReplay();
+            _thread = _savedThread;
         }
+        ActionScope(const ActionScope&) = delete;
+        ActionScope& operator=(const ActionScope&) = delete;
+        int& _depth;
+        uint32_t& _thread;
+        uint32_t _savedThread;
+    };
+
+    // The same, plus Replaying ends on every exit.
+    struct ReplayGuard
+    {
+        ReplayGuard(Deferral& d, int& depth, uint32_t& thread, uint32_t current) : _d(d), _scope(depth, thread, current) {}
+        ~ReplayGuard() { _d.EndReplay(); }
         ReplayGuard(const ReplayGuard&) = delete;
         ReplayGuard& operator=(const ReplayGuard&) = delete;
         Deferral& _d;
-        int& _depth;
+        ActionScope _scope;
     };
+
+    // True only on the thread that is inside a window call of this module: with the module lock given up around the calls
+    // out, another thread's resize that arrives meanwhile is not nested.
+    bool Nested(Env& env) const { return _actionDepth > 0 && _actionThread == env.CurrentThread(); }
 
     // Drops a held call without replaying it (nothing else to release: no reference is taken on the swapchain).
     void DropHold(Env& env, const char* why, bool warn = false)
@@ -510,7 +568,7 @@ class Controller
         _pendingNative = 0;
         _reRequestNoted = false;
 
-        ReplayGuard logGuard(_deferral, _actionDepth); // a throwing log must not leave Replaying stuck
+        ReplayGuard logGuard(_deferral, _actionDepth, _actionThread, env.CurrentThread()); // a throwing log must not leave Replaying stuck
         int32_t hr = 0;
         env.Log(std::format("Window: replaying SetFullscreenState({}) with a null target: {} (after {} presents, {} ms, {} "
                             "earlier call(s) replaced, fg={})",
@@ -592,9 +650,11 @@ class Controller
         }
 
         _fixArmed = false; // settled before the call out: the call runs the game's window procedure
-        ++_actionDepth;
-        const bool ok = env.ApplyExStyle(_hwnd, *fixed);
-        --_actionDepth;
+        bool ok = false;
+        {
+            ActionScope scope(_actionDepth, _actionThread, current); // restored even if the call throws
+            ok = env.ApplyExStyle(_hwnd, *fixed);
+        }
 
         const WindowInfo after = env.ReadWindow(_hwnd);
         env.Log(std::format("Window: border fix {} exstyle {:#010x} -> {:#010x} client {}x{} -> {}x{}",
@@ -629,7 +689,8 @@ class Controller
     uint64_t _fixArmedMs = 0;
     bool _fixWaitNoted = false;
     bool _ownerSkipLogged = false;
-    int _actionDepth = 0; // > 0 while the module is inside one of its own window calls
+    int _actionDepth = 0; // > 0 while the module is inside one of its own window calls ...
+    uint32_t _actionThread = 0; // ... made on this thread (the label nested=yes needs both)
     uint32_t _fixConfirmPresents = kReplayConfirmPresents; // complete off presents needed before the fix
     uint64_t _fixConfirmMs = kReplayConfirmMs;            // and this long since the first of them
 

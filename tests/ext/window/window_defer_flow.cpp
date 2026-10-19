@@ -370,6 +370,102 @@ int main()
         c.OnBridgeDestroyed(env, Mode::On, kBridge);
     }
 
+    // L1: a log (or the frame generation request) that throws while a call is being held must leave nothing held: the entry
+    // point then returns false and the game's call passes, and a hold left behind would replay the same call a second time.
+    // Nothing is asked of frame generation when a line throws before the state change.
+    for (const char* needle : { "set-fullscreen-state", "held back" })
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        env.throwOn = needle;
+        bool threw = false;
+        try
+        {
+            c.OnSetFullscreenState(env, Mode::On, Event(true));
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(env.fgOffRequests == 0);
+        env.throwOn.clear();
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty()); // nothing was held, so nothing is replayed
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // and the next call is held normally
+        CHECK(env.fgOffRequests == 1);
+    }
+    {
+        // the frame generation request itself throws: the hold is cancelled
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        env.onRequestOff = [&] { throw std::runtime_error("request"); };
+        bool threw = false;
+        try
+        {
+            c.OnSetFullscreenState(env, Mode::On, Event(true));
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        env.onRequestOff = nullptr;
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty());
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+    }
+    {
+        // a throwing line while a held call is replaced leaves the held call as it was
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.throwOn = "replaces the held call";
+        bool threw = false;
+        try
+        {
+            c.OnSetFullscreenState(env, Mode::On, Event(true));
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        env.throwOn.clear();
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+        CHECK_CONTAINS(env.All(), "0 earlier call(s) replaced");
+    }
+
+    // L3: "nested=yes" means a resize that runs inside a window call of this module ON THE SAME THREAD. The live module gives up
+    // its lock around the calls out, so another thread's resize that arrives meanwhile is not nested.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.onReplay = [&]
+        {
+            env.current = 7; // another thread's bridge resize while the replay call is out
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+            env.current = 100;
+        };
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1);
+        for (const auto& l : env.logs)
+            CHECK(l.find("nested=yes") == std::string::npos);
+    }
     // Probe never holds or prevents; off does nothing.
     {
         FakeEnv env;

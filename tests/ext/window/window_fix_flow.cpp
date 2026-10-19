@@ -499,6 +499,50 @@ int main()
         Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.applied.size() == 1);
     }
+    // L3: the border fix's window call counts as an action only on its own thread (a resize from another thread meanwhile is not
+    // nested), and a throwing window call does not leave the action depth raised.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        env.onApply = [&]
+        {
+            env.current = 7;
+            c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160); // another thread
+            env.current = 100;
+        };
+        Present(c, env, Mode::On, kOff, kOff);
+        env.onApply = nullptr;
+        CHECK(env.applied.size() == 1);
+        for (const auto& l : env.logs)
+            CHECK(l.find("nested=yes") == std::string::npos);
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetFixConfirm(1, 0);
+        MakeBorderBug(env);
+        env.fg = kOff;
+        EnterThenLeave(c, env, Mode::On);
+        env.onApply = [&] { throw std::runtime_error("apply"); };
+        bool threw = false;
+        try
+        {
+            Present(c, env, Mode::On, kOff, kOff);
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(env.applied.size() == 1);
+        env.onApply = nullptr;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        CHECK(env.Last().find("nested=yes") == std::string::npos); // the depth is back to 0
+    }
     // Mode off: no arming, no application, no reads.
     {
         FakeEnv env;
