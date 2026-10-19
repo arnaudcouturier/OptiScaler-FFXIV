@@ -228,7 +228,125 @@ struct Registration
     std::string id;
     std::string tab;
     std::string file; // path relative to OptiScaler/ext
+    // The card's `visible` argument (6th field of the Card: id, tab, name, draw, after, visible): "" when the registration
+    // stops before it, "nullptr" when it is null, else the name of the predicate
+    std::string visible;
+    // The body of `bool <visible>(...) { ... }` in the same file, "" when it is not found
+    std::string visibleBody;
 };
+
+inline bool IsWordChar(char c)
+{
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+// The body (from its '{' to the matching '}') of `bool Name(...)` in comment-stripped `code`; "" if there is none
+inline std::string BoolFunctionBody(const std::string& code, const std::string& name)
+{
+    if (name.empty())
+        return {};
+    for (size_t p = code.find(name); p != std::string::npos; p = code.find(name, p + 1))
+    {
+        const size_t e = p + name.size();
+        if ((p > 0 && IsWordChar(code[p - 1])) || (e < code.size() && IsWordChar(code[e])))
+            continue;
+        size_t b = p;
+        while (b > 0 && std::isspace(static_cast<unsigned char>(code[b - 1])))
+            --b;
+        if (b < 4 || code.compare(b - 4, 4, "bool") != 0 || (b > 4 && IsWordChar(code[b - 5])))
+            continue;
+        size_t q = e;
+        while (q < code.size() && std::isspace(static_cast<unsigned char>(code[q])))
+            ++q;
+        if (q >= code.size() || code[q] != '(')
+            continue;
+        const size_t close = code.find(')', q);
+        const size_t open = close == std::string::npos ? close : code.find('{', close);
+        if (open == std::string::npos)
+            continue;
+        int depth = 0;
+        for (size_t i = open; i < code.size();)
+        {
+            if (code[i] == '"')
+            {
+                i = SkipString(code, i);
+                continue;
+            }
+            if (code[i] == '{')
+                ++depth;
+            else if (code[i] == '}' && --depth == 0)
+                return code.substr(open, i - open + 1);
+            ++i;
+        }
+    }
+    return {};
+}
+
+// True when the card is registered with a visible predicate whose own body tests the game build. A card without the
+// argument, with nullptr, or whose predicate does not look at ext::game::Current() draws wherever its tab is drawn.
+inline bool TestsGameBuild(const Registration& r)
+{
+    return !r.visible.empty() && r.visible != "nullptr" && r.visibleBody.find("game::Current(") != std::string::npos;
+}
+
+// The registrations in one (comment-stripped) source text; `rel` is its path relative to OptiScaler/ext. `tokens` counts
+// the registration tokens seen.
+inline void ScanRegistrationText(const std::string& code, const std::string& rel, size_t& tokens, std::vector<Registration>& found)
+{
+    std::vector<size_t> starts;
+    for (size_t p = code.find("menu::Register("); p != std::string::npos; p = code.find("menu::Register(", p + 1))
+        starts.push_back(p + 15);
+    for (size_t p = code.find("AutoRegister"); p != std::string::npos; p = code.find("AutoRegister", p + 1))
+    {
+        const bool wordStart = p == 0 || !IsWordChar(code[p - 1]);
+        const bool wordEnd = p + 12 >= code.size() || !IsWordChar(code[p + 12]);
+        if (wordStart && wordEnd)
+            starts.push_back(p + 12);
+    }
+
+    for (size_t from : starts)
+    {
+        ++tokens;
+        const size_t end = code.find(';', from);
+        const size_t q1 = code.find('"', from);
+        if (q1 == std::string::npos || q1 > end)
+            continue;
+        const size_t e1 = SkipString(code, q1);
+        const size_t q2 = code.find('"', e1);
+        if (q2 == std::string::npos || q2 > end)
+            continue;
+        const size_t e2 = SkipString(code, q2);
+
+        Registration r { code.substr(q1 + 1, e1 - q1 - 2), code.substr(q2 + 1, e2 - q2 - 2), rel };
+
+        // the Card's braces: from the '{' before the id to its match
+        const size_t open = code.rfind('{', q1);
+        if (open != std::string::npos)
+        {
+            int depth = 0;
+            for (size_t i = open; i < code.size();)
+            {
+                if (code[i] == '"')
+                {
+                    i = SkipString(code, i);
+                    continue;
+                }
+                if (code[i] == '{')
+                    ++depth;
+                else if (code[i] == '}' && --depth == 0)
+                {
+                    const auto fields = Fields(code.substr(open + 1, i - open - 1));
+                    if (fields.size() > 5)
+                        r.visible = fields[5];
+                    break;
+                }
+                ++i;
+            }
+        }
+        r.visibleBody = BoolFunctionBody(code, r.visible);
+        found.push_back(r);
+    }
+}
 
 // Scans OptiScaler/ext for `AutoRegister name { { "id", "tab", ...` and `menu::Register({ "id", "tab", ...`. `tokens` is
 // the number of registration tokens seen (the definitions in core/ are skipped): it equals the result size when every
@@ -253,35 +371,7 @@ inline std::vector<Registration> ScanRegistrations(const std::string& repo, size
             rel == "core/SourceTracker.h")
             continue;
 
-        const std::string code = StripComments(ReadFile(entry.path().string()));
-
-        auto isWordChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
-
-        std::vector<size_t> starts;
-        for (size_t p = code.find("menu::Register("); p != std::string::npos; p = code.find("menu::Register(", p + 1))
-            starts.push_back(p + 15);
-        for (size_t p = code.find("AutoRegister"); p != std::string::npos; p = code.find("AutoRegister", p + 1))
-        {
-            const bool wordStart = p == 0 || !isWordChar(code[p - 1]);
-            const bool wordEnd = p + 12 >= code.size() || !isWordChar(code[p + 12]);
-            if (wordStart && wordEnd)
-                starts.push_back(p + 12);
-        }
-
-        for (size_t from : starts)
-        {
-            ++tokens;
-            const size_t end = code.find(';', from);
-            const size_t q1 = code.find('"', from);
-            if (q1 == std::string::npos || q1 > end)
-                continue;
-            const size_t e1 = SkipString(code, q1);
-            const size_t q2 = code.find('"', e1);
-            if (q2 == std::string::npos || q2 > end)
-                continue;
-            const size_t e2 = SkipString(code, q2);
-            found.push_back({ code.substr(q1 + 1, e1 - q1 - 2), code.substr(q2 + 1, e2 - q2 - 2), rel });
-        }
+        ScanRegistrationText(StripComments(ReadFile(entry.path().string())), rel, tokens, found);
     }
     std::sort(found.begin(), found.end(),
               [](const Registration& a, const Registration& b) { return a.id != b.id ? a.id < b.id : a.file < b.file; });

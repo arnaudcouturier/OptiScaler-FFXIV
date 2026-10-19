@@ -41,7 +41,8 @@ void Check1(bool ok, const char* what, int line)
 struct Reg
 {
     std::string id, tab, file;
-    bool gated = false; // the file tests the game build (ext::game::Current())
+    bool gated = false; // the card's own visible predicate tests the game build (ext::game::Current()), see TestsGameBuild
+    std::string visible; // name of that predicate ("" or "nullptr" when the registration has none)
 };
 
 struct Model
@@ -78,6 +79,14 @@ const Slot* FindSlot(const Model& m, const std::string& id)
             return &s;
     return nullptr;
 }
+
+// The fork card ids of the shipped session-final menu (13 cards), copied here on purpose: APPEND ONLY. The manifest's
+// kPersistedForkIds must contain every one of them, so deleting a card and its persisted id together cannot pass unnoticed.
+constexpr const char* kShippedForkIds[] = {
+    "dlss_nr",     "ffxiv_character_preview", "forced_quality", "ffxiv_jitter", "fg_unlocks",
+    "ffxiv_hdr",   "fg_hudless",              "fg_auto_mfg",    "window_mode",  "hudless_diag",
+    "mipmap_auto", "ffxiv_companion",         "reshade_addon_probe",
+};
 
 Violations Check(const Model& m)
 {
@@ -135,7 +144,8 @@ Violations Check(const Model& m)
             add("ffxiv-only", id + " is not in the FFXIV tab");
         for (const Reg& r : m.regs)
             if (r.id == id && !r.gated)
-                add("ffxiv-only", id + ": " + r.file + " does not test the game build");
+                add("ffxiv-only", id + ": its visible predicate ('" + r.visible + "' in " + r.file +
+                                      ") does not test the game build");
     }
     for (const Slot& s : m.slots)
         if (std::string(s.tab) == manifest::kFfxivTab && only.count(s.id) == 0)
@@ -229,6 +239,11 @@ Violations Check(const Model& m)
                 add("group-split", merged[i] + " sits inside the boxes of " + src);
     }
 
+    // the persisted list only grows: every id of the shipped session-final menu stays in it (removing a card means an alias,
+    // never deleting the id from both the layout and the list)
+    for (const char* id : kShippedForkIds)
+        if (!Contains<std::string>(m.persisted, id))
+            add("persisted", std::string(id) + " was shipped but is missing from the persisted id list");
     // every id that was ever released still resolves
     for (const std::string& id : m.persisted)
     {
@@ -243,6 +258,8 @@ Violations Check(const Model& m)
         const auto& a = m.aliases[i];
         if (FindSlot(m, a.first) != nullptr || IsUpstream(m, a.first))
             add("alias", a.first + " is retired but still a live card");
+        if (!Contains<std::string>(m.persisted, a.first))
+            add("alias", a.first + " is not in the persisted id list, so no released menu had it");
         if (FindSlot(m, a.second) == nullptr && !IsUpstream(m, a.second))
             add("alias", a.first + " points to '" + a.second + "', which is not a card");
         for (size_t j = 0; j < i; j++)
@@ -303,10 +320,7 @@ Model Build(const std::string& repo, std::string& menuCppRaw, std::string& menuH
 
     size_t tokens = 0;
     for (const auto& r : menuscan::ScanRegistrations(repo, tokens))
-    {
-        const std::string text = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/ext/" + r.file));
-        m.regs.push_back({ r.id, r.tab, r.file, text.find("game::Current(") != std::string::npos });
-    }
+        m.regs.push_back({ r.id, r.tab, r.file, menuscan::TestsGameBuild(r), r.visible });
     CHECK(tokens == m.regs.size()); // every registration token was understood
 
     m.slots.assign(std::begin(layout::kSlots), std::end(layout::kSlots));
@@ -354,6 +368,62 @@ void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw
     for (const auto& b2 : m.upstream)
         anyShared = anyShared || b2.source == "RenderFrameGenerationRuntimeSettings";
     CHECK(anyShared);
+}
+
+// ---- the registration scanner: which cards test the game build in THEIR OWN visible predicate -----------------------------
+void ScannerUnits()
+{
+    using menuscan::StripComments;
+    auto scan = [](const std::string& text)
+    {
+        size_t tokens = 0;
+        std::vector<menuscan::Registration> found;
+        menuscan::ScanRegistrationText(StripComments(text), "x/Card.cpp", tokens, found);
+        CHECK(tokens == found.size());
+        return found;
+    };
+
+    const std::string pred = "bool Vis(const ext::menu::Ctx&) { return ext::game::Current().hdr != nullptr; }\n";
+
+    { // a gated card
+        const auto f = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Vis } };");
+        CHECK(f.size() == 1 && f[0].id == "x" && f[0].tab == "FFXIV" && f[0].visible == "Vis");
+        CHECK(f.size() == 1 && menuscan::TestsGameBuild(f[0]));
+    }
+    { // the Register(...) form, the argument on the next line
+        const auto f = scan(pred + "void Init() { ext::menu::Register({ \"x\", \"FFXIV\", \"X\", Draw, \"fg_selection\",\n   Vis }); }");
+        CHECK(f.size() == 1 && f[0].visible == "Vis" && menuscan::TestsGameBuild(f[0]));
+    }
+    { // visible argument null: the file still mentions game::Current( in a predicate nobody registers
+        const auto f = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, nullptr } };");
+        CHECK(f.size() == 1 && f[0].visible == "nullptr" && !menuscan::TestsGameBuild(f[0]));
+    }
+    { // no visible argument at all
+        const auto f = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw } };");
+        CHECK(f.size() == 1 && f[0].visible.empty() && !menuscan::TestsGameBuild(f[0]));
+        const auto g = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, \"fg_selection\" } };");
+        CHECK(g.size() == 1 && g[0].visible.empty() && !menuscan::TestsGameBuild(g[0]));
+    }
+    { // a predicate that does not look at the game, next to a function that does
+        const auto f = scan("bool Vis(const ext::menu::Ctx&) { return true; }\nvoid Other() { ext::game::Current(); }\n"
+                            "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Vis } };");
+        CHECK(f.size() == 1 && f[0].visible == "Vis" && !menuscan::TestsGameBuild(f[0]));
+    }
+    { // the game test only in a comment
+        const auto f = scan("bool Vis(const ext::menu::Ctx&) { return true; /* ext::game::Current() */ }\n"
+                            "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Vis } };");
+        CHECK(f.size() == 1 && !menuscan::TestsGameBuild(f[0]));
+    }
+    { // the registration names a predicate that is not defined in the file
+        const auto f = scan(pred + "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Missing } };");
+        CHECK(f.size() == 1 && f[0].visible == "Missing" && f[0].visibleBody.empty() && !menuscan::TestsGameBuild(f[0]));
+    }
+    { // a similar name must not match: the registration points at Vis, the game test is in Vis2
+        const auto f = scan("bool Vis2(const ext::menu::Ctx&) { return ext::game::Current().hdr != nullptr; }\n"
+                            "bool Vis(const ext::menu::Ctx&) { return false; }\n"
+                            "const ext::menu::AutoRegister r { { \"x\", \"FFXIV\", \"X\", Draw, nullptr, Vis } };");
+        CHECK(f.size() == 1 && !menuscan::TestsGameBuild(f[0]));
+    }
 }
 
 // ---- every rule against a broken model ---------------------------------------------------------------------------------
@@ -475,6 +545,14 @@ void Broken(const Model& real)
         Find(m, "fg_unlocks")->after = "fg_selection";
         CHECK(!Has(Check(m), "group-split"));
     }
+    { // a shipped id dropped from the persisted list together with its card
+        Model m = real;
+        m.persisted.erase(std::remove(m.persisted.begin(), m.persisted.end(), std::string("mipmap_auto")), m.persisted.end());
+        m.slots.erase(std::remove_if(m.slots.begin(), m.slots.end(), [](const Slot& s) { return std::string(s.id) == "mipmap_auto"; }),
+                      m.slots.end());
+        m.regs.erase(std::remove_if(m.regs.begin(), m.regs.end(), [](const Reg& r) { return r.id == "mipmap_auto"; }), m.regs.end());
+        CHECK(Has(Check(m), "persisted"));
+    }
     { // a released id with no card and no alias; an alias fixes it
         Model m = real;
         m.slots.erase(std::remove_if(m.slots.begin(), m.slots.end(), [](const Slot& s) { return std::string(s.id) == "reshade_addon_probe"; }),
@@ -495,6 +573,11 @@ void Broken(const Model& real)
         m = real;
         m.aliases.push_back({ "old_card", "fg_unlocks" });
         m.aliases.push_back({ "old_card", "fg_unlocks" });
+        CHECK(Has(Check(m), "alias"));
+    }
+    { // an alias for an id no released menu had
+        Model m = real;
+        m.aliases.push_back({ "never_shipped", "fg_unlocks" });
         CHECK(Has(Check(m), "alias"));
     }
     { // ini-only keys: format, duplicate, not defined
@@ -528,6 +611,7 @@ int main(int argc, char** argv)
     std::string cppRaw, hRaw;
     const Model real = Build(repo, cppRaw, hRaw);
     RealMenu(real, cppRaw, hRaw);
+    ScannerUnits();
     Broken(real);
 
     if (failures)
