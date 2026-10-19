@@ -175,12 +175,36 @@ int main()
     CHECK(g_testLastLog.find("nonzero 1/16") != std::string::npos);
     CHECK(g_testLastLog.find("x [0, 1.5] y [-0.5, 0]") != std::string::npos);
 
+    // Typed from the sizes above, not from the rules: 4x4 images are 16 pixels, 8x8 images are 64. Per file the header is 12
+    // bytes: native 64, input 64, dlss 64 * 8, composed 64 * 4, depth 64, motion 64, so 1024 + 72.
+    CHECK(diag::BytesWritten() == 1096);
+
     // The second phase waits for more than 120 evaluations.
     CHECK(!diag::Capture(g_context.Get(), request, 50, 2000));
     CHECK(!diag::Capture(g_context.Get(), request, 120, 2000));
+
+    // The colour given to the upscaler is the NR before DLSS image (RGBA16F, 8 bytes per pixel) in the second dump: the rows
+    // and the size budget follow the real format of each image, not the usual one of its role.
+    const auto inputHalfData = Pattern(W * H * 8, 9);
+    auto inputHalf = Make(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, inputHalfData, 8);
+    request.input = inputHalf.Get();
     CHECK(diag::Capture(g_context.Get(), request, 121, 2000));
     PumpUntil(dir / "2-motion.bin");
     CHECK(diag::FilesWritten() == 12);
+    {
+        const auto bytes = ReadFile(dir / "2-input.bin");
+        CHECK(bytes.size() == 12 + inputHalfData.size()); // 16 pixels * 8 bytes: not the 4 byte rows of an RGBA8 input
+        if (bytes.size() == 12 + inputHalfData.size())
+        {
+            uint32_t header[3];
+            std::memcpy(header, bytes.data(), 12);
+            CHECK(header[0] == W && header[1] == H && header[2] == DXGI_FORMAT_R16G16B16A16_FLOAT);
+            CHECK(std::memcmp(bytes.data() + 12, inputHalfData.data(), inputHalfData.size()) == 0); // whole rows, in order
+        }
+        CHECK(ReadFile(dir / "2-native.bin").size() == 12 + nativeData.size()); // the other roles keep their own sizes
+        CHECK(ReadFile(dir / "2-dlss.bin").size() == 12 + dlssData.size());
+    }
+    CHECK(diag::BytesWritten() == 1096 + 1160); // the second dump is 1160: the 8 byte input adds 64 bytes (16 pixels * 4) to 1096
 
     // Two dumps only, and never more than 12 files.
     CHECK(!diag::Capture(g_context.Get(), request, 500, 3000));

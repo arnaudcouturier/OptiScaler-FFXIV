@@ -70,7 +70,8 @@ struct Stream
     uint32_t width = 0, height = 0;       // the colour image and the model's input size
     uint32_t guideWidth = 0, guideHeight = 0; // the depth and motion images (production: the render size, bring-up: same as the image)
     bool production = false;
-    bool late = false;            // the hand-off variant, decided when the stream is created (a config change rebuilds the stream); never in production
+    bool preSr = false;           // NR before SR (production is false then); the stream's placement is PlacementFrom(production, preSr)
+    bool late = false;            // the hand-off variant, decided when the stream is created (a config change rebuilds the stream); never in production or pre-SR
     Shared colour[2];             // the late variant uses both (the run before may still read one while the copy writes the other)
     Shared result[2], depth, motion;
     uint64_t serial[2] = {};      // identifies the result in result[i] (a module-wide counter, never reused): the debug tint is made once per serial
@@ -129,6 +130,7 @@ struct Module
     StateLog stateLog;
     CostAccumulator gpuCost, cpuCost;
     CostAccumulator productionGpuCost; // GPU time of the production runs alone, from the fenced per-slot read
+    CostAccumulator preSrGpuCost;      // ... and of the pre-SR runs alone
     Availability availability = Availability::ConfigOff;
     std::atomic<uint8_t> availabilitySnapshot { static_cast<uint8_t>(Availability::Available) }; // readable without the mutex
     uint64_t lastMaintain = 0;
@@ -137,10 +139,12 @@ struct Module
     std::atomic<uint64_t> runs { 0 };                                      // both modes
     FallbackTally fallbacks;                                               // both modes; `fallbacks.production` is the production entry alone
     std::atomic<uint64_t> productionRuns { 0 };                            // the production entry alone (a subset of `runs`)
+    std::atomic<uint64_t> preSrRuns { 0 };                                 // the pre-SR entry alone (a subset of `runs`)
     std::atomic<uint64_t> serialCounter { 0 };
     std::atomic<uint32_t> streamCount { 0 }, liveCount { 0 };
     std::atomic<uint64_t> lastGpuUs { 0 }, lastCpuUs { 0 };
     std::atomic<uint64_t> lastProductionGpuUs { 0 }, lastProductionCpuUs { 0 };
+    std::atomic<uint64_t> lastPreSrGpuUs { 0 }, lastPreSrCpuUs { 0 };
     VideoMemoryAccount vram; // the figure of the menu: what the streams' images and models added
 };
 
@@ -337,18 +341,21 @@ bool CreatePrivate(uint32_t w, uint32_t h, ComPtr<ID3D12Resource>& out)
 
 // The objects of a stream for `shape`. Bring-up: the colour image has the format of the native image (`nativeFormat`) and the guides have the
 // image's size. Production: the colour image is the format of the super-resolution output (RGBA16F, filled by a copy), the guides have the
-// render size; the late variant does not exist (the alpha pass needs this render's colour), so there is one colour image.
+// render size; the late variant does not exist (the alpha pass needs this render's colour), so there is one colour image. Pre-SR: the colour
+// image is the format of the render-size colour the SR path evaluates (RGBA8, filled by a copy), the guides have the same size as the colour.
 bool CreateStreamGpu(Stream& s, const StreamShape& shape, DXGI_FORMAT nativeFormat)
 {
+    const Placement placement = PlacementOf(shape);
     const uint32_t w = shape.width, h = shape.height;
-    const uint32_t gw = shape.production ? shape.guideWidth : w, gh = shape.production ? shape.guideHeight : h;
+    const uint32_t gw = CarriesGuides(placement) ? shape.guideWidth : w, gh = CarriesGuides(placement) ? shape.guideHeight : h;
     const bool late = LateVariantInUse(shape);
-    const DXGI_FORMAT colourFormat = shape.production ? kResultFormat : nativeFormat;
+    const DXGI_FORMAT colourFormat = static_cast<DXGI_FORMAT>(ColourFormatFor(placement, static_cast<uint32_t>(nativeFormat)));
     s.width = w;
     s.height = h;
     s.guideWidth = gw;
     s.guideHeight = gh;
     s.production = shape.production;
+    s.preSr = shape.preSr;
     s.late = late; // decided here, for the life of the stream
     if (!CreateShared("CharaNr colour", w, h, colourFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[0]) ||
         (late && !CreateShared("CharaNr colour 1", w, h, colourFormat, D3D11_BIND_SHADER_RESOURCE, false, false, s.colour[1])) ||
@@ -722,26 +729,32 @@ struct HandoffOps
     StreamState& st;
     ID3D11DeviceContext* ctx;
     ID3D11Texture2D* native;
-    const ProductionRequest* production; // null: bring-up
+    const ProductionRequest* production; // null: bring-up (also the request of the pre-SR entry, whose images are named the same way)
+    Placement placement;                  // what the copies are (CopyPlanFor)
     FramePlan plan;
     int buffer = 0;
     double cpuMs = 0.0;
 
     // The late variant overwrites a colour image the run before last read: the D3D11 queue first waits for that run (done fence).
     bool WaitColourFree(uint64_t v) { return SUCCEEDED(m.ctx4->Wait(m.doneFence11.Get(), v)); }
-    // The copies into the shareable images. Bring-up: the native image -> the colour image. Production: the super-resolution output ->
-    // the colour image, and the slot's depth and motion -> the guide images (sizes and formats were checked by the caller). All of them
-    // are issued before the ready signal, so the D3D12 queue starts after every one of them.
+    // The copies into the shareable images, as CopyPlanFor lists them. Bring-up: the native image -> the colour image. Production and pre-SR: the
+    // input colour (the super-resolution output, or the render-size colour the SR evaluate reads) -> the colour image, and the slot's depth and
+    // motion -> the guide images (sizes and formats were checked by the caller). All of them are issued before the ready signal, so the D3D12
+    // queue starts after every one of them.
     void CopyColour()
     {
-        if (production != nullptr)
+        const CopyPlan copies = CopyPlanFor(placement);
+        for (size_t i = 0; i < copies.count; ++i)
         {
-            ctx->CopyResource(s.colour[0].t11(), production->colour);
-            ctx->CopyResource(s.depth.t11(), production->depth);
-            ctx->CopyResource(s.motion.t11(), production->motion);
-            return;
+            switch (copies.kinds[i])
+            {
+            case CopyKind::Colour:
+                ctx->CopyResource(s.colour[plan.colour == Tex::Colour1 ? 1 : 0].t11(), production != nullptr ? static_cast<ID3D11Resource*>(production->colour) : native);
+                break;
+            case CopyKind::Depth: ctx->CopyResource(s.depth.t11(), production->depth); break;
+            case CopyKind::Motion: ctx->CopyResource(s.motion.t11(), production->motion); break;
+            }
         }
-        ctx->CopyResource(s.colour[plan.colour == Tex::Colour1 ? 1 : 0].t11(), native);
     }
     bool Signal11(uint64_t v) { return SUCCEEDED(m.ctx4->Signal(m.readyFence11.Get(), v)); }
     bool Wait12(uint64_t v) { return SUCCEEDED(m.queue->Wait(m.readyFence12.Get(), v)); }
@@ -809,7 +822,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     s.created = start;
     const uint64_t after = VramUsedBytes();
     LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB (before the stream's images) -> {} MB",
-             s.production ? "production" : "bring-up", index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
+             PlacementName(PlacementFrom(s.production, s.preSr)), index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
     return RunOutcome::Preparing;
 }
 
@@ -834,6 +847,7 @@ void LogCostIfDue(uint64_t now)
     const auto cpu = m.cpuCost.Take(now);
     const auto gpu = m.gpuCost.Take(now);
     const auto productionGpu = m.productionGpuCost.Take(now);
+    const auto preSrGpu = m.preSrGpuCost.Take(now);
     if (gpu.count != 0)
         LOG_INFO("CharaView NR cost: {} runs, GPU {:.2f} ms average ({:.2f} max), CPU recording {:.2f} ms average ({:.2f} max); {} stream(s)", cpu.count,
                  gpu.average, gpu.max, cpu.average, cpu.max, m.table.UsedCount());
@@ -842,29 +856,34 @@ void LogCostIfDue(uint64_t now)
     if (productionGpu.count != 0)
         LOG_INFO("CharaView NR cost, production runs alone: GPU {:.2f} ms average ({:.2f} max) over {} measured runs", productionGpu.average,
                  productionGpu.max, productionGpu.count);
+    if (preSrGpu.count != 0)
+        LOG_INFO("CharaView NR cost, pre-SR runs alone: GPU {:.2f} ms average ({:.2f} max) over {} measured runs", preSrGpu.average, preSrGpu.max,
+                 preSrGpu.count);
 }
 
 
-RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequest* production)
+RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequest* production, Placement placement)
 {
     Module& m = M();
     ReplayScope own; // the copy and clear below go through the hooked context: they are not the game's work
     StreamState& st = m.table.At(index);
 
     const bool late = s.late; // decided when the stream was created: the run and its consumer always agree
-    FramePlan plan;
-    plan.width = s.width;
-    plan.height = s.height;
-    // Bring-up: the motion image is zeroed on the first run and the depth is cleared to far (below). Production: both hold the preview's
-    // own guides, copied in by the hand-off, and must never be overwritten.
-    plan.initGuides = production == nullptr && !s.guidesInit;
+    PlanInputs planInputs;
+    planInputs.width = s.width;
+    planInputs.height = s.height;
+    planInputs.carriesGuides = production != nullptr;
+    planInputs.guidesInit = s.guidesInit;
     if (production != nullptr)
-        plan.guides = production->guides;
+    {
+        planInputs.guides = production->guides;
+        planInputs.superResolutionReset = production->superResolutionReset;
+    }
+    planInputs.late = late;
+    planInputs.now = req.now;
+    ResetReason reset = ResetReason::None;
+    FramePlan plan = MakeFramePlan(st, planInputs, &reset); // the one place the plan is made (tested as it is)
     const int resultBuffer = ResultBufferForRun(st.runs);
-    plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                 // the result image this run writes
-    plan.colour = (late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
-    const ResetReason reset = DecideReset(st.everRan, st.lastRun, req.now, production != nullptr && production->superResolutionReset);
-    plan.reset = reset != ResetReason::None;
     plan.settings = SettingsFromConfig();
     plan.tuning = TuningFromBackend();
 
@@ -881,7 +900,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     }
 
     const int buffer = resultBuffer;
-    HandoffOps ops { m, s, st, ctx, req.native, production, plan, buffer };
+    HandoffOps ops { m, s, st, ctx, req.native, production, placement, plan, buffer };
     const HandoffOutcome out = RunFrame(ops, m.ready, late, s.doneValue[buffer]);
     if (!out.ok)
     {
@@ -894,7 +913,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     }
 
     s.doneValue[buffer] = out.done;
-    m.timerRing.NoteSubmitted(out.done, production != nullptr); // the list of this run wrote the timer slot Start advanced to
+    m.timerRing.NoteSubmitted(out.done, placement); // the list of this run wrote the timer slot Start advanced to
     s.serial[buffer] = m.serialCounter.fetch_add(1, std::memory_order_relaxed) + 1; // a new result: its tint (if any) is stale
     s.guidesInit = true;
     st.everRan = true;
@@ -905,30 +924,40 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     m.runs.fetch_add(1, std::memory_order_relaxed);
     m.lastCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     m.cpuCost.Add(ops.cpuMs);
-    if (production != nullptr)
+    if (placement == Placement::PostSr)
     {
         m.productionRuns.fetch_add(1, std::memory_order_relaxed);
         m.lastProductionCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
+    }
+    else if (placement == Placement::PreSr)
+    {
+        m.preSrRuns.fetch_add(1, std::memory_order_relaxed);
+        m.lastPreSrCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     }
     // The timer reads the slot of the run two back; it is read only when that run's list is complete, and the time is attributed to the mode
     // of that run (not of the current one): with several streams in a frame the slot may belong to another stream or the other mode.
     if (m.timer != nullptr && m.timerRing.CanRead(GpuDone))
     {
-        const bool measuredProduction = m.timerRing.ReadIsProduction();
+        const Placement measured = m.timerRing.ReadMode();
         if (const auto gpuMs = m.timer->ReadGpuTime(m.queue); gpuMs.has_value())
         {
             m.lastGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
             m.gpuCost.Add(*gpuMs);
-            if (measuredProduction)
+            if (measured == Placement::PostSr)
             {
                 m.lastProductionGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
                 m.productionGpuCost.Add(*gpuMs);
             }
+            else if (measured == Placement::PreSr)
+            {
+                m.lastPreSrGpuUs.store(static_cast<uint64_t>(*gpuMs * 1000.0), std::memory_order_relaxed);
+                m.preSrGpuCost.Add(*gpuMs);
+            }
         }
     }
     if (st.runs == 1)
-        LOG_INFO("CharaView NR: stream {} first {} run {}x{} (guides {}x{}; {}, history {})", index, production != nullptr ? "production" : "bring-up",
-                 s.width, s.height, s.guideWidth, s.guideHeight, late ? "late variant" : "same frame", ResetReasonText(reset));
+        LOG_INFO("CharaView NR: stream {} first {} run {}x{} (guides {}x{}; {}, history {})", index, PlacementName(placement), s.width, s.height,
+                 s.guideWidth, s.guideHeight, late ? "late variant" : "same frame", ResetReasonText(reset));
     LogCostIfDue(req.now);
     return RunOutcome::Ran;
 }
@@ -949,10 +978,10 @@ static ImageInfo InfoOf(ID3D11Texture2D* texture)
     return ImageInfo { d.Width, d.Height, static_cast<uint32_t>(d.Format) };
 }
 
-// Both modes run through this one function; `production` is null for the bring-up. The stream table, the availability and creation steps,
-// the settle-and-rebuild rule, the model creation and the readiness wait are common; the mode decides the shape the stream is built for
-// and what the hand-off copies (see Stream).
-static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* production)
+// All three placements run through this one function; `production` is null for the bring-up (and set for the other two, whose requests carry
+// the copied images). The stream table, the availability and creation steps, the settle-and-rebuild rule, the model creation and the readiness
+// wait are common; the placement decides the shape the stream is built for and what the hand-off copies (see Stream).
+static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* production, Placement placement)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
@@ -991,18 +1020,10 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     // moment before the stream is rebuilt: dragging a window to a new size reports a new size every frame, and each one would
     // otherwise be a new model.
     const DlssNr::PreviewTuning tuning = DlssNr::CurrentPreviewTuning();
-    StreamShape wanted;
-    wanted.width = req.width;
-    wanted.height = req.height;
-    wanted.preset = tuning.preset;
-    wanted.style = tuning.style;
-    wanted.late = production == nullptr && Late(); // PreviewNRLate applies to the bring-up only: the alpha pass needs this render's colour
-    wanted.production = production != nullptr;
-    if (production != nullptr)
-    {
-        wanted.guideWidth = production->guides.width;
-        wanted.guideHeight = production->guides.height;
-    }
+    // PreviewNRLate applies to the bring-up only (ShapeFor): the alpha pass needs this render's colour, and the SR evaluate reads the pre-SR result
+    // right after the run.
+    const StreamShape wanted = ShapeFor(placement, req.width, req.height, tuning.preset, tuning.style, Late(),
+                                        production != nullptr ? production->guides.width : 0, production != nullptr ? production->guides.height : 0);
     m.table.At(index).lastLive = req.now;
     switch (DecideRebuild(m.table.At(index), wanted, req.now))
     {
@@ -1013,10 +1034,9 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         if (!GpuDone(m.table.At(index).lastSubmitted))
             return RunOutcome::Skipped;
         const StreamShape old = m.table.At(index).built;
-        LOG_INFO("CharaView NR: stream {} rebuilt: {} {}x{} -> {} {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index,
-                 old.production ? "production" : "bring-up", old.width, old.height, wanted.production ? "production" : "bring-up",
-                 wanted.width, wanted.height, old.preset, wanted.preset, old.style, wanted.style, old.late ? "late" : "same frame",
-                 wanted.late ? "late" : "same frame");
+        LOG_INFO("CharaView NR: stream {} rebuilt: {} {}x{} -> {} {}x{}, preset {} -> {}, style {} -> {}, {} -> {}", index, PlacementName(PlacementOf(old)),
+                 old.width, old.height, PlacementName(PlacementOf(wanted)), wanted.width, wanted.height, old.preset, wanted.preset, old.style,
+                 wanted.style, old.late ? "late" : "same frame", wanted.late ? "late" : "same frame");
         ReleaseStreamObjects(m.streams[index], true);
         m.table.Free(index);
         index = m.table.Bind(key, req.width, req.height, req.now);
@@ -1035,9 +1055,9 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     // A production run copies three images into the stream: their sizes and formats are the stream's, or the copy is not allowed. They are
     // fixed for a slot's life (a slot rebuild changes the sizes and so the wanted shape), so this only trips on a programming error.
     if (production != nullptr &&
-        !ProductionInputsFit(wanted, InfoOf(production->colour), InfoOf(production->depth), InfoOf(production->motion)))
+        !CopiedInputsFit(wanted, InfoOf(production->colour), InfoOf(production->depth), InfoOf(production->motion)))
     {
-        Latch("the production inputs (super-resolution output, depth, motion) do not match the stream's sizes and formats");
+        Latch("the images handed to NR (colour, depth, motion) do not match the stream's sizes and formats");
         return RunOutcome::Failed;
     }
     if (!s.gpuObjects)
@@ -1064,16 +1084,16 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         NoteFeatureReady(s, index);
         return RunOutcome::Preparing; // the first evaluation is on the next render
     }
-    const RunOutcome outcome = Run(index, s, req, production);
+    const RunOutcome outcome = Run(index, s, req, production, placement);
     UpdateHolds();
     return outcome;
 }
 
 // The one place a call of either entry ends: a call that produced no result is counted as a render that kept the image, once (the steps
 // above pass their outcome up without counting).
-static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production)
+static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production, Placement placement)
 {
-    return CountedCall(M().fallbacks, production != nullptr, [&] { return RunCoreSteps(req, production); },
+    return CountedCall(M().fallbacks, placement, [&] { return RunCoreSteps(req, production, placement); },
                        [](RunOutcome outcome) { return outcome == RunOutcome::Ran; });
 }
 
@@ -1083,35 +1103,38 @@ static RunOutcome RunBringUpImpl(const RunRequest& req)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
-    const RunOutcome outcome = RunCore(req, nullptr);
+    const RunOutcome outcome = RunCore(req, nullptr, Placement::BringUp);
     NoteBringUpEnded(m.table, reinterpret_cast<uintptr_t>(req.native), outcome == RunOutcome::Ran);
     return outcome;
 }
 
-// The production entry: NR on the super-resolution output of this render. On a run, the result image is handed back with its own
-// reference (the alpha pass samples it right away, on this thread; the inline D3D11 wait was queued by the hand-off). Any other outcome
-// returns no view and the caller keeps the super-resolution output.
-static ProductionResult RunProductionImpl(const ProductionRequest& request)
+// The production entry (NR on the super-resolution output of this render) and the pre-SR entry (NR on the render-size colour the SR evaluate is
+// about to read) share this body. On a run, the result image is handed back with its own reference (the alpha pass samples it, or the SR evaluate
+// reads it, right away, on this thread; the inline D3D11 wait was queued by the hand-off). The pre-SR entry also gets the texture, the handle the
+// evaluate takes. Any other outcome returns no view and the caller keeps the plain image of its step.
+static ProductionResult RunCopiedImpl(const ProductionRequest& request, Placement placement)
 {
     Module& m = M();
     std::lock_guard lock(m.mutex);
     ProductionResult result;
     const uintptr_t key = reinterpret_cast<uintptr_t>(request.base.native);
-    result.outcome = RunCore(request.base, &request);
+    result.outcome = RunCore(request.base, &request, placement);
     NoteBringUpEnded(m.table, key, result.outcome == RunOutcome::Ran);
     if (result.outcome != RunOutcome::Ran)
         return result; // RunCore counted it
     const int index = m.table.Find(key);
-    if (index == kNoStream || !m.streams[index].production || m.table.At(index).runs == 0)
+    if (index == kNoStream || PlacementFrom(m.streams[index].production, m.streams[index].preSr) != placement || m.table.At(index).runs == 0)
     {
         result.outcome = RunOutcome::Failed; // cannot happen: a run just finished on this stream
-        m.fallbacks.Note(true); // the run was counted as a run; this render still keeps the plain super-resolution image
+        m.fallbacks.NoteFor(placement); // the run was counted as a run; this render still keeps the plain image of its step
         return result;
     }
     const Stream& s = m.streams[index];
     const int buffer = ResultBufferForRun(m.table.At(index).runs - 1); // the run that just finished wrote this image
     result.view = s.result[buffer].srv;
     result.serial = s.serial[buffer];
+    if (placement == Placement::PreSr)
+        result.texture = s.result[buffer].t11(); // ComPtr: takes its own reference
     return result;
 }
 
@@ -1174,8 +1197,8 @@ static ComPtr<ID3D11Texture2D> ResultTextureImpl(uint64_t now, bool waitForResul
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
         const StreamState& st = m.table.At(static_cast<int>(i));
-        if (!st.Used() || ResultKindOf(st) == ResultKind::None || now < st.lastRun || now - st.lastRun > kLiveMs)
-            continue;
+        if (!st.Used() || !ResultTextureServes(ResultKindOf(st)) || now < st.lastRun || now - st.lastRun > kLiveMs)
+            continue; // no current result, or a pre-SR one (an input of the SR evaluate: the dump has no label for it)
         if (best == kNoStream || st.lastRun > m.table.At(best).lastRun)
             best = static_cast<int>(i);
     }
@@ -1307,6 +1330,11 @@ static Status GetStatusImpl()
     s.productionFallbacks = m.fallbacks.production.load(std::memory_order_relaxed);
     s.productionGpuMs = static_cast<double>(m.lastProductionGpuUs.load(std::memory_order_relaxed)) / 1000.0;
     s.productionCpuMs = static_cast<double>(m.lastProductionCpuUs.load(std::memory_order_relaxed)) / 1000.0;
+    s.preSrRuns = m.preSrRuns.load(std::memory_order_relaxed);
+    s.preSrFallbacks = m.fallbacks.preSr.load(std::memory_order_relaxed);
+    s.preSrGpuMs = static_cast<double>(m.lastPreSrGpuUs.load(std::memory_order_relaxed)) / 1000.0;
+    s.preSrCpuMs = static_cast<double>(m.lastPreSrCpuUs.load(std::memory_order_relaxed)) / 1000.0;
+    s.preSrLatched = m.latches.PreSrLatched();
     s.videoMemoryMb = m.vram.Total();
     return s;
 }
@@ -1332,7 +1360,7 @@ RunOutcome RunBringUp(const RunRequest& req)
 
 ProductionResult RunProduction(const ProductionRequest& request)
 {
-    return Guarded([&] { return RunProductionImpl(request); },
+    return Guarded([&] { return RunCopiedImpl(request, Placement::PostSr); },
                    []
                    {
                        M().fallbacks.Note(true); // counted before the latch line, which can throw
@@ -1343,9 +1371,27 @@ ProductionResult RunProduction(const ProductionRequest& request)
                    });
 }
 
+ProductionResult RunPreSr(const ProductionRequest& request)
+{
+    return Guarded([&] { return RunCopiedImpl(request, Placement::PreSr); },
+                   []
+                   {
+                       M().fallbacks.NoteFor(Placement::PreSr); // counted before the latch line, which can throw
+                       Latch("an unexpected exception stopped the pre-SR run");
+                       ProductionResult failed;
+                       failed.outcome = RunOutcome::Failed;
+                       return failed;
+                   });
+}
+
 void NoteProductionDeclined()
 {
     M().fallbacks.Note(true);
+}
+
+void NotePreSrDeclined()
+{
+    M().fallbacks.NoteFor(Placement::PreSr);
 }
 
 ResultView ResultFor(ID3D11DeviceContext*, uintptr_t key, uint64_t now)

@@ -14,6 +14,7 @@
 #include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaNrGuides.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaTintMap.h"
 #include "ext/ffxiv/chara/CharaNrTint.h"
@@ -145,6 +146,9 @@ struct SlotGpu
     uint32_t ngxGeneration = 0; // the NGX instance (g_ngxGeneration) that created params and handle
     bool failureLogged = false;
     bool composedFromNr = false; // the composed image was made from the production NR output (written by every alpha pass)
+    bool preSrColour = false;    // the SR evaluate of that render was given the pre-SR NR image as its colour (written beside composedFromNr)
+    nr::SrColourSource lastColour = nr::SrColourSource::Plain; // the colour source of the last successful SR evaluate (the history reset on a change)
+    nr::SourceResetClock sourceResets; // when this slot last got a history reset for such a change (at most one per kSourceResetMinMs)
 };
 
 struct PassData
@@ -228,6 +232,8 @@ nr::PlumbingFacts PlumbingNow()
     f.srGateOpen = static_cast<Availability>(g_availability.load(std::memory_order_relaxed)) == Availability::Available;
     f.nrHoldsResources = nr::HoldsResources();
     f.srSlotsHeld = g_slotsHeld.load(std::memory_order_relaxed);
+    f.preSrWanted = ext::Cfg().ffxiv.chara.previewNrBeforeSr.value_or_default();
+    f.preSrLatched = nr::SharedLatches().PreSrLatched();
     return f;
 }
 void ReportAvailability(Availability a)
@@ -690,7 +696,30 @@ bool EnsureInit(ID3D11DeviceContext* context, bool latchSrOnFailure = true)
     return true;
 }
 
-ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset); // preview NR production entry, defined below
+// What the production entry gave back: the NR image (only for a produced one) and what the module said (nr::DecideSlotRender decides on it).
+struct ProductionCall
+{
+    ComPtr<ID3D11ShaderResourceView> view;
+    nr::ProductionAnswer answer; // a value-initialised call is a failed one
+};
+ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR production entry, defined below
+
+// What the pre-SR entry gave back: the NR result as the texture the SR evaluate takes (only for a produced one) and what the module said.
+struct PreSrCall
+{
+    ComPtr<ID3D11Texture2D> texture;
+    nr::ProductionAnswer answer; // a value-initialised call is a failed one
+};
+PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR pre-SR entry, defined below
+
+// A successful evaluate that ran with a history reset for a change of the colour source: start the slot's debounce and count it (menu, probe table, log).
+void NoteSourceReset(int index, SlotGpu& g, uint64_t now)
+{
+    g.sourceResets.Note(now);
+    const uint64_t n = g_stats.srSourceResets.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 3 || n % 100 == 0)
+        LOG_INFO("CharaView DLSS: slot {} DLSS history reset for a change of the colour source (NR before DLSS <-> plain picture), {} so far", index, n);
+}
 
 void RunSlot(int index, const DrawView& view)
 {
@@ -757,10 +786,51 @@ void RunSlot(int index, const DrawView& view)
     in.jitterY = g_pass.jitter.y;
     in.reset = g_slots.ShouldReset(index, view.now);
     ParamSetter setter { g.params };
-    ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, in, g.color.texture.Get(), g.output.texture.Get(),
-                                                     g.depth.texture.Get(), g.motion.texture.Get());
-    const NVSDK_NGX_Result result = evaluate(context, g.handle, g.params, nullptr);
-    if (result != NVSDK_NGX_Result_Success)
+
+    // NR before SR (PreviewNRBeforeSR): with that placement NR runs on the render-size colour first and its result is the evaluate's Color. The
+    // decisions (is it offered, which colour does each evaluate get, what happens when the evaluate refuses the NR image) are nr::DecideSrEvaluate's:
+    // with the key off it runs the evaluate once on g.color, as before. A refused NR image is run again on g.color in this same render and latches
+    // NR before SR off for the session (one log line); that is never a failure of this slot or of the SR path.
+    ComPtr<ID3D11Texture2D> preSrColour; // the pre-SR NR result, with a reference of its own for the evaluate
+    NVSDK_NGX_Result result = NVSDK_NGX_Result_Success;
+    NVSDK_NGX_Result nrColourResult = NVSDK_NGX_Result_Success;
+    // The history reset of each evaluate is the rule's too (nr::EvaluateResetFor): the slot's own reset (`in.reset`), a change of the colour source
+    // since the slot's last successful evaluate (g.lastColour) and the retry after a refused NR image. `in` itself keeps the slot's own reset: the NR
+    // model gets that one, and the evaluate gets a copy with the rule's reset.
+    const nr::SrEvaluation ev = nr::DecideSrEvaluate(
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), nr::SrHistory { in.reset, g.lastColour, g.sourceResets.Due(view.now) },
+        [&]
+        {
+            PreSrCall call = RunNrPreSr(view, g, s, in);
+            preSrColour = std::move(call.texture);
+            return call.answer;
+        },
+        [&](nr::SrColourSource source, bool reset)
+        {
+            ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, ngx::WithReset(in, reset),
+                                                             nr::SrColourFor<ID3D11Resource*>(source, preSrColour.Get(), g.color.texture.Get()),
+                                                             g.output.texture.Get(), g.depth.texture.Get(), g.motion.texture.Get());
+            result = evaluate(context, g.handle, g.params, nullptr);
+            if (source == nr::SrColourSource::PreSr)
+                nrColourResult = result;
+            return result == NVSDK_NGX_Result_Success;
+        });
+    if (ev.ok)
+        g.lastColour = ev.colour; // only a successful evaluate moves it: a failed slot is released with its feature
+    if (ev.ok && ev.sourceReset)
+        NoteSourceReset(index, g, view.now);
+    if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())
+    {
+        if (ev.preSrProduced)
+            LOG_WARN("CharaView NR: the DLSS evaluate refused the pre-SR NR image (result {:#x}); {}NR before DLSS is "
+                     "switched off for this session and NR runs after DLSS",
+                     static_cast<unsigned>(nrColourResult),
+                     ev.ok ? "this render used the plain image, " : "the plain evaluate failed too, so this preview falls back to the game's own image for a while; ");
+        else
+            LOG_WARN("CharaView NR: the pre-SR run reported a result but gave no image; NR before DLSS is switched off for this session and NR runs "
+                     "after DLSS");
+    }
+    if (!ev.ok)
     {
         char text[64];
         std::snprintf(text, sizeof(text), "evaluate %X", static_cast<unsigned>(result));
@@ -771,35 +841,38 @@ void RunSlot(int index, const DrawView& view)
     // Preview NR, production entry: the SR evaluate succeeded for this render. NR runs on the SR output with the real guides and, when it
     // produced an image, the alpha pass recomposes the original alpha onto that image instead of the SR output. Any other outcome leaves
     // the SR output as it is (fail open); an NR problem is never a problem of this slot.
-    const uintptr_t previewKey = reinterpret_cast<uintptr_t>(view.rtvTexture);
-    const bool consumerRecent = view.rtvTexture != nullptr && g_consumed.Recent(previewKey, view.now, kNrLiveWindowMs);
-    ComPtr<ID3D11ShaderResourceView> nrOutput;
-    if (nr::RunProductionNow(PlumbingNow(), true, consumerRecent))
-        nrOutput = RunNrProduction(view, g, s, w, h, in.reset);
-    nr::AlphaInput alphaInput = nr::ChooseAlphaInput(nrOutput != nullptr);
-
+    // The decisions and their order (offer, run, choose the alpha colour and tint, alpha pass, composed-from-NR) are nr::DecideSlotRender's;
+    // what runs here are the effects.
     const bool tinted = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
     const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
-    const auto alphaPass = [&](nr::AlphaInput input)
-    {
-        ID3D11ShaderResourceView* colour = input == nr::AlphaInput::NrOutput ? nrOutput.Get() : g.output.srv.Get();
-        const nr::TintKind kind = nr::AlphaTintFor(tinted, input);
-        const guides::Tint tint = ToGuideTint(kind);
-        return scope.Alpha(colour, g.nativeSrv.Get(), g.composed.rtv.Get(), outW, outH, tint);
-    };
+    ComPtr<ID3D11ShaderResourceView> nrOutput; // outlives the alpha pass
     g.composedFromNr = false; // written by every alpha pass: a render without NR never inherits the flag of an earlier one
-    bool alphaOk = alphaPass(alphaInput);
-    if (!alphaOk)
+    g.preSrColour = false;
+    const nr::SlotRender render = nr::DecideSlotRender(
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, ev.placement, ev.usedPreSrColour,
+        [&]
+        {
+            ProductionCall call = RunNrProduction(view, g, s, ngx::WithReset(in, ev.resetUsed));
+            nrOutput = std::move(call.view);
+            return call.answer;
+        },
+        [&](nr::AlphaInput input, nr::TintKind kind)
+        {
+            ID3D11ShaderResourceView* colour = nr::AlphaColourFor<ID3D11ShaderResourceView*>(input, nrOutput.Get(), g.output.srv.Get());
+            return scope.Alpha(colour, g.nativeSrv.Get(), g.composed.rtv.Get(), outW, outH, ToGuideTint(kind));
+        });
+    if (!render.alphaOk)
     {
         FailSlot(index, "the alpha pass failed");
         return;
     }
-    g.composedFromNr = alphaInput == nr::AlphaInput::NrOutput;
-    g_nrProductionThisRender = g.composedFromNr;
-    if (g.composedFromNr)
-        ++g_stats.nrProductionRuns;
+    g.composedFromNr = render.composedFromNr;
+    g.preSrColour = render.preSrColour;
+    g_nrProductionThisRender = render.composedFromNr;
+    if (nr::MadeFromPostSrNr(g.composedFromNr, g.preSrColour))
+        ++g_stats.nrProductionRuns; // the alpha pass used the post-SR NR output (NR before SR has its own counters in the module)
     if (tinted)
-        ++g_stats.tintApplied; // the composed image: magenta for SR, cyan when its colour came from NR
+        ++g_stats.tintApplied; // the composed image: magenta for SR, cyan when its colour came from NR (after or before the evaluate)
 
     {
         ReplayScope own; // the query End goes through the hooked context
@@ -816,7 +889,7 @@ void RunSlot(int index, const DrawView& view)
     {
         diag::Request request;
         request.native = view.rtvTexture;
-        request.input = g.color.texture.Get();
+        request.input = ev.usedPreSrColour ? preSrColour.Get() : g.color.texture.Get(); // the colour the evaluate really read
         request.dlss = g.output.texture.Get();
         request.composed = g.composed.texture.Get();
         request.depth = g.depth.texture.Get();
@@ -830,8 +903,9 @@ void RunSlot(int index, const DrawView& view)
     }
     if (diag::TraceEnabled())
         diag::Trace(diag::TraceCategory::Guides, view.now,
-                    std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} reversedZ {} pass {}", index, w, h, g_pass.jitter.x,
-                                g_pass.jitter.y, in.reset, g_reversedZ, g_pass.counter));
+                    std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} (slot rule {}) colour {} reversedZ {} pass {}", index, w, h,
+                                g_pass.jitter.x, g_pass.jitter.y, ev.resetUsed, in.reset, ev.usedPreSrColour ? "pre-SR NR" : "plain", g_reversedZ,
+                                g_pass.counter));
 }
 
 // ---- Preview NR hooks -----------------------------------------------------------------------------------------------------
@@ -895,9 +969,9 @@ const char* ProductionCauseText(nr::RunOutcome outcome)
     }
 }
 
-ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
+ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
 {
-    const uint32_t outW = w * ngx::kOutputScale, outH = h * ngx::kOutputScale;
+    const uint32_t outW = in.width * ngx::kOutputScale, outH = in.height * ngx::kOutputScale;
     if (view.rtvTexture == nullptr || outW > kNrMaxSide || outH > kNrMaxSide)
     {
         // Not offered to NR: counted like any other fallback and logged once (a cause outside the RunOutcome range).
@@ -906,7 +980,7 @@ ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, cons
             LOG_INFO("CharaView NR: production NR kept the super-resolution output of a render: the preview texture is unknown or its size ({}x{}) is "
                      "larger than NR takes (counted; this cause is logged once)",
                      outW, outH);
-        return nullptr;
+        return { nullptr, { nr::RunOutcome::NotAvailable, false } };
     }
     nr::ProductionRequest request;
     request.base.context = view.context;
@@ -917,29 +991,83 @@ ComPtr<ID3D11ShaderResourceView> RunNrProductionInner(const DrawView& view, cons
     request.colour = g.output.texture.Get();
     request.depth = g.depth.texture.Get();
     request.motion = g.motion.texture.Get();
-    request.guides = nr::MakeProductionGuides(w, h, s.reversedZ); // what the SR feature of this slot was created with
-    request.superResolutionReset = srReset; // the SR evaluate of this render reset its history: so does the NR model
+    request.guides = nr::GuidesOf(in, s.reversedZ); // the guides the SR evaluate of this render was given; the depth convention its feature was created with
+    request.superResolutionReset = in.reset; // the reset the SR evaluate of this render ran with (RunSlot passes ev.resetUsed: the slot rule or a colour source change): so does the NR model
     nr::ProductionResult result = nr::RunProduction(request);
-    if (result.outcome == nr::RunOutcome::Ran && result.view != nullptr)
-        return std::move(result.view);
+    const nr::ProductionAnswer answer { result.outcome, result.view != nullptr };
+    if (nr::ProductionProduced(answer))
+        return { std::move(result.view), answer };
     if (g_productionCauses.First(static_cast<unsigned>(result.outcome)))
         LOG_INFO("CharaView NR: production NR kept the super-resolution output of a render: {} (counted; this cause is logged once)",
                  ProductionCauseText(result.outcome));
     if (diag::TraceEnabled())
         diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR production outcome {} for {}x{}", static_cast<int>(result.outcome), outW, outH));
-    return nullptr;
+    return { nullptr, answer };
 }
 
 // The second line of defence behind the module's own boundary (nr::RunProduction never throws): the request set-up and the log text
 // around it cannot leave the game's Draw hook either. An exception here latches preview NR; the SR output is used.
-ComPtr<ID3D11ShaderResourceView> RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, uint32_t w, uint32_t h, bool srReset)
+ProductionCall RunNrProduction(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
 {
-    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, w, h, srReset); },
-                       []() -> ComPtr<ID3D11ShaderResourceView>
+    return nr::Guarded([&] { return RunNrProductionInner(view, g, s, in); },
+                       []() -> ProductionCall
                        {
                            if (nr::SharedLatches().LatchNr())
                                LOG_WARN("CharaView NR: an unexpected exception in the dispatcher's production step; switched off for this session, the super-resolution output is used");
-                           return nullptr;
+                           return {};
+                       });
+}
+
+// Pre-SR entry: between the guide passes and the SR evaluate of RunSlot, with the real guides (nr::RunPreSrNow). The module copies the render-size
+// colour and the slot's depth and motion into its shared images, queues the NR list on the bridge's D3D12 queue and waits for it on this context
+// (same-frame hand-off), then hands back the NR output (RGBA16F, render size), which RunSlot gives the SR evaluate as its Color. Anything else
+// (the model is still being built, no list free, the module is switched off or failed) returns no image and the evaluate runs on the plain colour:
+// counted by the module, logged here once per cause. The post-SR entry is not started for such a render (nr::DecideSlotRender).
+nr::CauseLog g_preSrCauses; // one log line per cause of a pre-SR fallback (the module counts every one)
+
+PreSrCall RunNrPreSrInner(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
+{
+    if (view.rtvTexture == nullptr || in.width > kNrMaxSide || in.height > kNrMaxSide)
+    {
+        nr::NotePreSrDeclined();
+        if (g_preSrCauses.First(kProductionCauseDeclined))
+            LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: the preview texture is unknown or its size ({}x{}) is larger than NR "
+                     "takes (counted; this cause is logged once)",
+                     in.width, in.height);
+        return { nullptr, { nr::RunOutcome::NotAvailable, false } };
+    }
+    nr::ProductionRequest request;
+    request.base.context = view.context;
+    request.base.native = view.rtvTexture;
+    request.base.width = in.width;
+    request.base.height = in.height;
+    request.base.now = view.now;
+    request.colour = g.color.texture.Get();
+    request.depth = g.depth.texture.Get();
+    request.motion = g.motion.texture.Get();
+    request.guides = nr::GuidesOf(in, s.reversedZ); // the guides the SR evaluate of this render is given; the depth convention its feature was created with
+    request.superResolutionReset = in.reset;        // the SR history restarts with this render: so does the NR model's
+    nr::ProductionResult result = nr::RunPreSr(request);
+    const nr::ProductionAnswer answer { result.outcome, result.view != nullptr && result.texture != nullptr };
+    if (nr::ProductionProduced(answer))
+        return { std::move(result.texture), answer };
+    if (g_preSrCauses.First(static_cast<unsigned>(result.outcome)))
+        LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: {} (counted; this cause is logged once)", ProductionCauseText(result.outcome));
+    if (diag::TraceEnabled())
+        diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR pre-SR outcome {} for {}x{}", static_cast<int>(result.outcome), in.width, in.height));
+    return { nullptr, answer };
+}
+
+// The second line of defence behind the module's own boundary (nr::RunPreSr never throws), like RunNrProduction: an exception here latches preview
+// NR and the evaluate runs on the plain colour.
+PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in)
+{
+    return nr::Guarded([&] { return RunNrPreSrInner(view, g, s, in); },
+                       []() -> PreSrCall
+                       {
+                           if (nr::SharedLatches().LatchNr())
+                               LOG_WARN("CharaView NR: an unexpected exception in the dispatcher's pre-SR step; switched off for this session, the plain image is used");
+                           return {};
                        });
 }
 
@@ -1090,7 +1218,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
     bool any = false;
     bool flooded = false; // at least one slot got the debug magenta image (PreviewDebugFlood)
     bool anyNr = false;   // at least one slot got the bring-up NR result
-    bool anyProduction = false; // at least one slot got a composed image made from the production NR output
+    bool anyProduction = false; // at least one slot got a composed image made from NR (after SR: the production NR output; before SR: the SR colour)
+    bool anyPostSrNr = false;   // ... and at least one of them was made from the production NR output (what the production statistics count)
     ComPtr<ID3D11ShaderResourceView> nrHold[kSrvSlots]; // the NR results in use (also the cyan copies), alive until after the draw and the restore
     const bool floodOn = flood::On();
     const bool tintOn = ext::Cfg().ffxiv.chara.previewDebugTint.value_or_default();
@@ -1168,6 +1297,8 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
             replaced[i] = g->composed.srv.Get();
             any = true;
             anyProduction = true;
+            if (nr::MadeFromPostSrNr(g->composedFromNr, g->preSrColour))
+                anyPostSrNr = true;
             break;
         case nr::ConsumerSource::SrResult: // SR wins over the bring-up NR result
             replaced[i] = g->composed.srv.Get();
@@ -1204,7 +1335,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         else
         {
             ++g_stats.consumerSwaps;
-            if (anyProduction)
+            if (anyPostSrNr)
             {
                 ++g_stats.nrProductionSwaps;
                 if (g_lines.ShouldLog(kLineProductionSwap, identify::BurstNumber()))
@@ -1450,16 +1581,14 @@ bool Around(const DrawView& view, DrawCall draw)
         // Preview NR: bring-up entry. It needs only the native image, not the SR guides, so it does not wait for them and does not
         // care whether the SR path is latched or failed. A live window only: a UI draw must have sampled this preview image lately
         // (the first render after opening is native). It only reads the native image, so running it after the SR step changes nothing.
-        const bool live = view.rtvTexture != nullptr &&
-                          g_consumed.Recent(reinterpret_cast<uintptr_t>(view.rtvTexture), view.now, kNrLiveWindowMs);
-        bool bringUpProduced = false;
-        if (nr::RunBringUpNow(facts, view.finisherAccepted, live, srInCharge))
-            bringUpProduced = RunNrBringUp(view);
-        // Production NR ran inside the SR step above: it counts as a result for this render, or the withdrawal below would mark it stale at once.
-        const bool nrProducedResult = nr::NrProducedForRender(bringUpProduced, g_nrProductionThisRender);
-        // A render that has no NR result (rejected finisher, nobody shows the window, the SR path is in charge, a skipped or failed bring-up)
-        // withdraws the older result of this image: the UI draw must not show an older render for up to a quarter of a second.
-        if (nr::InvalidateNow(facts, nrProducedResult) && view.rtvTexture != nullptr)
+        const bool live = nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs);
+        // Production NR ran inside the SR step above: it counts as a result for this render (g_nrProductionThisRender), or the withdrawal
+        // would mark it stale at once. A render that has no NR result (rejected finisher, nobody shows the window, the SR path is in charge, a
+        // skipped or failed bring-up) withdraws the older result of this image: the UI draw must not show an older render for up to a quarter
+        // of a second. The decisions and their order are nr::DecideFinisherRender's.
+        const nr::FinisherRender finisher = nr::DecideFinisherRender(facts, view.finisherAccepted, live, srInCharge, g_nrProductionThisRender,
+                                                                     [&] { return RunNrBringUp(view); });
+        if (finisher.invalidate && view.rtvTexture != nullptr)
             nr::Invalidate(reinterpret_cast<uintptr_t>(view.rtvTexture));
         return true;
     }

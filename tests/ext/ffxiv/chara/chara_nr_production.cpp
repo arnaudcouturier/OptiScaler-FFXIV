@@ -1,12 +1,16 @@
 // Preview NR, production entry (NR on the super-resolution output): the pure parts. What this proves: the model call of a production
-// run (output-size colour, render-size guides, the upscaler's depth convention and motion scale), the recipe of a production run (no
-// zero-motion pass, the same states as the bring-up), the stream shape (a mode change rebuilds the stream, a bring-up consumer is never
-// given a production result), the checks on the images a production run copies, and the mode-specific decisions of the dispatcher side.
+// run (output-size colour, render-size guides built by GuidesOf from the same inputs as the super-resolution evaluate, the upscaler's
+// depth convention and motion scale), the recipe of a production run (no zero-motion pass, the same states as the bring-up), the stream
+// shape (a mode change rebuilds the stream, a bring-up consumer is never given a production result) and the checks on the images a
+// production run copies. The decisions of one render (production vs bring-up, the
+// alpha input, the withdrawal) are tested in chara_nr_render.
 // What it cannot prove (the game session does): the D3D12 state tracking of the copied inputs, the model's behaviour for guides smaller
 // than the colour, the image quality on alpha-masked characters.
 #include "check.h"
 
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
+#include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaNrGuides.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/ffxiv/chara/CharaNrRules.h"
@@ -56,15 +60,34 @@ struct Fake
     }
 };
 
-FramePlan ProductionPlan(bool reversedZ, bool reset)
+// The inputs of one super-resolution evaluate at the render size (the same object feeds the evaluate and the production plan).
+ngx::EvaluateInputs SrInputs(uint32_t width, uint32_t height, bool reset)
 {
-    FramePlan p;
-    p.width = kOutW;
-    p.height = kOutH;
-    p.initGuides = false; // production never zeroes the motion image: it holds the preview's own motion
-    p.reset = reset;
-    p.guides = MakeProductionGuides(kRenderW, kRenderH, reversedZ);
-    return p;
+    ngx::EvaluateInputs in;
+    in.width = width;
+    in.height = height;
+    in.reset = reset;
+    return in;
+}
+
+// A production plan for the render the evaluate `sr` was made for, made by the module's own MakeFramePlan (the function Run() records from): the
+// colour is the evaluate's output (twice its size), the guides come from the same inputs, the reset follows the evaluate's. The stream is one that
+// ran a moment ago, so DecideReset alone says "continue": a reset in the plan can only come from the evaluate's reset.
+FramePlan ProductionPlan(const ngx::EvaluateInputs& sr, bool reversedZ)
+{
+    StreamState st;
+    st.everRan = true;
+    st.lastRun = 1000;
+    st.runs = 5;
+    PlanInputs in;
+    in.width = sr.width * ngx::kOutputScale;
+    in.height = sr.height * ngx::kOutputScale;
+    in.carriesGuides = true;
+    in.guidesInit = true;
+    in.guides = GuidesOf(sr, reversedZ);
+    in.superResolutionReset = sr.reset;
+    in.now = 1016;
+    return MakeFramePlan(st, in);
 }
 
 // The values the super-resolution evaluate is given, recorded through its own composition.
@@ -92,8 +115,10 @@ struct NgxFake
 
 void TestModelCall()
 {
+    // one render: the super-resolution evaluate and the production plan are made from the same inputs
+    const ngx::EvaluateInputs in = SrInputs(kRenderW, kRenderH, true);
     Fake f;
-    CHECK(RecordRun(f, ProductionPlan(false, true)));
+    CHECK(RecordRun(f, ProductionPlan(in, false)));
     const ModelCall& m = f.call;
     // the model sees the 2x image; depth and motion are the render-size sub-rectangles starting at 0
     CHECK(m.width == kOutW && m.height == kOutH);
@@ -101,9 +126,6 @@ void TestModelCall()
     CHECK(m.depthBaseX == 0 && m.depthBaseY == 0 && m.motionBaseX == 0 && m.motionBaseY == 0);
     // the motion scale is the one the super-resolution evaluate is given
     NgxFake sr;
-    ngx::EvaluateInputs in;
-    in.width = kRenderW;
-    in.height = kRenderH;
     ngx::ApplyEvaluate<NgxFake, const void*>(sr, in, nullptr, nullptr, nullptr, nullptr);
     CHECK(sr.mvX == static_cast<float>(kRenderW) && sr.mvY == static_cast<float>(kRenderH));
     CHECK(m.mvScaleX == sr.mvX && m.mvScaleY == sr.mvY);
@@ -113,7 +135,7 @@ void TestModelCall()
 
     // the depth convention follows the feature's flags
     Fake g;
-    CHECK(RecordRun(g, ProductionPlan(true, false)));
+    CHECK(RecordRun(g, ProductionPlan(SrInputs(kRenderW, kRenderH, false), true)));
     CHECK(g.call.depthInverted == 1 && g.call.reset == 0);
     CHECK((ngx::CreateFlags(true) & ngx::kFlagDepthInverted) != 0 && (ngx::CreateFlags(false) & ngx::kFlagDepthInverted) == 0);
     // and the motion vectors are declared low resolution, which is what makes the guides' own size the reference of the motion scale
@@ -125,16 +147,128 @@ void TestModelCall()
     CHECK(b.depthInverted == 0 && b.mvScaleX == 1.0f && b.mvScaleY == 1.0f);
 }
 
+// The guides as they were computed before GuidesOf existed, from a loose width and height: the oracle of the equivalence sweep.
+GuideSetup OldProductionGuides(uint32_t renderWidth, uint32_t renderHeight, bool reversedZ)
+{
+    return GuideSetup { renderWidth, renderHeight, reversedZ, static_cast<float>(renderWidth), static_cast<float>(renderHeight) };
+}
+
+// GuidesOf is the one place the production NR guides come from, and ApplyEvaluate (the super-resolution evaluate's set-up) uses the same
+// EvaluateGuidesOf. The guides of a production run therefore equal what the evaluate of the same render is given, whatever the size.
+void TestGuidesOf()
+{
+    const uint32_t sizes[][2] = { { 1, 1 },       { 2, 3 },       { 576, 960 },   { 960, 576 },   { 1280, 720 },
+                                  { 1920, 1080 }, { 2048, 2048 }, { 4095, 1 },    { 1, 4096 } };
+    for (const auto& size : sizes)
+        for (const bool reversedZ : { false, true })
+            for (const bool reset : { false, true })
+            {
+                const uint32_t w = size[0], h = size[1];
+                const ngx::EvaluateInputs in = SrInputs(w, h, reset);
+                const GuideSetup got = GuidesOf(in, reversedZ);
+
+                // behaviour is unchanged: field by field the same as the old computation from the loose width and height
+                const GuideSetup old = OldProductionGuides(w, h, reversedZ);
+                CHECK(got.width == old.width && got.height == old.height && got.depthInverted == old.depthInverted &&
+                      got.mvScaleX == old.mvScaleX && got.mvScaleY == old.mvScaleY);
+
+                // what the super-resolution evaluate of this render is given, recorded through its own composition
+                NgxFake sr;
+                ngx::ApplyEvaluate<NgxFake, const void*>(sr, in, nullptr, nullptr, nullptr, nullptr);
+                CHECK(got.mvScaleX == sr.mvX && got.mvScaleY == sr.mvY);
+                CHECK(got.width == sr.subW && got.height == sr.subH);
+                // the convention itself, typed independently of the helper: the render size, in pixels, and not the output size
+                CHECK(got.width == w && got.height == h);
+                CHECK(got.mvScaleX == static_cast<float>(w) && got.mvScaleY == static_cast<float>(h));
+                CHECK(got.depthInverted == reversedZ);
+
+                // the model call of a production run for this render carries them
+                Fake rec;
+                CHECK(RecordRun(rec, ProductionPlan(in, reversedZ)));
+                CHECK(rec.call.guideWidth == sr.subW && rec.call.guideHeight == sr.subH && rec.call.motionWidth == sr.subW &&
+                      rec.call.motionHeight == sr.subH);
+                CHECK(rec.call.mvScaleX == sr.mvX && rec.call.mvScaleY == sr.mvY);
+                CHECK(rec.call.width == w * ngx::kOutputScale && rec.call.height == h * ngx::kOutputScale);
+                CHECK(rec.call.depthInverted == (reversedZ ? 1 : 0) && rec.call.reset == (reset ? 1 : 0));
+
+                // GuidesOf depends on the inputs it is given (the comparisons above are not between equal constants): inputs at the OUTPUT size
+                // give other guides. That the glue passes the render-size inputs is guarded by chara_dlss_glue_text, not by this assertion.
+                const GuideSetup wrong = GuidesOf(SrInputs(w * ngx::kOutputScale, h * ngx::kOutputScale, reset), reversedZ);
+                CHECK(wrong.mvScaleX != sr.mvX && wrong.mvScaleY != sr.mvY);
+                CHECK(wrong.width != sr.subW && wrong.height != sr.subH);
+            }
+}
+
 void TestRecipe()
 {
     // production: encode -> model -> resolve only; the motion image is never overwritten
     Fake f;
-    CHECK(RecordRun(f, ProductionPlan(false, false)));
+    CHECK(RecordRun(f, ProductionPlan(SrInputs(kRenderW, kRenderH, false), false)));
     CHECK(f.passes == 2 && f.Has("evaluate"));
     CHECK(!f.Has("pass:11")); // DlssNrMode_ZeroMotion
     CHECK(f.constants[0].Mode == DlssNrMode_Encode && f.constants[0].Width == kOutW && f.constants[0].Height == kOutH);
     CHECK(f.constants[1].Mode == DlssNrMode_Resolve && f.constants[1].Width == kOutW && f.constants[1].Height == kOutH);
     CHECK(f.constants[0].Passthrough == 1 && f.constants[1].Passthrough == 1); // the SR output is already display referred
+}
+
+// MakeFramePlan is the one place Run() makes its plan: the bring-up keeps its synthetic guides, a stream with copied guides never initialises or
+// clears them, and the super-resolution evaluate's reset reaches the plan only there.
+void TestFramePlan()
+{
+    PlanInputs in;
+    in.width = kRenderW;
+    in.height = kRenderH;
+    in.now = 5000;
+    ResetReason why = ResetReason::None;
+
+    // bring-up: first run -> synthetic guides are set up, history starts; later runs continue; a gap resets
+    StreamState fresh;
+    FramePlan p = MakeFramePlan(fresh, in, &why);
+    CHECK(p.initGuides && p.reset && why == ResetReason::FirstRun);
+    CHECK(p.width == kRenderW && p.height == kRenderH && p.guides.width == 0 && p.guides.height == 0);
+    CHECK(p.result == Tex::Result0 && p.colour == Tex::Colour0);
+    in.guidesInit = true;
+    StreamState ran;
+    ran.everRan = true;
+    ran.lastRun = 4900;
+    ran.runs = 3;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.initGuides && !p.reset && why == ResetReason::None);
+    CHECK(p.result == Tex::Result1); // the result image alternates with the run count
+    ran.lastRun = 4000;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::Gap);
+    // the bring-up never takes the super-resolution reset, whatever the caller says
+    ran.lastRun = 4900;
+    in.superResolutionReset = true;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.reset && why == ResetReason::None);
+    in.superResolutionReset = false;
+    // the late variant alternates the colour images with the result images
+    in.late = true;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour1);
+    ran.runs = 4;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour0 && MakeFramePlan(ran, in).result == Tex::Result0);
+    in.late = false;
+    ran.runs = 3;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour0); // not late: one colour image
+
+    // copied guides: never initialised, taken from the caller, and the evaluate's reset restarts the history of a stream that continues
+    in.carriesGuides = true;
+    in.guidesInit = false; // even before the first guides run: the images hold the preview's own guides
+    in.guides = GuideSetup { kRenderW, kRenderH, true, 576.0f, 960.0f };
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.initGuides && !p.reset && why == ResetReason::None);
+    CHECK(p.guides.width == kRenderW && p.guides.height == kRenderH && p.guides.depthInverted && p.guides.mvScaleX == 576.0f && p.guides.mvScaleY == 960.0f);
+    in.superResolutionReset = true;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::SuperResolution);
+    // a first run or a gap are reported as such, not as the evaluate's reset
+    p = MakeFramePlan(fresh, in, &why);
+    CHECK(p.reset && why == ResetReason::FirstRun);
+    ran.lastRun = 4000;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::Gap);
 }
 
 StreamShape BringUp()
@@ -254,47 +388,15 @@ void TestInputsFit()
     CHECK(!ProductionInputsFit(noGuides, colour, depth, motion));
 }
 
-// The module-side decisions of one render with PreviewDLSS and PreviewNR both on, in the order the dispatcher takes them.
-void TestRenderDecisions()
-{
-    PlumbingFacts f;
-    f.srWanted = f.nrWanted = true;
-    f.srGateOpen = true;
-    f.nrHoldsResources = true;
-
-    // render where SR evaluated and production produced: no bring-up, no withdrawal, the consumer gets the production image
-    const bool srEvaluated = true, windowShown = true;
-    const bool production = RunProductionNow(f, srEvaluated, windowShown);
-    CHECK(production);
-    CHECK(!RunBringUpNow(f, true, windowShown, /*srInCharge=*/SrInCharge(true, false, false))); // the SR path is in charge: no bring-up, no cost
-    CHECK(!InvalidateNow(f, NrProducedForRender(false, production)));
-    CHECK(ChooseConsumerSource(false, production, srEvaluated, false) == ConsumerSource::ProductionResult);
-    CHECK(AlphaTintFor(true, ChooseAlphaInput(production)) == TintKind::Nr);
-
-    // production fell back (preparing the model, no free list, a failure): the SR image is used, as without NR (fail open)
-    const bool fellBack = false;
-    CHECK(InvalidateNow(f, NrProducedForRender(false, fellBack))); // the older NR result of the image is withdrawn
-    CHECK(ChooseConsumerSource(false, fellBack, srEvaluated, false) == ConsumerSource::SrResult);
-    CHECK(AlphaTintFor(true, ChooseAlphaInput(fellBack)) == TintKind::Sr);
-    CHECK(AlphaTintFor(false, ChooseAlphaInput(fellBack)) == TintKind::None);
-
-    // SR did not evaluate this render: no production. While the SR path is in charge of the preview the render keeps the native image (no
-    // bring-up, as with PreviewDLSS alone); the bring-up runs only where the SR path does not serve the preview (latched, a failed slot, too large)
-    CHECK(!RunProductionNow(f, false, windowShown));
-    CHECK(!RunBringUpNow(f, true, windowShown, SrInCharge(true, false, false)));
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, true, false)));  // the slot failed
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(true, false, true)));  // too large for the SR path
-    CHECK(RunBringUpNow(f, true, windowShown, SrInCharge(false, false, false))); // the SR path is not usable
-    CHECK(ChooseConsumerSource(false, false, false, true) == ConsumerSource::NrResult);
-}
 } // namespace
 
 int main()
 {
     TestModelCall();
+    TestGuidesOf();
     TestRecipe();
+    TestFramePlan();
     TestStreamModes();
     TestInputsFit();
-    TestRenderDecisions();
     return TEST_RESULT("chara_nr_production");
 }

@@ -20,6 +20,7 @@ struct CharaConfig
     CustomOptional<bool> previewNr { false };           // [FFXIV] PreviewNR: Neural Rendering for character previews (new work, not in Nickle's build)
     CustomOptional<uint32_t> previewNrLingerSeconds { 5 }; // [FFXIV] PreviewNRLingerSeconds: how long a preview's NR model outlives its window
     CustomOptional<bool> previewNrLate { false };       // [FFXIV] PreviewNRLate: show the previous frame's NR result (no GPU wait)
+    CustomOptional<bool> previewNrBeforeSr { false };   // [FFXIV] PreviewNRBeforeSR: run NR before the DLSS evaluate instead of after it (experimental; needs PreviewDLSS and PreviewNR)
     CustomOptional<bool> previewProbe { false };        // [FFXIV] PreviewProbe: debug probe that traces how the preview reaches the screen
     CustomOptional<bool> previewDebugFlood { false };   // [FFXIV] PreviewDebugFlood: replaces the sampled preview by solid magenta (debug aid)
 
@@ -34,6 +35,7 @@ struct CharaConfig
         b.Add("FFXIV", "PreviewNR", previewNr);
         b.Add("FFXIV", "PreviewNRLingerSeconds", previewNrLingerSeconds);
         b.Add("FFXIV", "PreviewNRLate", previewNrLate);
+        b.Add("FFXIV", "PreviewNRBeforeSR", previewNrBeforeSr);
         b.Add("FFXIV", "PreviewProbe", previewProbe);
         b.Add("FFXIV", "PreviewDebugFlood", previewDebugFlood);
     }

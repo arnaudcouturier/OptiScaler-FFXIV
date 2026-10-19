@@ -156,7 +156,8 @@ struct ModelCall
 //   motion scale is 1 (the motion image is zero).
 //   Production: the guides are the preview's own, at render size while the colour (the super-resolution output) is at output size. This is
 //   the main NR pass's convention for a frame whose motion vectors are low resolution (guide sub-rectangles = render size, the depth
-//   convention of the upscaler, motion scale = the scale given to the upscaler), see MakeProductionGuides.
+//   convention of the upscaler, motion scale = the scale given to the upscaler), see GuidesOf (CharaNrGuides.h), which builds it from the
+//   super-resolution evaluate's own inputs.
 struct GuideSetup
 {
     uint32_t width = 0;  // size of the depth and motion images; 0 = the size of the colour image
@@ -165,14 +166,6 @@ struct GuideSetup
     float mvScaleX = 1.0f;
     float mvScaleY = 1.0f;
 };
-
-// The guides of a production run for a preview rendered at `renderWidth` x `renderHeight`: the depth and motion images have the render
-// size, the depth is inverted when the feature of the super-resolution evaluate was created that way, and the motion vectors (fractions of
-// the render image) are scaled by the render size, the same scale the super-resolution evaluate is given.
-constexpr GuideSetup MakeProductionGuides(uint32_t renderWidth, uint32_t renderHeight, bool reversedZ)
-{
-    return GuideSetup { renderWidth, renderHeight, reversedZ, static_cast<float>(renderWidth), static_cast<float>(renderHeight) };
-}
 
 // The model works at the colour image's size; depth and motion are described by `guides`.
 inline ModelCall MakeModelCall(uint32_t width, uint32_t height, bool reset, const ModelTuning& t, const GuideSetup& guides = {})

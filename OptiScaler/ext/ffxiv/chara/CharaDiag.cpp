@@ -26,7 +26,8 @@ struct Job
     float jitterX = 0.0f;
     float jitterY = 0.0f;
     std::array<ComPtr<ID3D11Texture2D>, kFilesPerDump> staging;
-    std::array<DXGI_FORMAT, kFilesPerDump> formats {};
+    DumpFormats formats {}; // DXGI format values, in kRoles order
+    uint64_t bytes = 0;     // the budget cost of the whole dump, worked out once from those formats
     std::array<uint32_t, kFilesPerDump> widths {}, heights {};
     ComPtr<ID3D11Buffer> cameraStaging;
     uint32_t cameraBytes = 0;
@@ -103,7 +104,25 @@ bool Capture(ID3D11DeviceContext* context, const Request& request, uint64_t eval
 {
     if (!CaptureEnabled() || g_hasJob || context == nullptr || !SizeAllowed(request.width, request.height))
         return false;
-    if (!g_budget.Fits(kFilesPerDump, DumpBytes(request.width, request.height)))
+
+    // The real format of every image decides its row size and the size budget (FormatBytesPerPixel), so all six are looked
+    // at before the budget is checked.
+    Job job;
+    std::array<D3D11_TEXTURE2D_DESC, kFilesPerDump> descs {};
+    for (size_t i = 0; i < kRoles.size(); ++i)
+    {
+        ID3D11Texture2D* source = SourceOf(request, kRoles[i]);
+        if (source == nullptr)
+            return false;
+        source->GetDesc(&descs[i]);
+        if (!Plausible(descs[i], kRoles[i], request))
+            return false;
+        job.formats[i] = static_cast<uint32_t>(descs[i].Format);
+        job.widths[i] = descs[i].Width;
+        job.heights[i] = descs[i].Height;
+    }
+    job.bytes = DumpBytes(request.width, request.height, job.formats);
+    if (!g_budget.Fits(kFilesPerDump, job.bytes))
         return false;
     const int phase = g_phases.Next(evaluations, nowMs);
     if (phase < 0)
@@ -114,7 +133,6 @@ bool Capture(ID3D11DeviceContext* context, const Request& request, uint64_t eval
     if (device == nullptr)
         return false;
 
-    Job job;
     job.phase = phase;
     job.group = g_groups + 1;
     job.width = request.width;
@@ -124,16 +142,7 @@ bool Capture(ID3D11DeviceContext* context, const Request& request, uint64_t eval
 
     for (size_t i = 0; i < kRoles.size(); ++i)
     {
-        ID3D11Texture2D* source = SourceOf(request, kRoles[i]);
-        if (source == nullptr)
-            return false;
-        D3D11_TEXTURE2D_DESC desc {};
-        source->GetDesc(&desc);
-        if (!Plausible(desc, kRoles[i], request))
-            return false;
-        job.formats[i] = desc.Format;
-        job.widths[i] = desc.Width;
-        job.heights[i] = desc.Height;
+        D3D11_TEXTURE2D_DESC desc = descs[i];
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.MiscFlags = 0;
@@ -208,7 +217,7 @@ void Pump(ID3D11DeviceContext* context, uint64_t nowMs)
     std::vector<std::vector<uint8_t>> files(kFilesPerDump);
     for (size_t i = 0; i < kFilesPerDump; ++i)
     {
-        const uint32_t bpp = RoleBytesPerPixel(kRoles[i]);
+        const uint32_t bpp = RoleBytesPerPixel(kRoles[i], g_job.formats[i]);
         const uint32_t w = g_job.widths[i], h = g_job.heights[i];
         std::vector<uint8_t>& out = files[i];
         out.resize(static_cast<size_t>(w) * h * bpp);
@@ -228,7 +237,7 @@ void Pump(ID3D11DeviceContext* context, uint64_t nowMs)
         }
     }
 
-    const uint64_t dumpBytes = DumpBytes(g_job.width, g_job.height);
+    const uint64_t dumpBytes = g_job.bytes;
     uint32_t saved = 0;
     if (g_budget.Fits(kFilesPerDump, dumpBytes))
     {
@@ -242,7 +251,7 @@ void Pump(ID3D11DeviceContext* context, uint64_t nowMs)
             {
                 const fs::path path = dir / (std::to_string(g_job.group) + "-" + RoleName(kRoles[i]) + ".bin");
                 std::ofstream file(path, std::ios::binary | std::ios::trunc);
-                const uint32_t header[3] { g_job.widths[i], g_job.heights[i], static_cast<uint32_t>(g_job.formats[i]) };
+                const uint32_t header[3] { g_job.widths[i], g_job.heights[i], g_job.formats[i] };
                 file.write(reinterpret_cast<const char*>(header), sizeof(header));
                 file.write(reinterpret_cast<const char*>(files[i].data()), static_cast<std::streamsize>(files[i].size()));
                 if (file.good())
