@@ -6,6 +6,7 @@
 #include "ext/game/Game.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
+#include "ext/reshade/ReShadeBoundary.h"
 
 #include <menu/menu_common.h>
 
@@ -93,6 +94,18 @@ void DrawHudless(ext::menu::Ctx&)
         cfg.showDetectedUi = tint;
     ext::menu::Tooltip("Debug: tints the pasted UI area so the mask is visible (UI-free mode).");
 
+    // [HudLess] ReShadePresets: auto | on | off; the order of the combo is the order of ext::reshade::PresetsMode.
+    static constexpr const char* kPresetNames[] = { "auto", "on", "off" };
+    int preset = static_cast<int>(ext::reshade::ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default()));
+    if (ImGui::Combo("ReShade presets at the UI boundary", &preset, "Auto\0On\0Off\0"))
+        ext::Cfg().reshade.presets = std::string(kPresetNames[preset]);
+    ext::menu::Tooltip("Apply your ReShade presets in place at the UI boundary, so the UI-free image carries the effects and "
+                       "the HUD stays unfiltered. Only used in UI-free mode (needs ReShade with the add-on).\n"
+                       "Auto: when ReShade registered a runtime and at least one technique is enabled.\n"
+                       "On: always try (the technique count is not trusted).\n"
+                       "Off: never apply presets here.\n"
+                       "Read at every UI boundary: applies at once. Save Settings to keep it.");
+
     if (!ImGui::TreeNode("Advanced"))
         return;
 
@@ -126,6 +139,16 @@ void DrawHudless(ext::menu::Ctx&)
     ext::menu::Tooltip("Fall back to normal frame generation when more than this share of the screen is flagged as UI for "
                        "five frames in a row (full-screen fades, a preset that runs before the capture); retries after "
                        "120 frames. 0 = off. Default 0.60.");
+
+    // [DLSSG] UIRecomposition: unset = on (the engine treats an unset key as on); read when the DLSS-G feature is created.
+    auto& recompositionSetting = ext::Cfg().fg.uiRecomposition;
+    int recomposition = !recompositionSetting.has_value() ? 0 : (recompositionSetting.value() ? 1 : 2);
+    if (ImGui::Combo("UI recomposition (restart)", &recomposition, "Auto (on)\0On\0Off\0"))
+        recompositionSetting = recomposition == 0 ? std::optional<bool> {} : std::optional<bool>(recomposition == 1);
+    ext::menu::Tooltip("Recomposition mode only: whether DLSS-G gets a separate UI path and recomposes the UI itself "
+                       "(Auto = on). Off: DLSS-G treats the tagged hud-less and UI images as hints only and still "
+                       "interpolates the UI.\n"
+                       "DLSS-G reads this when it is created: applies after a restart. Save Settings to keep it.");
 
     if (ImGui::Button("Reset advanced"))
     {
