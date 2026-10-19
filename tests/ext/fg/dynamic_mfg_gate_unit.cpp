@@ -129,6 +129,16 @@ void MenuCardVisibility()
     CHECK(!IsBlackwellArchitecture(0x190));
 }
 
+void PermanentGates()
+{
+    // Gates that cannot reopen without a change of the keys: the glue stops ticking on them (DynamicMfgGlue.h).
+    for (auto g : { AutoMfgGate::NotNvidia, AutoMfgGate::Blackwell, AutoMfgGate::NotDx12, AutoMfgGate::Stopped })
+        CHECK(IsPermanentlyClosed(g));
+    for (auto g : { AutoMfgGate::Open, AutoMfgGate::KeyOff, AutoMfgGate::NotDlssg, AutoMfgGate::FollowsGame,
+                    AutoMfgGate::DynamicMode, AutoMfgGate::MaxBelow3x })
+        CHECK(!IsPermanentlyClosed(g)); // the user or the game can change these at any time
+}
+
 void CeilingArithmetic()
 {
     CHECK(HardMaxFactor(4, 5) == 4); // never 5x/6x, whatever the unlock allows
@@ -198,6 +208,7 @@ int main()
     TargetResolution();
     RefreshIsUnknownBelow24Hz();
     MenuCardVisibility();
+    PermanentGates();
     CeilingArithmetic();
     OptionsGuard();
     if (g_failures)

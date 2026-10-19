@@ -17,9 +17,9 @@ unsigned ObservedMultiplier(IFGFeature* fg);
 // E3: restart the DLSS-G presentation telemetry window (DLSS-G Dx12 activation).
 void ResetDlssgPresentStats();
 
-// Dynamic MFG on RTX 40 (DynamicMfgSeams.cpp). AdjustDlssgOptions: one tick per game frame; true = the automatic
-// selection (or the self-test) is in charge of this frame's count, `options` may have been changed.
-bool AutoMfgTickFrame(IFGFeature* fg, sl::DLSSGOptions& options);
+// Dynamic MFG on RTX 40 (DynamicMfgSeams.cpp, logic in DynamicMfgGlue.h). AdjustDlssgOptions: one call per game frame; the
+// automatic selection (or the self-test) may change `options`, then the ForceDMFG / Ada-ceiling guard runs on the result.
+void AutoMfgAdjustOptions(IFGFeature* fg, sl::DLSSGOptions& options);
 // AfterDlssgSetOptions: what GetState said right after this frame's options, for the next tick's kill-switch.
 void AutoMfgObserve(bool queryOk, uint32_t status, uint32_t presented);
 // DLSS-G (re)activated (OnActivated): new observation window; the kill-switch's memory stays.
