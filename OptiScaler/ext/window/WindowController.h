@@ -81,6 +81,12 @@ class Controller
         _confirmPresents = presents;
         _confirmMs = ms;
     }
+    // The same for the border fix (M3): it needs this many complete off presents, and this long since the first of them.
+    void SetFixConfirm(uint32_t presents, uint64_t ms)
+    {
+        _fixConfirmPresents = presents;
+        _fixConfirmMs = ms;
+    }
 
     // Bridge swapchain resize finished (ext::dx11bridge::OnResizeDone). `bridge` identifies the bridge swapchain.
     // `swapWidth/swapHeight` = the bridge's FG swapchain size after this resize.
@@ -147,7 +153,7 @@ class Controller
         const FgSnapshot fg = env.Fg();
         // A present that returned before the frame generation present says nothing about Streamline (M2): not counted.
         const bool reached = PresentReached(env);
-        _gate.OnPresentEnd(fg, reached);
+        _gate.OnPresentEnd(fg, reached, env.NowMs());
         if (reached)
             _fgPresentSinceRequest = true; // the soft wait limit needs one such present since the last request
 
@@ -517,12 +523,24 @@ class Controller
                 hr < 0);
     }
 
+    bool FixFloorReached(Env& env) const
+    {
+        const uint64_t now = env.NowMs();
+        const uint64_t first = _gate.FirstOffMs();
+        return _gate.Count() >= _fixConfirmPresents && now >= first && now - first >= _fixConfirmMs;
+    }
+
     // B1-a. Runs at the end of a game present while the fix is armed. Frame generation must be confirmed off (a complete
     // present with the feature inactive, DLSS-G output) AND be off right now: the pause after a Deactivate is only about ten
     // frames, so the feature can come back; then the fix waits for the next off period.
     void TryFix(Env& env, const FgSnapshot& fg)
     {
         if (!_gate.Confirmed(env.DlssgOutput()) || !FgIsOff(fg))
+            return;
+        // Like the replay (M3): enough complete off presents AND enough time since the first of them. After a leave that was
+        // not held, the next present is already complete and off, and the restyle that follows resizes the swapchain in the
+        // present in which Streamline first sees eOff. Not a gated check yet, so kFixMaxChecks counts only checks past it.
+        if (!FixFloorReached(env))
             return;
 
         if (++_fixChecks > kFixMaxChecks)
@@ -612,6 +630,8 @@ class Controller
     bool _fixWaitNoted = false;
     bool _ownerSkipLogged = false;
     int _actionDepth = 0; // > 0 while the module is inside one of its own window calls
+    uint32_t _fixConfirmPresents = kReplayConfirmPresents; // complete off presents needed before the fix
+    uint64_t _fixConfirmMs = kReplayConfirmMs;            // and this long since the first of them
 
     // B2-a
     Deferral _deferral;

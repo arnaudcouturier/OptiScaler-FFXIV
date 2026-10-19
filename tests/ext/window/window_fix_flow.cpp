@@ -60,6 +60,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.fg = kOff;
         MakeBorderBug(env);
         Present(c, env, Mode::On, kOff, kOff); // earlier presents do not matter
@@ -91,6 +92,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kActive;
         Present(c, env, Mode::On, kActive, kActive);
@@ -109,6 +111,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.window = wt::BorderlessWindow(); // the game has not rewritten its frame-less style yet
         env.window.style = 0x16CF0000u;      // the fork's WS_OVERLAPPEDWINDOW | WS_VISIBLE, with a caption
         env.window.exstyle = 0x300u;
@@ -134,6 +137,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.window = wt::BorderlessWindow();
         env.window.style = 0x16CF0000u;
         env.window.exstyle = 0x300u;
@@ -158,6 +162,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         env.exclusive = false;
@@ -191,6 +196,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.window = wt::BorderlessWindow();
         env.window.style = 0x16CF0000u; // caption
         env.window.exstyle = 0x300u;
@@ -217,6 +223,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kActive;
         EnterThenLeave(c, env, Mode::On);
@@ -234,6 +241,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kActive;
         env.nowMs = 1000;
@@ -250,6 +258,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         env.exclusive = false;
@@ -270,6 +279,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.window = wt::BorderlessWindow();
         env.window.style = 0x16CF0000u; // still the fork's overlapped style: waiting
         env.window.exstyle = 0x300u;
@@ -288,6 +298,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         EnterThenLeave(c, env, Mode::Probe);
@@ -302,6 +313,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         env.dlssg = false;
@@ -315,6 +327,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         env.owner = 5;
@@ -343,6 +356,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         env.fg = kOff;
         env.window.valid = false;
         EnterThenLeave(c, env, Mode::On);
@@ -356,6 +370,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         env.applyResult = false;
@@ -372,6 +387,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
         MakeBorderBug(env);
         env.fg = kOff;
         EnterThenLeave(c, env, Mode::On);
@@ -393,10 +409,88 @@ int main()
         CHECK(env.Last().find("nested=yes") == std::string::npos);
     }
 
+    // M3, the strict defaults (the other cases above relax the floor to focus on their own rule): the fix needs at least 2
+    // complete off presents AND 50 ms since the first of them, like the replay. After a leave that was NOT held (every guard
+    // that fails open) the very next present is complete and off, and the fix must not restyle the window inside it: the
+    // resize that follows would run in the present in which Streamline first sees eOff.
+    {
+        FakeEnv env;
+        Controller c; // defaults
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 1005;
+        Present(c, env, Mode::On, kPaused, kPaused); // 1 complete off present: the first
+        CHECK(env.applied.empty());
+        for (uint64_t t = 1010; t <= 1050; t += 5)
+        {
+            env.nowMs = t;
+            Present(c, env, Mode::On, kPaused, kPaused); // 2 or more presents, but at most 45 ms since the first
+            CHECK(env.applied.empty());
+        }
+        CHECK(c.FixArmed());
+        env.nowMs = 1055; // 50 ms since the first complete off present
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+        CHECK(!env.applied[0].fgActiveAtCall);
+    }
+    {
+        // plenty of time but only one complete present: not enough
+        FakeEnv env;
+        Controller c;
+        MakeBorderBug(env);
+        env.fg = kOff;
+        env.nowMs = 1000;
+        EnterThenLeave(c, env, Mode::On);
+        env.nowMs = 5000;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.empty());
+        env.nowMs = 5001;
+        Present(c, env, Mode::On, kPaused, kPaused); // the second, 1 ms after the first
+        CHECK(env.applied.empty());
+        env.nowMs = 5050;
+        Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.applied.size() == 1);
+    }
+    {
+        // An interruption (frame generation comes back, then goes off again) restarts the floor from the next first present;
+        // so does a bridge resize (it deactivates frame generation again and resets the gate).
+        for (const bool interruptByResize : { false, true })
+        {
+            FakeEnv env;
+            Controller c;
+            MakeBorderBug(env);
+            env.fg = kOff;
+            env.nowMs = 1000;
+            EnterThenLeave(c, env, Mode::On);
+            for (uint64_t t = 1005; t <= 1025; t += 5)
+            {
+                env.nowMs = t;
+                Present(c, env, Mode::On, kPaused, kPaused); // count 5, first at 1005
+            }
+            CHECK(env.applied.empty());
+            env.nowMs = 1028;
+            if (interruptByResize)
+                c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+            else
+                Present(c, env, Mode::On, kPaused, kActive); // frame generation is back
+            for (uint64_t t = 1030; t <= 1070; t += 10)
+            {
+                env.nowMs = t;
+                Present(c, env, Mode::On, kPaused, kPaused); // new first present at 1030, at most 40 ms later
+                CHECK(env.applied.empty());                 // a stale first-present time (1005) would apply from 1060
+            }
+            env.nowMs = 1080; // 50 ms since the new first present
+            Present(c, env, Mode::On, kPaused, kPaused);
+            CHECK(env.applied.size() == 1);
+        }
+    }
     // Mode off: no arming, no application, no reads.
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0);
         MakeBorderBug(env);
         EnterThenLeave(c, env, Mode::Off);
         Present(c, env, Mode::Off, kOff, kOff);

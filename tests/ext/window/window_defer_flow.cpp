@@ -312,6 +312,7 @@ int main()
         FakeEnv env;
         Controller c;
         c.SetReplayConfirm(1, 0);
+        c.SetFixConfirm(1, 0); // the floor would stop the fix anyway: relaxed, so only the guard under test can stop it
         Running(c, env);
         env.exclusive = true;
         Present(c, env, Mode::On, kActive, kActive);
@@ -606,6 +607,7 @@ int main()
         FakeEnv env;
         Controller c;
         c.SetReplayConfirm(1, 0); // these cases are about other rules; the strict default has its own cases below
+        c.SetFixConfirm(1, 0);
         Running(c, env);
         env.exclusive = true; // the pseudo fullscreen is in effect; a present has sampled it, no resize has
         Present(c, env, Mode::On, kActive, kActive);

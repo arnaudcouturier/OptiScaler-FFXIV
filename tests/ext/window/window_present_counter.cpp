@@ -528,6 +528,7 @@ int main()
     {
         FakeEnv env;
         Controller c;
+        c.SetFixConfirm(1, 0); // about the counter here; the floor has its own cases in window_fix_flow
         env.serial = 0;
         env.fg = kOff;
         Present(c, env, Mode::On, kOff, kOff, true); // the present thread is recorded

@@ -97,5 +97,32 @@ int main()
     CHECK(std::string(FgStateName(kOff)) == "off");
     CHECK(std::string(FgStateName(FgSnapshot { true, true, true })) == "active"); // active wins over paused
 
+    // M3: the gate keeps the clock of the first present of the current run (count 0 -> 1); later presents do not move it, and an
+    // interruption, an aborted present or a Reset forgets it.
+    {
+        FgOffGate gate;
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, true, 1000);
+        CHECK(gate.Count() == 1 && gate.FirstOffMs() == 1000);
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, true, 1030);
+        CHECK(gate.Count() == 2 && gate.FirstOffMs() == 1000); // not moved
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kActive, true, 1040); // interrupted
+        CHECK(gate.Count() == 0 && gate.FirstOffMs() == 0);
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, true, 1050);
+        CHECK(gate.Count() == 1 && gate.FirstOffMs() == 1050); // a new run
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, false, 1060); // aborted before the FG present
+        CHECK(gate.Count() == 0 && gate.FirstOffMs() == 0);
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, true, 1070);
+        gate.Reset();
+        CHECK(gate.Count() == 0 && gate.FirstOffMs() == 0);
+        gate.OnPresentBegin(kOff);
+        gate.OnPresentEnd(kOff, true, 1080);
+        CHECK(gate.FirstOffMs() == 1080);
+    }
     return wt::g_failed ? 1 : 0;
 }

@@ -47,29 +47,37 @@ class FgOffGate
     {
         _count = 0;
         _startedOff = false;
+        _firstMs = 0;
     }
     void OnPresentBegin(const FgSnapshot& fg) { _startedOff = FgIsOff(fg); }
     // `reachedFg` = the present got as far as the frame generation present (the swapchain Present Streamline sees). A present
-    // that returned early (an error path before it) says nothing about Streamline: the count starts again.
-    void OnPresentEnd(const FgSnapshot& fg, bool reachedFg = true)
+    // that returned early (an error path before it) says nothing about Streamline: the count starts again. `nowMs` = the clock
+    // at this present end; it is kept as FirstOffMs() when the count goes from 0 to 1 and forgotten when the count starts again.
+    void OnPresentEnd(const FgSnapshot& fg, bool reachedFg = true, uint64_t nowMs = 0)
     {
         if (reachedFg && _startedOff && FgIsOff(fg))
         {
+            if (_count == 0)
+                _firstMs = nowMs;
             if (_count < UINT32_MAX)
                 ++_count;
         }
         else
         {
             _count = 0;
+            _firstMs = 0;
         }
         _startedOff = false;
     }
     bool Confirmed(bool dlssgOutput) const { return dlssgOutput && _count >= kPresentsNeeded; }
     uint32_t Count() const { return _count; }
+    // The clock at the end of the first present of the current run (meaningful only while Count() > 0).
+    uint64_t FirstOffMs() const { return _firstMs; }
 
   private:
     uint32_t _count = 0;
     bool _startedOff = false;
+    uint64_t _firstMs = 0;
 };
 
 // ---- the present counter -------------------------------------------------------------------------------------------------
