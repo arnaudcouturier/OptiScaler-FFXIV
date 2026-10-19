@@ -43,6 +43,7 @@ void TestDefaultsAndBinding()
     CHECK(!defaults.previewNr.value_or_default());
     CHECK(defaults.previewNrLingerSeconds.value_or_default() == 5u);
     CHECK(!defaults.previewNrLate.value_or_default());
+    CHECK(!defaults.previewNrBeforeSr.value_or_default()); // experimental, off unless asked for
     CHECK(!defaults.previewProbe.value_or_default());
     CHECK(!defaults.previewDebugFlood.value_or_default());
 
@@ -63,11 +64,12 @@ void TestDefaultsAndBinding()
         { "FFXIV", "PreviewNR", &defaults.previewNr },
         { "FFXIV", "PreviewNRLingerSeconds", &defaults.previewNrLingerSeconds },
         { "FFXIV", "PreviewNRLate", &defaults.previewNrLate },
+        { "FFXIV", "PreviewNRBeforeSR", &defaults.previewNrBeforeSr },
         { "FFXIV", "PreviewProbe", &defaults.previewProbe },
         { "FFXIV", "PreviewDebugFlood", &defaults.previewDebugFlood },
     };
-    CHECK(binder.Table().size() == 11);
-    for (size_t i = 0; i < 11 && i < binder.Table().size(); ++i)
+    CHECK(binder.Table().size() == 12);
+    for (size_t i = 0; i < 12 && i < binder.Table().size(); ++i)
     {
         CHECK(std::string(binder.Table()[i].section) == expected[i].section);
         CHECK(std::string(binder.Table()[i].key) == expected[i].key);
@@ -88,6 +90,7 @@ void TestRoundTrip()
     ini.SetValue("FFXIV", "PreviewNR", "true");
     ini.SetValue("FFXIV", "PreviewNRLingerSeconds", "12");
     ini.SetValue("FFXIV", "PreviewNRLate", "true");
+    ini.SetValue("FFXIV", "PreviewNRBeforeSR", "true");
     ini.SetValue("FFXIV", "PreviewProbe", "true");
     ini.SetValue("FFXIV", "PreviewDebugFlood", "true");
     config::Load(ini);
@@ -99,6 +102,7 @@ void TestRoundTrip()
     CHECK(c.previewGuideCapture.value_or_default());
     CHECK(c.previewNrTrace.value_or_default());
     CHECK(c.previewNr.value_or_default() && c.previewNrLate.value_or_default() && c.previewNrLingerSeconds.value_or_default() == 12u);
+    CHECK(c.previewNrBeforeSr.value_or_default());
     CHECK(c.previewDebugTint.value_or_default());
     CHECK(c.previewProbe.value_or_default());
     CHECK(c.previewDebugFlood.value_or_default());
@@ -115,6 +119,7 @@ void TestRoundTrip()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewNR", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewNRLingerSeconds", "")) == "12");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewNRLate", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewNRBeforeSR", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewProbe", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugFlood", "")) == "true");
 
@@ -135,6 +140,7 @@ void TestUnsetKeysStayDefault()
     CHECK(fresh.previewUpscale.value_or_default());
     CHECK(!fresh.previewAA.value_or_default());
     CHECK(!fresh.previewProbe.value_or_default());
+    CHECK(!fresh.previewNrBeforeSr.value_or_default());
     CHECK(!fresh.previewDebugFlood.value_or_default());
 
     CSimpleIniA out;
@@ -143,6 +149,7 @@ void TestUnsetKeysStayDefault()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewUpscale", "")) == "auto");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewAA", "")) == "auto");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewProbe", "")) == "auto");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewNRBeforeSR", "")) == "auto");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugFlood", "")) == "auto");
 }
 
@@ -150,7 +157,7 @@ void TestFragments(const std::string& repo)
 {
     const std::string ffxiv = ReadFile(repo + "/OptiScaler/ext/ini/FFXIV.ini");
     CHECK(!ffxiv.empty());
-    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint", "PreviewNR", "PreviewNRLingerSeconds", "PreviewNRLate", "PreviewProbe", "PreviewDebugFlood" })
+    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint", "PreviewNR", "PreviewNRLingerSeconds", "PreviewNRLate", "PreviewNRBeforeSR", "PreviewProbe", "PreviewDebugFlood" })
         CHECK(HasKeyLine(ffxiv, key));
     CHECK(!HasKeyLine(ffxiv, "PreviewNRTrace"));
     CHECK(ffxiv.find("[FFXIV]") == std::string::npos || ffxiv.find("[FFXIV]") == 0); // a leading header would be dropped by the packager
