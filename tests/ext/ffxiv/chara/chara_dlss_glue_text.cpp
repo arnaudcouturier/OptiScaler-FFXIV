@@ -163,6 +163,15 @@ const std::vector<Fragment> kDlss = {
 const char* const kPlanFields[] = { "plan.reset", "plan.initGuides", "plan.guides", "plan.width", "plan.height", "plan.colour", "plan.result" };
 const std::vector<Fragment> kNr = {
     { "MakeFramePlan(st, planInputs, &reset)", 1, "Run() records the plan the tests check" },
+    { "CopyPlanFor(placement)", 1, "the hand-off copies exactly what the pure copy plan lists, all before the ready signal" },
+    { "ShapeFor(placement, req.width, req.height, tuning.preset, tuning.style, Late(),", 1, "the stream shape comes from the pure ShapeFor (PreviewNRLate only for the bring-up)" },
+    { "CopiedInputsFit(wanted,", 1, "the copied images are checked against the placement's own fit" },
+    { "ColourFormatFor(placement, static_cast<uint32_t>(nativeFormat))", 1, "the colour image has the placement's format" },
+    { "m.timerRing.NoteSubmitted(out.done, placement);", 1, "the timer attributes a measurement to the placement" },
+    { "CountedCall(M().fallbacks, placement,", 1, "a call without a result is counted for its own placement" },
+    { "RunCopiedImpl(request, Placement::PostSr)", 1, "the production entry runs the post-SR placement" },
+    { "RunCopiedImpl(request, Placement::PreSr)", 1, "the pre-SR entry runs the pre-SR placement" },
+    { "!ResultTextureServes(ResultKindOf(st))", 1, "the dump is not offered a result it cannot label" },
 };
 
 // The edit of a negative control, made on the comment-free text (white space is not part of the match).

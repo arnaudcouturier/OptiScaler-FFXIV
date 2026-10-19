@@ -12,7 +12,7 @@
 // and released a few seconds after the preview was last drawn. The module never touches the main NR pass's state, owns its own
 // fence, and treats any failure as final for the session (one log line, the native image stays).
 //
-// Two modes, one stream table (keyed by the preview image's texture pointer, one stream per image):
+// Three placements, one stream table (keyed by the preview image's texture pointer, one stream per image):
 //   bring-up   : NR on the native image (PreviewNR alone, or a preview the super-resolution path does not serve): colour only, synthetic
 //                guides (a cleared depth, zero motion); the result replaces the native image in the UI draws that sample it.
 //   production : NR on the super-resolution output (PreviewDLSS and PreviewNR): the output (RGBA16F, twice the render size) and copies of the
@@ -120,12 +120,22 @@ struct ProductionResult
     // The NR output (same size as the colour, RGBA16F), with its own reference. The inline D3D11 wait on the D3D12 work was queued by the run,
     // so a draw issued on the immediate context after this call samples the finished image.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture; // the same image as `view`; set by the pre-SR entry only (the handle the SR evaluate takes)
     uint64_t serial = 0;
 };
 ProductionResult RunProduction(const ProductionRequest& request);
 // The dispatcher declined to offer a render to the production entry (no preview texture, or a size NR does not take): counted as a production
 // fallback and as a render that kept the super-resolution output.
 void NoteProductionDeclined();
+
+// The pre-SR entry (PreviewNRBeforeSR): NR on the render-size colour the SR evaluate is about to read, before that evaluate. The request is the
+// production request with the render-size images: `colour` is the slot's colour image (R8G8B8A8_UNORM, base.width x base.height = the render
+// size), `depth` and `motion` are the slot's guides at the same size, `guides` describes them. The result (RGBA16F, the same size) is in
+// `view` and `texture` and is meant as the SR evaluate's Color; the inline D3D11 wait on the D3D12 work was queued by the run, so an evaluate
+// issued on the immediate context afterwards is ordered after it. Any other outcome returns no image and the caller evaluates the plain colour.
+ProductionResult RunPreSr(const ProductionRequest& request);
+// The dispatcher declined to offer a render to the pre-SR entry (no preview texture, or a size NR does not take): counted as a pre-SR fallback.
+void NotePreSrDeclined();
 
 // A bring-up result a UI draw samples instead of the native image. `serial` identifies the result (never reused): the debug tint is made
 // once per result.
@@ -175,6 +185,11 @@ struct Status
     uint64_t productionFallbacks = 0; // production calls that left the super-resolution output as it was
     double productionGpuMs = 0.0;     // GPU time of the last production run (0 = none measured yet)
     double productionCpuMs = 0.0;
+    uint64_t preSrRuns = 0;           // ... of which pre-SR runs (NR before the SR evaluate)
+    uint64_t preSrFallbacks = 0;      // pre-SR calls that left the SR evaluate on the plain colour
+    double preSrGpuMs = 0.0;          // GPU time of the last pre-SR run (0 = none measured yet)
+    double preSrCpuMs = 0.0;
+    bool preSrLatched = false;        // the SR evaluate refused the NR image: NR before SR is off for the session
     uint64_t videoMemoryMb = 0; // video memory the streams' images and model instances added (measured around their creation, given back when a stream is released; 0 = not measured)
     bool late = false;         // a bring-up stream uses the late variant now (PreviewNRLate applies to the bring-up only; a production stream never does)
 };

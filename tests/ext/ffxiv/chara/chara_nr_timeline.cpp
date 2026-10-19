@@ -297,6 +297,89 @@ Scenario BuildOld(const std::vector<bool>& lates, int frames, uint32_t consumerF
     return s;
 }
 
+// NR before SR: what the module queues for one pre-SR run (the copies of CopyPlanFor, then the hand-off), followed by the caller's next D3D11
+// command, the SR evaluate, which reads the result image. The production templates drive it exactly as for the other placements.
+struct PreSrOps
+{
+    Timeline& t;
+    FenceCounter& done;
+    std::vector<int> copyEvents;
+    int runEvent;
+    bool WaitColourFree(uint64_t v)
+    {
+        t.Push(kD3D11, { Op::Wait, kDone, v, 0 });
+        return true;
+    }
+    void CopyColour()
+    {
+        const CopyPlan plan = CopyPlanFor(Placement::PreSr);
+        for (size_t i = 0; i < plan.count; ++i)
+            t.Push(kD3D11, { Op::Work, 0, 0, copyEvents[i] }); // colour, depth, motion, each before the ready signal below
+    }
+    bool Signal11(uint64_t v)
+    {
+        t.Push(kD3D11, { Op::Signal, kReady, v, 0 });
+        return true;
+    }
+    bool Wait12(uint64_t v)
+    {
+        t.Push(kD3D12, { Op::Wait, kReady, v, 0 });
+        return true;
+    }
+    bool Record(uint64_t& d)
+    {
+        t.Push(kD3D12, { Op::Work, 0, 0, runEvent });
+        d = done.Next();
+        t.Push(kD3D12, { Op::Signal, kDone, d, 0 });
+        return true;
+    }
+    bool Wait11(uint64_t d)
+    {
+        t.Push(kD3D11, { Op::Wait, kDone, d, 0 });
+        return true;
+    }
+};
+
+// `inlineWait` false is the negative control: the evaluate is issued without the D3D11 wait on the run (what a late-variant hand-off would do).
+Scenario BuildPreSr(int frames, bool inlineWait)
+{
+    Scenario s;
+    FenceCounter ready, done;
+    // PreviewNRLate belongs to the bring-up: a pre-SR stream is never late, so its run always waits inline
+    const StreamShape shape = ShapeFor(Placement::PreSr, 576, 960, 2, 0, /*lateWanted=*/true, 576, 960);
+    CHECK(!LateVariantInUse(shape));
+    const bool late = inlineWait ? LateVariantInUse(shape) : true;
+    std::vector<std::vector<int>> copies;
+    std::vector<int> runs, evaluates;
+    for (int k = 0; k < frames; ++k)
+    {
+        PreSrOps ops { s.timeline, done, {}, 0 };
+        for (size_t i = 0; i < CopyPlanFor(Placement::PreSr).count; ++i)
+            ops.copyEvents.push_back(s.timeline.AddEvent());
+        ops.runEvent = s.timeline.AddEvent();
+        const HandoffOutcome o = RunFrame(ops, ready, late, 0);
+        CHECK(o.ok);
+        const int evaluate = s.timeline.AddEvent();
+        s.timeline.Push(kD3D11, { Op::Work, 0, 0, evaluate }); // the caller's next D3D11 command: the SR evaluate reading the result
+        copies.push_back(ops.copyEvents);
+        runs.push_back(ops.runEvent);
+        evaluates.push_back(evaluate);
+    }
+    CHECK(copies.empty() || copies[0].size() == 3);
+    for (int k = 0; k < frames; ++k)
+    {
+        for (const int copy : copies[k])
+            s.deps.push_back({ copy, runs[k] }); // the run reads all three copies
+        s.deps.push_back({ runs[k], evaluates[k] }); // the evaluate reads a finished result
+        if (k + 1 < frames)
+            for (const int copy : copies[k + 1])
+                s.deps.push_back({ runs[k], copy }); // one colour, depth and motion image: the next copies wait for the run that read them
+        if (k + 2 < frames)
+            s.deps.push_back({ evaluates[k], runs[k + 2] }); // two result images: run k+2 overwrites the one the evaluate of run k read
+    }
+    return s;
+}
+
 struct Verdict
 {
     int drainFailures = 0;
@@ -400,6 +483,41 @@ void TestOldPlanShowsTheDefects()
     CHECK(two.hazards > 0 && two.decreases > 0);
 }
 
+// NR before SR: three copies (colour, depth, motion) before the ready signal, and the SR evaluate that follows the run on the D3D11 queue is ordered
+// after the run in every schedule; the result image a later run overwrites has been read by then.
+void TestPreSrHandoff()
+{
+    for (const int frames : { 1, 2, 3, 8 })
+    {
+        const Verdict v = Check(BuildPreSr(frames, true));
+        CHECK(v.schedules == 403);
+        CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0 && v.hazards == 0);
+    }
+    // each frame queues the three copies and then the ready signal on the D3D11 queue, in this order, and only then the wait on the run
+    const Scenario s = BuildPreSr(2, true);
+    const std::vector<Op>& q11 = s.timeline.Queue(kD3D11);
+    size_t copiesBeforeSignal = 0;
+    bool signalled = false, waitedAfterSignal = false, evaluateAfterWait = false;
+    for (const Op& op : q11)
+    {
+        if (op.kind == Op::Work && !signalled)
+            ++copiesBeforeSignal;
+        else if (op.kind == Op::Signal)
+            signalled = true;
+        else if (op.kind == Op::Wait && signalled)
+            waitedAfterSignal = true;
+        else if (op.kind == Op::Work && waitedAfterSignal)
+        {
+            evaluateAfterWait = true;
+            break;
+        }
+    }
+    CHECK(copiesBeforeSignal == 3 && signalled && waitedAfterSignal && evaluateAfterWait);
+    // negative control: an evaluate issued without the D3D11 wait on the run reads a result that may not be finished (the model must say so)
+    const Verdict bad = Check(BuildPreSr(4, false));
+    CHECK(bad.hazards > 0);
+}
+
 // The window closes after a late frame: the last result is never consumed, and the queues still drain (this is where the shared fence
 // hung the bridge's queue).
 void TestWindowClosesAfterLateFrame()
@@ -422,6 +540,7 @@ int main()
     TestNewPlanIsSound();
     TestStructure();
     TestOldPlanShowsTheDefects();
+    TestPreSrHandoff();
     TestWindowClosesAfterLateFrame();
     return TEST_RESULT("chara_nr_timeline");
 }
