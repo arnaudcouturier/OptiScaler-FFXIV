@@ -10,10 +10,12 @@
 //                                         "output_scaling" /* after */, NrVisible } };
 //
 // The draw callback runs inside an upstream ScopedCard, so tab filtering and Custom Tab pinning work like for any
-// upstream card. `tab` is the label of an existing upstream tab. `after` is the id of the upstream (or earlier fork)
-// card to follow; when it is null or unknown the card goes after the last card of its tab. Cards with the same
-// anchor keep their registration order. At most kMaxCards cards.
+// upstream card. `tab` is the label of a tab of the menu. WHERE the card sits is decided by the layout table in
+// ext/core/MenuLayout.h (one slot per card id), never by the order the cards registered in; `after` is a legacy hint
+// that MergeBoxes ignores. A card without a slot goes to the end of its tab. Add a slot (and the id to the menu
+// manifest) with every new card. At most kMaxCards cards.
 
+#include "ext/core/MenuLayout.h"
 #include "ext/core/SourceTracker.h"
 
 #include <array>
@@ -55,11 +57,11 @@ template <class RenderContext> Ctx MakeCtx(RenderContext& rc)
 struct Card
 {
     const char* id;   // saved to the config (pinning), unique
-    const char* tab;  // label of the upstream tab: "Upscaling", "Frame Gen", "Latency & FPS", "Textures",
-                      // "Compatibility", "Menu", "Quirks / ASI", "Help / Status"
+    const char* tab;  // label of the tab: "Upscaling", "Frame Gen", "FFXIV", "Latency & FPS", "Textures",
+                      // "Compatibility", "Menu", "Help / Status" ("Quirks" is drawn by its own function, not from cards)
     const char* name; // shown in the Custom Tab picker
     void (*draw)(Ctx&);
-    const char* after = nullptr;                 // id of the card to follow
+    const char* after = nullptr;                 // legacy anchor, ignored by MergeBoxes: see ext/core/MenuLayout.h
     bool (*visible)(const Ctx&) = nullptr;       // null = always visible
     bool pinnable = true;
 };
@@ -163,59 +165,28 @@ template <class Box> const Box* MergeBoxes(const Box* base, size_t& count)
             return std::array<DrawFn, sizeof...(I)> { (+[](Ctx& c) { detail::RunCard(I, &c, c.menuResScale); })... };
         }(std::make_index_sequence<kMaxCards> {});
 
-        struct Entry
-        {
-            Box box;
-            const char* after; // anchor of a fork card
-            bool fork;
-        };
-
-        std::vector<Entry> entries;
+        // The order comes from the layout table (ext/core/MenuLayout.h), not from the order the cards registered in
+        std::vector<layout::Item> baseItems, cardItems;
         for (size_t i = 0; i < count; i++)
-            entries.push_back({ base[i], nullptr, false });
-
+            baseItems.push_back({ base[i].id, base[i].tab });
         for (size_t c = 0; c < cardCount && c < slots.size(); c++)
+            cardItems.push_back({ cards[c].id, cards[c].tab });
+
+        const auto order = layout::MergeOrder(baseItems.data(), baseItems.size(), cardItems.data(), cardItems.size(),
+                                              layout::kSlots, layout::kSlotCount);
+
+        for (const layout::Placed& p : order)
         {
-            const Card& card = cards[c];
-            Entry e { Box { card.id, card.tab, card.name, slots[c], nullptr, card.pinnable }, card.after, true };
-
-            size_t pos = SIZE_MAX; // insertion index
-
-            // after the anchor, behind fork cards that already follow the same anchor
-            if (card.after != nullptr)
+            if (!p.fork)
             {
-                for (size_t i = 0; i < entries.size(); i++)
-                {
-                    if (strcmp(entries[i].box.id, card.after) != 0)
-                        continue;
-
-                    pos = i + 1;
-                    while (pos < entries.size() && entries[pos].fork && entries[pos].after != nullptr &&
-                           strcmp(entries[pos].after, card.after) == 0)
-                        pos++;
-                    break;
-                }
+                merged.push_back(base[p.index]);
+                continue;
             }
 
-            // unknown or no anchor: after the last card of the tab, else at the end
-            if (pos == SIZE_MAX)
-            {
-                pos = entries.size();
-                for (size_t i = entries.size(); i > 0; i--)
-                {
-                    if (strcmp(entries[i - 1].box.tab, card.tab) == 0)
-                    {
-                        pos = i;
-                        break;
-                    }
-                }
-            }
-
-            entries.insert(entries.begin() + pos, e);
+            // the box and its trampoline belong to the card's REGISTRATION index, not to its place in the menu
+            const Card& card = cards[p.index];
+            merged.push_back(Box { card.id, card.tab, card.name, slots[p.index], nullptr, card.pinnable });
         }
-
-        for (const auto& e : entries)
-            merged.push_back(e.box);
 
         done = true;
     }
