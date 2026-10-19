@@ -17,6 +17,7 @@ WindowInfo Read(uint64_t hwnd);
 // SetWindowLongPtr(GWL_EXSTYLE, exstyle) then SetWindowPos(NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED): the new
 // extended style takes effect and the client area is recomputed. The window procedure runs inside the call (WM_NCCALCSIZE,
 // WM_SIZE), so it must be made on the window's owner thread and never from inside a ResizeBuffers or a paced present. False
-// when the handle is not a window or either call failed.
+// when the handle is not a window, SetWindowLongPtr failed (previous value 0 AND a non-zero last error: a stale error left by
+// the window procedure with a non-zero previous value is not a failure) or SetWindowPos failed; SetWindowPos always runs.
 bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle);
 } // namespace ext::window::win32

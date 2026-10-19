@@ -54,13 +54,17 @@ bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle)
     if (window == nullptr || !IsWindow(window))
         return false;
 
-    // SetWindowLongPtr returns the previous value, and 0 is a valid previous extended style: the last error tells.
+    // SetWindowLongPtr returns the previous value; 0 is also a valid previous extended style, so only "0 AND a non-zero last
+    // error" is a failure. The game's window procedure (and everything subclassed on it) runs synchronously inside this call
+    // and any API that fails benignly there leaves a stale last error behind, so the error alone proves nothing. (The border
+    // fix only calls this when an edge bit is set, so the previous value is never 0 in production.)
     SetLastError(0);
-    SetWindowLongPtrW(window, GWL_EXSTYLE, static_cast<LONG_PTR>(exstyle));
-    if (GetLastError() != 0)
-        return false;
+    const LONG_PTR previous = SetWindowLongPtrW(window, GWL_EXSTYLE, static_cast<LONG_PTR>(exstyle));
+    const bool styleOk = !(previous == 0 && GetLastError() != 0);
 
-    return SetWindowPos(window, nullptr, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) != FALSE;
+    // Always recompute the frame: the new style is in place whatever the last error says.
+    const bool framed = SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) != FALSE;
+    return styleOk && framed;
 }
 } // namespace ext::window::win32
