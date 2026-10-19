@@ -21,6 +21,12 @@ inline constexpr uint32_t kJitterPhases = 32;
 // The recommended length of a jitter cycle: 8 * (outputWidth / renderWidth)^2 phases, rounded down (18 at 3:2, 32 at 2:1, 72 at 3:1).
 // Integer maths: no float rounding on exact boundaries. 0 when either width is 0 or above 2^20 (not meaningful; keeps the 64-bit
 // intermediate from overflowing); the result saturates at the largest 32-bit value.
+//
+// The rounding is a choice, not a requirement: the XeSS guide says "at least" this many phases and the fork's own FFX answer
+// (FfxApi_Dx12.cpp) rounds up, while FSR's reference code truncates like this function. The two agree at the preview's fixed 2:1
+// (exactly 32), so nothing changes today. Nothing in the product calls this function: kJitterPhases is a constant, and this function
+// exists only so a test can tie that constant to the ratio the preview's DLSS feature is created with (tests/ext/ffxiv/chara/chara_jitter.cpp).
+// If the preview ever gets another scale, derive the phase count from here, and decide between rounding down and up then.
 constexpr uint32_t RecommendedPhases(uint32_t renderWidth, uint32_t outputWidth)
 {
     constexpr uint32_t kMaxWidth = 1u << 20;

@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -173,8 +175,35 @@ Coverage CoverageOf(uint32_t phases, uint32_t k)
     return c;
 }
 
+// The same count, taken from the production function: the jitter of passes 0 .. kJitterPhases - 1, one full cycle.
+Coverage ProductionCoverage(uint32_t k)
+{
+    std::vector<uint32_t> counts(static_cast<size_t>(k) * k, 0);
+    auto cell = [k](double v) { return std::min<uint32_t>(k - 1, static_cast<uint32_t>(std::floor((v + 0.5) * k))); };
+    for (uint32_t p = 0; p < kJitterPhases; ++p)
+    {
+        const Jitter j = PassJitter(p);
+        ++counts[static_cast<size_t>(cell(j.y)) * k + cell(j.x)];
+    }
+    Coverage c;
+    c.minCount = counts[0];
+    for (uint32_t v : counts)
+    {
+        c.minCount = std::min(c.minCount, v);
+        c.maxCount = std::max(c.maxCount, v);
+        c.emptyCells += v == 0 ? 1u : 0u;
+    }
+    return c;
+}
+
 void TestCoverage()
 {
+    // What the preview really uses: PassJitter over one cycle of kJitterPhases passes (the loops below use the test's own sequence, so
+    // they would stay green with a wrong PassJitter or a wrong kJitterPhases).
+    const Coverage p2 = ProductionCoverage(2), p4 = ProductionCoverage(4);
+    CHECK(p2.emptyCells == 0 && p2.minCount == 7 && p2.maxCount == 9); // 2x2 output pixels per render pixel: 7..9 samples each
+    CHECK(p4.emptyCells == 0);                                          // half-output-pixel cells: none empty
+
     // 2x upscale: one render pixel covers 2 x 2 output pixels. The numbers are the ones the study derived: 16 phases give 3..5 samples per
     // output pixel per cycle, 32 phases give 7..9 (the rule's target is 8).
     const Coverage c16 = CoverageOf(16, 2), c32 = CoverageOf(32, 2);
@@ -270,13 +299,32 @@ void TestRecommendedPhases()
     }
 }
 
+// Records what the preview's DLSS feature is created with (ApplyCreate's setter interface).
+struct CreateRecorder
+{
+    std::map<std::string, uint64_t> values;
+    void SetUInt(const char* name, uint32_t v) { values[name] = v; }
+    void SetInt(const char* name, int v) { values[name] = static_cast<uint64_t>(v); }
+    void SetFloat(const char*, float) {}
+};
+
 void TestTiedToPreviewScale()
 {
-    // The preview's DLSS output is kOutputScale times its render size; the phase count follows from that ratio. If the preview scale
-    // changes without kJitterPhases, this fails.
-    static_assert(ext::ffxiv::chara::dlss::ngx::kOutputScale == 2);
-    CHECK(kJitterPhases == RecommendedPhases(1, ext::ffxiv::chara::dlss::ngx::kOutputScale));
-    CHECK(kJitterPhases == RecommendedPhases(576, 576 * ext::ffxiv::chara::dlss::ngx::kOutputScale));
+    // The phase count has to follow the ratio the feature is ACTUALLY created with: take the Width/Height and OutWidth/OutHeight the
+    // creation helper writes for the preview's render sizes, and ask the recommendation for that pair. If the preview scale (or the
+    // creation code) changes without kJitterPhases, this fails as a normal test failure.
+    namespace ngx = ext::ffxiv::chara::dlss::ngx;
+    const std::vector<std::pair<uint32_t, uint32_t>> sizes = { { 576, 960 }, { 288, 480 }, { 1152, 1920 }, { 100, 100 }, { 1, 1 } };
+    for (const auto& size : sizes)
+    {
+        CreateRecorder created;
+        ngx::ApplyCreate(created, size.first, size.second, false);
+        const uint32_t w = static_cast<uint32_t>(created.values.at(ngx::kWidth)), h = static_cast<uint32_t>(created.values.at(ngx::kHeight));
+        const uint32_t outW = static_cast<uint32_t>(created.values.at(ngx::kOutWidth)), outH = static_cast<uint32_t>(created.values.at(ngx::kOutHeight));
+        CHECK(w == size.first && h == size.second);
+        CHECK(RecommendedPhases(w, outW) == kJitterPhases);
+        CHECK(RecommendedPhases(h, outH) == kJitterPhases); // both axes are scaled alike
+    }
 }
 
 void TestViewportAndAlpha()
