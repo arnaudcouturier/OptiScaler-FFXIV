@@ -26,7 +26,7 @@
 .PARAMETER Version
   Release tag, for example ffxiv-2026.10.17-fd6c2870-rc1 (convention: ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]); the leading "ffxiv-" may be left out.
 .PARAMETER Exclude
-  File names or package-relative paths to leave out of the archive (for example a binary whose licence you could not confirm).
+  File names or package-relative paths to leave out of the archive. Default: libxell.dll (Intel's XeLL library: its licence file does not name it, so it is not redistributed; pass -Exclude @() to pack it anyway).
 .PARAMETER OutDir
   Output folder, default <repo>\dist. A .gitignore containing "*" is written there so the archive can never be committed by accident.
 .EXAMPLE
@@ -39,7 +39,7 @@ param(
     [Parameter(Mandatory)][string]$Version,
     [string]$OutDir,
     [switch]$IncludeSymbols,
-    [string[]]$Exclude = @()
+    [string[]]$Exclude = @('libxell.dll')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -218,6 +218,11 @@ $(($byo | ForEach-Object { "  $_" }) -join "`n")
 KNOWN LIMITS
   * Only the settings marked "tested" in the project README were played in game, on one RTX 4090. Everything else is untested.
   * HUD-less is opt-in and off by default; SDR with DLSS-G 2x-4x was tested, HDR was not.
+  * Window mode ([Window] Mode=on), the automatic multiplier ([DLSSG] AutoMFG=true), "Run NR before DLSS" in the character
+    preview and the game jitter correction are off by default. Window mode needs [XeFG] ForceBorderless=true and ReShade.
+    The jitter correction is experimental and made no visible difference at the Quality mode in the maintainer's test.
+  * DLSS presets L and M cost more fps than K (heavier models); K is the default.
+  * libxell.dll (Intel XeLL) is not part of this archive.
   * 5x and 6x multi frame generation on RTX 40 are experimental; one GPU hang happened at 6x. Use 4x or lower.
   * The FFXIV-specific features (native quality, nameplates, lighting, HDR, HUD-less) are tied to one game build. After a game
     patch they switch themselves off (see the log) until the fork is updated; the rest keeps working.

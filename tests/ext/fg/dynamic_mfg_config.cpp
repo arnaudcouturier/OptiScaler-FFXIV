@@ -102,7 +102,7 @@ void IniFragmentDocumentsTheKeys(const std::string& repo)
     CHECK(HasKeyLine(ini, "AdaMfgUnlock") && HasKeyLine(ini, "UIRecomposition")); // the old ones are still there
     CHECK(ini.find("[DLSSG]") == std::string::npos); // a header would be dropped by the packager
     CHECK(ini.find("Default (auto) is 4") != std::string::npos); // AutoMFGMax
-    CHECK(ini.find("untested in game") != std::string::npos);
+    CHECK(ini.find("tested on one RTX 4090 setup only") != std::string::npos);
     // the kill-switch rule as the controller has it: two long frames in a row or three in all (not "a second one")
     CHECK(ini.find("stops after two such changes in a row, or three in all. An earlier one is forgotten only") != std::string::npos);
     // strikes are forgotten by the number of clean changes in a row, not by time (the code: kForgetAfterClean)
@@ -144,7 +144,7 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
     CHECK(card.find("A game stall (below about 33 real fps) is never held against it: nothing changes while it lasts.") !=
           std::string::npos);
     CHECK(card.find("stops after a second one") == std::string::npos);
-    CHECK(card.find("Untested in game") != std::string::npos);
+    CHECK(card.find("Tested on one RTX 4090 setup only") != std::string::npos);
     // the self-test key is a checkbox of the card: read from the key, written back to the key, nothing else writes it
     CHECK(card.find("bool selfTest = cfg.autoMfgSelfTest.value_or_default();") != std::string::npos);
     CHECK(card.find("if (ImGui::Checkbox(\"Run the self-test once##AutoMfg\", &selfTest))") != std::string::npos);
