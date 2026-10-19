@@ -16,6 +16,13 @@
 //             through the existing toggle path to the last good count, then automatic mode stops for the session. A bad
 //             status or count that began in the last kBadRunMs of the second is not dropped: the watch stays open (at most
 //             kBadRunMs more) until it is convicted or gone.
+//
+// Stall rule: while the controller's own average of the real interval is above kStallMs (below about 33 real fps) the game is
+// stalled (a loading screen, a re-creation by the game), and a stall is not a failed change. No new change starts and the
+// self-test does not start; an open watch is not judged and starts over on every stalled tick, so the second that is judged
+// is a calm one (kStallCalmMs); a watch that is not judged within kStallGiveUpMs of its switch ends as unknown (no strike, no
+// clean switch, the count stays). The self-test waits for kSelfTestCalmMs without a stall and a stall during it ends it as
+// interrupted. At normal frame rates nothing of this applies.
 
 #include "ext/fg/DynamicMfg.h"
 #include "ext/fg/DynamicMfgGate.h"
