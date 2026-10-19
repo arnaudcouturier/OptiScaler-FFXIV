@@ -104,7 +104,9 @@ void DrawHudless(ext::menu::Ctx&)
                        "Auto: when ReShade registered a runtime and at least one technique is enabled.\n"
                        "On: always try (the technique count is not trusted).\n"
                        "Off: never apply presets here.\n"
-                       "Read at every UI boundary: applies at once. Save Settings to keep it.");
+                       "Switching to Off applies at once.\n"
+                       "Switching it on again after the game started with Off applies after a restart (the ReShade runtime tracking is only installed at start when presets are not Off).\n"
+                       "Save Settings to keep it.");
 
     if (!ImGui::TreeNode("Advanced"))
         return;

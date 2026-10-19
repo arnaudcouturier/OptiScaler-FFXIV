@@ -54,12 +54,13 @@ constexpr const char* kCharaDebug = "void DrawDebugSection(CharaConfig& cfg, boo
 constexpr const char* kAmpereAdvanced = "ImGui::TreeNode(\"Advanced (RTX 20/30 runtime)##ampere_advanced\")"; // closed by default
 
 const Row kRows[] = {
-    // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card, read at every UI boundary = applies at once
+    // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card. The mode is read at every UI boundary, so switching to Off
+    // applies at once; but the ReShade runtime tracking is only installed at start when presets are not Off (ReShadeAddon.cpp
+    // OnReshadeLoaded), so switching on again after a start with Off applies after a restart: the tooltip says both.
     { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"ReShade presets at the UI boundary\"",
       .write = "ext::Cfg().reshade.presets=std::string(kPresetNames[preset])", .keyPrefix = "ext::Cfg().reshade.presets=",
-      .block = { "applies at once", "Only used in UI-free mode" },
-      .fileHas = { "ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default())" }, .before = "ImGui::TreeNode(\"Advanced\")",
-      .blockNot = { "restart" } },
+      .block = { "Switching to Off applies at once", "applies after a restart", "Only used in UI-free mode" },
+      .fileHas = { "ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default())" }, .before = "ImGui::TreeNode(\"Advanced\")" },
     // WP4 item 1: [DLSSG] UIRecomposition (auto/on/off), inside the existing Advanced fold, read when DLSS-G is created = restart
     { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"UI recomposition (restart)\"",
       .write = "recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1)",
