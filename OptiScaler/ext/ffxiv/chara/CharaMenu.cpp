@@ -16,14 +16,22 @@
 // Menu card of the character preview feature (CharaView). The texts are the ones of the build this feature was
 // reconstructed from, so users of both builds see the same labels. Hosted on a matched FFXIV build only (the hooks that
 // feed it live in the lighting capture).
+//
+// Layout (tab FFXIV, position in ext/core/MenuLayout.h): the user toggles on top (Preview DLSS, Preview spatial AA with its
+// 2x upscaling option, Preview NR with "Run NR before DLSS"), then the one-line states that explain what is running or why
+// nothing is, then ONE fold "Advanced (debug)", closed by default, with every counter and debug aid. The fold is drawn by
+// DrawCharaCard itself (TreeNode/TreePop in one place, no return in between).
 namespace
 {
 using namespace ext::ffxiv::chara;
 
 bool Visible(const ext::menu::Ctx&) { return ext::game::Current().lighting != nullptr; }
 
-// Preview Neural Rendering (new work, not part of the build the other preview features were reconstructed from).
-void DrawNrSection(CharaConfig& cfg)
+// ---- main view -----------------------------------------------------------------------------------------------------
+
+// Preview Neural Rendering (new work, not part of the build the other preview features were reconstructed from):
+// the two switches.
+void DrawNrToggles(CharaConfig& cfg)
 {
     bool nrOn = cfg.previewNr.value_or_default();
     if (ImGui::Checkbox("Preview Neural Rendering (NR, experimental)", &nrOn))
@@ -33,7 +41,7 @@ void DrawNrSection(CharaConfig& cfg)
                        "Preview DLSS it runs on the DLSS result (twice the size, with the preview's depth and motion) and the preview's own "
                        "alpha is put back afterwards; when NR cannot run for a render the plain DLSS image is shown. The spatial AA still "
                        "takes the equipment preview while NR has no result for a draw, unless the Preview DLSS pass runs. Every open window costs "
-                       "video memory and GPU time; the numbers below show both. Any failure switches it off for the session and the "
+                       "video memory and GPU time; the numbers in the Advanced (debug) section show both. Any failure switches it off for the session and the "
                        "native preview stays.");
 
     bool before = cfg.previewNrBeforeSr.value_or_default();
@@ -44,7 +52,12 @@ void DrawNrSection(CharaConfig& cfg)
                        "been anti-aliased yet: look for shimmer or trails on hair and cloth and switch it off if you see any. If DLSS refuses the NR "
                        "picture, this render uses the plain picture, this option switches itself off for the session (one log line) and NR runs after "
                        "DLSS as usual. The previous-frame option does not apply to it. Switching it rebuilds the window's model after half a second.");
+}
 
+// The one-line state of Preview NR (off and releasing, unavailable and why, ready, preparing, running)
+void DrawNrStatusLine(const CharaConfig& cfg)
+{
+    const bool nrOn = cfg.previewNr.value_or_default();
     const nr::Status st = nr::GetStatus();
     if (!nrOn && st.streams == 0)
         return;
@@ -59,6 +72,18 @@ void DrawNrSection(CharaConfig& cfg)
         ImGui::TextDisabled("Preview NR: preparing the model (the first result comes a few frames later)");
     else
         ImGui::Text("Preview NR: running");
+}
+
+// ---- Advanced (debug) ------------------------------------------------------------------------------------------------
+
+// The counters of Preview NR (everything below the one-line state)
+void DrawNrCounters(const CharaConfig& cfg)
+{
+    const bool nrOn = cfg.previewNr.value_or_default();
+    const bool before = cfg.previewNrBeforeSr.value_or_default();
+    const nr::Status st = nr::GetStatus();
+    if (!nrOn && st.streams == 0)
+        return;
 
     ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native or plain DLSS image", st.liveStreams,
                         st.streams, (unsigned long long) st.runs, (unsigned long long) st.fallbacks);
@@ -107,40 +132,18 @@ void DrawNrSection(CharaConfig& cfg)
         ImGui::TextDisabled("Showing the previous frame's NR result for NR on the native image (PreviewNRLate, bring-up only)");
 }
 
-void DrawCharaCard(ext::menu::Ctx&)
+// Everything diagnostic: counters, status of the passes, the debug aids and the probe. `inert` = the whole feature is off
+// for this session (the reason is shown in the main view).
+void DrawDebugSection(CharaConfig& cfg, bool inert)
 {
-    auto& cfg = ext::Cfg().ffxiv.chara;
-    ext::menu::SectionTitle("Character preview (experimental)");
-
-    bool dlss = cfg.previewDlss.value_or_default();
-    if (ImGui::Checkbox("Preview DLSS (2x output, experimental)", &dlss))
-        cfg.previewDlss = dlss;
-
     const dlss::Counters counters = dlss::GetCounters();
     ImGui::Text("DLSS previews: %u active; %llu evaluations; %llu fallbacks", counters.activeSlots,
                 (unsigned long long) counters.evaluations, (unsigned long long) counters.fallbacks);
-    if (const char* note = dlss::StatusNote(); note != nullptr && note[0] != '\0')
-        ImGui::TextDisabled("%s", note);
     if (cfg.previewGuideCapture.value_or_default())
         ImGui::Text("Preview diagnostics: %u files, %llu bytes", ext::ffxiv::chara::diag::FilesWritten(),
                     (unsigned long long) ext::ffxiv::chara::diag::BytesWritten());
 
-    // Not greyed out: the AA is used whenever neither Preview DLSS nor Preview NR produces the equipment image (see the tooltip).
-    bool aa = cfg.previewAA.value_or_default();
-    if (ImGui::Checkbox("Preview spatial AA", &aa))
-        cfg.previewAA = aa;
-    ext::menu::Tooltip("Spatial anti-aliasing of the equipment preview image. It is used while Preview DLSS is off, and while the DLSS "
-                       "pass cannot run. With Preview NR on, a result NR has for a draw is shown instead, so the AA only takes the draws "
-                       "NR has no result for yet (the first frames after opening a window, renders it skipped, a preview it cannot "
-                       "process). While the DLSS pass runs the AA is not used, also for a draw NR has no result for.");
-    bool upscale = cfg.previewUpscale.value_or_default();
-    if (ImGui::Checkbox("2x preview upscaling", &upscale))
-        cfg.previewUpscale = upscale;
-
-    ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. "
-                       "Unsupported layouts retain native rendering. Frame generation does not apply to the preview.");
-
-    DrawNrSection(cfg);
+    DrawNrCounters(cfg);
 
     bool tint = cfg.previewDebugTint.value_or_default();
     if (ImGui::Checkbox("Show preview processing (debug)", &tint))
@@ -196,16 +199,11 @@ void DrawCharaCard(ext::menu::Ctx&)
             ImGui::TextDisabled("Last request: %s", dumpStatus.lastMessage.c_str());
     }
 
-    // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
-    if (const char* reason = table::InertReason(); reason != nullptr && reason[0] != '\0')
-    {
-        ImGui::TextWrapped("Character preview is off for this session: %s.", reason);
-        return;
-    }
-
     // The spatial AA runs when PreviewDLSS is off, and also while the DLSS path cannot run (its status note says why).
+    const bool aa = cfg.previewAA.value_or_default();
+    const bool dlss = cfg.previewDlss.value_or_default();
     const char* dlssNote = dlss::StatusNote();
-    if (aa && (!dlss || (dlssNote != nullptr && dlssNote[0] != '\0')))
+    if (!inert && aa && (!dlss || (dlssNote != nullptr && dlssNote[0] != '\0')))
     {
         const unsigned long long processed = g_stats.aaProcessed.load(std::memory_order_relaxed);
         ImGui::Text("Processed preview draws: %llu", processed);
@@ -218,6 +216,52 @@ void DrawCharaCard(ext::menu::Ctx&)
             else
                 ImGui::TextWrapped("Waiting for the equipment preview display shader.");
         }
+    }
+}
+
+void DrawCharaCard(ext::menu::Ctx&)
+{
+    auto& cfg = ext::Cfg().ffxiv.chara;
+    ext::menu::SectionTitle("Character preview");
+    ImGui::TextDisabled("(experimental) Changes how the character preview windows are drawn. Off by default; the normal preview "
+                        "stays whenever a pass cannot run.");
+
+    // the user switches
+    bool dlss = cfg.previewDlss.value_or_default();
+    if (ImGui::Checkbox("Preview DLSS (2x output, experimental)", &dlss))
+        cfg.previewDlss = dlss;
+    if (const char* note = dlss::StatusNote(); note != nullptr && note[0] != '\0')
+        ImGui::TextDisabled("%s", note);
+
+    // Not greyed out: the AA is used whenever neither Preview DLSS nor Preview NR produces the equipment image (see the tooltip).
+    bool aa = cfg.previewAA.value_or_default();
+    if (ImGui::Checkbox("Preview spatial AA", &aa))
+        cfg.previewAA = aa;
+    ext::menu::Tooltip("Spatial anti-aliasing of the equipment preview image. It is used while Preview DLSS is off, and while the DLSS "
+                       "pass cannot run. With Preview NR on, a result NR has for a draw is shown instead, so the AA only takes the draws "
+                       "NR has no result for yet (the first frames after opening a window, renders it skipped, a preview it cannot "
+                       "process). While the DLSS pass runs the AA is not used, also for a draw NR has no result for.");
+    bool upscale = cfg.previewUpscale.value_or_default();
+    if (ImGui::Checkbox("2x preview upscaling", &upscale))
+        cfg.previewUpscale = upscale;
+
+    ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. "
+                       "Unsupported layouts retain native rendering. Frame generation does not apply to the preview.");
+
+    DrawNrToggles(cfg);
+    DrawNrStatusLine(cfg);
+
+    // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
+    const char* reason = table::InertReason();
+    const bool inert = reason != nullptr && reason[0] != '\0';
+    if (inert)
+        ImGui::TextWrapped("Character preview is off for this session: %s.", reason);
+
+    // every counter and debug aid, closed by default
+    if (ImGui::TreeNode("Advanced (debug)##chara_preview"))
+    {
+        DrawDebugSection(cfg, inert);
+        ImGui::TreePop();
     }
 }
 
