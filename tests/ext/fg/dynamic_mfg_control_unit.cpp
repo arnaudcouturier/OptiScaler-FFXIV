@@ -860,10 +860,13 @@ void AStallInterruptsTheSelfTestWithoutAFailure()
         r.Calm();
         while (r.switches.size() < 3) // three changes of the cycle are made (3x to 2x, 3x, 4x), the last one is being watched
             r.Step();
+        r.lagMs = 2000; // the log of the first run: the last change is applied late, while the game stalls
         r.stallFrom = r.t + 50;
         r.stallUntil = r.t + 50 + stallLen;
         const uint64_t until = r.stallUntil;
-        r.Run(stallLen + 9000);
+        r.Run(stallLen + 150); // past the end of the stall
+        r.lagMs = 150;         // the late count belonged to that change; the restore afterwards is applied promptly
+        r.Run(8850);
         CHECK_MSG(r.ResultLines() == 1 && r.Count("AutoMFG self-test: FAIL (interrupted: the game stalled)") == 1,
                   "stall %llu ms: %d result lines", stallLen, r.ResultLines());
         CHECK(r.Find("re-created") == nullptr && r.Count("AutoMFG self-test: PASS") == 0);
