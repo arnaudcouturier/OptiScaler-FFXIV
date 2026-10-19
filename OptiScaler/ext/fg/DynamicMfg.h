@@ -48,6 +48,10 @@ class DynamicMfg
     static constexpr uint64_t kProbeBaseMs = 12000;
     static constexpr uint64_t kProbeMaxMs = 96000;
     static constexpr uint64_t kRefuseMs = 30000;
+    // Intervals dropped after a switch or a restart. The controller's kill-switch looks at the same number of intervals for
+    // the re-creation stall (DynamicMfgControl.h kSignatureSamples = this), so a stall the kill-switch counts can never seed
+    // the average and revert a correct step through the regret guard.
+    static constexpr int kSettleSamples = 2;
 
     enum class Why : uint8_t
     {
@@ -93,7 +97,7 @@ class DynamicMfg
         probeRunning_ = false;
         started_ = true;
         lastChange_ = now;
-        settle_ = true; // the next interval still holds the transition (a long frame from the toggle path or a re-creation)
+        settleLeft_ = kSettleSamples; // the next intervals still hold the transition (a long frame from the toggle path or a re-creation)
     }
 
     const Info& Last() const { return last_; }
@@ -142,9 +146,9 @@ class DynamicMfg
             return current;
         }
 
-        if (settle_)
+        if (settleLeft_ > 0)
         {
-            settle_ = false;
+            --settleLeft_;
             return current;
         }
         double sample = ms;
@@ -162,7 +166,7 @@ class DynamicMfg
         const double real = 1000.0 / avg_;
         const double presented = real * current;
 
-        // The average of the first half second after an up step (the first interval is dropped by `settle_`).
+        // The average of the first half second after an up step (the first kSettleSamples intervals are dropped).
         if (pend_.kind == Pend::Regret && pend_.earlyMs == 0.0 && Since(now, pend_.at) >= kRegretEarlyMs)
             pend_.earlyMs = avg_;
 
@@ -292,7 +296,7 @@ class DynamicMfg
         cand_ = 0;
         avg_ = 0.0;
         probeRunning_ = false;
-        settle_ = true; // the interval right after a switch can hold a re-creation stall: it must not seed the average
+        settleLeft_ = kSettleSamples; // the intervals right after a switch can hold a re-creation stall: they must not seed the average
     }
 
     void RecordSwitch(uint64_t now)
@@ -320,7 +324,7 @@ class DynamicMfg
     uint64_t holdMs_ = kDefaultHoldMs;
     double avg_ = 0.0;
     bool started_ = false;
-    bool settle_ = false;
+    int settleLeft_ = 0;
     uint64_t lastChange_ = 0;
     int cand_ = 0;
     uint64_t candSince_ = 0;

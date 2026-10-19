@@ -346,7 +346,8 @@ void RegretGuardJudgesTheStepNotTheScene()
     // One slow frame right after the step (it seeds the average) is smoothed out over the half second, not taken as the
     // step's cost.
     Sim blip = FirstUpStep();
-    blip.Step(40.0); // the interval right after a switch is dropped
+    blip.Step(40.0); // the first two intervals after a switch are dropped
+    blip.Step(40.0);
     blip.Step(70.0);
     blip.Run(3000, 42.0);
     CHECK(blip.CountWhy(Why::RegretRevert) == 0);
@@ -381,13 +382,18 @@ void RestartKeepsWhatWasLearned()
 
 void FirstIntervalAfterASwitchIsDropped()
 {
-    // The interval right after a switch (or a restart) can hold a re-creation stall; it must not seed the average.
+    // The first kSettleSamples (2) intervals after a switch (or a restart) can hold a re-creation stall (the kill-switch
+    // looks at the same two, DynamicMfgControl.h kSignatureSamples); they must not seed the average. Fix round 2 moved this
+    // from one interval to two: a stall in the second one used to seed the average and revert a correct up step.
+    static_assert(DynamicMfg::kSettleSamples == 2);
     DynamicMfg d;
     d.Select(40, 138, 1000, 2, 4, false); // starts the window
     d.Restart(2000);
     d.Select(190, 138, 2010, 2, 4, false);
     CHECK(d.AverageMs() == 0.0);
-    d.Select(40, 138, 2050, 2, 4, false);
+    d.Select(190, 138, 2050, 2, 4, false); // the second one is dropped too
+    CHECK(d.AverageMs() == 0.0);
+    d.Select(40, 138, 2090, 2, 4, false); // the third one seeds
     CHECK(d.AverageMs() == 40.0);
 
     Sim s;
@@ -399,7 +405,40 @@ void FirstIntervalAfterASwitchIsDropped()
     s.Step(190.0);                    // the stall of a re-creation
     CHECK(s.sel.AverageMs() == 0.0);
     s.Step(40.0);
+    CHECK(s.sel.AverageMs() == 0.0);
+    s.Step(40.0);
     CHECK(s.sel.AverageMs() == 40.0);
+
+    // a stall in the third interval is a game hitch, not the signature: it seeds, like any other sample
+    Sim h;
+    h.target = 138;
+    h.Step(40);
+    while (h.log.empty())
+        h.Step(40.0);
+    h.Step(40.0);
+    h.Step(40.0);
+    h.Step(190.0);
+    CHECK(h.sel.AverageMs() == 190.0);
+}
+
+void AStallInTheSecondIntervalDoesNotRevertACorrectStep()
+{
+    // The plugin applies the new count one frame late: the first interval after the switch is clean, the 190 ms stall is the
+    // second. It used to seed the average (and with it the regret guard's half-second snapshot), so a correct step
+    // (42 ms per real frame at 3x against 40 ms at 2x: 71 presented against 50) judged about 23 fps and was reverted, and
+    // refused for 30 s.
+    Sim s = FirstUpStep();
+    CHECK(s.log.size() == 1 && s.log[0].why == Why::Up && s.factor == 3);
+    s.Step(42.0);
+    s.Step(190.0);
+    s.Run(4000, 42.0);
+    CHECK(s.CountWhy(Why::RegretRevert) == 0);
+    CHECK_MSG(s.factor >= 3, "factor %dx", s.factor); // it keeps going up, the plain stream is still under the target
+    // the stall in the first interval was already harmless
+    Sim f = FirstUpStep();
+    f.Step(190.0);
+    f.Run(4000, 42.0);
+    CHECK(f.CountWhy(Why::RegretRevert) == 0 && f.factor >= 3);
 }
 
 void ExternalChangeVoidsATrial()
@@ -483,6 +522,7 @@ int main()
     ExternalChangeVoidsATrial();
     ProbeLostToABadSampleBacksOff();
     FirstIntervalAfterASwitchIsDropped();
+    AStallInTheSecondIntervalDoesNotRevertACorrectStep();
     if (g_failures)
     {
         std::printf("dynamic_mfg_unit: %d check(s) failed\n", g_failures);

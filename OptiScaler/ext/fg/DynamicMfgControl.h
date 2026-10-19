@@ -124,7 +124,8 @@ class AutoMfgController
     static constexpr int kSelfTestSteps = 5;
     static constexpr int kWrongSamples = 3;         // applied count wrong on this many samples in a row at the end of the watch
     static constexpr int kBadStatusSamples = 3;     // a non-zero Streamline status that persists on this many samples
-    static constexpr int kSignatureSamples = 2;     // the re-creation stall is the interval right after the switch
+    static constexpr int kSignatureSamples = DynamicMfg::kSettleSamples; // the re-creation stall is one of the first intervals
+                                                    // after the switch: the same ones the selector drops from its average
     static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
     static constexpr int kStrikesInTotalToStop = 3; // so do this many signatures without ten clean switches between (a
                                                     // plugin that re-creates DLS-G only on up steps breaks the row every time)
