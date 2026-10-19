@@ -109,6 +109,26 @@ struct FakeEnv final : Env
     WindowInfo ReadWindow(uint64_t) override { return window; }
     uint64_t monitor = 0x77;
     uint64_t MonitorOfWindow(uint64_t) override { return monitor; }
+
+    // The bridge's present counter. Unknown by default (the meaning every present had before M2); a test that needs it sets
+    // `serial` and calls CompletePresent() between OnPresentBegin and OnPresentEnd for a present that reached the FG present.
+    std::optional<uint64_t> serial;
+    uint32_t serialBuffers = 0; // 0 = the counter just counts up; otherwise it wraps modulo this (the bridge's buffer count)
+    int serialReads = 0;
+    std::optional<uint64_t> PresentSerial() override
+    {
+        ++serialReads;
+        return serial;
+    }
+    void CompletePresent()
+    {
+        if (!serial)
+            return;
+        uint64_t next = *serial + 1;
+        if (serialBuffers != 0)
+            next %= serialBuffers;
+        serial = next;
+    }
     bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
     {
         applied.push_back({ hwnd, exstyle, fg.present && fg.active, current });

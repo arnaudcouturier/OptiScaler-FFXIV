@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
 
 namespace ext::window
@@ -40,6 +41,9 @@ class Env
     virtual uint32_t OwnerThread(uint64_t hwnd) = 0; // 0 = unknown
     virtual WindowInfo ReadWindow(uint64_t hwnd) = 0;
     virtual uint64_t MonitorOfWindow(uint64_t hwnd) = 0; // HMONITOR of the window, 0 = unknown
+    // The bridge's present counter (PresentSerialFromIndex): changes once per game present that reached the frame generation
+    // present. nullopt = no counter (no bridge known, or fewer than two buffers).
+    virtual std::optional<uint64_t> PresentSerial() = 0;
     // SetWindowLongPtr(GWL_EXSTYLE) + SetWindowPos(NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED). Only ever called
     // on the window's owner thread. The window procedure runs inside it.
     virtual bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) = 0;
@@ -129,6 +133,8 @@ class Controller
             return;
         Announce(env, mode);
         _presentThread = env.CurrentThread();
+        _serialBridge = _bridge;
+        _serialBegin = env.PresentSerial();
         _gate.OnPresentBegin(env.Fg());
     }
 
@@ -137,7 +143,8 @@ class Controller
         if (mode == Mode::Off)
             return;
         const FgSnapshot fg = env.Fg();
-        _gate.OnPresentEnd(fg);
+        // A present that returned before the frame generation present says nothing about Streamline (M2): not counted.
+        _gate.OnPresentEnd(fg, PresentReached(env));
 
         // The flag changes inside upstream's SetFullscreenState hook, and a game does not necessarily resize its swapchain
         // after the switch (the logged startup enter has no resize behind it), so a present boundary is a sampling point too.
@@ -269,6 +276,7 @@ class Controller
     }
 
     // Test access.
+    uint32_t AbortedPresents() const { return _abortedPresents; }
     uint32_t PresentThread() const { return _presentThread; }
     const FgOffGate& Gate() const { return _gate; }
     bool FixArmed() const { return _fixArmed; }
@@ -315,6 +323,54 @@ class Controller
             }
         }
         return prev;
+    }
+
+    // M2. Did the present that just ended reach the frame generation present? Judged by the bridge's present counter, read at
+    // the start and at the end of the present (it advances only after the FG present returned success, with frame generation on
+    // or off). No counter at either end, or a different bridge by the end: unknown, and an unknown present counts as it always
+    // did. The one-time notes make the live path visible in the log.
+    bool PresentReached(Env& env)
+    {
+        const std::optional<uint64_t> begin = _serialBegin;
+        _serialBegin.reset(); // an end with no begin since is unknown
+        const bool sameBridge = _serialBridge != 0 && _serialBridge == _bridge;
+        const std::optional<uint64_t> end = sameBridge ? env.PresentSerial() : std::nullopt;
+
+        if (!begin || !end)
+        {
+            if (sameBridge && !_noCounterNoted)
+            {
+                _noCounterNoted = true;
+                env.Log("Window: the bridge present counter is not available (fewer than two buffers): every game present is "
+                        "counted, a present that failed before the frame generation present is not told apart",
+                        false);
+            }
+            return true;
+        }
+
+        if (PresentReachedFg(begin, end))
+        {
+            if (!_counterLiveNoted)
+            {
+                _counterLiveNoted = true;
+                env.Log("Window: the bridge present counter is live: it changes once per game present that reaches the frame "
+                        "generation present, with frame generation on or off",
+                        false);
+            }
+            return true;
+        }
+
+        ++_abortedPresents;
+        if (_abortLogged < kAbortLogLines)
+        {
+            ++_abortLogged;
+            env.Log(std::format("Window: a game present ended before the frame generation present (bridge present counter "
+                                "unchanged at {}): not counted, the frame-generation-off confirmation starts again "
+                                "({} so far)",
+                                *end, _abortedPresents),
+                    false);
+        }
+        return false;
     }
 
     ProbeFields Fill(Env& env, Mode mode, std::string_view event, uint64_t hwnd)
@@ -517,6 +573,15 @@ class Controller
     bool _lastExclusive = false;
     uint32_t _presentThread = 0;
     FgOffGate _gate;
+
+    // M2: the bridge present counter at the start of the present in progress, and the bridge it was read from.
+    static constexpr uint32_t kAbortLogLines = 5; // the abort line is capped; the count is exact
+    std::optional<uint64_t> _serialBegin;
+    uint64_t _serialBridge = 0;
+    uint32_t _abortedPresents = 0;
+    uint32_t _abortLogged = 0;
+    bool _counterLiveNoted = false;
+    bool _noCounterNoted = false;
 
     // B1-a
     bool _fixArmed = false;

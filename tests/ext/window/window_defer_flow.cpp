@@ -28,8 +28,11 @@ FsEvent Event(bool fullscreen, uint64_t native = kBridge)
 
 void Present(Controller& c, FakeEnv& env, Mode mode, const FgSnapshot& entry, const FgSnapshot& exit)
 {
+    if (!env.serial)
+        env.serial = 0; // these flows run with the bridge present counter live (M2): every present here reaches the FG present
     env.fg = entry;
     c.OnPresentBegin(env, mode);
+    env.CompletePresent();
     env.fg = exit;
     c.OnPresentEnd(env, mode);
 }

@@ -49,9 +49,11 @@ class FgOffGate
         _startedOff = false;
     }
     void OnPresentBegin(const FgSnapshot& fg) { _startedOff = FgIsOff(fg); }
-    void OnPresentEnd(const FgSnapshot& fg)
+    // `reachedFg` = the present got as far as the frame generation present (the swapchain Present Streamline sees). A present
+    // that returned early (an error path before it) says nothing about Streamline: the count starts again.
+    void OnPresentEnd(const FgSnapshot& fg, bool reachedFg = true)
     {
-        if (_startedOff && FgIsOff(fg))
+        if (reachedFg && _startedOff && FgIsOff(fg))
         {
             if (_count < UINT32_MAX)
                 ++_count;
@@ -69,6 +71,29 @@ class FgOffGate
     uint32_t _count = 0;
     bool _startedOff = false;
 };
+
+// ---- the present counter -------------------------------------------------------------------------------------------------
+
+// The bridge (Dx11wDx12SC::Present) advances its back buffer index, modulo the buffer count, only after the frame generation
+// swapchain's Present returned success, and does so whether frame generation is on or off. A present that returned early
+// never advances it. Read at the start and at the end of a game present, a CHANGED value means "this present reached the FG
+// present" (compare for inequality, never "greater": the index wraps). With fewer than two buffers the index can never change,
+// so it says nothing: no counter, and the module falls back to counting every present.
+constexpr std::optional<uint64_t> PresentSerialFromIndex(uint32_t index, uint32_t bufferCount)
+{
+    if (bufferCount < 2)
+        return std::nullopt;
+    return index;
+}
+
+// A game present reached the FG present when its counter changed between the start and the end. Without a counter at either
+// end (no bridge, fewer than two buffers, a different bridge by the end) nothing is known and the present counts.
+constexpr bool PresentReachedFg(const std::optional<uint64_t>& atBegin, const std::optional<uint64_t>& atEnd)
+{
+    if (!atBegin || !atEnd)
+        return true;
+    return *atBegin != *atEnd;
+}
 
 // ---- threads -----------------------------------------------------------------------------------------------------------
 

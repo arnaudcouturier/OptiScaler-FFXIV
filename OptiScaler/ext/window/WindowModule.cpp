@@ -69,6 +69,18 @@ class LiveEnv final : public Env
     {
         return reinterpret_cast<uint64_t>(MonitorFromWindow(reinterpret_cast<HWND>(static_cast<uintptr_t>(hwnd)), MONITOR_DEFAULTTONEAREST));
     }
+    // The bridge object, set at a bridge resize and cleared when that bridge is destroyed (both under the module lock). Only
+    // read here, never owned.
+    void SetBridge(Dx11wDx12SC* sc) { _bridge = sc; }
+    Dx11wDx12SC* Bridge() const { return _bridge; }
+    std::optional<uint64_t> PresentSerial() override
+    {
+        if (_bridge == nullptr)
+            return std::nullopt;
+        return PresentSerialFromIndex(ext::Access::Bridge::FakeBackBufferIndex(*_bridge),
+                                      ext::Access::Bridge::BufferCount(*_bridge));
+    }
+
     bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
     {
         Unlocked unlocked;
@@ -112,6 +124,9 @@ class LiveEnv final : public Env
         else
             LOG_INFO("{}", line);
     }
+
+  private:
+    Dx11wDx12SC* _bridge = nullptr;
 };
 
 // Heap-allocated and never destroyed: nothing runs at DLL_PROCESS_DETACH (loader lock), and callbacks that may still
@@ -157,6 +172,7 @@ void ResizeDoneSlow(Dx11wDx12SC& sc) noexcept
         auto& g = G();
         std::lock_guard lock(g.lock);
         LockDepth depth;
+        g.env.SetBridge(&sc);
         g.controller.OnResizeDone(g.env, CurrentMode(), bridge, hwnd, swapWidth, swapHeight);
     }
     catch (...)
@@ -173,6 +189,8 @@ void DestroySlow(Dx11wDx12SC& sc) noexcept
         auto& g = G();
         std::lock_guard lock(g.lock);
         LockDepth depth;
+        if (g.env.Bridge() == &sc)
+            g.env.SetBridge(nullptr); // never read a destroyed bridge
         g.controller.OnBridgeDestroyed(g.env, CurrentMode(), bridge);
     }
     catch (...)
