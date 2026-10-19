@@ -7,10 +7,12 @@
 // Replaying the held call is being replayed right now (the replay itself must pass through the ReShade handler untouched).
 //
 // Waiting is bounded, in two stages. After the soft limit (a few presents or 2 s) the call is replayed anyway IF frame
-// generation is off at that moment. Frame generation can come back during the wait (the pause after a Deactivate is only
-// about ten frames); every present that finds it active asks the controller to switch it off again, and the replay never
-// runs with it active until the hard limit, which replays regardless: the call then goes through as it would today (fail
-// open), and the controller logs that loudly.
+// generation is off at that moment AND the controller allows it (`softAllowed`: a present has reached the frame generation
+// present since the last request, and the confirmation floor since that request is over). Frame generation can come back
+// during the wait (the pause after a Deactivate is only about ten frames); every present that finds it active asks the
+// controller to switch it off again, and the replay never runs with it active until the hard limit, which replays
+// regardless (also after a run of failed presents, when nothing was ever confirmed): the call then goes through as it would
+// today (fail open), and the controller logs that loudly.
 
 #include <cstdint>
 
@@ -61,7 +63,7 @@ constexpr const char* WaitResultName(WaitResult r)
     case WaitResult::ReplayAtLimit:
         return "wait limit reached";
     case WaitResult::ReplayAtHardLimit:
-        return "hard wait limit reached with frame generation still on";
+        return "hard wait limit reached without a confirmation";
     default:
         return "waiting";
     }
@@ -107,8 +109,11 @@ class Deferral
 
     // One complete game present went by while Pending. `fgMaybeOn` = frame generation is active or unknown;
     // `gateConfirmed` = the FgOffGate says DLSS-G is off. `rightThread` = this present runs on the thread that made the held
-    // call; the call is replayed there only, so on another thread only the hard limit can end the wait.
-    WaitResult OnPresentEnd(bool fgMaybeOn, bool gateConfirmed, uint64_t nowMs, bool rightThread = true)
+    // call; the call is replayed there only, so on another thread only the hard limit can end the wait. `softAllowed` = the
+    // soft limit may end the wait: a game present has reached the frame generation present since the last request AND the
+    // confirmation floor (ms since that request) is over. Without it only a confirmation or the hard limit can replay. All
+    // five arguments are required, so every caller says what it means.
+    WaitResult OnPresentEnd(bool fgMaybeOn, bool gateConfirmed, uint64_t nowMs, bool rightThread, bool softAllowed)
     {
         if (_state != DeferState::Pending)
             return WaitResult::Wait;
@@ -119,7 +124,7 @@ class Deferral
             return WaitResult::Replay;
         if (_presents >= _limits.hardPresents || elapsed >= _limits.hardMs)
             return WaitResult::ReplayAtHardLimit;
-        if (rightThread && !fgMaybeOn && (_presents >= _limits.softPresents || elapsed >= _limits.softMs))
+        if (rightThread && softAllowed && !fgMaybeOn && (_presents >= _limits.softPresents || elapsed >= _limits.softMs))
             return WaitResult::ReplayAtLimit;
         return WaitResult::Wait;
     }

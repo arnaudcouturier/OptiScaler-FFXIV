@@ -492,10 +492,43 @@ int main()
         Present(c, env, Mode::On, kActive, kActive);
         CHECK(env.replays.size() == 1);
         CHECK(env.replays[0].fgActiveAtCall); // documented: this is the fail-open case
-        CHECK_CONTAINS(env.All(), "hard wait limit reached with frame generation still on");
+        CHECK_CONTAINS(env.All(), "hard wait limit reached without a confirmation");
+        CHECK_CONTAINS(env.All(), "fg=active"); // the replay line names the frame generation state
         CHECK(Warnings(env) >= 1);
     }
 
+    // L4: the request bookkeeping (request time, gate, "a present reached Streamline since the request") is settled BEFORE the
+    // call out, which gives up the module lock in the live build, and cleared again AFTER it: a present that ends inside the
+    // call is not ordered against the request and counts for nothing.
+    {
+        FakeEnv env;
+        Controller c; // strict defaults
+        Running(c, env);
+        env.nowMs = 500;
+        Present(c, env, Mode::On, kOff, kOff);
+        Present(c, env, Mode::On, kOff, kOff);
+        CHECK(c.Gate().Count() == 2); // a count to lose
+        env.fg = kActive;
+        uint32_t gateInside = 99;
+        env.onRequestOff = [&]
+        {
+            gateInside = c.Gate().Count();
+            Present(c, env, Mode::On, kOff, kOff); // a present ends inside the call
+            env.onRequestOff = nullptr;
+        };
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        CHECK(gateInside == 0);          // settled before the call
+        CHECK(c.Gate().Count() == 0);    // and what the call raced is forgotten
+        for (int i = 0; i < 10; ++i)
+        {
+            env.nowMs += 100; // the 50 ms floor is long over; presents that never reach Streamline
+            env.fg = kOff;
+            c.OnPresentBegin(env, Mode::On);
+            c.OnPresentEnd(env, Mode::On);
+            CHECK(env.replays.empty()); // no soft replay: the present inside the call does not count as "since the request"
+        }
+    }
     // The soft limit by presents: frame generation is off at the end of each present but never off for a complete one.
     {
         FakeEnv env;

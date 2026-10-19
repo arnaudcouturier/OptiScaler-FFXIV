@@ -15,6 +15,15 @@ constexpr uint64_t kHwnd = 0xABC;
 
 const FgSnapshot kActive { true, true, false };
 const FgSnapshot kOff { true, false, false };
+const FgSnapshot kPaused { true, false, true };
+
+int Warns(const FakeEnv& env)
+{
+    int n = 0;
+    for (bool w : env.warns)
+        n += w ? 1 : 0;
+    return n;
+}
 
 FsEvent Event(bool fullscreen)
 {
@@ -305,25 +314,214 @@ int main()
         Present(c, env, Mode::On, kOff, kOff, true);
         CHECK(env.replays.size() == 1);
     }
-    // Presents that keep failing never confirm the gate: the wait ends at the soft limit (6 presents) like any wait that never
-    // confirms (frame generation is off right then), and the replay line says so instead of "confirmed off".
+    // Presents that keep failing never confirm the gate AND never reach Streamline, so the SOFT limit must not replay them (the
+    // decided fix): the wait goes on to the hard limit (24 presents), which replays regardless, loudly, and the line says there
+    // was no confirmation. Presents 1-23 give no replay.
     {
         FakeEnv env;
         Controller c;
         Running(c, env);
         env.nowMs = 1000;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
-        for (int i = 0; i < 5; ++i)
+        for (int i = 1; i <= 23; ++i)
         {
             env.nowMs += 50;
             Present(c, env, Mode::On, kOff, kOff, false);
+            CHECK(env.replays.empty());
         }
-        CHECK(env.replays.empty());
         env.nowMs += 50;
+        Present(c, env, Mode::On, kOff, kOff, false); // present 24
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "hard wait limit reached without a confirmation") == 1);
+        CHECK(Count(env, "fg=off") >= 1); // the replay line names the frame generation state
+        CHECK(Count(env, "frame generation confirmed off") == 0);
+        CHECK(Warns(env) >= 1);
+    }
+    // The same by time: 6 s pass with fewer than 24 failed presents.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 5; ++i)
+        {
+            env.nowMs += 1000;
+            Present(c, env, Mode::On, kOff, kOff, false);
+            CHECK(env.replays.empty()); // 2 s and more pass, still no soft replay: nothing reached Streamline
+        }
+        env.nowMs += 1000; // 6000 ms since the hold
         Present(c, env, Mode::On, kOff, kOff, false);
         CHECK(env.replays.size() == 1);
+        CHECK_CONTAINS(env.All(), "after 6 presents, 6000 ms");
+        CHECK(Count(env, "hard wait limit reached without a confirmation") == 1);
+        CHECK(Warns(env) >= 1);
+    }
+    // Failing presents past the soft limit, then ONE present that reaches Streamline: the soft limit replays at that present
+    // (not confirmed: one complete present is not enough), provided 50 ms have passed since the request.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 0; i < 8; ++i)
+        {
+            env.nowMs += 5;
+            Present(c, env, Mode::On, kOff, kOff, false);
+        }
+        env.nowMs = 1045; // 45 ms since the request: below the floor
+        Present(c, env, Mode::On, kOff, kOff, true);
+        CHECK(env.replays.empty());
+    }
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 0; i < 8; ++i)
+        {
+            env.nowMs += 10;
+            Present(c, env, Mode::On, kOff, kOff, false);
+        }
+        CHECK(env.replays.empty());
+        env.nowMs = 1090; // 90 ms since the request, 9th present, the first one that reached Streamline
+        Present(c, env, Mode::On, kOff, kOff, true);
+        CHECK(env.replays.size() == 1);
+        CHECK(!env.replays[0].fgActiveAtCall);
         CHECK(Count(env, "wait limit reached") >= 1);
+        CHECK(Count(env, "hard wait limit") == 0);
         CHECK(Count(env, "frame generation confirmed off") == 0);
+    }
+    // A re-request clears "a present reached Streamline since the request": one good present before the re-request must not let
+    // the next aborted presents soft-replay.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.nowMs = 1100;
+        Present(c, env, Mode::On, kOff, kOff, true); // reached, one complete present: not confirmed yet
+        CHECK(env.replays.empty());
+        env.nowMs = 1110;
+        Present(c, env, Mode::On, kPaused, kActive, true); // frame generation comes back: asked off again
+        CHECK(env.fgOffRequests == 2);
+        for (int i = 0; i < 10; ++i)
+        {
+            env.nowMs += 100; // far past the 50 ms floor every time
+            Present(c, env, Mode::On, kOff, kOff, false);
+            CHECK(env.replays.empty()); // past 6 presents, but none reached Streamline since the re-request
+        }
+        env.nowMs += 100;
+        Present(c, env, Mode::On, kOff, kOff, true); // the first one that does: soft replay
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "wait limit reached") >= 1);
+    }
+    // A bridge resize deactivates frame generation again and clears it too.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.nowMs = 1100;
+        Present(c, env, Mode::On, kOff, kOff, true);
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        for (int i = 0; i < 10; ++i)
+        {
+            env.nowMs += 100;
+            Present(c, env, Mode::On, kOff, kOff, false);
+            CHECK(env.replays.empty());
+        }
+    }
+    // Unknown counter (no serial): every present counts as having reached Streamline, so the soft limit works as before M2, with
+    // the 50 ms floor: presents 5 ms apart do not replay at present 6 (30 ms), the first one at 50 ms does.
+    {
+        FakeEnv env; // serial stays unknown
+        Controller c;
+        c.OnResizeDone(env, Mode::On, kBridge, kHwnd, 3840, 2160);
+        Present(c, env, Mode::On, kActive, kActive, false); // the present thread is recorded
+        env.fg = kActive;
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 9; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kActive, kPaused, false); // starts active: never a complete off present
+            CHECK(env.replays.empty());
+        }
+        env.nowMs = 1050;
+        Present(c, env, Mode::On, kActive, kPaused, false); // present 10, 50 ms
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "wait limit reached") >= 1);
+    }
+    // M1 at the strict defaults, scenario 1: frame generation off, a high frame rate. Complete off presents 5 ms apart do not
+    // replay (the soft limit used to fire at present 6 = 30 ms); the replay waits for the 50 ms floor and then reports a
+    // confirmation.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 9; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kOff, kOff, true);
+            CHECK(env.replays.empty());
+        }
+        env.nowMs = 1050;
+        Present(c, env, Mode::On, kOff, kOff, true); // present 10, 50 ms
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "frame generation confirmed off") == 1);
+        CHECK(Warns(env) == 0);
+    }
+    // M1, scenario 2: frame generation keeps coming back for six presents (each present asks it off again), then a present ends
+    // with it off. The soft limit used to fire one present after the last re-request. Now it needs the floor measured from that
+    // re-request, and a present that reached Streamline after it.
+    {
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 6; ++i)
+        {
+            env.nowMs = 1000 + 5 * i;
+            Present(c, env, Mode::On, kActive, kActive, true);
+        }
+        CHECK(env.fgOffRequests == 1 + 6);
+        env.nowMs = 1035; // 5 ms after the last re-request
+        Present(c, env, Mode::On, kPaused, kPaused, true); // present 7
+        CHECK(env.replays.empty());
+        env.nowMs = 1040;
+        Present(c, env, Mode::On, kPaused, kPaused, true); // present 8: two complete off presents, 10 ms
+        CHECK(env.replays.empty());
+        env.nowMs = 1085; // 55 ms after the last re-request
+        Present(c, env, Mode::On, kPaused, kPaused, true);
+        CHECK(env.replays.size() == 1);
+    }
+    {
+        // the same, but present 7 never reaches Streamline and the floor is long over: still no soft replay at present 7
+        FakeEnv env;
+        Controller c;
+        Running(c, env);
+        env.nowMs = 1000;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        for (int i = 1; i <= 6; ++i)
+        {
+            env.nowMs = 1000 + 100 * i;
+            Present(c, env, Mode::On, kActive, kActive, true);
+        }
+        env.nowMs = 1700; // 100 ms after the last re-request
+        Present(c, env, Mode::On, kPaused, kPaused, false); // present 7, aborted
+        CHECK(env.replays.empty());
+        env.nowMs = 1800;
+        Present(c, env, Mode::On, kPaused, kPaused, true); // present 8, the first that reached Streamline since: soft replay
+        CHECK(env.replays.size() == 1);
+        CHECK(Count(env, "wait limit reached") >= 1);
     }
 
     // ---- the border fix uses the same gate ----

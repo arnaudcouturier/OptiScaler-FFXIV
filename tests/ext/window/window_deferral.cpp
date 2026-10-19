@@ -11,7 +11,7 @@ int main()
     {
         Deferral d;
         CHECK(d.State() == DeferState::Idle);
-        CHECK(d.OnPresentEnd(false, true, 100) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, true, 100, true, true) == WaitResult::Wait);
         CHECK(!d.BeginReplay());
     }
 
@@ -21,8 +21,8 @@ int main()
         CHECK(d.Begin(true, 1000));
         CHECK(d.State() == DeferState::Pending);
         CHECK(d.PendingFullscreen());
-        CHECK(d.OnPresentEnd(true, false, 1016) == WaitResult::Wait); // the present during which it went off
-        CHECK(d.OnPresentEnd(false, true, 1033) == WaitResult::Replay);
+        CHECK(d.OnPresentEnd(true, false, 1016, true, true) == WaitResult::Wait); // the present during which it went off
+        CHECK(d.OnPresentEnd(false, true, 1033, true, true) == WaitResult::Replay);
         CHECK(d.Presents() == 2);
         CHECK(d.BeginReplay());
         CHECK(d.State() == DeferState::Replaying);
@@ -45,7 +45,7 @@ int main()
     {
         Deferral d;
         CHECK(d.Begin(true, 0));
-        CHECK(d.OnPresentEnd(true, false, 10) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 10, true, true) == WaitResult::Wait);
         CHECK(d.Replace(false));
         CHECK(!d.PendingFullscreen());
         CHECK(d.Replaced() == 1);
@@ -61,7 +61,7 @@ int main()
         CHECK(d.Begin(true, 0));
         d.Cancel();
         CHECK(d.State() == DeferState::Idle);
-        CHECK(d.OnPresentEnd(false, true, 5) == WaitResult::Wait); // nothing to replay
+        CHECK(d.OnPresentEnd(false, true, 5, true, true) == WaitResult::Wait); // nothing to replay
         CHECK(d.Begin(false, 9)); // can start again
     }
 
@@ -70,26 +70,60 @@ int main()
         Deferral d; // soft 6 presents
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 5; ++i)
-            CHECK(d.OnPresentEnd(false, false, i + 1) == WaitResult::Wait); // off, not confirmed
-        CHECK(d.OnPresentEnd(false, false, 6) == WaitResult::ReplayAtLimit);
+            CHECK(d.OnPresentEnd(false, false, i + 1, true, true) == WaitResult::Wait); // off, not confirmed
+        CHECK(d.OnPresentEnd(false, false, 6, true, true) == WaitResult::ReplayAtLimit);
     }
 
     // Soft limit by time.
     {
         Deferral d;
         CHECK(d.Begin(true, 5000));
-        CHECK(d.OnPresentEnd(false, false, 6999) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, false, 7000) == WaitResult::ReplayAtLimit);
+        CHECK(d.OnPresentEnd(false, false, 6999, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, false, 7000, true, true) == WaitResult::ReplayAtLimit);
     }
 
+    // The soft limit needs the controller's permission (`softAllowed`: a present reached the frame generation present since the
+    // request, and the floor since the request is over). Without it the wait goes on, by presents and by time, up to the hard
+    // limit, which replays regardless; a confirmed gate is not held back by it.
+    {
+        Deferral d;
+        CHECK(d.Begin(true, 0));
+        for (int i = 0; i < 20; ++i)
+            CHECK(d.OnPresentEnd(false, false, i + 1, true, false) == WaitResult::Wait); // past the soft 6 presents
+        CHECK(d.OnPresentEnd(false, false, 21, true, true) == WaitResult::ReplayAtLimit); // allowed again: replays at once
+    }
+    {
+        Deferral d;
+        CHECK(d.Begin(true, 5000));
+        CHECK(d.OnPresentEnd(false, false, 7000, true, false) == WaitResult::Wait); // soft 2000 ms passed, not allowed
+        CHECK(d.OnPresentEnd(false, false, 7001, true, true) == WaitResult::ReplayAtLimit);
+    }
+    {
+        Deferral d; // not allowed: the hard limit still replays, by presents...
+        CHECK(d.Begin(true, 0));
+        for (int i = 0; i < 23; ++i)
+            CHECK(d.OnPresentEnd(false, false, i + 1, true, false) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, false, 24, true, false) == WaitResult::ReplayAtHardLimit);
+    }
+    {
+        Deferral d; // ... and by time
+        CHECK(d.Begin(true, 0));
+        CHECK(d.OnPresentEnd(false, false, 5999, true, false) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, false, 6000, true, false) == WaitResult::ReplayAtHardLimit);
+    }
+    {
+        Deferral d; // a confirmed gate does not need the permission
+        CHECK(d.Begin(true, 0));
+        CHECK(d.OnPresentEnd(false, true, 1, true, false) == WaitResult::Replay);
+    }
     // Frame generation active (or unknown) at the soft limit: no replay, keep waiting; never replays with it on...
     {
         Deferral d;
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 20; ++i)
-            CHECK(d.OnPresentEnd(true, false, i + 1) == WaitResult::Wait); // soft 6 passed, hard 24 not yet
+            CHECK(d.OnPresentEnd(true, false, i + 1, true, true) == WaitResult::Wait); // soft 6 passed, hard 24 not yet
         // ...a confirmed gate does not help while the feature is active (the controller asks it off again).
-        CHECK(d.OnPresentEnd(true, true, 21) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, true, 21, true, true) == WaitResult::Wait);
     }
 
     // Hard limit by presents and by time: replay regardless (fail open).
@@ -97,14 +131,14 @@ int main()
         Deferral d; // hard 24 presents
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 23; ++i)
-            CHECK(d.OnPresentEnd(true, false, i + 1) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(true, false, 24) == WaitResult::ReplayAtHardLimit);
+            CHECK(d.OnPresentEnd(true, false, i + 1, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 24, true, true) == WaitResult::ReplayAtHardLimit);
     }
     {
         Deferral d; // hard 6000 ms
         CHECK(d.Begin(true, 100));
-        CHECK(d.OnPresentEnd(true, false, 6099) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(true, false, 6100) == WaitResult::ReplayAtHardLimit);
+        CHECK(d.OnPresentEnd(true, false, 6099, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 6100, true, true) == WaitResult::ReplayAtHardLimit);
     }
 
     // On another thread than the one that made the call: nothing replays, not even a confirmed gate, until the hard limit.
@@ -112,20 +146,20 @@ int main()
         Deferral d;
         CHECK(d.Begin(true, 0));
         for (int i = 0; i < 23; ++i)
-            CHECK(d.OnPresentEnd(false, true, i + 1, false) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, true, 24, false) == WaitResult::ReplayAtHardLimit);
+            CHECK(d.OnPresentEnd(false, true, i + 1, false, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, true, 24, false, true) == WaitResult::ReplayAtHardLimit);
     }
     {
         Deferral d;
         CHECK(d.Begin(true, 0));
-        CHECK(d.OnPresentEnd(false, true, 6100, false) == WaitResult::ReplayAtHardLimit); // by time
+        CHECK(d.OnPresentEnd(false, true, 6100, false, true) == WaitResult::ReplayAtHardLimit); // by time
     }
     {
         // and back on the right thread the confirmed gate replays at once
         Deferral d;
         CHECK(d.Begin(true, 0));
-        CHECK(d.OnPresentEnd(false, true, 1, false) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, true, 2, true) == WaitResult::Replay);
+        CHECK(d.OnPresentEnd(false, true, 1, false, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, true, 2, true, true) == WaitResult::Replay);
     }
 
     // Custom limits are honoured.
@@ -135,8 +169,8 @@ int main()
         limits.hardPresents = 3;
         Deferral d(limits);
         CHECK(d.Begin(true, 0));
-        CHECK(d.OnPresentEnd(false, false, 1) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(false, false, 2) == WaitResult::ReplayAtLimit);
+        CHECK(d.OnPresentEnd(false, false, 1, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(false, false, 2, true, true) == WaitResult::ReplayAtLimit);
     }
     {
         // the custom hard limit (3 presents) ends the wait with frame generation still on; 2 presents do not
@@ -145,9 +179,9 @@ int main()
         limits.hardPresents = 3;
         Deferral d(limits);
         CHECK(d.Begin(true, 0));
-        CHECK(d.OnPresentEnd(true, false, 1) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(true, false, 2) == WaitResult::Wait);
-        CHECK(d.OnPresentEnd(true, false, 3) == WaitResult::ReplayAtHardLimit);
+        CHECK(d.OnPresentEnd(true, false, 1, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 2, true, true) == WaitResult::Wait);
+        CHECK(d.OnPresentEnd(true, false, 3, true, true) == WaitResult::ReplayAtHardLimit);
     }
 
     // A clock that goes backwards never produces a huge elapsed time.
@@ -158,7 +192,7 @@ int main()
     }
 
     CHECK(std::string(DeferStateName(DeferState::Pending)) == "pending");
-    CHECK(std::string(WaitResultName(WaitResult::ReplayAtHardLimit)).find("still on") != std::string::npos);
+    CHECK(std::string(WaitResultName(WaitResult::ReplayAtHardLimit)).find("without a confirmation") != std::string::npos);
 
     return wt::g_failed ? 1 : 0;
 }

@@ -5,7 +5,8 @@
 //
 // Threading: the controller itself has no lock. The live module serialises calls with one recursive mutex, because a window
 // call made by the module can run the game's window procedure, which can call back into the bridge on the same thread. The
-// controller is written for that: its state is updated BEFORE every call out.
+// controller is written for that: its state is updated BEFORE every call out (the request bookkeeping is also cleared again
+// after the call, see AskFgOff).
 
 #include "ext/window/WindowMode.h"
 #include "ext/window/WindowProbe.h"
@@ -108,8 +109,9 @@ class Controller
         env.Log(FormatProbeLine(f), false);
 
         // A bridge resize deactivates frame generation (Streamline applies "off" inside the next present), so what the gate
-        // counted before it says nothing about the new state.
+        // counted before it says nothing about the new state, and no present has reached Streamline since this request.
         _gate.Reset();
+        _fgPresentSinceRequest = false;
     }
 
     // A bridge swapchain is being destroyed (ext::dx11bridge::OnDestroy): a call held for it is dropped, unreplayed, and the
@@ -144,7 +146,10 @@ class Controller
             return;
         const FgSnapshot fg = env.Fg();
         // A present that returned before the frame generation present says nothing about Streamline (M2): not counted.
-        _gate.OnPresentEnd(fg, PresentReached(env));
+        const bool reached = PresentReached(env);
+        _gate.OnPresentEnd(fg, reached);
+        if (reached)
+            _fgPresentSinceRequest = true; // the soft wait limit needs one such present since the last request
 
         // The flag changes inside upstream's SetFullscreenState hook, and a game does not necessarily resize its swapchain
         // after the switch (the logged startup enter has no resize behind it), so a present boundary is a sampling point too.
@@ -255,9 +260,7 @@ class Controller
                     _pendingNative = ev.native;
                     _pendingThread = f.currentThread;
                     _deferral.Begin(ev.fullscreen, env.NowMs());
-                    env.RequestFgOff();
-                    _requestMs = env.NowMs();
-                    _gate.Reset();
+                    AskFgOff(env);
                     prevent = true;
                     action = "held back: frame generation asked off, replayed once it is confirmed off";
                 }
@@ -422,6 +425,20 @@ class Controller
         env.Log(std::format("Window: held SetFullscreenState dropped, not replayed: {}", why), warn);
     }
 
+    // Asks frame generation off (the hold, and every re-request while a call is held). The request time, the gate and the
+    // "a present reached Streamline since the request" flag are settled BEFORE the call out (the live call gives up the module
+    // lock, so a present on another thread may end inside it), and cleared again after it: whatever raced the call is not
+    // ordered against the request and counts for nothing.
+    void AskFgOff(Env& env)
+    {
+        _requestMs = env.NowMs();
+        _gate.Reset();
+        _fgPresentSinceRequest = false;
+        env.RequestFgOff();
+        _gate.Reset();
+        _fgPresentSinceRequest = false;
+    }
+
     // DLSS-G confirmed off AND enough complete off presents AND enough time since the request (M3).
     bool ReplayConfirmed(Env& env)
     {
@@ -437,9 +454,7 @@ class Controller
     {
         if (fg.present && fg.active)
         {
-            env.RequestFgOff();
-            _requestMs = env.NowMs();
-            _gate.Reset();
+            AskFgOff(env);
             if (!_reRequestNoted)
             {
                 _reRequestNoted = true;
@@ -450,8 +465,13 @@ class Controller
         const bool maybeOn = !fg.present || fg.active;
         // A held call is replayed on the thread that made it; another presenting thread leaves it for the hard limit.
         const bool rightThread = env.CurrentThread() == _pendingThread;
-        const WaitResult result =
-            _deferral.OnPresentEnd(maybeOn, ReplayConfirmed(env), env.NowMs(), rightThread);
+        // The soft limit replays only if a game present has reached the frame generation present since the last request AND the
+        // same floor as the confirmed replay is over (measured from that request): otherwise a high frame rate, or a frame
+        // generation that keeps coming back, would shorten the wait to a few presents, and a run of failed presents would end it
+        // with nothing processed by Streamline. The hard limit does not need it (fail open).
+        const uint64_t now = env.NowMs();
+        const bool softAllowed = _fgPresentSinceRequest && now >= _requestMs && now - _requestMs >= _confirmMs;
+        const WaitResult result = _deferral.OnPresentEnd(maybeOn, ReplayConfirmed(env), now, rightThread, softAllowed);
         if (result == WaitResult::Wait)
             return;
 
@@ -487,8 +507,9 @@ class Controller
         ReplayGuard logGuard(_deferral, _actionDepth); // a throwing log must not leave Replaying stuck
         int32_t hr = 0;
         env.Log(std::format("Window: replaying SetFullscreenState({}) with a null target: {} (after {} presents, {} ms, {} "
-                            "earlier call(s) replaced)",
-                            fullscreen ? "TRUE" : "FALSE", WaitResultName(result), presents, waited, replaced),
+                            "earlier call(s) replaced, fg={})",
+                            fullscreen ? "TRUE" : "FALSE", WaitResultName(result), presents, waited, replaced,
+                            FgStateName(fg)),
                 result == WaitResult::ReplayAtHardLimit);
         hr = env.Replay(native, fullscreen);
         env.Log(std::format("Window: replayed SetFullscreenState({}) returned {:#010x}", fullscreen ? "TRUE" : "FALSE",
@@ -595,6 +616,7 @@ class Controller
     // B2-a
     Deferral _deferral;
     uint64_t _requestMs = 0;                            // when frame generation was last asked off
+    bool _fgPresentSinceRequest = false;                // a game present reached the FG present since the last request
     uint32_t _confirmPresents = kReplayConfirmPresents; // complete off presents needed before a replay
     uint64_t _confirmMs = kReplayConfirmMs;            // and this long since the request
     uint64_t _pendingNative = 0;

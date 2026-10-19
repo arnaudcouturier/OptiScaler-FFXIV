@@ -95,6 +95,7 @@ struct FakeEnv final : Env
     std::vector<ReplayCall> replays;
     int32_t replayResult = 0; // S_OK
     std::function<void()> onReplay; // runs inside the call, like the hook and the game's window procedure would
+    std::function<void()> onRequestOff; // runs inside RequestFgOff (the live call gives up the module lock there)
 
     std::string throwOn; // a log line containing this text throws (to test cleanup)
     std::vector<std::string> logs;
@@ -148,6 +149,8 @@ struct FakeEnv final : Env
     void RequestFgOff() override
     {
         ++fgOffRequests;
+        if (onRequestOff)
+            onRequestOff();
         if (autoOff)
         {
             fg.active = false;
