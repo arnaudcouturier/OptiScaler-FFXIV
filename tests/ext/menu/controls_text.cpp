@@ -51,6 +51,8 @@ constexpr const char* kNrAdvanced = "ImGui::TreeNode(\"Advanced##nr_card\")"; //
 
 constexpr const char* kCharaDebug = "void DrawDebugSection(CharaConfig& cfg, bool inert)\n{"; // body of the closed Advanced (debug) fold
 
+constexpr const char* kAmpereAdvanced = "ImGui::TreeNode(\"Advanced (RTX 20/30 runtime)##ampere_advanced\")"; // closed by default
+
 const Row kRows[] = {
     // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card, read at every UI boundary = applies at once
     { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"ReShade presets at the UI boundary\"",
@@ -121,6 +123,31 @@ const Row kRows[] = {
     { .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::Checkbox(\"Trace preview NR in the log (diagnostics)\"",
       .write = "cfg.previewNrTrace=trace", .keyPrefix = "cfg.previewNrTrace=", .block = { "applies at once", "changes nothing" },
       .guard = kCharaDebug },
+
+    // WP4 item 3: the RTX 20/30 runtime tuning keys, in a collapsed fold inside the runtime fold, drawn only while the runtime path is
+    // switched on; they are written to the runtime's own settings file when it is loaded = restart
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Combo(\"Kernel image (restart)\"",
+      .write = "cfg.ampereMfgKernelImage=std::string(kKernelImages[kernelImage])", .keyPrefix = "cfg.ampereMfgKernelImage=",
+      .block = { "applies after a restart", "PTX or Cubin force it" },
+      .fileHas = { "if (enabled)\nDrawAmpereAdvanced(cfg);", "dlssg_sm86.ini" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Combo(\"Kernel family (restart)\"",
+      .write = "cfg.ampereMfgRouter=std::string(kRouters[router])", .keyPrefix = "cfg.ampereMfgRouter=",
+      .block = { "applies after a restart", "no SM75 kernels" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Checkbox(\"Hardware bilinear sampling (restart)\"",
+      .write = "cfg.ampereMfgHardwareBilinear=hardwareBilinear", .keyPrefix = "cfg.ampereMfgHardwareBilinear=",
+      .block = { "applies after a restart", "Off by default" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::SliderInt(\"Optimization level (restart)\"",
+      .write = "cfg.ampereMfgOptimized=optimized", .keyPrefix = "cfg.ampereMfgOptimized=",
+      .block = { "applies after a restart", "0 to 3" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Combo(\"Preset (restart)\"",
+      .write = "cfg.ampereMfgPreset=std::string(kPresets[preset])", .keyPrefix = "cfg.ampereMfgPreset=",
+      .block = { "applies after a restart", "A or B" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::Combo(\"Report GPU architecture to the game (restart)\"",
+      .write = "cfg.ampereMfgSpoofArchToGame=std::string(kSpoofArch[spoofArch])", .keyPrefix = "cfg.ampereMfgSpoofArchToGame=",
+      .block = { "applies after a restart", "Auto writes nothing" }, .fold = kAmpereAdvanced },
+    { .file = "fg/MenuFgUnlocks.cpp", .widget = "ImGui::SliderInt(\"Runtime log level (restart)\"",
+      .write = "cfg.ampereMfgLogLevel=logLevel", .keyPrefix = "cfg.ampereMfgLogLevel=",
+      .block = { "applies after a restart", "diagnostic" }, .fold = kAmpereAdvanced },
 };
 
 // Squashed code of the file with the widget's block cut out: from the widget to the next input widget, fold or TreePop

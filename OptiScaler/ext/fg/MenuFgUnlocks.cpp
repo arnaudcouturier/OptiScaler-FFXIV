@@ -14,6 +14,87 @@
 
 namespace
 {
+// Position of the stored text in the list of choices (case-insensitive); anything unknown reads as the first entry (Auto),
+// the same way the runtime's settings writer treats it.
+int IndexOfValue(const std::string& value, const char* const* values, int count)
+{
+    for (int i = 0; i < count; ++i)
+        if (_stricmp(value.c_str(), values[i]) == 0)
+            return i;
+    return 0;
+}
+
+// The settings writer accepts exactly "1"/"true" (on) and "0"/"false" (off) and leaves the key out for anything else.
+int SpoofArchIndex(const std::string& value)
+{
+    if (value == "1" || value == "true")
+        return 1;
+    if (value == "0" || value == "false")
+        return 2;
+    return 0;
+}
+
+// The tuning keys of the runtime. They are written to the runtime's own settings file (dlssg_sm86.ini next to its DLL, see
+// AmpereMfgLoader.cpp GenerateIniContent) every time the runtime is loaded, so each change applies after a restart.
+void DrawAmpereAdvanced(ext::FgConfig& cfg)
+{
+    if (!ImGui::TreeNode("Advanced (RTX 20/30 runtime)##ampere_advanced"))
+        return;
+
+    ImGui::TextWrapped("Written to the runtime's own settings file (dlssg_sm86.ini next to its DLL) each time it is loaded: every "
+                       "change here applies after a restart. Leave everything on Auto unless you are tuning the runtime.");
+
+    static const char* const kKernelImages[] = { "Auto", "PTX", "Cubin" };
+    int kernelImage = IndexOfValue(cfg.ampereMfgKernelImage.value_or_default(), kKernelImages, 3);
+    if (ImGui::Combo("Kernel image (restart)", &kernelImage, "Auto\0PTX\0Cubin\0"))
+        cfg.ampereMfgKernelImage = std::string(kKernelImages[kernelImage]);
+    ext::menu::Tooltip("Interpolation kernel image of the runtime. Auto picks one for your GPU (and for Linux/Proton); PTX or Cubin force it.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    static const char* const kRouters[] = { "Auto", "SM75", "SM86" };
+    int router = IndexOfValue(cfg.ampereMfgRouter.value_or_default(), kRouters, 3);
+    if (ImGui::Combo("Kernel family (restart)", &router, "Auto\0SM75\0SM86\0"))
+        cfg.ampereMfgRouter = std::string(kRouters[router]);
+    ext::menu::Tooltip("Kernel family the runtime routes to. Auto picks SM75 on RTX 20 (when the runtime has it) and SM86 on RTX 30. "
+                       "SM75 falls back to Auto when the loaded runtime has no SM75 kernels.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    bool hardwareBilinear = cfg.ampereMfgHardwareBilinear.value_or_default();
+    if (ImGui::Checkbox("Hardware bilinear sampling (restart)", &hardwareBilinear))
+        cfg.ampereMfgHardwareBilinear = hardwareBilinear;
+    ext::menu::Tooltip("Use hardware bilinear sampling in the runtime's kernels. Off by default.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    int optimized = cfg.ampereMfgOptimized.value_or_default();
+    if (ImGui::SliderInt("Optimization level (restart)", &optimized, 0, 3))
+        cfg.ampereMfgOptimized = optimized;
+    ext::menu::Tooltip("Optimization level the runtime is configured with, 0 to 3 (default 1).\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    static const char* const kPresets[] = { "Auto", "A", "B" };
+    int preset = IndexOfValue(cfg.ampereMfgPreset.value_or_default(), kPresets, 3);
+    if (ImGui::Combo("Preset (restart)", &preset, "Auto\0A\0B\0"))
+        cfg.ampereMfgPreset = std::string(kPresets[preset]);
+    ext::menu::Tooltip("Compatibility preset of the runtime: Auto, A or B.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    static const char* const kSpoofArch[] = { "Auto", "true", "false" };
+    int spoofArch = SpoofArchIndex(cfg.ampereMfgSpoofArchToGame.value_or_default());
+    if (ImGui::Combo("Report GPU architecture to the game (restart)", &spoofArch, "Auto\0On\0Off\0"))
+        cfg.ampereMfgSpoofArchToGame = std::string(kSpoofArch[spoofArch]);
+    ext::menu::Tooltip("Whether the runtime tells the game it runs on the GPU architecture the runtime was built for. Auto writes nothing "
+                       "(the runtime decides); On and Off write the choice.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    int logLevel = cfg.ampereMfgLogLevel.value_or_default();
+    if (ImGui::SliderInt("Runtime log level (restart)", &logLevel, 0, 3))
+        cfg.ampereMfgLogLevel = logLevel;
+    ext::menu::Tooltip("Log level of the runtime, 0 to 3 (default 1); a diagnostic setting, its logs go to the dlssg_sm86 logs folder.\n"
+                       "Written to the runtime's settings file: applies after a restart.");
+
+    ImGui::TreePop();
+}
+
 void DrawAmpereRuntime(ext::FgConfig& cfg)
 {
     if (!ImGui::TreeNode("RTX 20/30 frame-generation runtime (experimental)"))
@@ -50,6 +131,8 @@ void DrawAmpereRuntime(ext::FgConfig& cfg)
         ImGui::TextWrapped("%s", result.c_str());
     ImGui::EndDisabled();
     ImGui::TextWrapped("Live controls require the SilyNoMeta exports. Detection alone does not confirm FG support.");
+    if (enabled)
+        DrawAmpereAdvanced(cfg);
     ImGui::TreePop();
 }
 
