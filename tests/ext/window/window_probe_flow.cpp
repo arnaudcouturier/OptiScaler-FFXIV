@@ -32,6 +32,7 @@ struct CountingEnv final : Env
     uint32_t OwnerThread(uint64_t) override { ++calls; return 1; }
     WindowInfo ReadWindow(uint64_t) override { ++calls; return {}; }
     uint64_t MonitorOfWindow(uint64_t) override { ++calls; return 0; }
+    uint64_t FgSwapChain() override { ++calls; return 0; }
     std::optional<uint64_t> PresentSerial() override { ++calls; return std::nullopt; }
     bool ApplyExStyle(uint64_t, uint32_t) override { ++calls; return false; }
     void RequestFgOff() override { ++calls; }
@@ -158,8 +159,13 @@ int main()
         // Another swapchain: would pass, and the line shows both pointers.
         env.exclusive = false;
         CHECK(!c.OnSetFullscreenState(env, Mode::Probe, Event(true, 0x2000)));
-        CHECK_CONTAINS(env.Last(), "native=0x2000 bridge=0x1000 sameObject=no");
+        CHECK_CONTAINS(env.Last(), "native=0x2000 bridge=0x1000 fgswapchain=0x3000 sameObject=no");
         CHECK_CONTAINS(env.Last(), "wouldReturn=false");
+
+        // ReShade passing the bridge's inner FG swapchain instead: native equals fgswapchain, the session can tell.
+        env.fgSwapChain = 0x5000;
+        CHECK(!c.OnSetFullscreenState(env, Mode::Probe, Event(true, 0x5000)));
+        CHECK_CONTAINS(env.Last(), "native=0x5000 bridge=0x1000 fgswapchain=0x5000 sameObject=no");
 
         // Frame generation off: would pass.
         env.fg = FgSnapshot { true, false, false };

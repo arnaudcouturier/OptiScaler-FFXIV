@@ -47,6 +47,7 @@ struct ProbeFields
     uint64_t callTarget = 0;    // the event's hmonitor argument, as the raw value
     uint64_t nativeSwapchain = 0; // swapchain->get_native()
     uint64_t bridgeSwapchain = 0; // the bridge swapchain stored at the last resize-done
+    uint64_t fgSwapchain = 0;     // the bridge's inner FG swapchain (read-only): tells which of the two ReShade passed
     DeferVerdict verdict = DeferVerdict::UnknownSwapchain;
     const char* deferState = "idle";
     bool wouldReturn = false; // what Mode=on would return from the handler
@@ -87,9 +88,10 @@ inline std::string FormatProbeLine(const ProbeFields& f)
 
     if (f.hasCall)
     {
-        out += std::format(" call=SetFullscreenState({}) target={:#x} native={:#x} bridge={:#x} sameObject={} state={} verdict={} "
-                           "wouldReturn={} returned={}",
+        out += std::format(" call=SetFullscreenState({}) target={:#x} native={:#x} bridge={:#x} fgswapchain={:#x} sameObject={} state={} "
+                           "verdict={} wouldReturn={} returned={}",
                            f.callFullscreen ? "TRUE" : "FALSE", f.callTarget, f.nativeSwapchain, f.bridgeSwapchain,
+                           f.fgSwapchain,
                            (f.nativeSwapchain != 0 && f.nativeSwapchain == f.bridgeSwapchain) ? "yes" : "no", f.deferState,
                            VerdictName(f.verdict), f.wouldReturn ? "true" : "false", f.returned ? "true" : "false");
     }

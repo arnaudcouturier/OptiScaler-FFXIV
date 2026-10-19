@@ -110,6 +110,8 @@ struct FakeEnv final : Env
     WindowInfo ReadWindow(uint64_t) override { return window; }
     uint64_t monitor = 0x77;
     uint64_t MonitorOfWindow(uint64_t) override { return monitor; }
+    uint64_t fgSwapChain = 0x3000;
+    uint64_t FgSwapChain() override { return fgSwapChain; }
 
     // The bridge's present counter. Unknown by default (the meaning every present had before M2); a test that needs it sets
     // `serial` and calls CompletePresent() between OnPresentBegin and OnPresentEnd for a present that reached the FG present.

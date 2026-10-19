@@ -72,6 +72,12 @@ class LiveEnv final : public Env
     {
         return reinterpret_cast<uint64_t>(MonitorFromWindow(reinterpret_cast<HWND>(static_cast<uintptr_t>(hwnd)), MONITOR_DEFAULTTONEAREST));
     }
+    uint64_t FgSwapChain() override
+    {
+        if (_bridge == nullptr)
+            return 0;
+        return reinterpret_cast<uint64_t>(static_cast<IDXGISwapChain*>(ext::Access::Bridge::FgSwapChain(*_bridge)));
+    }
     // The bridge object, set at a bridge resize and cleared when that bridge is destroyed (both under the module lock). Only
     // read here, never owned.
     void SetBridge(Dx11wDx12SC* sc) { _bridge = sc; }

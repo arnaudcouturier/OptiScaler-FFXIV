@@ -42,6 +42,9 @@ class Env
     virtual uint32_t OwnerThread(uint64_t hwnd) = 0; // 0 = unknown
     virtual WindowInfo ReadWindow(uint64_t hwnd) = 0;
     virtual uint64_t MonitorOfWindow(uint64_t hwnd) = 0; // HMONITOR of the window, 0 = unknown
+    // The bridge's inner frame generation swapchain as the same kind of pointer ReShade passes (IDXGISwapChain*), 0 = unknown.
+    // Read-only; it only goes into the probe line, so a session can tell which swapchain ReShade passed.
+    virtual uint64_t FgSwapChain() = 0;
     // The bridge's present counter (PresentSerialFromIndex): changes once per game present that reached the frame generation
     // present. nullopt = no counter (no bridge known, or fewer than two buffers).
     virtual std::optional<uint64_t> PresentSerial() = 0;
@@ -217,6 +220,7 @@ class Controller
         f.callTarget = ev.target;
         f.nativeSwapchain = ev.native;
         f.bridgeSwapchain = _bridge;
+        f.fgSwapchain = env.FgSwapChain();
         f.verdict = DecideDefer(in);
         if (wouldHold && f.verdict == DeferVerdict::SizeMismatch && _deferral.State() == DeferState::Idle)
             env.Log(std::format("Window: the follow-up ResizeBuffers is not protected: the FG swapchain is {}x{} but the window rect is {}x{}; "
