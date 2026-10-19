@@ -137,6 +137,15 @@ template <class R> struct DrawArg<void (*)(R&)>
 };
 } // namespace detail
 
+// The "FFXIV" tab (one row of the tabs[] array in MenuCommon::RenderMainMenuTabs) is shown only when the running game
+// matched the FFXIV build entry (ext::game::Current()). The template takes upstream's RenderMenuContext without naming
+// it, so the row can point at it as a `bool (*)(RenderMenuContext&)`.
+bool FfxivTabShown();
+template <class RenderContext> bool FfxivTabVisible(RenderContext&)
+{
+    return FfxivTabShown();
+}
+
 // The seam in MenuCommon::GetMenuBoxes (declared through ext/Seams.h). MenuBox and RenderMenuContext are private to
 // menu_common.cpp, so this is a template deduced from the real array there: no fork code names those types.
 // Returns `base` while no card is registered, otherwise a merged array that lives for the whole process.

@@ -221,6 +221,6 @@ void DrawCharaCard(ext::menu::Ctx&)
     }
 }
 
-const ext::menu::AutoRegister registration { { "ffxiv_character_preview", "Upscaling", "Character preview", DrawCharaCard,
+const ext::menu::AutoRegister registration { { "ffxiv_character_preview", "FFXIV", "Character preview", DrawCharaCard,
                                                "dlss_nr", Visible } };
 } // namespace

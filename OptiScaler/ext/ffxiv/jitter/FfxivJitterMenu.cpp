@@ -44,7 +44,7 @@ void Draw(ext::menu::Ctx&)
     ImGui::PopStyleColor();
 }
 
-const ext::menu::AutoRegister registration { { "ffxiv_jitter", "Upscaling", "Game jitter (FFXIV)", Draw, "output_scaling",
+const ext::menu::AutoRegister registration { { "ffxiv_jitter", "FFXIV", "Game jitter (FFXIV)", Draw, "output_scaling",
                                                  Visible } };
 } // namespace
 } // namespace ext::ffxiv::jitter::menu

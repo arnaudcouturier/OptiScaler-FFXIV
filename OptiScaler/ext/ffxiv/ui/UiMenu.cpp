@@ -53,6 +53,6 @@ void DrawDiagCard(ext::menu::Ctx&)
 
 bool DiagVisible(const ext::menu::Ctx&) { return ext::game::Current().hudless != nullptr && DiagnosticsOn(); }
 
-const ext::menu::AutoRegister registration { { "hudless_diag", "Frame Gen", "HUD-less diagnostics", DrawDiagCard, nullptr,
+const ext::menu::AutoRegister registration { { "hudless_diag", "FFXIV", "HUD-less diagnostics", DrawDiagCard, nullptr,
                                                DiagVisible } };
 } // namespace

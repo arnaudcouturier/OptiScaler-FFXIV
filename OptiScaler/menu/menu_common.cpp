@@ -8753,6 +8753,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
         { "MAIN", "Custom", "Boxes picked in Menu > Custom Tab.", RenderCustomTab },
         { "MAIN", "Upscaling", "Backend, sharpness and output scaling.", RenderUpscalerStateMessage },
         { "MAIN", "Frame Gen", "Frame generation source, output and pacing." },
+        { "MAIN", "FFXIV", "FFXIV only: display, image quality, HUD and diagnostics.", nullptr, false, ext::menu::FfxivTabVisible<RenderMenuContext> }, // ext: hidden unless the game is FFXIV
         { "MAIN", "Latency & FPS", "Frame limiter, low latency and V-Sync." },
         { "SYSTEM", "Textures", "Mipmap bias and anisotropic filtering." },
         { "SYSTEM", "Compatibility", "Init flags, hooks, plugins and game specific workarounds." },

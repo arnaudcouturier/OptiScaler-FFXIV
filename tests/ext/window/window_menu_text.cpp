@@ -1,7 +1,7 @@
 // The "Window mode (FFXIV)" menu card is ImGui glue and cannot run offline: this pins what it must do by reading the source
 // (comments and string literals stripped): the [Window] Mode key is only written from its combo with one of the three known
-// names, the card shows the ACTIVE mode from the published copy (a change needs a restart), it is registered in the Frame Gen
-// tab after the DLSSG settings with the FFXIV visibility rule, and it holds no decision of its own.
+// names, the card shows the ACTIVE mode from the published copy (a change needs a restart), it is registered in the FFXIV
+// tab with the FFXIV visibility rule, and it holds no decision of its own.
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -94,9 +94,9 @@ int main(int argc, char** argv)
     CHECK(Count(code, "if(ParseMode(kNames[i])==stored)index=i;") == 1);
     CHECK(Count(code, "ModeName(CurrentMode())") >= 1);
     CHECK(Count(code, "if(CurrentMode()!=stored)") == 1);
-    // registered in the Frame Gen tab after the DLSSG settings, visible only for the FFXIV build entry
+    // registered in the FFXIV tab (its place comes from the layout table), visible only for the FFXIV build entry
     CHECK(Count(code, "ext::menu::AutoRegisterregistration{{\"\",\"\",\"\",Draw,\"\",Visible}};") == 1);
-    CHECK(raw.find("\"Frame Gen\"") != std::string::npos);
+    CHECK(raw.find("{ \"window_mode\", \"FFXIV\", ") != std::string::npos);
     CHECK(raw.find("\"fg_dlssg\"") != std::string::npos);
     CHECK(raw.find("\"window_mode\"") != std::string::npos);
     CHECK(Count(code, "returnext::game::Current().lighting!=nullptr;") == 1);

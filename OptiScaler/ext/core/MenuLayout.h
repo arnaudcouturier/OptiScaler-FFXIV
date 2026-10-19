@@ -36,24 +36,27 @@ struct Slot
 inline constexpr Slot kSlots[] = {
     // Upscaling
     { "dlss_nr",                  "Upscaling",     "upscaler" },
-    { "ffxiv_character_preview",  "Upscaling",     "dlss_nr" },
     { "forced_quality",           "Upscaling",     "sharpness" },
-    { "ffxiv_jitter",             "Upscaling",     "output_scaling" },
 
-    // Frame Gen: the runtime cards (fg_fsrfg .. fg_sl_inputs) are one shared function, our cards follow its last box
+    // Frame Gen: the runtime cards (fg_fsrfg .. fg_sl_inputs) are one shared function, our card follows its last box
     { "fg_unlocks",               "Frame Gen",     "fg_selection" },
-    { "ffxiv_hdr",                "Frame Gen",     "fg_unlocks" },
-    { "fg_hudless",               "Frame Gen",     "ffxiv_hdr" },
     { "fg_auto_mfg",              "Frame Gen",     "fg_sl_inputs" },
-    { "window_mode",              "Frame Gen",     "fg_auto_mfg" },
-    { "hudless_diag",             "Frame Gen",     "window_mode" },
+
+    // FFXIV (tab hidden outside the FFXIV build match), after the Frame Gen cards, in the order of the tab:
+    // display, image quality, HUD, diagnostics
+    { "window_mode",              "FFXIV",         "fg_sl_inputs" },
+    { "ffxiv_hdr",                "FFXIV",         "window_mode" },
+    { "ffxiv_jitter",             "FFXIV",         "ffxiv_hdr" },
+    { "ffxiv_character_preview",  "FFXIV",         "ffxiv_jitter" },
+    { "fg_hudless",               "FFXIV",         "ffxiv_character_preview" },
+    { "ffxiv_companion",          "FFXIV",         "fg_hudless" },
+    { "hudless_diag",             "FFXIV",         "ffxiv_companion" },
 
     // Textures: Mipmap Bias and Anisotropic Filtering are one shared function
     { "mipmap_auto",              "Textures",      "anisotropy" },
 
     // Compatibility
-    { "ffxiv_companion",          "Compatibility", nullptr },
-    { "reshade_addon_probe",      "Compatibility", "ffxiv_companion" },
+    { "reshade_addon_probe",      "Compatibility", nullptr },
 };
 // clang-format on
 

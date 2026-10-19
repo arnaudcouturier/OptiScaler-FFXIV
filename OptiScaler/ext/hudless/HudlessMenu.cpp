@@ -139,6 +139,6 @@ void DrawHudless(ext::menu::Ctx&)
     ImGui::TreePop();
 }
 
-ext::menu::AutoRegister reg { { "fg_hudless", "Frame Gen", "HUD-less frame generation", DrawHudless, "fg_selection",
+ext::menu::AutoRegister reg { { "fg_hudless", "FFXIV", "HUD-less frame generation", DrawHudless, "fg_selection",
                                 Visible } };
 } // namespace

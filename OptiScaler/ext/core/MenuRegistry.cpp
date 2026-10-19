@@ -2,6 +2,7 @@
 
 #include "ext/Seams.h"
 #include "ext/core/MenuRegistry.h"
+#include "ext/game/Game.h"
 
 #include <menu/menu_common.h>
 
@@ -84,6 +85,9 @@ void RegisterShortcut(const Shortcut& shortcut) { AddTo(ShortcutList(), shortcut
 void RegisterOverlay(const Overlay& overlay) { AddTo(OverlayList(), overlay, "overlay", "overlay"); }
 
 void RegisterTimeRow(const TimeRow& row) { AddTo(TimeRowList(), row, "time row", row.label); }
+
+// All the FFXIV pointers (lighting, hdr, hudless, quality, ...) are set together by the build match: this is "the game is FFXIV"
+bool FfxivTabShown() { return ext::game::Current().lighting != nullptr; }
 
 bool WantsFrame()
 {

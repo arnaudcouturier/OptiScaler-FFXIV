@@ -222,16 +222,16 @@ void RealTable(const std::string& repo)
     }
     auto tabIds = [&](const std::string& tab) { return Join(OfTab(reference, tabOf, tab)); };
 
-    CHECK_EQ(tabIds("Upscaling"),
-          "upscaler dlss_nr ffxiv_character_preview sharpness forced_quality upscale_ratio output_scaling ffxiv_jitter "
-          "shader_times magnifier");
+    CHECK_EQ(tabIds("Upscaling"), "upscaler dlss_nr sharpness forced_quality upscale_ratio output_scaling shader_times magnifier");
     CHECK_EQ(tabIds("Frame Gen"),
-          "fg_selection fg_unlocks ffxiv_hdr fg_hudless fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx "
-          "fg_fsrfg_inputs fg_sl_inputs fg_auto_mfg window_mode hudless_diag");
+             "fg_selection fg_unlocks fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx fg_fsrfg_inputs "
+             "fg_sl_inputs fg_auto_mfg");
+    CHECK_EQ(tabIds("FFXIV"),
+             "window_mode ffxiv_hdr ffxiv_jitter ffxiv_character_preview fg_hudless ffxiv_companion hudless_diag");
     CHECK_EQ(tabIds("Textures"), "mipmap anisotropy mipmap_auto");
     CHECK_EQ(tabIds("Compatibility"),
-          "init_flags fsr_common upscaler_inputs spoofing plugins shaders_limits barriers root_signatures ffxiv_companion "
-          "reshade_addon_probe");
+             "init_flags fsr_common upscaler_inputs spoofing plugins shaders_limits barriers root_signatures "
+             "reshade_addon_probe");
 
     // the upstream cards keep their relative order
     Ids upstreamOrder, merged;

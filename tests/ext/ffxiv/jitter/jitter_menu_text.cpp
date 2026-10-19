@@ -1,6 +1,6 @@
 // The "Game jitter (FFXIV)" menu card is ImGui glue and cannot run offline: this pins what it must do by reading the source
 // (comments and string literals stripped): both keys are assigned from their own checkbox inside Draw, the card is registered
-// in the Upscaling tab after Output Scaling with the FFXIV visibility rule, and it holds no decision of its own.
+// in the FFXIV tab with the FFXIV visibility rule, and it holds no decision of its own.
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -91,9 +91,9 @@ int main(int argc, char** argv)
     // no other writes to the keys
     CHECK(Count(code, "cfg.jitterProbe=") == 1);
     CHECK(Count(code, "cfg.jitterCorrection=") == 1);
-    // registered in the Upscaling tab after Output Scaling, visible only for the FFXIV build entry
+    // registered in the FFXIV tab (its place comes from the layout table), visible only for the FFXIV build entry
     CHECK(Count(code, "ext::menu::AutoRegisterregistration{{\"\",\"\",\"\",Draw,\"\",Visible}};") == 1);
-    CHECK(raw.find("\"Upscaling\"") != std::string::npos);
+    CHECK(raw.find("{ \"ffxiv_jitter\", \"FFXIV\", ") != std::string::npos);
     CHECK(raw.find("\"output_scaling\"") != std::string::npos);
     CHECK(raw.find("\"ffxiv_jitter\"") != std::string::npos);
     CHECK(Count(code, "returnext::game::Current().lighting!=nullptr;") == 1);

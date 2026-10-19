@@ -49,7 +49,7 @@ void Draw(ext::menu::Ctx&)
         ImGui::TextWrapped("The selection above takes effect after the game is restarted.");
 }
 
-const ext::menu::AutoRegister registration { { "window_mode", "Frame Gen", "Window mode (FFXIV)", Draw, "fg_dlssg",
+const ext::menu::AutoRegister registration { { "window_mode", "FFXIV", "Window mode (FFXIV)", Draw, "fg_dlssg",
                                                  Visible } };
 } // namespace
 } // namespace ext::window::menu

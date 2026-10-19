@@ -77,7 +77,7 @@ void AroundIndexed(ID3D11DeviceContext* context, UINT count, UINT start, DrawCal
 void DrawCompanionCard(ext::menu::Ctx&) { DrawSettings(); }
 bool CompanionVisible(const ext::menu::Ctx&) { return ext::game::Current().hdr != nullptr; }
 const ext::menu::AutoRegister companionCard {
-    { "ffxiv_companion", "Compatibility", "FFXIV Companion", DrawCompanionCard, nullptr, CompanionVisible }
+    { "ffxiv_companion", "FFXIV", "FFXIV Companion", DrawCompanionCard, nullptr, CompanionVisible }
 };
 } // namespace
 

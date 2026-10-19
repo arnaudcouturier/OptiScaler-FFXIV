@@ -166,7 +166,7 @@ struct HdrMenuRegistration
 {
     HdrMenuRegistration()
     {
-        ext::menu::Register({ "ffxiv_hdr", "Frame Gen", "FFXIV HDR10 output", DrawHdrCard, "fg_selection",
+        ext::menu::Register({ "ffxiv_hdr", "FFXIV", "FFXIV HDR10 output", DrawHdrCard, "fg_selection",
                               HdrCardVisible });
         ext::menu::RegisterShortcut({ "OptiHDR screenshot", 15, ScreenshotKeyOption, "OptiHDR screenshot",
                                       ScreenshotPressed });
