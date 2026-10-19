@@ -356,6 +356,52 @@ void ExternalChangeVoidsATrial()
     s.Run(5000, ms4);
     CHECK(s.CountWhy(Why::ProbeRevert) == 0 && !s.sel.TrialPending());
 }
+
+void ProbeLostToABadSampleBacksOff()
+{
+    // L6: a probe step followed by a pause-like frame (> 250 ms) loses its verdict. The factor stays down, and the back-off
+    // is doubled all the same: the probe cost something and nothing proved it harmless.
+    const double ms4 = 1000.0 / 60.0;
+    Sim s;
+    s.factor = 4;
+    s.Step(ms4);
+    s.Run(13000, ms4);
+    CHECK(s.CountWhy(Why::Probe) == 1 && s.sel.TrialPending() && s.factor == 3);
+    CHECK(s.sel.ProbeMs() == DynamicMfg::kProbeBaseMs);
+    s.Step(300.0); // a bad sample while the probe is open
+    CHECK(!s.sel.TrialPending());
+    CHECK(s.sel.ProbeMs() == 2 * DynamicMfg::kProbeBaseMs);
+
+    // No probe pending (a plain bad sample): the interval stays as it was.
+    Sim plain;
+    plain.factor = 4;
+    plain.Step(ms4);
+    plain.Run(3000, ms4);
+    CHECK(!plain.sel.TrialPending());
+    plain.Step(300.0);
+    CHECK(plain.sel.ProbeMs() == DynamicMfg::kProbeBaseMs);
+
+    // An up step (regret trial) lost to a bad sample is not a probe: no back-off change.
+    Sim up;
+    up.target = 138;
+    up.Step(40);
+    for (int guard = 0; !up.sel.TrialPending() && guard < 100000; ++guard)
+        up.Step(40.0);
+    up.Step(300.0);
+    CHECK(!up.sel.TrialPending());
+    CHECK(up.sel.ProbeMs() == DynamicMfg::kProbeBaseMs);
+
+    // The doubling is capped.
+    Sim cap;
+    cap.factor = 4;
+    cap.Step(ms4);
+    cap.Run(300000, ms4); // back-off at the cap
+    CHECK(cap.sel.ProbeMs() == DynamicMfg::kProbeMaxMs);
+    for (int guard = 0; !cap.sel.TrialPending() && guard < 100000; ++guard)
+        cap.Step(ms4);
+    cap.Step(300.0);
+    CHECK(cap.sel.ProbeMs() == DynamicMfg::kProbeMaxMs);
+}
 } // namespace
 
 int main()
@@ -375,6 +421,7 @@ int main()
     RegretGuardRevertsAndRefuses();
     RestartKeepsWhatWasLearned();
     ExternalChangeVoidsATrial();
+    ProbeLostToABadSampleBacksOff();
     FirstIntervalAfterASwitchIsDropped();
     if (g_failures)
     {

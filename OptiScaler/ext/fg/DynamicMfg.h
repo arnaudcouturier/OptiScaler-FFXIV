@@ -132,6 +132,10 @@ class DynamicMfg
         }
         if (!std::isfinite(ms) || ms <= 0.0 || ms > kMaxSampleMs || !std::isfinite(target) || target <= 0.0)
         {
+            // A probe whose verdict is lost here (Restart drops the trial) is not forgotten: the factor stays one step
+            // down with nothing proving it harmless, so the back-off doubles as for a failed probe.
+            if (pend_.kind == Pend::Probe)
+                probeMs_ = std::min(probeMs_ * 2, kProbeMaxMs);
             Restart(now);
             return current;
         }
