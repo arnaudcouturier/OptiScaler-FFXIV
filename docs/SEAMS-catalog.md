@@ -54,7 +54,7 @@ Not seams: `[LowLatency] Input/Output` and `[Vulkan] UseCopyForInputs/Output` pe
 
 ## menu
 
-`MenuRegistry` cards registered through `MergeBoxes`: `dlss_nr` (tab Upscaling, after `upscaler`, drawn inside `ScopedCard`; `DlssNr::RenderMenu` loses its own CollapsingHeader and starts with the card title; **S2c placed**, `ext/nr/menu/`), `forced_quality` (Upscaling, `after = "upscale_ratio"`'s predecessor; **S7 (placed)**, `ext/upscaler/menu/`), `ffxiv_hdr` (Frame Gen, visible when FFXIV), `fg_unlocks` (Frame Gen), `fg_hudless` (Frame Gen, visible when DLSS-G + OptiFG), `ffxiv_companion` (Compatibility, visible when FFXIV). Draw callbacks receive `ext::menu::Ctx`, built from `RenderMenuContext` through `ext::Access`.
+`MenuRegistry` cards registered through `MergeBoxes`: `dlss_nr` (tab Upscaling, after `upscaler`, drawn inside `ScopedCard`; `DlssNr::RenderMenu` loses its own CollapsingHeader and starts with the card title; **S2c placed**, `ext/nr/menu/`), `forced_quality` (Upscaling, after `upscale_ratio`, titled "Forced quality level"; **S7 (placed)**, `ext/upscaler/menu/`), `fg_unlocks` (Frame Gen, after the runtime cards) and `fg_auto_mfg` (after it); the FFXIV tab: `window_mode`, `ffxiv_hdr`, `ffxiv_jitter`, `ffxiv_character_preview`, `fg_hudless` (visible when the FFXIV build matches, `game::Current().hudless != nullptr`; it needs no other output), `ffxiv_companion`, `hudless_diag`, `ffxiv_advanced`, all visible only for the FFXIV build match. Draw callbacks receive `ext::menu::Ctx`, built from `RenderMenuContext` through `ext::Access`.
 
 | Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
 |---|---|---|---|---|---|
