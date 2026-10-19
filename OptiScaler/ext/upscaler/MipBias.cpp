@@ -55,8 +55,12 @@ void EnsureConfigured()
         return;
 
     const auto& settings = Cfg().upscaler;
-    Write(Configure(policy, settings.mipBiasAuto.value_or_default(), settings.mipBiasAutoOffset.value_or_default(),
-                    ScaleOverrideOn()));
+    const Outcome o = Configure(policy, settings.mipBiasAuto.value_or_default(),
+                                settings.mipBiasAutoOffset.value_or_default(), ScaleOverrideOn());
+    Write(o);
+
+    if (o.warn) // only called from a create, so the logger exists
+        LOG_WARN("{}", ScaleModeWarning());
 }
 
 // The outcome of a settings change or of the Scale override flipping: one WARN line when auto is blocked by the Scale
@@ -74,11 +78,14 @@ void OnConfigLoaded(bool enabled, float offset)
 {
     std::scoped_lock lock(PolicyMutex());
     auto& policy = CurrentPolicy();
-    Write(Configure(policy, enabled, offset, ScaleOverrideOn()));
+    const Outcome o = Configure(policy, enabled, offset, ScaleOverrideOn());
+    Write(o);
 
-    // No log here (the logger may not exist yet): the warning of a blocked policy is left for the first create or the
-    // first look of the menu card, which will find the policy blocked and say so once.
-    policy.warned = false;
+    // No log here (the logger may not exist yet): the warning this load owes is left for the first create or the first
+    // look of the menu card. Only the load that started the episode re-arms it; a later load in the same episode (every
+    // Config::Reload) must not make the warning come again.
+    if (o.warn)
+        policy.warned = false;
 }
 
 void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag)

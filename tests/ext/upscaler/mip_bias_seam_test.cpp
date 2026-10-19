@@ -178,6 +178,7 @@ int main(int argc, char** argv)
         CHECK(glue.find("DlaaRequired") == std::string::npos);
         CHECK(glue.find("forcePerfQuality") == std::string::npos);
         CHECK(glue.find("ForcedQuality") == std::string::npos);
+        CHECK(glue.find("forced") == std::string::npos);
         CHECK(glue.find("ForcePerfQuality") == std::string::npos);
         CHECK(glue.find("PerfQuality") == std::string::npos);
         CHECK(glue.find("(pq") == std::string::npos && glue.find(" pq") == std::string::npos);
@@ -263,6 +264,13 @@ int main(int argc, char** argv)
         CHECK(glue.find("Config::Instance()->MipmapBiasScaleOverride.value_or_default()") != std::string::npos);
         CHECK(glue.find("create.scaleMode = ScaleOverrideOn();") != std::string::npos);
         CHECK(Count(glue, "ScaleOverrideOn()") >= 5); // definition + create + EnsureConfigured + config load + menu + sync
+
+        // Once per episode: the config load re-arms the pending warning only when it started the episode, and the
+        // catch-up in EnsureConfigured (which runs at a create, with the logger up) logs the warning it owes.
+        CHECK(glue.find("    Write(o);\n\n    // No log here") != std::string::npos);
+        CHECK(glue.find("    if (o.warn)\n        policy.warned = false;\n}") != std::string::npos);
+        CHECK(glue.find("    if (o.warn) // only called from a create, so the logger exists\n        LOG_WARN(") !=
+              std::string::npos);
 
         // If a sync renames or drops upstream's card, ours would silently move to the end of the tab.
         const std::string menu = ReadAll(root + "/OptiScaler/menu/menu_common.cpp");

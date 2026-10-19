@@ -124,9 +124,10 @@ int main()
         CHECK(g.overrideValue == 0.0);
     }
 
-    // ---- a player who forces Quality but plays at native DLAA all session ---------------------------------------
-    // The forced preset is not an input of this policy on purpose (that is what rules out the "forced preset wins"
-    // variant): every create is 3840x2160 for the whole session, so the bias is 0 for the whole session.
+    // ---- native DLAA all session: repeated 3840x2160 creates keep the bias at 0 -----------------------------------------
+    // Relabelled (it used to claim to cover a forced preset): this only shows that native-quality creates stay at 0 and
+    // do not count as changes. That the forced preset is no input of the create path is guarded where it can fail, as
+    // text, in mip_bias_seam ("2. ApplyForcedQuality": MipBias.cpp names none of the forced-quality state).
     {
         Game g;
         g.Config(true, 0.0);
