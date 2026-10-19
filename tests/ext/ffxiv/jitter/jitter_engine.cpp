@@ -300,6 +300,135 @@ void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
     }
 }
 
+// L4 (third review): an exception that is thrown only after the limiter has armed (the status line asks frame generation, and that
+// happens on sample ticks only) is not a new episode at every tick just because the evaluates between the ticks complete. The same place
+// repeating is ONE episode; another place is another episode; a step that gets past the place ends it.
+void TestAnExceptionAfterTheLimiterArmedIsOneEpisode()
+{
+    auto exceptionLines = [](const std::vector<std::string>& logs) { return CountLines(logs, "step abandoned after an exception"); };
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    e.fgThrows = true;
+    int counter = 100;
+    for (int tick = 0; tick < 100; ++tick) // 100 sample ticks, 10 s apart, with two more evaluates in between that complete
+    {
+        const std::uint64_t t0 = static_cast<std::uint64_t>(tick) * 10000;
+        for (int k = 0; k < 3; ++k)
+            Evaluate(e, engine, At(counter++, 1, t0 + static_cast<std::uint64_t>(k) * 16), false, true);
+    }
+    CHECK_MSG(exceptionLines(e.logs) == 1 && CountLines(e.logs, "fg state") == 1, "%d exception lines in 100 ticks of the same failure",
+              exceptionLines(e.logs));
+    CHECK(e.lockDepth == 0 && e.setsEver > 0); // the correction itself went on working between the ticks
+    // frame generation answers again: the tick gets past the place, the status line is written AT ONCE (the failed attempts did not use up
+    // the slots of the thinned status line), and the episode is over
+    e.fgThrows = false;
+    Evaluate(e, engine, At(counter++, 1, 100 * 10000ull), false, true);
+    CHECK_MSG(CountLines(e.logs, "Jitter correction: on;") == 1, "the status line was not written after the failure ended (%d)",
+              CountLines(e.logs, "Jitter correction: on;"));
+    // a new failure at the same place is a new episode
+    e.fgThrows = true;
+    Evaluate(e, engine, At(counter++, 1, 101 * 10000ull), false, true);
+    CHECK(exceptionLines(e.logs) == 2);
+    // an exception in ANOTHER place is another episode, even while one is open
+    e.fault = [](const char* where)
+    {
+        if (std::string(where) == "GetFloat")
+            throw std::runtime_error("reads");
+    };
+    Evaluate(e, engine, At(counter++, 1, 101 * 10000ull + 16), false, true);
+    CHECK(exceptionLines(e.logs) == 3 && CountLines(e.logs, "reads") == 1);
+}
+
+// L4 (third review): the episodes of exceptions that the 32-line budget had no room for are counted in the report like the others.
+void TestExceptionEpisodesBeyondTheBudgetAreCounted()
+{
+    auto exceptionLines = [](const std::vector<std::string>& logs) { return CountLines(logs, "step abandoned after an exception"); };
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    bool failing = false;
+    e.fault = [&failing](const char* where)
+    {
+        if (failing && std::string(where) == "GetFloat")
+            throw std::runtime_error("flap");
+    };
+    for (int i = 0; i < 101; ++i) // one evaluate per sample tick: odd ones fail (50 episodes), the even ones end them and can report
+    {
+        failing = i % 2 == 1 && i < 100;
+        Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), false, true);
+    }
+    CHECK(exceptionLines(e.logs) == 32);
+    std::string last;
+    for (const std::string& line : e.logs)
+        if (Has(line, "log line budget used up"))
+            last = line;
+    CHECK_MSG(Has(last, "0 probe failures, 0 pass-throughs, 0 replacements, 18 abandoned steps"), "report: \"%s\"", last.c_str());
+}
+
+// L5 (third review): a write that throws between the two Sets puts the first value back (best effort), so the upscaler is not handed
+// a corrected X beside the game's own Y for that evaluate.
+void TestAHalfWrittenPairIsPutBack()
+{
+    auto exceptionLines = [](const std::vector<std::string>& logs) { return CountLines(logs, "step abandoned after an exception"); };
+    auto prime = [](FakeEnv& e, Engine& engine) { Evaluate(e, engine, At(100, 1.5f, 0), false, true); };
+    float correctedX = 0.0f;
+    {
+        // what a complete replacement writes (with a jitter scaled by 1.5 the corrected pair is not the game's)
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        prime(e, engine);
+        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
+        CHECK(o.sets.size() == 2);
+        correctedX = o.sets.empty() ? 0.0f : o.sets[0].value;
+        CHECK_MSG(!Near(correctedX, 0.3), "the corrected X (%f) equals the game's: the case cannot tell", correctedX);
+    }
+    {
+        // the second Set throws: X goes back to what the game set; the step is abandoned and logged once
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        prime(e, engine);
+        int sets = 0;
+        e.fault = [&sets](const char* where)
+        {
+            if (std::string(where) == "SetFloat" && ++sets == 2)
+                throw std::runtime_error("Y refused");
+        };
+        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
+        CHECK(exceptionLines(e.logs) == 1 && e.lockDepth == 0);
+        CHECK_MSG(o.sets.size() == 2 && Near(o.sets[0].value, correctedX) && o.sets[1].param == Param::JitterX && Near(o.sets[1].value, 0.3),
+                  "sets: %zu", o.sets.size());
+        CHECK_MSG(Near(e.floats[Param::JitterX], 0.3) && Near(e.floats[Param::JitterY], -0.2),
+                  "the block ends with (%f, %f), not the game's pair", e.floats[Param::JitterX], e.floats[Param::JitterY]);
+    }
+    {
+        // putting X back fails too: nothing escapes, one line, the lock is free (best effort)
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        prime(e, engine);
+        int sets = 0;
+        e.fault = [&sets](const char* where)
+        {
+            if (std::string(where) == "SetFloat" && ++sets >= 2)
+                throw std::runtime_error("Y refused");
+        };
+        Evaluate(e, engine, At(101, 1.5f, 16), false, true);
+        CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "Y refused") == 1 && e.lockDepth == 0);
+    }
+    {
+        // the first Set throws: nothing was written, so nothing is put back
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        prime(e, engine);
+        e.fault = [](const char* where)
+        {
+            if (std::string(where) == "SetFloat")
+                throw std::runtime_error("X refused");
+        };
+        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
+        CHECK(o.sets.empty() && exceptionLines(e.logs) == 1);
+        CHECK(Near(e.floats[Param::JitterX], 0.3) && Near(e.floats[Param::JitterY], -0.2));
+    }
+}
+
 // L4 (fix round 2): switching the correction off (a step with the key off, the probe still on) forgets the same-frame reference, so the
 // first evaluate after it is a first frame again instead of being compared with one from before the pause.
 void TestSwitchingTheCorrectionOffForgetsTheReference()
@@ -328,6 +457,9 @@ int main()
     TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestLogLinesAreCappedPerSession();
     TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode();
+    TestAnExceptionAfterTheLimiterArmedIsOneEpisode();
+    TestExceptionEpisodesBeyondTheBudgetAreCounted();
+    TestAHalfWrittenPairIsPutBack();
     TestSwitchingTheCorrectionOffForgetsTheReference();
     TestStatusLinesAreThinnedAndCarryTotals();
     TestSuppressedReportIsThinnedAndKeepsTheFinalTotal();

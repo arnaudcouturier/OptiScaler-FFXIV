@@ -88,8 +88,11 @@ class Engine
 {
   public:
     // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons the REST of that step (a write only
-    // follows a complete proof, so whatever was not reached was not written; a pair whose second Set threw stays half written, which the
-    // next evaluate overwrites) and is logged once per episode of exceptions, so a feature that has turned into a no-op leaves a trace.
+    // follows a complete proof, so whatever was not reached was not written; a pair whose second Set threw is put back to the game's own
+    // X when that Set works, see Run, so the pair that goes on to the upscaler is the game's) and is logged once per episode of
+    // exceptions, so a feature that has turned into a no-op leaves a trace. An episode is the same place failing again and again: a step
+    // that gets at least as far as the place that threw ends it, a step that returned before that place proves nothing (the status line
+    // is built on sample ticks only, the steps between the ticks do not reach it).
     template <class Env> void Step(Env& env, bool probe, bool correct)
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
@@ -98,10 +101,12 @@ class Engine
             return;
 
         [[maybe_unused]] auto lock = env.Lock();
+        _stage = Stage::Start;
         try
         {
             Run(env, probe, correct);
-            _exceptions.Event(false); // a step that ran to its end (whatever path it took) ends an episode of exceptions
+            if (_stage >= _thrownAt)
+                _exceptions.Event(false); // a step that got past the place that threw ends the episode of exceptions
         }
         catch (const std::exception& ex)
         {
@@ -114,6 +119,15 @@ class Engine
     }
 
   private:
+    // How far a step got: the stage an exception happened in, and the stage a completed step reached (see Step).
+    enum class Stage : std::uint8_t
+    {
+        Start,  // key gate passed: the build, the clock, the early return of a probe-only step
+        Reads,  // the parameter reads, the quality answer and the limiter
+        Decide, // the game's object, the decision, the write, the correction lines
+        Sample, // a sample is due: the probe lines, the status line, the report
+    };
+
     // The correction is off in this step (the probe alone is on): whatever the same-frame rules and the episode logs remember about the
     // correction is stale by the time it is switched on again, so it is dropped. (Both keys off touches nothing, by design.)
     void ForgetCorrectionState()
@@ -128,6 +142,9 @@ class Engine
     template <class Env> void AbandonStep(Env& env, const char* what) noexcept
     {
         _frames = FrameRules {};
+        if (_thrownAt != _stage)
+            _exceptions.Close(); // another place is another episode, even while one is open
+        _thrownAt = _stage;
         try
         {
             if (_exceptions.Event(true))
@@ -164,6 +181,7 @@ class Engine
         if (!correct && !SampleMayBeDue(now))
             return;
 
+        _stage = Stage::Reads;
         // The values this evaluate carries to NGX, read BEFORE any replacement: the probe compares against the game's own, and the
         // correction decides on them. Nothing below is allowed to move these two reads behind the write.
         const std::optional<float> ngxX = env.GetFloat(Param::JitterX);
@@ -192,6 +210,7 @@ class Engine
         if (!correct && !allowed)
             return;
 
+        _stage = Stage::Decide;
         auto reader = [&env](std::uintptr_t address, void* out, std::size_t bytes) { return env.ReadMemory(address, out, bytes); };
         RawObject object;
         const Guard readGuard = ReadChain(reader, build, env.ModuleBase(), object);
@@ -221,7 +240,27 @@ class Engine
                 // The block is the bridge's own NVSDK_NGX_Parameter (the Evaluate's InParameters, which later goes to the upscaler's
                 // Evaluate and to the frame-generation input). The game sets Jitter.Offset again at its next evaluate.
                 env.SetFloat(Param::JitterX, decision.ax);
-                env.SetFloat(Param::JitterY, decision.ay);
+                try
+                {
+                    env.SetFloat(Param::JitterY, decision.ay);
+                }
+                catch (...)
+                {
+                    // Half written: X is corrected, Y is the game's. Put the game's own X back (best effort, a failing Set here is
+                    // swallowed) so that the pair that goes on to the upscaler is not a mixed one, then let Step abandon the evaluate.
+                    // A replacement needs the NGX jitter to match, so ngxX is set here.
+                    if (ngxX)
+                    {
+                        try
+                        {
+                            env.SetFloat(Param::JitterX, *ngxX);
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    throw;
+                }
                 ++_counts.replaced;
                 if (_replacing.Event(true))
                 {
@@ -246,6 +285,7 @@ class Engine
 
         if (!allowed)
             return;
+        _stage = Stage::Sample;
 
         if (probe)
         {
@@ -269,17 +309,24 @@ class Engine
         }
         // The status line carries the totals since the start, so thinning it (the first 60 lines at every tick, then one per 60 s) loses
         // nothing; the counts are never zeroed.
-        if (correct && _statusLog.Take(now))
-            env.Log(FormatStatus(_counts, env.FrameGenerationActive(), env.FrameGenerationInput()));
+        // The line is built BEFORE its slot is taken: a failing frame-generation query must not use up the thinned slots without a line.
+        if (correct && _statusLog.Ready(now))
+        {
+            const std::string status = FormatStatus(_counts, env.FrameGenerationActive(), env.FrameGenerationInput());
+            _statusLog.Take(now);
+            env.Log(status);
+        }
 
         // The episodes the three logs had no budget left for, in either mode, only when the total changed since the last report and
         // thinned the same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that
         // comes between two permitted reports is written at the next permitted one.
-        const std::uint64_t suppressed = _probeFailures.Suppressed() + _passThrough.Suppressed() + _replacing.Suppressed();
+        const std::uint64_t suppressed = static_cast<std::uint64_t>(_probeFailures.Suppressed()) + _passThrough.Suppressed() +
+                                         _replacing.Suppressed() + _exceptions.Suppressed();
         if (suppressed != _reportedSuppressed && _suppressedLog.Take(now))
         {
             _reportedSuppressed = suppressed;
-            env.Log(FormatSuppressed(_probeFailures.Suppressed(), _passThrough.Suppressed(), _replacing.Suppressed()));
+            env.Log(FormatSuppressed(_probeFailures.Suppressed(), _passThrough.Suppressed(), _replacing.Suppressed(),
+                                     _exceptions.Suppressed()));
         }
     }
 
@@ -306,7 +353,9 @@ class Engine
     EpisodeLog _probeFailures;
     EpisodeLog _passThrough;
     EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
-    EpisodeLog _exceptions; // runs of steps that ended in an exception
+    EpisodeLog _exceptions; // runs of steps that ended in an exception, at the same place
+    Stage _stage = Stage::Start;    // how far the step in progress has got
+    Stage _thrownAt = Stage::Start; // where the last exception happened
     bool _buildNoted = false;
     std::uint32_t _sampleLines = 0;
     LineDecimator _statusLog, _suppressedLog; // thinned: the first 60 lines at every sample tick, then one per 60 s

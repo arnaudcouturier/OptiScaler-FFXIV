@@ -508,9 +508,11 @@ class LineDecimator
     static constexpr std::uint64_t kSlowIntervalMs = 60000;
 
     // True when a line may be written now; taking it counts it. A clock that goes backwards counts as "no time passed".
+    // Would a line be allowed now? Does not count it: a caller that builds the line first (and can fail doing so) asks this, then Take.
+    bool Ready(std::uint64_t nowMs) const { return _lines < kFullLines || Elapsed(nowMs) >= kSlowIntervalMs; }
     bool Take(std::uint64_t nowMs)
     {
-        if (_lines >= kFullLines && Elapsed(nowMs) < kSlowIntervalMs)
+        if (!Ready(nowMs))
             return false;
         ++_lines;
         _last = nowMs;
@@ -632,10 +634,12 @@ inline std::string FormatStepException(const char* what)
     return std::format("Game jitter: step abandoned after an exception: {} (the rest of that evaluate is skipped; one line per episode)", what);
 }
 
-inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements)
+inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements,
+                                    std::uint64_t abandonedSteps)
 {
-    return std::format("Game jitter: log line budget used up, episodes not logged so far: {} probe failures, {} pass-throughs, {} replacements",
-                       probeFailures, passThroughs, replacements);
+    return std::format("Game jitter: log line budget used up, episodes not logged so far: {} probe failures, {} pass-throughs, {} replacements, "
+                       "{} abandoned steps",
+                       probeFailures, passThroughs, replacements, abandonedSteps);
 }
 
 // `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too, but

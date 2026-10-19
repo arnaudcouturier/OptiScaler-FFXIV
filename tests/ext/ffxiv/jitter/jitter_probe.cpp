@@ -710,8 +710,8 @@ void TestText()
 
     CHECK(FormatStepException("block exploded") ==
           "Game jitter: step abandoned after an exception: block exploded (the rest of that evaluate is skipped; one line per episode)");
-    CHECK(FormatSuppressed(1, 2, 3) ==
-          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements");
+    CHECK(FormatSuppressed(1, 2, 3, 4) ==
+          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements, 4 abandoned steps");
     CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up"));
     // the configuration key follows every field that matters: each one, changed alone, changes the key
     Context c2 = ctx;

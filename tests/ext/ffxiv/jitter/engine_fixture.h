@@ -47,6 +47,7 @@ struct FakeEnv
     // Log itself throw. `lockDepth` is the number of step guards alive right now (a step that throws must release its lock).
     std::function<void(const char*)> fault;
     bool logThrows = false;
+    bool fgThrows = false; // FrameGenerationActive() throws (the status line is built after the limiter has armed)
     int lockDepth = 0;
 
     struct Held
@@ -121,6 +122,8 @@ struct FakeEnv
     std::optional<bool> FrameGenerationActive()
     {
         ++fgQueries;
+        if (fgThrows)
+            throw std::runtime_error("fg state");
         return frameGeneration;
     }
     std::string FrameGenerationInput()
