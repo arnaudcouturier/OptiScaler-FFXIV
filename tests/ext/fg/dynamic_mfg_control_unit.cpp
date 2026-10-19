@@ -618,6 +618,68 @@ void SelfTestFailures()
     }
 }
 
+void SelfTestEndStates()
+{
+    // A normal end: back to the count in force before the test, as the first change after the result line.
+    for (int start : { 3, 4 })
+    {
+        Rig r;
+        r.selfTest = true;
+        r.factor = start;
+        r.plant.base2x = 20.0;
+        r.Run(60000);
+        CHECK(r.Count("AutoMFG self-test: PASS") == 1);
+        CHECK(r.Find("(back to the count in use before the test)") != nullptr);
+        int first = 0;
+        for (const auto& s : r.switches)
+            if (s.t > r.doneAt)
+            {
+                first = s.to;
+                break;
+            }
+        CHECK_MSG(first == start, "start %dx: first change after the result went to %dx", start, first);
+    }
+    {
+        Rig r; // the key goes off while the cycle is at 4x: the count in force before the test comes back
+        r.selfTest = true;
+        r.factor = 3;
+        r.plant.base2x = 20.0;
+        while (r.factor != 4)
+            r.Step();
+        r.gate.keyOn = false;
+        r.Step();
+        CHECK_MSG(r.factor == 3, "key off mid-test at 4x left %dx", r.factor);
+        CHECK(r.Find("AutoMFG self-test: FAIL (interrupted: AutoMFG is off)") != nullptr);
+        r.Run(20000);
+        CHECK(r.factor == 3 && r.ResultLines() == 1);
+    }
+    {
+        Rig r; // the user drags the slider mid-test: interrupted, no restore, the selector owns the next factor
+        r.selfTest = true;
+        r.factor = 3;
+        while (r.switches.empty())
+            r.Step();
+        r.factor = 4;
+        r.c.OnActivated();
+        r.Run(40000);
+        CHECK(r.ResultLines() == 1 && r.Find("FAIL (interrupted: frame generation was reactivated)") != nullptr);
+        CHECK(r.Find("back to the count in use before the test") == nullptr);
+        CHECK_MSG(r.factor == 4 && r.switches.size() == 1, "factor %dx after %zu switches", r.factor, r.switches.size());
+    }
+    {
+        Rig r; // a broken change in the middle goes back to the count before the test, not to the last cycle step
+        r.selfTest = true;
+        r.factor = 4;
+        r.plant.base2x = 20.0;
+        while (r.switches.size() < 2)
+            r.Step();
+        r.detectedOverride = 7;
+        r.Run(20000);
+        CHECK_MSG(r.recoveries == 1 && r.factor == 4, "recoveries %d, factor %dx", r.recoveries, r.factor);
+        CHECK(r.Find("going back to 4x, automatic mode stopped") != nullptr);
+    }
+}
+
 void FormatsAreStable()
 {
     DynamicMfg::Info i;
@@ -670,6 +732,7 @@ int main()
     SelfTestPasses(4, 5, "gpu");
     SelfTestPasses(2, 4, "refresh");
     SelfTestFailures();
+    SelfTestEndStates();
     FormatsAreStable();
     if (g_failures)
     {

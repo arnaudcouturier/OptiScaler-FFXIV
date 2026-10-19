@@ -176,7 +176,7 @@ class AutoMfgController
         out.controls = true;
 
         if (in.selfTest && !st_.done && !st_.running)
-            SelfTestBegin(in, out, cycleMax);
+            SelfTestBegin(in, out, cycleMax, hardMax);
 
         // Watch of the last switch.
         if (w_.open)
@@ -218,10 +218,26 @@ class AutoMfgController
         }
 
         int next = current;
-        if (st_.running)
+        bool fromSelector = false;
+        bool restoring = false;
+        if (restore_ != 0)
+        {
+            // the self-test is over: back to the count in force before it, as a watched change like any other
+            if (!w_.open)
+            {
+                if (restore_ != current)
+                {
+                    next = restore_;
+                    restoring = true;
+                }
+                restore_ = 0;
+            }
+        }
+        else if (st_.running)
             next = SelfTestStep(in, out, now, current);
         else
         {
+            fromSelector = true;
             // fed while a switch is watched too (the hold keeps it from switching inside the watch)
             const int pick = sel_.Select(in.realMs, target, now, current, hardMax, costly_ == 0);
             if (!w_.open)
@@ -231,9 +247,11 @@ class AutoMfgController
 
         if (next != current)
         {
-            const bool fromSelector = !st_.running;
             if (fromSelector)
                 Line(out, false, FormatSwitch(sel_.Last(), target));
+            else if (restoring)
+                Line(out, false, std::format("AutoMFG self-test: {}x -> {}x (back to the count in use before the test)",
+                                             current, next));
             else
                 Line(out, false, std::format("AutoMFG self-test: {}x -> {}x", current, next));
             w_ = {};
@@ -290,6 +308,7 @@ class AutoMfgController
         int changes = 0;
         double worst = 0.0;
         double baselineMs = 0.0;
+        int restoreFactor = 0; // the count in force when the test began
         int costly = 0;
         // the 4x step: real interval over its second half
         bool at4x = false;
@@ -323,10 +342,19 @@ class AutoMfgController
         {
             w_ = {};
             if (st_.running)
-                SelfTestFinish(out, false, std::format("interrupted: {}", GateText(gate)));
+                SelfTestFinish(out, false, std::format("interrupted: {}", GateText(gate)), true);
         }
         if (in.selfTest && !st_.done)
             SelfTestFinish(out, false, std::format("not run: {}", GateText(gate)));
+        // the self-test left the count at a cycle step: return it to the value in force before the test
+        if (restore_ != 0 && in.appliedFactor != restore_)
+        {
+            out.setFactor = true;
+            out.factor = restore_;
+            Info(out, std::format("AutoMFG self-test: {}x -> {}x (back to the count in use before the test)",
+                                  in.appliedFactor, restore_));
+        }
+        restore_ = 0;
     }
 
     void Verdict(const AutoMfgTick& in, AutoMfgOut& out)
@@ -347,10 +375,12 @@ class AutoMfgController
                 why = std::format("applied count {} != requested {} (generated frames)", in.detectedGenerated, requested);
             else
                 why = "presented frames stuck at 1";
+            // during the self-test the last good count is a cycle step: go back to the one in force before the test
+            const int back = st_.running && st_.restoreFactor > 0 ? st_.restoreFactor : lastGood_;
             Warn(out, std::format("AutoMFG: {}, switch {}x -> {}x; going back to {}x, automatic mode stopped", why,
-                                  w.from, w.to, lastGood_));
+                                  w.from, w.to, back));
             out.recover = true;
-            out.factor = lastGood_;
+            out.factor = back;
             stopped_ = true;
             if (st_.running)
                 SelfTestFinish(out, false, std::format("{}", why));
@@ -395,7 +425,7 @@ class AutoMfgController
     }
 
     // --- self-test ---------------------------------------------------------------------------------------------
-    void SelfTestBegin(const AutoMfgTick& in, AutoMfgOut& out, int cycleMax)
+    void SelfTestBegin(const AutoMfgTick& in, AutoMfgOut& out, int cycleMax, int hardMax)
     {
         if (cycleMax < 4)
         {
@@ -406,6 +436,7 @@ class AutoMfgController
         }
         st_ = {};
         st_.running = true;
+        st_.restoreFactor = std::clamp(in.appliedFactor, 2, std::max(2, hardMax)); // what the selector left in force
         st_.firstAt = in.nowMs + kWarmupMs;
         st_.baselineMs = sel_.AverageMs();
         Info(out, std::format("AutoMFG self-test: started, 2x -> 3x -> 4x -> 3x -> 2x, one change every {} s",
@@ -415,12 +446,12 @@ class AutoMfgController
     void SelfTestInterrupted(AutoMfgOut& out, uint64_t now, const char* why)
     {
         if (st_.changes > 0)
-            SelfTestFinish(out, false, std::format("interrupted: {}", why));
+            SelfTestFinish(out, false, std::format("interrupted: {}", why), false); // the user or a pause owns the count now
         else
             st_.firstAt = now + kWarmupMs; // nothing changed yet: start the timeline over
     }
 
-    void SelfTestFinish(AutoMfgOut& out, bool pass, std::string detail)
+    void SelfTestFinish(AutoMfgOut& out, bool pass, std::string detail, bool restore = false)
     {
         if (st_.done)
             return;
@@ -428,6 +459,8 @@ class AutoMfgController
         st_.running = false;
         st_.done = true;
         sel_.Restart(lastTick_);
+        if (restore && st_.restoreFactor != 0)
+            restore_ = st_.restoreFactor; // applied on the next tick (open: a watched change; closed: at once)
         if (pass)
             Info(out, std::format("AutoMFG self-test: PASS ({} in-place changes, worst interval {:.0f} ms, all applied "
                                   "counts matched, no Streamline errors)",
@@ -486,7 +519,7 @@ class AutoMfgController
                                       st_.worst, kSelfTestPassMs);
                 else
                     why = std::format("only {} changes happened", st_.changes);
-                SelfTestFinish(out, pass, why);
+                SelfTestFinish(out, pass, why, true);
             }
             return current;
         }
@@ -520,5 +553,6 @@ class AutoMfgController
     int streak_ = 0;    // signatures on consecutive switches
     int cleanRun_ = 0;  // clean switches since the last signature
     int lastGood_ = 0;
+    int restore_ = 0;   // self-test over: the count to return to (0 = none)
 };
 } // namespace ext::fg
