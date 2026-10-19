@@ -136,6 +136,17 @@ struct Rig
         while (t < end)
             Step();
     }
+    // The self-test starts only after the game has been calm for 20 s, and the selector would move the count meanwhile.
+    // Calm(): the target sits just above the presented rate at the count in force (0.95: no step up, no probe, no step down),
+    // and 20.5 s pass without the self-test being asked for; then it is asked for and starts at once.
+    void Calm()
+    {
+        target = plant.Presented(factor) / 0.95;
+        const bool asked = selfTest;
+        selfTest = false;
+        Run(20500);
+        selfTest = asked;
+    }
     int Count(const std::string& prefix) const
     {
         int n = 0;
@@ -814,12 +825,99 @@ void AnUnknownWatchIsNeitherAStrikeNorACleanSwitch()
     CHECK(r.Count("AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped") == 1);
 }
 
+// Decision 5: the self-test starts only after 20 s without a stall (any stall starts the wait over), and a stall during it
+// ends it as "interrupted" (the FAIL line with that label, as for a pause), never as a failed re-creation test.
+void TheSelfTestWaitsForTwentySecondsOfCalm()
+{
+    {
+        Rig r;
+        r.selfTest = true;
+        r.Run(19800);
+        CHECK(r.Count("AutoMFG self-test: started") == 0);
+        r.Run(1500);
+        const uint64_t at = r.TimeOf("AutoMFG self-test: started");
+        CHECK_MSG(at >= 1000 + 20000 && at <= 1000 + 20100, "started %lld ms after the first tick", (long long) at - 1000);
+    }
+    {
+        Rig r; // a stall in the middle of the wait starts it over
+        r.selfTest = true;
+        r.stallFrom = 8000;
+        r.stallUntil = 9000;
+        r.Run(40000);
+        const uint64_t at = r.TimeOf("AutoMFG self-test: started");
+        CHECK_MSG(at >= r.stallUntil + 20000 && at <= r.stallUntil + 21000, "started %lld ms after the stall",
+                  (long long) at - (long long) r.stallUntil);
+    }
+}
+
+void AStallInterruptsTheSelfTestWithoutAFailure()
+{
+    for (const uint64_t stallLen : { 2000ull, 6000ull }) // the second one ends the open watch as unknown on the way
+    {
+        Rig r;
+        r.selfTest = true;
+        r.factor = 3;
+        r.Calm();
+        while (r.switches.size() < 3) // three changes of the cycle are made (3x to 2x, 3x, 4x), the last one is being watched
+            r.Step();
+        r.stallFrom = r.t + 50;
+        r.stallUntil = r.t + 50 + stallLen;
+        const uint64_t until = r.stallUntil;
+        r.Run(stallLen + 9000);
+        CHECK_MSG(r.ResultLines() == 1 && r.Count("AutoMFG self-test: FAIL (interrupted: the game stalled)") == 1,
+                  "stall %llu ms: %d result lines", stallLen, r.ResultLines());
+        CHECK(r.Find("re-created") == nullptr && r.Count("AutoMFG self-test: PASS") == 0);
+        CHECK_MSG(r.recoveries == 0 && !r.c.Stopped() && r.c.CostlyCount() == 0, "stall %llu ms: recoveries %d stopped %d",
+                  stallLen, r.recoveries, (int) r.c.Stopped());
+        CHECK(r.c.SelfTestDone() && r.Count("AutoMFG self-test: started") == 1); // it does not start again
+        // the count in use before the test comes back, as a change of its own, and not before the stall is over
+        CHECK(r.LinesWith("(back to the count in use before the test)") == 1);
+        const uint64_t back = r.TimeOf("(back to the count in use before the test)");
+        CHECK_MSG(back > until, "stall %llu ms: restored %lld ms after the stall", stallLen,
+                  (long long) back - (long long) until);
+        size_t n = 0;
+        for (const auto& s : r.switches)
+            if (s.t >= until)
+            {
+                CHECK_MSG(n++ > 0 || s.to == 3, "stall %llu ms: first change after the stall is %dx, not the 3x of before", stallLen,
+                          s.to);
+            }
+    }
+}
+
+// A stall while nothing has changed yet (the 3 s of warmup): the test goes back to waiting for a quiet game, it is not over.
+void AStallBeforeTheFirstChangeSendsTheSelfTestBackToWaiting()
+{
+    Rig r;
+    r.selfTest = true;
+    r.plant.base2x = 8.0;
+    r.factor = 3;
+    while (r.Count("AutoMFG self-test: started") == 0)
+        r.Step();
+    r.stallFrom = r.t + 500; // inside the warmup
+    r.stallUntil = r.t + 1500;
+    r.Run(2500);
+    CHECK(r.ResultLines() == 0 && !r.c.SelfTestDone());
+    const uint64_t until = r.stallUntil;
+    r.Run(120000);
+    CHECK_MSG(r.Count("AutoMFG self-test: started") == 2, "started %d times", r.Count("AutoMFG self-test: started"));
+    CHECK(r.ResultLines() == 1 && r.Count("AutoMFG self-test: PASS") == 1);
+    uint64_t second = 0;
+    int seen = 0;
+    for (size_t i = 0; i < r.lines.size(); ++i)
+        if (r.lines[i].text.rfind("AutoMFG self-test: started", 0) == 0 && ++seen == 2)
+            second = r.lineT[i];
+    CHECK_MSG(second >= until + 20000, "started again %lld ms after the stall", (long long) second - (long long) until);
+}
+
 void SelfTestPasses(int startFactor, int expectedChanges, const char* field)
 {
     Rig r;
     r.selfTest = true;
     r.factor = startFactor;
     r.plant.base2x = field[0] == 'r' ? 8.0 : 20.0; // light: pinned at the refresh at 4x; heavy: GPU-bound
+    r.Calm();
+    const uint64_t t0 = r.t;
     r.Run(60000);
     CHECK_MSG(r.ResultLines() == 1, "%d result lines", r.ResultLines());
     CHECK_MSG(r.Count("AutoMFG self-test: PASS (" + std::to_string(expectedChanges) +
@@ -834,7 +932,7 @@ void SelfTestPasses(int startFactor, int expectedChanges, const char* field)
         CHECK(r.switches[i].to == want[5 - made + i]);
     CHECK_MSG(r.Find(std::string("-> ") + (field[0] == 'r' ? "refresh-bound" : "GPU-bound")) != nullptr, "field %s", field);
     CHECK(r.Find("AutoMFG self-test: at 4x real interval ") != nullptr);
-    CHECK_MSG(r.c.SelfTestDone() && r.doneAt != 0 && r.doneAt < 1000 + 45000, "done after %llu ms", r.doneAt - 1000);
+    CHECK_MSG(r.c.SelfTestDone() && r.doneAt != 0 && r.doneAt < t0 + 45000, "done after %llu ms", r.doneAt - t0);
 }
 
 void SelfTestFailures()
@@ -844,6 +942,7 @@ void SelfTestFailures()
         r.selfTest = true;
         r.factor = 3;
         r.recreate = true;
+        r.Calm();
         r.Run(80000);
         CHECK(r.ResultLines() == 1 && r.Find("AutoMFG self-test: FAIL (re-created: worst interval 190 ms") != nullptr);
         CHECK(r.c.CostlyCount() >= 2 && r.c.Stopped());
@@ -861,6 +960,7 @@ void SelfTestFailures()
         r.factor = 3;
         r.recreate = true;
         r.stallMs = 60.0;
+        r.Calm();
         r.Run(80000);
         CHECK(r.ResultLines() == 1 &&
               r.Find("AutoMFG self-test: FAIL (worst interval 60 ms, expected under 40") != nullptr);
@@ -890,6 +990,7 @@ void SelfTestFailures()
         Rig r; // interrupted by a reactivation after the first change
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         while (r.switches.empty())
             r.Step();
         r.c.OnActivated();
@@ -901,6 +1002,7 @@ void SelfTestFailures()
         Rig r; // interrupted before the first change: the timeline starts over and the test still ends in one line
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         r.Run(1500);
         r.c.OnActivated();
         r.Run(80000);
@@ -910,6 +1012,7 @@ void SelfTestFailures()
         Rig r; // the gate closes mid-run
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         while (r.switches.size() < 2)
             r.Step();
         r.gate.followsGame = true;
@@ -920,6 +1023,7 @@ void SelfTestFailures()
         Rig r; // the plugin applies another count: Fail B, one recovery
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         r.detectedOverride = 3;
         r.Run(40000);
         CHECK(r.ResultLines() == 1 && r.Find("AutoMFG self-test: FAIL (applied count 3 != requested 1") != nullptr);
@@ -929,8 +1033,10 @@ void SelfTestFailures()
         Rig r; // after a finished self-test the selector works normally
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         r.Run(60000);
         CHECK(r.Count("AutoMFG self-test: PASS") == 1);
+        r.target = 224.0; // the selector is free again
         const size_t n = r.switches.size();
         r.Run(60000);
         CHECK(r.ResultLines() == 1 && r.switches.size() >= n && r.factor == 4);
@@ -946,6 +1052,7 @@ void SelfTestEndStates()
         r.selfTest = true;
         r.factor = start;
         r.plant.base2x = 20.0;
+        r.Calm();
         r.Run(60000);
         CHECK(r.Count("AutoMFG self-test: PASS") == 1);
         CHECK(r.Find("(back to the count in use before the test)") != nullptr);
@@ -963,6 +1070,7 @@ void SelfTestEndStates()
         r.selfTest = true;
         r.factor = 3;
         r.plant.base2x = 20.0;
+        r.Calm();
         while (r.factor != 4)
             r.Step();
         r.gate.keyOn = false;
@@ -976,8 +1084,10 @@ void SelfTestEndStates()
         Rig r; // the user drags the slider mid-test: interrupted, no restore, the selector owns the next factor
         r.selfTest = true;
         r.factor = 3;
+        r.Calm();
         while (r.switches.empty())
             r.Step();
+        r.target = 224.0; // the selector owns the count from here
         r.factor = 4;
         r.c.OnActivated();
         r.Run(40000);
@@ -990,6 +1100,7 @@ void SelfTestEndStates()
         r.selfTest = true;
         r.factor = 4;
         r.plant.base2x = 20.0;
+        r.Calm();
         while (r.switches.size() < 2)
             r.Step();
         r.detectedOverride = 7;
@@ -1056,6 +1167,9 @@ int main()
     ARealFaultAt200FpsIsConvictedAsBefore();
     AWatchThatCannotBeJudgedWithinFiveSecondsEndsAsUnknown();
     AnUnknownWatchIsNeitherAStrikeNorACleanSwitch();
+    TheSelfTestWaitsForTwentySecondsOfCalm();
+    AStallInterruptsTheSelfTestWithoutAFailure();
+    AStallBeforeTheFirstChangeSendsTheSelfTestBackToWaiting();
     SelfTestPasses(3, 5, "refresh");
     SelfTestPasses(4, 5, "gpu");
     SelfTestPasses(2, 4, "refresh");

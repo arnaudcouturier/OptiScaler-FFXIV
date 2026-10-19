@@ -542,8 +542,10 @@ void SelfTestEndStateReachesTheCount()
     // Key turned off while the self-test sits on its 4x step: the count goes back to the one in use before the test, even
     // though the selector no longer controls (the glue applies a setFactor whatever `controls` says).
     Rig r;
-    r.w.fg.autoMfgSelfTest = true;
+    r.w.fg.autoMfgTarget = 158.0f; // 20 ms frames at 3x present 150: inside the selector's quiet band
     r.w.cfg.FGDLSSGInterpolationCount.set_from_config(2); // 3x before the test
+    r.Run(1100, 20.0);                                    // the self-test starts only after 20 s without a stall
+    r.w.fg.autoMfgSelfTest = true;
     // frames until the cycle reaches 4x (generated = 3)
     int frames = 0;
     while (frames < 3000 && r.Count() != 3)
@@ -565,8 +567,10 @@ void SelfTestEndStateReachesTheCount()
     // Frame Gen switched to Default at that moment instead: the game's count stays in the options, and the configured count
     // (unused in Default) still goes back to the one before the test for when the user leaves Default.
     Rig g;
-    g.w.fg.autoMfgSelfTest = true;
+    g.w.fg.autoMfgTarget = 158.0f;
     g.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
+    g.Run(1100, 20.0);
+    g.w.fg.autoMfgSelfTest = true;
     frames = 0;
     while (frames < 3000 && g.Count() != 3)
     {

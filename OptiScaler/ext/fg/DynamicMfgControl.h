@@ -203,6 +203,15 @@ class AutoMfgController
         status_.factor = current;
         out.controls = true;
 
+        if (st_.running && stalled_)
+        {
+            // A stall is not a failed test. With changes made the test is over, as for a pause (the count in use before it
+            // comes back once the game is calm again); with none made it goes back to waiting for a quiet game.
+            if (st_.changes > 0)
+                SelfTestFinish(out, false, "interrupted: the game stalled", true);
+            else
+                st_ = {};
+        }
         if (in.selfTest && !st_.done && !st_.running)
             SelfTestBegin(in, out, cycleMax, hardMax);
 
@@ -559,6 +568,8 @@ class AutoMfgController
                                                    cycleMax));
             return;
         }
+        if (!CalmFor(in.nowMs, kSelfTestCalmMs))
+            return; // a loading screen or a hitch while the count changes would be taken for the test's own failure
         st_ = {};
         st_.running = true;
         st_.restoreFactor = std::clamp(in.appliedFactor, 2, std::max(2, hardMax)); // what the selector left in force
