@@ -270,16 +270,89 @@ size_t Count(const std::string& hay, const std::string& needle)
     return n;
 }
 
+// The scope of the tracker in upstream's tab loop, on whitespace-free, comment-free text. It must be a plain local that is
+// declared ONCE per tab pass, as the statement right before the box loop (a `static` or a tracker declared inside the
+// loop body would be wrong in opposite ways: shared functions drawn only on the first frame, or drawn again for every
+// box), and the loop body must claim a shared function exactly once, with the box's own draw as the other branch.
+std::vector<std::string> TrackerScopeProblems(const std::string& code)
+{
+    std::vector<std::string> p;
+    const std::string decl = "ext::menu::SourceTracker<DrawFn>drawnSources;";
+    const std::string loop = "for(size_ti=0;i<boxCount;i++){";
+
+    if (Count(code, decl) != 1)
+        p.push_back("the tracker is not declared exactly once");
+    // `;` + declaration + loop: nothing (no static, thread_local, constexpr) in front of the type, nothing between it and the loop
+    if (Count(code, ";" + decl + loop) != 1)
+        p.push_back("the tracker is not an unqualified statement right before the box loop");
+
+    const size_t at = code.find(loop);
+    if (at == std::string::npos)
+    {
+        p.push_back("the box loop was not found");
+        return p;
+    }
+
+    // the loop body, by brace matching
+    const size_t open = at + loop.size() - 1;
+    size_t depth = 0, close = std::string::npos;
+    for (size_t i = open; i < code.size() && close == std::string::npos; i++)
+    {
+        if (code[i] == '{')
+            ++depth;
+        else if (code[i] == '}' && --depth == 0)
+            close = i;
+    }
+    if (close == std::string::npos)
+    {
+        p.push_back("the box loop body is not closed");
+        return p;
+    }
+    const std::string body = code.substr(open, close - open + 1);
+
+    if (body.find("SourceTracker") != std::string::npos)
+        p.push_back("a tracker is declared inside the loop body");
+    if (Count(code, "drawnSources.Claim(") != 1)
+        p.push_back("the tracker is claimed other than exactly once");
+    if (Count(body, "if(boxes[i].draw==nullptr){if(drawnSources.Claim(boxes[i].source))boxes[i].source(ctx);}"
+                    "else{boxes[i].draw(ctx);}") != 1)
+        p.push_back("the loop body does not claim a shared function once, with the box's own draw as the other branch");
+    return p;
+}
+
+std::string Replace(std::string s, const std::string& from, const std::string& to)
+{
+    const size_t at = s.find(from);
+    if (at != std::string::npos)
+        s.replace(at, from.size(), to);
+    return s;
+}
+
 void UpstreamLoopPins(const std::string& repo)
 {
     const std::string raw = ReadFile(repo + "/OptiScaler/menu/menu_common.cpp");
     CHECK(!raw.empty());
     const std::string code = Squash(StripComments(raw));
 
-    // the tracker is declared once, for the tab pass, with upstream's own DrawFn
-    CHECK(Count(code, "ext::menu::SourceTracker<DrawFn>drawnSources;") == 1);
-    // a shared function is called only when the tracker says so, in the tab loop
-    CHECK(Count(code, "if(drawnSources.Claim(boxes[i].source))boxes[i].source(ctx);") == 1);
+    // the tracker is declared once per tab pass, outside the loop, not static; the loop claims each shared function once
+    const auto problems = TrackerScopeProblems(code);
+    for (const auto& s : problems)
+        std::printf("  tracker scope: %s\n", s.c_str());
+    CHECK(problems.empty());
+
+    // negative controls: the same text with the scope broken must complain
+    const std::string decl = "ext::menu::SourceTracker<DrawFn>drawnSources;";
+    const std::string loop = "for(size_ti=0;i<boxCount;i++){";
+    CHECK(!TrackerScopeProblems(Replace(code, decl, "static" + decl)).empty());
+    CHECK(!TrackerScopeProblems(Replace(code, decl, "thread_local" + decl)).empty());
+    CHECK(!TrackerScopeProblems(Replace(Replace(code, decl, ""), loop, loop + decl)).empty()); // inside the loop body
+    CHECK(!TrackerScopeProblems(Replace(Replace(code, decl, ""), loop, loop + "staticconstintx=0;" + decl)).empty());
+    CHECK(!TrackerScopeProblems(Replace(code, "if(drawnSources.Claim(boxes[i].source))", "if(true)")).empty());
+    CHECK(!TrackerScopeProblems(Replace(code, "else{boxes[i].draw(ctx);}", "")).empty());
+    CHECK(!TrackerScopeProblems(Replace(code, decl, "")).empty());
+    CHECK(!TrackerScopeProblems(Replace(code, loop, "for(size_ti=0;i<boxCount;i++){drawnSources=ext::menu::SourceTracker<DrawFn>();")).empty());
+    CHECK(TrackerScopeProblems("junk").size() >= 1);
+
     // the old run logic is gone
     CHECK(code.find("lastSource") == std::string::npos);
     // the Custom tab path (one card, filtered) is untouched
