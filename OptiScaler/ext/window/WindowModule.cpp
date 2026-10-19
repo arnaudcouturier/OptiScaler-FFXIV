@@ -2,6 +2,7 @@
 
 #include "ext/dx11bridge/BridgeAccess.h"
 #include "ext/window/WindowController.h"
+#include "ext/window/WindowLiveOps.h"
 #include "ext/window/WindowSeams.h"
 #include "ext/window/WindowWin32.h"
 
@@ -16,6 +17,8 @@
 // points of WindowSeams.h. The decisions are in WindowController.h / WindowRules.h (tested offline).
 namespace ext::window
 {
+static_assert(live::kPointerError == E_POINTER, "WindowLiveOps.h repeats E_POINTER");
+
 namespace
 {
 std::recursive_mutex& ModuleLock();
@@ -91,12 +94,7 @@ class LiveEnv final : public Env
     void RequestFgOff() override
     {
         Unlocked unlocked;
-        if (auto* fg = State::Instance().currentFG)
-        {
-            State::Instance().fgChanged = true;
-            fg->UpdateTarget();
-            fg->Deactivate();
-        }
+        live::RequestOff(State::Instance().currentFG, State::Instance().fgChanged);
     }
     uint64_t NowMs() override { return GetTickCount64(); }
 
@@ -110,10 +108,7 @@ class LiveEnv final : public Env
     int32_t Replay(uint64_t native, bool fullscreen) override
     {
         Unlocked unlocked;
-        if (native == 0)
-            return E_POINTER;
-        return static_cast<int32_t>(
-            reinterpret_cast<IDXGISwapChain*>(native)->SetFullscreenState(fullscreen ? TRUE : FALSE, nullptr));
+        return live::ReplaySetFullscreen(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(native)), fullscreen);
     }
 
     // The log macro puts the function name in front of the text; the module's own prefix "Window:" follows it.
