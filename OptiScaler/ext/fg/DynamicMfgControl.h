@@ -148,8 +148,9 @@ class AutoMfgController
     static constexpr uint64_t kStallGiveUpMs = 5000;  // a change that could not be judged within this long of its switch ends as unknown
     static constexpr uint64_t kSelfTestCalmMs = 20000; // the self-test starts only after the game has been calm this long
     static constexpr double kStallTauMs = 250.0;      // time constant of that average
-    static constexpr double kStallClipMs = 2.0 * kStallMs; // one sample counts at most this much: one long frame (the signature of a
-                                                      // re-creation of DLS-G) is no stall, a few slow ones in a row are
+    static constexpr double kStallClipMs = 50.0;      // one sample counts at most this much: one long frame (the signature of a
+                                                      // re-creation of DLS-G) does not lift an average of up to about 25 ms over
+                                                      // kStallMs, a few slow ones in a row do
 
     AutoMfgOut Tick(const AutoMfgTick& in)
     {
@@ -206,7 +207,14 @@ class AutoMfgController
             SelfTestBegin(in, out, cycleMax, hardMax);
 
         // Watch of the last switch.
-        if (w_.open)
+        if (w_.open && stalled_)
+        {
+            // The game is stalled: a change is not judged on a stalled game (late counts, a long frame and a bad status are
+            // what a stall looks like). The watch starts over on every tick of it, so that the second that is judged later
+            // is a calm one.
+            w_.StartOver(now);
+        }
+        else if (w_.open)
         {
             ++w_.ticks;
             if (std::isfinite(in.realMs))
@@ -236,7 +244,7 @@ class AutoMfgController
                 w_.wrongSince = now;
             if (in.detectedGenerated > 0)
                 w_.lastDetected = in.detectedGenerated;
-            if (now - w_.since >= kWatchMs)
+            if (now - w_.since >= (w_.stalled ? kStallCalmMs : kWatchMs))
             {
                 // A fault that is in progress but too young to convict (it began in the last kBadRunMs) keeps the watch open
                 // for at most kBadRunMs more: closing it here would let the next switch take the already faulty status as
@@ -247,6 +255,14 @@ class AutoMfgController
                 if (!young || now >= w_.graceEnd)
                     Verdict(in, out);
             }
+        }
+        if (w_.open && w_.stalled && now - w_.switchAt >= kStallGiveUpMs)
+        {
+            // Not judged within kStallGiveUpMs of the switch because of stalls: unknown. No strike (nor a clean switch), the
+            // count stays as it is, lastGood_ is not moved (the change was not proven good), and the selector starts over.
+            Info(out, std::format("AutoMFG: judging the change at {}x skipped, the game was stalled", w_.to));
+            w_ = {};
+            sel_.Restart(now);
         }
         if (stopped_) // the verdict just stopped it
         {
@@ -300,6 +316,7 @@ class AutoMfgController
             w_ = {};
             w_.open = true;
             w_.since = now;
+            w_.switchAt = now;
             w_.from = current;
             w_.to = next;
             w_.baselineMs = fromSelector ? sel_.Last().avgMs : st_.baselineMs;
@@ -343,6 +360,26 @@ class AutoMfgController
         bool seenMulti = false;
         int samples = 0;
         uint64_t graceEnd = 0;   // 0, or the time at which a still young fault stops holding the watch open
+        uint64_t switchAt = 0;   // time of the switch itself (since moves when a stall starts the watch over)
+        bool stalled = false;    // a stall held the watch back at least once
+
+        // A stall: forget what was seen so far, keep what identifies the change (from, to, baselineMs, baseStatus, switchAt).
+        void StartOver(uint64_t now)
+        {
+            since = now;
+            worst = early = 0.0;
+            ticks = 0;
+            badRun = 0;
+            badSince = 0;
+            statusCode = 0;
+            wrongRun = 0;
+            wrongSince = 0;
+            lastDetected = 0;
+            seenMulti = false;
+            samples = 0;
+            graceEnd = 0;
+            stalled = true;
+        }
     };
 
     struct SelfTest

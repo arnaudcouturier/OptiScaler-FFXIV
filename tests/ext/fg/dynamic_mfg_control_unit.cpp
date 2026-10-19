@@ -513,7 +513,7 @@ void StrikesAreForgottenAfterTenCleanSwitches()
     r.recreate = false;
     for (int i = 0; i < 14; ++i)
     {
-        r.plant.base2x = i % 2 == 0 ? 4.0 : 30.0; // alternating scene: every half cycle switches twice
+        r.plant.base2x = i % 2 == 0 ? 4.0 : 22.0; // alternating scene (22 ms is under the stall limit)
         r.Run(90000);
         const size_t clean = r.switches.size() - 1; // every switch after the first was clean
         if (clean < 9)
@@ -532,7 +532,7 @@ void RunToSwitchCount(Rig& r, size_t n, int& scene)
 {
     for (int guard = 0; guard < 400 && r.switches.size() < n; ++guard)
     {
-        r.plant.base2x = scene % 2 == 0 ? 4.0 : 30.0;
+        r.plant.base2x = scene % 2 == 0 ? 4.0 : 22.0;
         for (int s = 0; s < 90 && r.switches.size() < n; ++s)
             r.Run(1000);
         ++scene;
@@ -672,6 +672,146 @@ void GapStartsANewHold()
               r.switches.empty() ? 0ull : r.switches.back().t - resume);
     r.Run(6000);
     CHECK(!r.switches.empty() && r.switches.back().t - resume >= 2900);
+}
+
+// Decision 1, second part (the logs of both runs): a stall right after a switch, the new count applied late. The change is
+// not judged while the stall lasts, no strike, no stop; once the average has been at or below 30 ms for a second it is judged
+// by the usual rules (here: the count is there by then, clean).
+void ALateCountInAStallIsNoStrike()
+{
+    struct Case
+    {
+        uint64_t off; // the stall begins this long after the switch
+        double frameMs;
+    };
+    // with the switch (the logs) / in the middle of its watch / long frames from the first one after the switch: the
+    // 200 ms frames are the re-creation signature if they were the switch's own, and are not when a stall brings them
+    for (const Case c : { Case{ 50, 55.0 }, Case{ 600, 55.0 }, Case{ 0, 200.0 } })
+    {
+        Rig r;
+        const uint64_t s = RunToFirstSwitch(r);
+        r.lagMs = 3500; // the plugin applies the new count 3.5 s after the switch
+        r.stallFrom = s + c.off;
+        r.stallUntil = s + c.off + 2400;
+        r.stallFrameMs = c.frameMs;
+        r.Run(5000); // the next change of the selector would come later: the slow count belongs to this one only
+        CHECK_MSG(r.recoveries == 0 && !r.c.Stopped(), "off %llu: recoveries %d stopped %d", c.off, r.recoveries,
+                  (int) r.c.Stopped());
+        CHECK_MSG(r.c.CostlyCount() == 0 && r.Count("AutoMFG: inactive") == 0 && r.Count("applied count") == 0,
+                  "off %llu: strikes %d", c.off, r.c.CostlyCount());
+        CHECK(r.Count("skipped, the game was stalled") == 0);
+        const uint64_t at = r.TimeOf("AutoMFG: 3x settled");
+        CHECK_MSG(at >= r.stallUntil + 1000 && at <= r.stallUntil + 1700, "off %llu: judged %lld ms after the stall", c.off,
+                  (long long) at - (long long) r.stallUntil);
+        CHECK(r.Find("applied 3x)") != nullptr);
+        CHECK_MSG(r.Find("(worst interval 5") == nullptr && r.Find("(worst interval 190 ms") == nullptr &&
+                      r.Find("(worst interval 200 ms") == nullptr,
+                  "off %llu: the stall's frames are in the worst interval of the calm second", c.off);
+    }
+}
+
+// A real fault does not hide behind a stall that is over: the usual rules judge it on the calm second after it.
+void ARealFaultAfterAStallIsStillConvicted()
+{
+    Rig r;
+    const uint64_t s = RunToFirstSwitch(r);
+    r.detectedOverride = r.prevFactor - 1; // the old count stays
+    r.stallFrom = s + 50;
+    r.stallUntil = s + 2000;
+    r.Run(10000);
+    CHECK_MSG(r.recoveries == 1 && r.c.Stopped(), "recoveries %d stopped %d", r.recoveries, (int) r.c.Stopped());
+    const uint64_t at = r.TimeOf("AutoMFG: applied count 1 != requested 2 (generated frames), switch 2x -> 3x");
+    CHECK_MSG(at >= r.stallUntil + 1000 && at <= r.stallUntil + 1700, "convicted %lld ms after the stall",
+              (long long) at - (long long) r.stallUntil);
+    CHECK(r.Count("skipped, the game was stalled") == 0);
+}
+
+// The same faults at 200 fps (no stall) are convicted exactly as before: one second after the switch, the strict rules.
+void ARealFaultAt200FpsIsConvictedAsBefore()
+{
+    for (int kind = 0; kind < 2; ++kind)
+    {
+        Rig r;
+        r.plant.base2x = 5.0;
+        r.plant.refresh = 0;
+        r.plant.limit = 0;
+        r.target = 600.0;
+        const uint64_t s = RunToFirstSwitch(r);
+        if (kind == 0)
+            r.detectedOverride = r.prevFactor - 1;
+        else
+            r.status = 0x2;
+        r.Run(5000);
+        CHECK_MSG(r.recoveries == 1 && r.c.Stopped(), "kind %d: recoveries %d stopped %d", kind, r.recoveries,
+                  (int) r.c.Stopped());
+        const uint64_t at = r.TimeOf(", switch ");
+        CHECK_MSG(at >= s + 1000 && at <= s + 1300, "kind %d: convicted %lld ms after the switch", kind,
+                  (long long) at - (long long) s);
+        CHECK(r.Count("skipped, the game was stalled") == 0);
+    }
+}
+
+// Decision 2: 5 s from the SWITCH. A watch that a stall kept from being judged until then ends as unknown: no strike, no
+// stop, the count stays, one INFO line, the selector starts over (nothing changes for its hold after the stall).
+void AWatchThatCannotBeJudgedWithinFiveSecondsEndsAsUnknown()
+{
+    for (const uint64_t stallLen : { 9000ull, 4150ull }) // 4.15 s: calm again at about 4.4 s, so the second would end after 5 s
+    {
+        Rig r;
+        const uint64_t s = RunToFirstSwitch(r);
+        r.detectedOverride = r.prevFactor - 1; // a real fault, but it cannot be judged in time
+        r.stallFrom = s + 50;
+        r.stallUntil = s + 50 + stallLen;
+        r.Run(7000); // the selector's next change would come later
+        const uint64_t at = r.TimeOf("AutoMFG: judging the change at 3x skipped, the game was stalled");
+        CHECK_MSG(r.Count("AutoMFG: judging the change at 3x skipped, the game was stalled") == 1 && at >= s + 5000 &&
+                      at <= s + 5100,
+                  "stall %llu ms: %d lines, at %lld ms after the switch", stallLen,
+                  r.Count("AutoMFG: judging the change at"), (long long) at - (long long) s);
+        CHECK(r.recoveries == 0 && !r.c.Stopped() && r.c.CostlyCount() == 0);
+        CHECK(r.Count("AutoMFG: 3x settled") == 0 && r.Count("applied count") == 0 && r.Count("AutoMFG: inactive") == 0);
+        CHECK(r.Find("AutoMFG: judging the change at 3x skipped") != nullptr && !r.Find("AutoMFG: judging")->warn);
+        // the selector starts over, at the end of the stall and again when the watch ends as unknown: the next change comes
+        // no earlier than its hold after the later of the two
+        r.detectedOverride = -1;
+        r.Run(20000);
+        const uint64_t from = std::max(r.stallUntil, at);
+        CHECK_MSG(r.switches.size() >= 2 && r.switches[1].t >= from + 2900, "stall %llu ms: next change %lld ms after it",
+                  stallLen, r.switches.size() < 2 ? -1ll : (long long) r.switches[1].t - (long long) from);
+    }
+    // the fault is judged when the second ends within the five seconds (stall to 3.2 s: calm at about 3.5, judged at 4.5)
+    Rig r;
+    const uint64_t s = RunToFirstSwitch(r);
+    r.detectedOverride = r.prevFactor - 1;
+    r.stallFrom = s + 50;
+    r.stallUntil = s + 3200;
+    r.Run(10000);
+    CHECK_MSG(r.recoveries == 1 && r.c.Stopped() && r.Count("skipped, the game was stalled") == 0, "recoveries %d",
+              r.recoveries);
+}
+
+// An unknown watch is neither a strike nor a clean switch: strike, unknown, strike are still two in a row.
+void AnUnknownWatchIsNeitherAStrikeNorACleanSwitch()
+{
+    Rig r;
+    r.recreate = true; // every switch costs one 190 ms frame
+    while (r.switches.size() < 1)
+        r.Step();
+    r.Run(2000);
+    CHECK(r.c.CostlyCount() == 1 && !r.c.Stopped());
+    while (r.switches.size() < 2) // the next change, 12 s later, meets a long stall
+        r.Step();
+    r.stallFrom = r.t + 50;
+    r.stallUntil = r.t + 9000;
+    r.Run(10000);
+    CHECK_MSG(r.Count("AutoMFG: judging the change at") == 1 && r.c.CostlyCount() == 1 && !r.c.Stopped(),
+              "unknown lines %d, strikes %d, stopped %d", r.Count("AutoMFG: judging the change at"), r.c.CostlyCount(),
+              (int) r.c.Stopped());
+    r.target = 100.0; // the output is far above this target: the selector goes down, and that switch re-creates DLS-G again
+    r.Run(40000);
+    CHECK_MSG(r.c.CostlyCount() == 2 && r.c.Stopped() && r.recoveries == 0, "strikes %d stopped %d recoveries %d",
+              r.c.CostlyCount(), (int) r.c.Stopped(), r.recoveries);
+    CHECK(r.Count("AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped") == 1);
 }
 
 void SelfTestPasses(int startFactor, int expectedChanges, const char* field)
@@ -911,6 +1051,11 @@ int main()
     BrokenOutcomesRecoverOnceAndStop();
     ActivationAndGapCloseTheWatchWithoutAVerdict();
     GapStartsANewHold();
+    ALateCountInAStallIsNoStrike();
+    ARealFaultAfterAStallIsStillConvicted();
+    ARealFaultAt200FpsIsConvictedAsBefore();
+    AWatchThatCannotBeJudgedWithinFiveSecondsEndsAsUnknown();
+    AnUnknownWatchIsNeitherAStrikeNorACleanSwitch();
     SelfTestPasses(3, 5, "refresh");
     SelfTestPasses(4, 5, "gpu");
     SelfTestPasses(2, 4, "refresh");
