@@ -1,7 +1,7 @@
 #include "pch.h"
 
 #include "ext/ffxiv/jitter/FfxivJitter.h"
-#include "ext/ffxiv/jitter/FfxivJitterProbe.h"
+#include "ext/ffxiv/jitter/FfxivJitterCore.h"
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
@@ -13,16 +13,22 @@ namespace ext::ffxiv::jitter
 {
 namespace
 {
+// The core spells the NGX parameter names as literals (it does not include the NGX header); a typo there would turn a parameter into a
+// "missing" one and fail open without a sound, so every literal is checked against the header's own macro here.
+static_assert(SameText(ParamName(Param::JitterX), NVSDK_NGX_Parameter_Jitter_Offset_X));
+static_assert(SameText(ParamName(Param::JitterY), NVSDK_NGX_Parameter_Jitter_Offset_Y));
+static_assert(SameText(ParamName(Param::SubrectWidth), NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width));
+static_assert(SameText(ParamName(Param::SubrectHeight), NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height));
+static_assert(SameText(ParamName(Param::Width), NVSDK_NGX_Parameter_Width));
+static_assert(SameText(ParamName(Param::Height), NVSDK_NGX_Parameter_Height));
+static_assert(SameText(ParamName(Param::OutWidth), NVSDK_NGX_Parameter_OutWidth));
+static_assert(SameText(ParamName(Param::OutHeight), NVSDK_NGX_Parameter_OutHeight));
+static_assert(SameText(ParamName(Param::PerfQuality), NVSDK_NGX_Parameter_PerfQualityValue));
+
 struct State
 {
     std::mutex mutex;
-    SampleLimiter limiter;
-    CounterTracker counter;
-    EpisodeLog probeFailures;
-    EpisodeLog passThrough;
-    EpisodeLog replacing; // runs of evaluates in which the correction replaced the values
-    bool buildNoted = false;
-    std::uint64_t evaluated = 0, replaced = 0, passed = 0; // since the last status line
+    Engine engine;
 };
 
 State& S()
@@ -31,153 +37,81 @@ State& S()
     return state;
 }
 
-// The executable identity is checked once per session (MatchCurrentProcess walks the module headers).
-const GameBuild* Build()
+// The real environment of one step: the bridge's parameter block, the process, the clock and the log.
+struct NgxEnvironment
 {
-    static const GameBuild* build = MatchCurrentProcess();
-    return build;
-}
+    NVSDK_NGX_Parameter* parameters;
 
-std::optional<float> GetFloat(const NVSDK_NGX_Parameter* p, const char* name)
-{
-    float v = 0.0f;
-    if (p->Get(name, &v) == NVSDK_NGX_Result_Success)
-        return v;
-    return std::nullopt;
-}
+    std::unique_lock<std::mutex> Lock() { return std::unique_lock<std::mutex>(S().mutex); }
 
-std::uint32_t GetUInt(const NVSDK_NGX_Parameter* p, const char* name)
-{
-    unsigned int v = 0;
-    return p->Get(name, &v) == NVSDK_NGX_Result_Success ? v : 0u;
-}
-
-std::optional<int> GetInt(const NVSDK_NGX_Parameter* p, const char* name)
-{
-    int v = 0;
-    if (p->Get(name, &v) == NVSDK_NGX_Result_Success)
-        return v;
-    unsigned int u = 0;
-    if (p->Get(name, &u) == NVSDK_NGX_Result_Success)
-        return static_cast<int>(u);
-    return std::nullopt;
-}
-
-void Run(NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
-{
-    const GameBuild* build = Build();
-    State& st = S();
-    std::lock_guard lock(st.mutex);
-
-    if (build == nullptr)
+    // The executable identity is checked once per session (MatchCurrentProcess walks the module headers).
+    const GameBuild* Build()
     {
-        if (!st.buildNoted)
-        {
-            st.buildNoted = true;
-            LOG_INFO("Game jitter: probe and correction idle for this session, {}", GuardName(Guard::BuildMismatch));
-        }
-        return;
+        static const GameBuild* build = MatchCurrentProcess();
+        return build;
     }
 
-    // The values this evaluate carries to NGX, read BEFORE any replacement: the probe compares against the game's own.
-    const std::optional<float> ngxX = GetFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_X);
-    const std::optional<float> ngxY = GetFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_Y);
-    Context ctx;
-    ctx.subrectW = GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width);
-    ctx.subrectH = GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height);
-    ctx.widthParam = GetUInt(parameters, NVSDK_NGX_Parameter_Width);
-    ctx.heightParam = GetUInt(parameters, NVSDK_NGX_Parameter_Height);
-    ctx.outW = GetUInt(parameters, NVSDK_NGX_Parameter_OutWidth);
-    ctx.outH = GetUInt(parameters, NVSDK_NGX_Parameter_OutHeight);
-    ctx.perfQuality = GetInt(parameters, NVSDK_NGX_Parameter_PerfQualityValue);
-    const auto answer = ext::upscaler::LastQualityAnswer();
-    if (answer.queries != 0)
+    std::uintptr_t ModuleBase() { return reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)); }
+    bool ReadMemory(std::uintptr_t address, void* out, std::size_t bytes) { return ext::core::ReadProcessBytes(address, out, bytes); }
+
+    std::optional<float> GetFloat(Param p)
     {
-        ctx.forcedQuality = answer.quality;
-        ctx.answeredRenderW = answer.renderWidth;
-        ctx.answeredRenderH = answer.renderHeight;
-        ctx.answeredDisplayW = answer.displayWidth;
-        ctx.answeredDisplayH = answer.displayHeight;
-    }
-    const RenderSize size = ResolveRenderSize(ctx.subrectW, ctx.subrectH, ctx.widthParam, ctx.heightParam);
-
-    // Probe only: one sample per interval, and nothing is read in between. The correction needs every evaluate.
-    const bool allowed = st.limiter.Allow(GetTickCount64(), ConfigurationKey(ctx));
-    if (!correct && !allowed)
-        return;
-
-    auto reader = [](std::uintptr_t address, void* out, std::size_t bytes) { return ext::core::ReadProcessBytes(address, out, bytes); };
-    RawObject object;
-    const Guard readGuard = ReadChain(reader, build, reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)), object);
-    const Analysis analysis = readGuard == Guard::None ? Analyse(object, size) : Analysis {};
-    const NgxMatch match = readGuard == Guard::None ? CompareNgx(object, ngxX, ngxY) : NgxMatch::Unavailable;
-
-    if (correct)
-    {
-        ++st.evaluated;
-        const CorrectionDecision decision = DecideCorrection(readGuard, analysis, match);
-        if (decision.replace)
-        {
-            // The block is the bridge's own NVSDK_NGX_Parameter (IFeature_Dx11wDx12::Evaluate's InParameters, which later goes to the
-            // upscaler's Evaluate and to the frame-generation input). The game sets Jitter.Offset again at its next evaluate.
-            parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, decision.ax);
-            parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, decision.ay);
-            ++st.replaced;
-            if (st.replacing.Event(true))
-                LOG_INFO("{}", FormatCorrection(analysis, decision));
-            st.passThrough.Close();
-        }
-        else
-        {
-            ++st.passed;
-            if (!decision.undetermined) // a frame too small to tell changes no episode
-            {
-                st.replacing.Event(false);
-                if (st.passThrough.ShouldLog(decision.guard))
-                    LOG_INFO("{}", FormatPassThrough(decision.guard));
-            }
-        }
+        float v = 0.0f;
+        if (parameters->Get(ParamName(p), &v) == NVSDK_NGX_Result_Success)
+            return v;
+        return std::nullopt;
     }
 
-    if (!allowed)
-        return;
+    std::uint32_t GetUInt(Param p)
+    {
+        unsigned int v = 0;
+        return parameters->Get(ParamName(p), &v) == NVSDK_NGX_Result_Success ? v : 0u;
+    }
 
-    if (probe)
+    std::optional<int> GetInt(Param p)
     {
-        const Guard guard = readGuard == Guard::None ? st.counter.Check(object.counter) : readGuard;
-        if (guard != Guard::None)
-        {
-            if (st.probeFailures.ShouldLog(guard))
-                LOG_INFO("{}", FormatProbeFailure(guard));
-        }
-        else
-        {
-            st.probeFailures.ShouldLog(Guard::None);
-            LOG_INFO("{}", FormatSample(analysis, match, ngxX, ngxY, ctx));
-        }
+        int v = 0;
+        if (parameters->Get(ParamName(p), &v) == NVSDK_NGX_Result_Success)
+            return v;
+        unsigned int u = 0;
+        if (parameters->Get(ParamName(p), &u) == NVSDK_NGX_Result_Success)
+            return static_cast<int>(u);
+        return std::nullopt;
     }
-    if (correct)
+
+    void SetFloat(Param p, float value) { parameters->Set(ParamName(p), value); }
+
+    ForcedQualityAnswer ForcedQuality()
     {
-        LOG_INFO("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through unchanged",
-                 st.evaluated, st.replaced, st.passed);
-        if (st.replacing.Suppressed() != 0 || st.passThrough.Suppressed() != 0)
-            LOG_INFO("Jitter correction: log line budget used up, {} further episodes were not logged", st.replacing.Suppressed() + st.passThrough.Suppressed());
-        st.evaluated = st.replaced = st.passed = 0;
+        const auto answer = ext::upscaler::LastQualityAnswer();
+        ForcedQualityAnswer out;
+        out.present = answer.queries != 0;
+        out.quality = answer.quality;
+        out.renderWidth = answer.renderWidth;
+        out.renderHeight = answer.renderHeight;
+        out.displayWidth = answer.displayWidth;
+        out.displayHeight = answer.displayHeight;
+        return out;
     }
-}
+
+    std::uint64_t NowMs() { return GetTickCount64(); }
+    void Log(const std::string& line) { LOG_INFO("{}", line); }
+    std::optional<bool> FrameGenerationActive() { return std::nullopt; }
+};
 } // namespace
 
 void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
 {
     try
     {
-        // Both keys off: this is all it costs.
+        // Both keys off: this is all it costs (the core repeats the key gate, which a test pins, so it never runs on its own either).
         const auto& cfg = ext::Cfg().ffxiv;
         const bool probe = cfg.jitterProbe.value_or_default();
         const bool correct = cfg.jitterCorrection.value_or_default();
         if ((!probe && !correct) || parameters == nullptr)
             return;
-        Run(parameters, probe, correct);
+        NgxEnvironment env { parameters };
+        S().engine.Step(env, probe, correct);
     }
     catch (...)
     {
