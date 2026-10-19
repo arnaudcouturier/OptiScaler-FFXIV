@@ -852,7 +852,7 @@ void RunSlot(int index, const DrawView& view)
         PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), tinted, ev.placement, ev.usedPreSrColour,
         [&]
         {
-            ProductionCall call = RunNrProduction(view, g, s, in);
+            ProductionCall call = RunNrProduction(view, g, s, ngx::WithReset(in, ev.resetUsed));
             nrOutput = std::move(call.view);
             return call.answer;
         },
@@ -992,7 +992,7 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
     request.depth = g.depth.texture.Get();
     request.motion = g.motion.texture.Get();
     request.guides = nr::GuidesOf(in, s.reversedZ); // the guides the SR evaluate of this render was given; the depth convention its feature was created with
-    request.superResolutionReset = in.reset; // the SR evaluate of this render reset its history: so does the NR model
+    request.superResolutionReset = in.reset; // the reset the SR evaluate of this render ran with (RunSlot passes ev.resetUsed: the slot rule or a colour source change): so does the NR model
     nr::ProductionResult result = nr::RunProduction(request);
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr };
     if (nr::ProductionProduced(answer))

@@ -205,7 +205,7 @@ const std::vector<Fragment> kDlss = {
     { "g.composedFromNr = render.composedFromNr;", 1, "the slot remembers whether its picture came from NR" },
     { "nrOutput = std::move(call.view);", 1, "the production image is handed to the alpha pass" },
     { "nr::AlphaColourFor<ID3D11ShaderResourceView*>(input, nrOutput.Get(), g.output.srv.Get())", 1, "the alpha pass reads the NR image for NrOutput and the SR image otherwise" },
-    { "RunNrProduction(view, g, s, in)", 1, "the production entry is given the evaluate's own inputs" },
+    { "RunNrProduction(view, g, s, ngx::WithReset(in, ev.resetUsed))", 1, "the production entry is given the evaluate's own inputs with the history reset the evaluate ran with (a source change resets too)" },
     { "nr::GuidesOf(in, s.reversedZ)", 2, "the NR guides come from the evaluate's inputs and the slot's depth convention (post-SR and pre-SR entries)" },
     { "request.superResolutionReset = in.reset;", 2, "the SR reset reaches the NR model (post-SR and pre-SR entries)" },
     { "nr::DecideSrEvaluate(PlumbingNow(),", 1, "the SR evaluate and the pre-SR step are decided on a fresh snapshot" },
