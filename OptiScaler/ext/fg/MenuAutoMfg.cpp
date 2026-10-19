@@ -70,7 +70,7 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
         cfg.autoMfgMax = highest;
 
     float target = cfg.autoMfgTarget.value_or_default();
-    if (ImGui::SliderFloat("Target FPS##AutoMfg", &target, 0.0f, 500.0f, target > 0.0f ? "%.0f" : "Auto"))
+    if (ImGui::SliderFloat("Target FPS (automatic multiplier)##AutoMfg", &target, 0.0f, 500.0f, target > 0.0f ? "%.0f" : "Auto"))
         cfg.autoMfgTarget = target;
     ext::menu::Tooltip("Frame rate to reach. Auto is the lower of the frame rate limit and the display refresh rate.");
 

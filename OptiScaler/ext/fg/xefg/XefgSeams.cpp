@@ -123,7 +123,7 @@ void XeFgExtras(IFGFeature* fgOutput)
         ImGui::EndDisabled();
         float targetXe = fgCfg.xefgDynamicTarget.value_or_default();
         ImGui::BeginDisabled(!dynamicXe);
-        if (ImGui::SliderFloat("Target FPS##XeDynamic", &targetXe, 30.0f, 240.0f, "%.0f"))
+        if (ImGui::SliderFloat("Target FPS (XeFG dynamic)##XeDynamic", &targetXe, 30.0f, 240.0f, "%.0f"))
             fgCfg.xefgDynamicTarget = targetXe;
         if (currentCount >= 1)
             ImGui::Text("Current XeMFG: %dX (selected)", currentCount + 1);

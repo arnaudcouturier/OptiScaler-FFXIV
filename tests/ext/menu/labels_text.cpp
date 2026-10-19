@@ -46,9 +46,19 @@ const Row kRows[] = {
         "{ \"fg_unlocks\", \"Frame Gen\", \"Frame generation unlocks\", DrawFgUnlocks," },
       { "SM86/SM75", "ompanion" } },
     // Automatic multi frame generation: titled (title == picker name)
+    // and its slider says which "Target FPS" it is (upstream's two DMFG sliders keep their names); the `##AutoMfg` suffix stays
     { "fg/MenuAutoMfg.cpp",
-      { "SectionTitle(\"Automatic multi frame generation\")", "{ \"fg_auto_mfg\", \"Frame Gen\", \"Automatic multi frame generation\", DrawAutoMfg," },
-      {} },
+      { "SectionTitle(\"Automatic multi frame generation\")", "{ \"fg_auto_mfg\", \"Frame Gen\", \"Automatic multi frame generation\", DrawAutoMfg,",
+        "SliderFloat(\"Target FPS (automatic multiplier)##AutoMfg\"" },
+      { "\"Target FPS##AutoMfg\"" } },
+    // XeFG dynamic extras: the same naming, hidden id `##XeDynamic` unchanged
+    { "fg/xefg/XefgSeams.cpp",
+      { "SliderFloat(\"Target FPS (XeFG dynamic)##XeDynamic\"" },
+      { "\"Target FPS##XeDynamic\"" } },
+    // HUD-less: the debug tint says which feature it belongs to
+    { "hudless/HudlessMenu.cpp",
+      { "Checkbox(\"Show detected UI (HUD-less)\", &tint)", "SectionTitle(\"HUD-less (UI-free frame generation)\")" },
+      { "Checkbox(\"Show detected UI\"" } },
 };
 
 std::vector<std::string> Problems(const Row& r, const std::string& text)

@@ -89,7 +89,7 @@ void DrawHudless(ext::menu::Ctx&)
         ImGui::TextWrapped("Recomposition applies after a game restart (DLSS-G reads it when the feature is created).");
 
     bool tint = cfg.showDetectedUi.value_or_default();
-    if (ImGui::Checkbox("Show detected UI", &tint))
+    if (ImGui::Checkbox("Show detected UI (HUD-less)", &tint))
         cfg.showDetectedUi = tint;
     ext::menu::Tooltip("Debug: tints the pasted UI area so the mask is visible (UI-free mode).");
 
