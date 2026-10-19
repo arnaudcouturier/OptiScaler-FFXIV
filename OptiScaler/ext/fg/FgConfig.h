@@ -39,8 +39,9 @@ struct FgConfig
     CustomOptional<int> ampereMfgLogLevel { 1 };
 
     // D2/C11: DLSS-G UI recomposition (DLSSGOptions::enableUserInterfaceRecomposition). Only matters in [HudLess] Mode =
-    // recomposition, where unset = on (ext::hudless::QueryRecomposition).
-    CustomOptional<bool> uiRecomposition { false };
+    // recomposition, where unset = on (ext::hudless::QueryRecomposition). The declared default is that meaning of "unset"
+    // (true), so Off (false) differs from it and Save Settings writes `false` instead of `auto`.
+    CustomOptional<bool> uiRecomposition { true };
 
     // Dynamic MFG on RTX 40 ([DLSSG] section, ext/fg/DynamicMfgSeams.cpp). Off by default. AutoMFGMax is the highest
     // multiplier an automatic choice may use (2..4), AutoMFGTarget the frame rate to reach (0 = the lower of the frame
