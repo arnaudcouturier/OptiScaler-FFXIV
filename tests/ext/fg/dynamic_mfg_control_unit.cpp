@@ -40,8 +40,13 @@ struct Rig
     uint64_t switchT = 0;
     uint64_t zeroFrom = 0, zeroUntil = 0;   // detectedGenerated reads 0 in [from, until)
     uint64_t pauseFrom = 0, pauseUntil = 0; // frame generation is paused in [from, until)
+    // a game stall (a loading screen, a feature re-creation): every real interval in [stallFrom, stallUntil) is at least
+    // stallFrameMs long (55 ms = the 18 fps of the two in-game runs)
+    uint64_t stallFrom = 0, stallUntil = 0;
+    double stallFrameMs = 55.0;
     GateInputs gate;
     std::vector<AutoMfgLine> lines;
+    std::vector<uint64_t> lineT; // the time of each line
     std::vector<Switch> switches;
     int recoveries = 0;
     uint64_t doneAt = 0; // when the first self-test result line appeared
@@ -68,6 +73,8 @@ struct Rig
             hitchDue = 0;
         }
         pendingStall = 0.0;
+        if (stallUntil != 0 && t >= stallFrom && t < stallUntil)
+            ms = std::max(ms, stallFrameMs);
         in.realMs = ms;
         in.appliedFactor = factor;
         in.selfTest = selfTest;
@@ -89,7 +96,10 @@ struct Rig
         in.paused = inPause;
         const AutoMfgOut out = c.Tick(in);
         for (const auto& l : out.lines)
+        {
             lines.push_back(l);
+            lineT.push_back(t);
+        }
         if (doneAt == 0 && ResultLines() > 0)
             doneAt = t;
         if (out.setFactor)
@@ -139,6 +149,14 @@ struct Rig
             if (l.text.find(needle) != std::string::npos)
                 return &l;
         return nullptr;
+    }
+    // Time of the first line that contains `needle` (0 = none).
+    uint64_t TimeOf(const std::string& needle) const
+    {
+        for (size_t i = 0; i < lines.size(); ++i)
+            if (lines[i].text.find(needle) != std::string::npos)
+                return lineT[i];
+        return 0;
     }
     int ResultLines() const { return Count("AutoMFG self-test: PASS") + Count("AutoMFG self-test: FAIL"); }
     int LinesWith(const std::string& needle) const
@@ -254,19 +272,55 @@ void CostlyOutcomeSlowsDownThenStops()
     CHECK(p.c.CostlyCount() == 1 && p.switches.size() == n); // no second probe, no other switch
 }
 
-void CostlyThresholdFollowsTheUsualInterval()
+// The two in-game runs (RTX 4090, 4K): a loading screen and a DLSS preset change stalled the game at 18 fps while the count
+// was being changed, and the kill-switch took the stall for a failed change and stopped the mode for the session. While the
+// real interval is above 30 ms the controller is in a stall state (the rules are below, one test each).
+
+// Decision 1, first part: nothing new starts in a stall. The selector is not asked at all (it would count a switch that the
+// controller then drops) and starts over when the stall ends: no change for the hold after it.
+void ANewChangeIsNotStartedInAStall()
 {
-    // A slow scene (80 ms frames): a 190 ms frame is no re-creation signature (3 x 80 = 240).
-    Rig r;
-    r.plant.base2x = 80.0;
-    r.plant.refresh = 0;
-    r.plant.limit = 0;
-    r.recreate = true;
-    r.target = 100.0;
-    r.factor = 2;
+    Rig r; // 2x at 18 ms real would go up at once without the stall
+    r.stallFrom = 0;
+    r.stallUntil = r.t + 20000;
     r.Run(20000);
-    CHECK(!r.switches.empty()); // it did switch up
-    CHECK_MSG(r.c.CostlyCount() == 0, "a 190 ms frame in an 80 ms scene counted as a re-creation");
+    CHECK_MSG(r.switches.empty(), "%zu switches during a stall", r.switches.size());
+    CHECK(r.Count("AutoMFG: 2x ->") == 0 && r.Count("AutoMFG: 3x ->") == 0);
+    CHECK(r.c.Selector().RecentSwitches(r.t) == 0); // the selector did not record a switch that never happened
+    const uint64_t over = r.stallUntil;
+    r.Run(15000);
+    CHECK(!r.switches.empty());
+    CHECK_MSG(r.switches.empty() || r.switches.front().t >= over + 2900,
+              "first change %llu ms after the stall (the hold starts over when it ends)",
+              r.switches.empty() ? 0ull : r.switches.front().t - over);
+    CHECK(r.Count("AutoMFG: inactive") == 0 && r.c.CostlyCount() == 0 && !r.c.Stopped());
+}
+
+// The boundary is the smoothed interval at 30 ms: a scene at 28 ms real (35 fps) is not a stall, one at 32 ms is.
+void TheStallThresholdIs30Ms()
+{
+    for (const double base : { 28.0, 32.0 })
+    {
+        Rig r;
+        r.plant.base2x = base;
+        r.plant.refresh = 0;
+        r.plant.limit = 0;
+        r.Run(20000);
+        CHECK_MSG(r.switches.empty() == (base > 30.0), "%.0f ms scene: %zu switches", base, r.switches.size());
+        CHECK(r.c.CostlyCount() == 0 && !r.c.Stopped() && r.recoveries == 0);
+    }
+}
+
+// One long frame is no stall: the estimate clips a sample, so the re-creation signature still reaches the strike rules.
+void OneLongFrameIsNoStall()
+{
+    Rig r;
+    r.recreate = true; // every switch costs one 190 ms frame
+    r.Run(8000);
+    CHECK_MSG(r.switches.size() == 1 && r.c.CostlyCount() == 1, "%zu switches, %d strikes", r.switches.size(),
+              r.c.CostlyCount());
+    CHECK(r.Count("AutoMFG: switch 2x -> 3x cost a 190 ms frame") == 1);
+    CHECK(r.Count("skipped, the game was stalled") == 0);
 }
 
 // A tick-by-tick helper: run until the first switch, return its time.
@@ -840,7 +894,9 @@ int main()
     CleanSwitchLogsAndSettles();
     FreshControllerProbesOnARefreshBoundScene();
     CostlyOutcomeSlowsDownThenStops();
-    CostlyThresholdFollowsTheUsualInterval();
+    ANewChangeIsNotStartedInAStall();
+    TheStallThresholdIs30Ms();
+    OneLongFrameIsNoStall();
     TransientZeroAtTheVerdictIsNotAFailure();
     ThreeZeroSamplesAtTheEndAreStillAFailure();
     ANonZeroStatusBeforeTheSwitchIsNotTheSwitchsFault();
