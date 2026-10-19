@@ -192,6 +192,10 @@ struct Policy
     Sizes sizes {};        // the last ACCEPTED create (remembered even while auto is off)
     double outputScaling = 1.0;
     double published = 0.0; // the final bias the override holds while engaged
+    // [Mipmap] MipmapBiasScaleOverride ("MB Scale Override"): the hooks then multiply the game's own bias by the override
+    // instead of adding to it, so a negative automatic value would blur. Auto does not engage while it is on.
+    bool scaleMode = false;
+    bool warned = false;    // the warning for the current scale-mode episode was already given
 };
 
 enum class Action
@@ -210,7 +214,9 @@ struct Outcome
     bool changed = false;  // the value moved by kMinChange or more (or was just engaged)
     bool accepted = false; // OnCreate: the create was taken into account
     Reject reject = Reject::None; // OnCreate: why it was not
-    bool log = false;      // OnCreate: the glue logs this outcome (auto is on)
+    bool log = false;      // OnCreate: the glue logs this outcome (auto is on and not blocked)
+    bool blocked = false;  // auto is on but cannot engage because the Scale override is on
+    bool warn = false;     // blocked, and this is the first outcome of the episode: the glue logs one WARN line
     bool haveSizes = false;
     Sizes sizes {};        // accepted: render/display of the create; rejected: Width, Height, OutWidth, OutHeight as given
     double outputScaling = 1.0;
@@ -269,43 +275,65 @@ inline void Follow(Outcome& o, Policy& p)
     o.action = Action::Publish;
     o.value = p.published;
 }
+
+// What the policy should do now: follow when auto is on and the Scale override is off; otherwise give the override back
+// if it holds this policy's value, and (auto on, Scale on) say so once per episode.
+inline void Reconcile(Outcome& o, Policy& p)
+{
+    if (p.enabled && !p.scaleMode)
+    {
+        p.warned = false;
+        Follow(o, p);
+        return;
+    }
+
+    if (p.engaged)
+    {
+        o.was = p.published;
+        p.engaged = false;
+        p.published = 0.0;
+        o.action = Action::Restore;
+        o.changed = true;
+    }
+
+    o.blocked = p.enabled && p.scaleMode;
+    if (o.blocked && !p.warned)
+    {
+        p.warned = true;
+        o.warn = true;
+    }
+    else if (!o.blocked)
+    {
+        p.warned = false;
+    }
+}
 } // namespace detail
 
 // The settings changed: config load (it runs again on every Config::Reload, so it is idempotent), the menu checkbox,
 // the menu slider. Turning auto on engages the override at once from the last accepted create (or from 0 plus the
 // offset when there is none); turning it off restores the user's value; a changed offset republishes.
-inline Outcome Configure(Policy& p, bool enabled, double offset)
+// `scaleMode` is the Scale override ("MB Scale Override"): while it is on, auto does not engage (see Policy::scaleMode).
+inline Outcome Configure(Policy& p, bool enabled, double offset, bool scaleMode = false)
 {
     Outcome o;
     p.configured = true;
     p.enabled = enabled;
     p.offset = ClampOffset(offset);
+    p.scaleMode = scaleMode;
     detail::Describe(o, p);
-
-    if (!enabled)
-    {
-        if (p.engaged)
-        {
-            o.was = p.published;
-            p.engaged = false;
-            p.published = 0.0;
-            o.action = Action::Restore;
-            o.changed = true;
-        }
-        return o;
-    }
-
-    detail::Follow(o, p);
+    detail::Reconcile(o, p);
     return o;
 }
 
 // An upscaler feature was created (IFeature::SetInitParameters, through ApplyForcedQuality). Raw NGX parameters in.
 // The sizes are remembered even while auto is off, so ticking the checkbox mid-session applies the current ratio.
 inline Outcome OnCreate(Policy& p, unsigned width, unsigned height, unsigned outWidth, unsigned outHeight,
-                        bool extendedLimits, double outputScaling)
+                        bool extendedLimits, double outputScaling, bool scaleMode = false)
 {
     Outcome o;
-    o.log = p.enabled;
+    const bool modeChanged = p.scaleMode != scaleMode;
+    p.scaleMode = scaleMode;
+    o.log = p.enabled && !p.scaleMode;
 
     const auto check = CreateSizes(width, height, outWidth, outHeight, extendedLimits);
     if (check.reject != Reject::None)
@@ -314,6 +342,8 @@ inline Outcome OnCreate(Policy& p, unsigned width, unsigned height, unsigned out
         o.sizes = { width, height, outWidth, outHeight };
         o.outputScaling = p.outputScaling;
         o.offset = p.offset;
+        if (modeChanged)
+            detail::Reconcile(o, p); // the Scale override flipped since the last event: engage or give back now
         return o;
     }
 
@@ -323,8 +353,7 @@ inline Outcome OnCreate(Policy& p, unsigned width, unsigned height, unsigned out
 
     o.accepted = true;
     detail::Describe(o, p);
-    if (p.enabled)
-        detail::Follow(o, p);
+    detail::Reconcile(o, p);
 
     return o;
 }
@@ -341,6 +370,7 @@ struct RawCreate
     bool outputScalingEnabled = false;
     double outputScalingMultiplier = 1.0;
     bool lowResMv = false; // already resolved by EffectiveLowResMv
+    bool scaleMode = false; // [Mipmap] MipmapBiasScaleOverride
 };
 
 inline Outcome OnRawCreate(Policy& p, const RawCreate& c)
@@ -350,7 +380,7 @@ inline Outcome OnRawCreate(Policy& p, const RawCreate& c)
     const double scaling = EffectiveOutputScaling(c.outputScalingEnabled, c.outputScalingMultiplier, c.lowResMv,
                                                   renderEqualsDisplay);
 
-    return OnCreate(p, c.width, c.height, c.outWidth, c.outHeight, c.extendedLimits, scaling);
+    return OnCreate(p, c.width, c.height, c.outWidth, c.outHeight, c.extendedLimits, scaling, c.scaleMode);
 }
 
 // ---- text: the log lines the in-game check reads and the menu card ---------------------------------------------------
@@ -390,6 +420,29 @@ inline std::string IgnoredLine(const Outcome& o)
                        o.sizes.displayW, o.sizes.displayH, RejectText(o.reject));
 }
 
+// The one WARN line of a Scale-override episode (auto is on, "MB Scale Override" is on): nothing is applied.
+inline std::string ScaleModeWarning()
+{
+    return "Automatic mipmap bias: not applied while MB Scale Override is on (Scale multiplies the game's own bias by the "
+           "value, so a sharpening value would blur); the manual setting stays in force. Turn Scale Override off to use "
+           "the automatic bias";
+}
+
+// The red line of the menu card while auto is on and the Scale override blocks it; empty otherwise.
+inline std::string BlockedLine(bool blocked)
+{
+    return blocked ? "Automatic bias needs additive mode; MB Scale Override is on." : "";
+}
+
+// The note under the card: how the automatic value meets the upstream buttons and modes, and the known limits.
+inline std::string CardNote()
+{
+    return "While this is on, \"Set\" and \"Reset\" in the card above are overwritten at the next quality change. "
+           "Fixed replaces the game's own per-sampler biases with the single value; Scale cannot be used with it. "
+           "Turn it off from the menu while no level is loading, or edit the ini: the texture hooks read the value without "
+           "a lock. A screen turned to portrait is not followed, because a display taller than wide is ignored.";
+}
+
 // The line for the menu checkbox / slider (Configure's outcome); `on` is the new state of the checkbox.
 inline std::string SettingLine(const Outcome& o, bool on)
 {
@@ -416,12 +469,14 @@ struct Status
     double ratio = 1.0;
     double bias = 0.0; // what the override holds (formula plus offset)
     double offset = 0.0;
+    bool blocked = false; // auto is on but the Scale override stops it from engaging
 };
 
 inline Status StatusOf(const Policy& p)
 {
     Status s;
     s.enabled = p.enabled;
+    s.blocked = p.enabled && p.scaleMode;
     s.haveSizes = p.haveSizes;
     s.sizes = p.sizes;
     s.outputScaling = p.outputScaling;
@@ -512,6 +567,11 @@ void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigne
 
 // The menu card changed the checkbox or the offset (they are already stored in ext::Cfg().upscaler).
 void OnSettingChanged();
+
+// The menu card calls this each time it is drawn: "MB Scale Override" can be ticked without any create or setting change
+// in between. Acts (give the override back, or take it again, and log) only when the Scale override differs from what the
+// policy last saw, or a blocked policy still owes its warning.
+void OnScaleOverrideMaybeChanged();
 
 // A copy of the policy for the menu card.
 Status CurrentStatus();

@@ -42,6 +42,10 @@ void Write(const Outcome& o)
     }
 }
 
+// "MB Scale Override" (Config::MipmapBiasScaleOverride): the hooks multiply the game's bias by the override in that mode,
+// which turns the automatic (negative) value into a blur, so auto does not engage while it is on.
+bool ScaleOverrideOn() { return Config::Instance()->MipmapBiasScaleOverride.value_or_default(); }
+
 // Caller holds the mutex. The config load normally configured the policy long before the first create; if it ran before
 // this file's start-up registration (so its hook call was missed), catch up from the stored settings now.
 void EnsureConfigured()
@@ -51,14 +55,30 @@ void EnsureConfigured()
         return;
 
     const auto& settings = Cfg().upscaler;
-    Write(Configure(policy, settings.mipBiasAuto.value_or_default(), settings.mipBiasAutoOffset.value_or_default()));
+    Write(Configure(policy, settings.mipBiasAuto.value_or_default(), settings.mipBiasAutoOffset.value_or_default(),
+                    ScaleOverrideOn()));
+}
+
+// The outcome of a settings change or of the Scale override flipping: one WARN line when auto is blocked by the Scale
+// override (once per episode), else the INFO line of the change. Caller holds the mutex.
+void LogSetting(const Outcome& o, bool enabled)
+{
+    if (o.warn)
+        LOG_WARN("{}", ScaleModeWarning());
+    else if (o.action != Action::None)
+        LOG_INFO("{}", SettingLine(o, enabled));
 }
 } // namespace
 
 void OnConfigLoaded(bool enabled, float offset)
 {
     std::scoped_lock lock(PolicyMutex());
-    Write(Configure(CurrentPolicy(), enabled, offset));
+    auto& policy = CurrentPolicy();
+    Write(Configure(policy, enabled, offset, ScaleOverrideOn()));
+
+    // No log here (the logger may not exist yet): the warning of a blocked policy is left for the first create or the
+    // first look of the menu card, which will find the policy blocked and say so once.
+    policy.warned = false;
 }
 
 void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag)
@@ -75,12 +95,16 @@ void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigne
     create.outputScalingMultiplier = static_cast<double>(config->OutputScalingMultiplier.value_or_default());
     create.lowResMv =
         EffectiveLowResMv(lowResMvFlag, config->DisplayResolution.has_value(), config->DisplayResolution.value_or(false));
+    create.scaleMode = ScaleOverrideOn();
 
     std::scoped_lock lock(PolicyMutex());
     EnsureConfigured();
 
     const Outcome o = OnRawCreate(CurrentPolicy(), create);
     Write(o);
+
+    if (o.warn)
+        LOG_WARN("{}", ScaleModeWarning());
 
     if (!o.log)
         return; // auto is off: the sizes are remembered, nothing is logged
@@ -98,11 +122,27 @@ void OnSettingChanged()
     const float offset = settings.mipBiasAutoOffset.value_or_default();
 
     std::scoped_lock lock(PolicyMutex());
-    const Outcome o = Configure(CurrentPolicy(), enabled, offset);
+    const Outcome o = Configure(CurrentPolicy(), enabled, offset, ScaleOverrideOn());
     Write(o);
+    LogSetting(o, enabled);
+}
 
-    if (o.action != Action::None)
-        LOG_INFO("{}", SettingLine(o, enabled));
+void OnScaleOverrideMaybeChanged()
+{
+    const bool scale = ScaleOverrideOn();
+
+    std::scoped_lock lock(PolicyMutex());
+    auto& policy = CurrentPolicy();
+    if (!policy.configured)
+        return;
+
+    // Nothing to do while the policy has seen the current state, except the warning a config load left pending.
+    if (policy.scaleMode == scale && !(policy.enabled && scale && !policy.warned))
+        return;
+
+    const Outcome o = Configure(policy, policy.enabled, policy.offset, scale);
+    Write(o);
+    LogSetting(o, policy.enabled);
 }
 
 Status CurrentStatus()

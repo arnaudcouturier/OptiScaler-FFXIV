@@ -270,6 +270,26 @@ int main()
         CHECK(Near(ov.value(), -0.7) && !ov.isVolatile);
     }
 
+    // ---- Scale override on: the policy never touches the override; ticking it mid-session gives the user's value back -----
+    {
+        FakeOverride ov;
+        ov.set_from_config(-0.7f);
+        Policy policy;
+
+        Apply(ov, Configure(policy, true, 0.0, true));                                       // config load, Scale on
+        CHECK(Near(ov.value(), -0.7) && !ov.isVolatile && ov.volatileWrites == 0);           // the user's value, untouched
+        Apply(ov, OnCreate(policy, 2560, 1440, 3840, 2160, false, 1.0, true));
+        CHECK(Near(ov.value(), -0.7) && !ov.isVolatile && ov.volatileWrites == 0);
+
+        Apply(ov, OnCreate(policy, 2560, 1440, 3840, 2160, false, 1.0, false));              // Scale unticked
+        CHECK(Near(ov.value(), -0.584963) && ov.isVolatile);
+        Apply(ov, OnCreate(policy, 2560, 1440, 3840, 2160, false, 1.0, true));               // ticked again
+        CHECK(Near(ov.value(), -0.7) && !ov.isVolatile);                                     // given back
+        const int writes = ov.volatileWrites;
+        Apply(ov, OnCreate(policy, 2258, 1270, 3840, 2160, false, 1.0, true));
+        CHECK(ov.volatileWrites == writes && Near(ov.value(), -0.7));
+    }
+
     if (g_failed != 0)
     {
         std::printf("%d check(s) failed\n", g_failed);

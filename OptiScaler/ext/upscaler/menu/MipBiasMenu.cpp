@@ -27,6 +27,13 @@ void Dim(const std::string& text)
     ImGui::PopStyleColor();
 }
 
+void Red(const std::string& text)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+    ImGui::TextWrapped("%s", text.c_str());
+    ImGui::PopStyleColor();
+}
+
 void Draw(ext::menu::Ctx& ctx)
 {
     ext::menu::SectionTitle("Automatic Mipmap Bias");
@@ -59,13 +66,22 @@ void Draw(ext::menu::Ctx& ctx)
 
     ext::menu::Tooltip("Added to the automatic value. Negative makes textures sharper.");
 
+    // "MB Scale Override" can be ticked in the card above at any time: give the override back (or take it again) now.
+    mipbias::OnScaleOverrideMaybeChanged();
+
     if (on)
     {
-        Dim(mipbias::StatusLine(mipbias::CurrentStatus()));
-        Dim(mipbias::CreatedLine(ctx.state.lastMipBias, ctx.state.lastMipBiasMax));
+        const auto status = mipbias::CurrentStatus();
+        if (status.blocked)
+            Red(mipbias::BlockedLine(status.blocked));
+        else
+        {
+            Dim(mipbias::StatusLine(status));
+            Dim(mipbias::CreatedLine(ctx.state.lastMipBias, ctx.state.lastMipBiasMax));
+        }
     }
 
-    Dim("While this is on, \"Set\" and \"Reset\" in the card above are overwritten at the next quality change.");
+    Dim(mipbias::CardNote());
 }
 
 const ext::menu::AutoRegister registration { { "mipmap_auto", "Textures", "Automatic Mipmap Bias", Draw, "mipmap",

@@ -150,6 +150,20 @@ int main(int argc, char** argv)
         CHECK(card.find("settings.mipBiasAutoOffset = static_cast<float>(mipbias::ClampOffset(offset));") !=
               std::string::npos);
 
+        // The Scale override blocks auto: the card shows the red status line instead of the numbers, the note is shown
+        // always, and the card notices a tick of "MB Scale Override" made between two creates.
+        CHECK(card.find("mipbias::OnScaleOverrideMaybeChanged();") != std::string::npos);
+        CHECK(card.find("if (status.blocked)\n            Red(mipbias::BlockedLine(status.blocked));") !=
+              std::string::npos);
+        CHECK(card.find("ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));") != std::string::npos);
+        CHECK(card.find("    Dim(mipbias::CardNote());\n}") != std::string::npos);
+
+        // The glue hands the live Scale override to every entry point of the policy.
+        const std::string glue = ReadAll(root + "/OptiScaler/ext/upscaler/MipBias.cpp");
+        CHECK(glue.find("Config::Instance()->MipmapBiasScaleOverride.value_or_default()") != std::string::npos);
+        CHECK(glue.find("create.scaleMode = ScaleOverrideOn();") != std::string::npos);
+        CHECK(Count(glue, "ScaleOverrideOn()") >= 5); // definition + create + EnsureConfigured + config load + menu + sync
+
         // If a sync renames or drops upstream's card, ours would silently move to the end of the tab.
         const std::string menu = ReadAll(root + "/OptiScaler/menu/menu_common.cpp");
         CHECK(menu.find("{ \"mipmap\", \"Textures\", \"Mipmap Bias\", nullptr, RenderApiAndTextureSettings }") !=

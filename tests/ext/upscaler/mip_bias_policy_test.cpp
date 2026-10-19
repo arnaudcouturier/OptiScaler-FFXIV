@@ -325,6 +325,71 @@ int main()
                    "(was 0.0000, offset +0.00); applies to samplers created from now on");
     }
 
+    // ---- the Scale override ("MB Scale Override") blocks auto: Scale multiplies the game's negative bias by the negative
+    //      automatic value, which blurs. No Engage, no Publish, one warning per episode. -----------------------------------
+    {
+        Policy p;
+        Outcome o = Configure(p, true, 0.0, true); // config load: auto on, Scale on
+        CHECK(o.action == Action::None && !p.engaged);
+        CHECK(o.blocked && o.warn && p.warned);
+
+        o = Configure(p, true, 0.0, true); // a second load or a slider release in the same episode: no second warning
+        CHECK(o.action == Action::None && o.blocked && !o.warn);
+
+        // creates while blocked: the sizes are remembered, nothing is engaged, published or logged
+        o = OnCreate(p, 2560, 1440, 3840, 2160, false, 1.0, true);
+        CHECK(o.accepted && o.action == Action::None && !o.log && !o.warn && !p.engaged && p.haveSizes);
+        o = OnCreate(p, 1280, 720, 3840, 2160, false, 1.0, true);
+        CHECK(o.action == Action::None && !p.engaged && !o.changed);
+        CHECK(StatusOf(p).blocked && StatusOf(p).bias == 0.0);
+
+        // Scale override unticked: the next create (or the card) engages from the remembered sizes at once
+        o = OnCreate(p, 2560, 1440, 3840, 2160, false, 1.0, false);
+        CHECK(o.action == Action::Engage && o.log && Near(o.value, -0.584963) && !o.blocked && !o.warn);
+        CHECK(!StatusOf(p).blocked);
+
+        // ticked again while engaged: the override is given back and the new episode warns once
+        o = OnCreate(p, 2560, 1440, 3840, 2160, false, 1.0, true);
+        CHECK(o.action == Action::Restore && o.warn && o.blocked && !p.engaged && !o.log);
+        o = OnCreate(p, 2560, 1440, 3840, 2160, false, 1.0, true);
+        CHECK(o.action == Action::None && !o.warn);
+
+        // the same flip seen by a create that is itself ignored (the preview): still given back / taken again
+        o = OnCreate(p, 576, 960, 1152, 1920, false, 1.0, false);
+        CHECK(!o.accepted && o.action == Action::Engage && Near(o.value, -0.584963));
+        o = OnCreate(p, 576, 960, 1152, 1920, false, 1.0, true);
+        CHECK(!o.accepted && o.action == Action::Restore && o.warn);
+
+        // auto switched off while Scale is on: nothing to warn about, nothing engaged
+        o = Configure(p, false, 0.0, true);
+        CHECK(o.action == Action::None && !o.blocked && !o.warn && !StatusOf(p).blocked);
+        // ... and on again with Scale still on: a new episode
+        o = Configure(p, true, 0.0, true);
+        CHECK(o.blocked && o.warn);
+    }
+    {
+        // Scale on from the start of the session: native DLAA login screen then the world: never engaged
+        Policy p;
+        Configure(p, true, 0.0, true);
+        for (const unsigned render : { 3840u, 2560u, 2258u })
+        {
+            const Outcome o = OnCreate(p, render, render * 9 / 16, 3840, 2160, false, 1.0, true);
+            CHECK(o.action == Action::None && !p.engaged);
+        }
+        CHECK(StatusOf(p).bias == 0.0);
+    }
+    {
+        // texts
+        CHECK(BlockedLine(false).empty());
+        CHECK(BlockedLine(true).find("utomatic bias needs additive mode; MB Scale Override is on") != std::string::npos);
+        CHECK(ScaleModeWarning().find("MB Scale Override") != std::string::npos);
+        const std::string note = CardNote();
+        CHECK(note.find("Fixed replaces the game's own per-sampler biases with the single value") != std::string::npos);
+        CHECK(note.find("Turn it off from the menu while no level is loading, or edit the ini") != std::string::npos);
+        CHECK(note.find("portrait") != std::string::npos);
+        CHECK(note.find("\"Set\" and \"Reset\"") != std::string::npos);
+    }
+
     // ---- OnRawCreate: the whole create path the glue runs (output scaling choice, extended limits) -------------------------
     {
         RawCreate c;
