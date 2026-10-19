@@ -33,6 +33,12 @@ struct Rig
     int hitchLeft = 0;
     uint64_t hitchDue = 0;
     int stallLeft = -1; // with `recreate`: how many switches still stall (-1 = all)
+    // the plugin applies a new count `lagMs` after the switch (the old count is still reported until then)
+    uint64_t lagMs = 150;
+    int prevFactor = 2;
+    uint64_t switchT = 0;
+    uint64_t zeroFrom = 0, zeroUntil = 0;   // detectedGenerated reads 0 in [from, until)
+    uint64_t pauseFrom = 0, pauseUntil = 0; // frame generation is paused in [from, until)
     GateInputs gate;
     std::vector<AutoMfgLine> lines;
     std::vector<Switch> switches;
@@ -72,7 +78,14 @@ struct Rig
         in.stateValid = true;
         in.slStatus = status;
         in.presented = stuckAtOne ? 1u : (uint32_t) factor;
-        in.detectedGenerated = detectedOverride >= 0 ? detectedOverride : factor - 1;
+        int detected = switchT != 0 && t - switchT < lagMs ? prevFactor - 1 : factor - 1;
+        if (detectedOverride >= 0)
+            detected = detectedOverride;
+        const bool inPause = pauseUntil != 0 && t >= pauseFrom && t < pauseUntil;
+        if (inPause || (zeroUntil != 0 && t >= zeroFrom && t < zeroUntil))
+            detected = 0;
+        in.detectedGenerated = detected;
+        in.paused = inPause;
         const AutoMfgOut out = c.Tick(in);
         for (const auto& l : out.lines)
             lines.push_back(l);
@@ -81,6 +94,8 @@ struct Rig
         if (out.setFactor)
         {
             switches.push_back({ t, factor, out.factor, Why::None });
+            prevFactor = factor;
+            switchT = t;
             factor = out.factor;
             if (recreate && stallLeft != 0)
             {
@@ -245,6 +260,86 @@ void CostlyThresholdFollowsTheUsualInterval()
     CHECK_MSG(r.c.CostlyCount() == 0, "a 190 ms frame in an 80 ms scene counted as a re-creation");
 }
 
+// A tick-by-tick helper: run until the first switch, return its time.
+uint64_t RunToFirstSwitch(Rig& r)
+{
+    while (r.switches.empty())
+        r.Step();
+    return r.switches.back().t;
+}
+
+void TransientZeroAtTheVerdictIsNotAFailure()
+{
+    Rig r;
+    const uint64_t s = RunToFirstSwitch(r);
+    r.zeroFrom = s + 1000; // the plugin's field reads 0 for the one tick that closes the watch
+    r.zeroUntil = s + 1040;
+    r.Run(5000);
+    CHECK_MSG(r.recoveries == 0 && !r.c.Stopped(), "recoveries %d stopped %d", r.recoveries, (int) r.c.Stopped());
+    CHECK(r.Find("AutoMFG: 3x settled (worst interval ") != nullptr && r.Find("applied 3x)") != nullptr);
+    CHECK(r.Count("AutoMFG: inactive") == 0);
+}
+
+void ThreeZeroSamplesAtTheEndAreStillAFailure()
+{
+    Rig r;
+    const uint64_t s = RunToFirstSwitch(r);
+    r.zeroFrom = s + 900; // 0 for the last samples of the watch and on
+    r.zeroUntil = s + 60000;
+    r.Run(20000);
+    CHECK_MSG(r.recoveries == 1 && r.c.Stopped(), "recoveries %d stopped %d", r.recoveries, (int) r.c.Stopped());
+    CHECK(r.Find("applied count 0 != requested 2") != nullptr);
+}
+
+void ANonZeroStatusBeforeTheSwitchIsNotTheSwitchsFault()
+{
+    Rig r;
+    r.status = 0x4; // present all the time, also before and across every switch
+    r.Run(30000);
+    CHECK_MSG(r.switches.size() >= 2 && r.recoveries == 0 && !r.c.Stopped(), "switches %zu recoveries %d", r.switches.size(),
+              r.recoveries);
+}
+
+void ABriefBadStatusIsNotEnough()
+{
+    Rig r;
+    const uint64_t s = RunToFirstSwitch(r);
+    while (r.t < s + 985)
+        r.Step();
+    r.status = 0x2;
+    r.Step();
+    r.Step(); // at most two samples, the one that closes the watch among them
+    r.status = 0;
+    r.Run(10000);
+    CHECK_MSG(r.recoveries == 0 && !r.c.Stopped(), "recoveries %d", r.recoveries);
+}
+
+void AShortPauseAcrossTheWatchEndIsNotAFailure()
+{
+    {
+        Rig r; // the pause is reported (paused flag) around the end of the watch
+        const uint64_t s = RunToFirstSwitch(r);
+        r.pauseFrom = s + 900;
+        r.pauseUntil = s + 1300;
+        r.Run(20000);
+        CHECK_MSG(r.recoveries == 0 && !r.c.Stopped(), "paused flag: recoveries %d stopped %d", r.recoveries,
+                  (int) r.c.Stopped());
+        CHECK(r.factor == 4); // and it goes on working
+    }
+    {
+        Rig r; // no tick for 600 ms (under the 1 s gap rule), the first tick after it still reads 0
+        const uint64_t s = RunToFirstSwitch(r);
+        while (r.t < s + 950)
+            r.Step();
+        r.t += 600;
+        r.zeroFrom = r.t;
+        r.zeroUntil = r.t + 30;
+        r.Run(20000);
+        CHECK_MSG(r.recoveries == 0 && !r.c.Stopped(), "silent 600 ms: recoveries %d stopped %d", r.recoveries,
+                  (int) r.c.Stopped());
+    }
+}
+
 void UnrelatedHitchesDoNotStopTheMode()
 {
     // Two 150 ms game hitches, five minutes apart, each 0.8 s after a switch: nothing to do with a count change.
@@ -330,7 +425,7 @@ void BrokenOutcomesRecoverOnceAndStop()
         const char* text;
     };
     const Case cases[] = {
-        { "status", [](Rig& r) { r.status = 0x2; }, "Streamline status 0x2" },
+        { "status", [](Rig& r) { r.status = 0x2; }, "Streamline status 0x2" }, // raised after the switch (see below)
         { "count not applied", [](Rig& r) { r.detectedOverride = 1; }, "applied count 1 != requested 2" },
         { "presented stuck", [](Rig& r) { r.stuckAtOne = true; }, "presented frames stuck at 1" },
     };
@@ -338,6 +433,11 @@ void BrokenOutcomesRecoverOnceAndStop()
     {
         Rig r;
         r.Run(2500); // 2x in force, accepted as the last good count
+        if (std::string(cs.name) == "status")
+        {
+            while (r.switches.empty()) // a status that was already bad before the switch is not the switch's fault
+                r.Step();
+        }
         cs.apply(r);
         r.Run(30000);
         CHECK_MSG(r.recoveries == 1, "%s: %d recoveries", cs.name, r.recoveries);
@@ -554,6 +654,11 @@ int main()
     FreshControllerProbesOnARefreshBoundScene();
     CostlyOutcomeSlowsDownThenStops();
     CostlyThresholdFollowsTheUsualInterval();
+    TransientZeroAtTheVerdictIsNotAFailure();
+    ThreeZeroSamplesAtTheEndAreStillAFailure();
+    ANonZeroStatusBeforeTheSwitchIsNotTheSwitchsFault();
+    ABriefBadStatusIsNotEnough();
+    AShortPauseAcrossTheWatchEndIsNotAFailure();
     UnrelatedHitchesDoNotStopTheMode();
     LongFrameLaterInTheWatchIsNotTheSignature();
     TheSignatureHasToRepeatInARow();

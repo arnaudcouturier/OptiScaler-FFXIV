@@ -42,7 +42,8 @@ struct AutoMfgTick
     bool stateValid = false; // slDLSSGGetState succeeded
     uint32_t slStatus = 0;   // DLSSGState::status
     uint32_t presented = 0;  // DLSSGState::numFramesActuallyPresented
-    int detectedGenerated = 0; // State::dlssgDetectedInterpolationCount (generated frames the plugin evaluates with)
+    int detectedGenerated = 0; // State::dlssgDetectedInterpolationCount (generated frames the plugin evaluates with); 0 = unknown
+    bool paused = false;       // IFGFeature::IsPaused(): the count field reads 0 while frame generation is paused
 };
 
 struct AutoMfgLine
@@ -120,6 +121,8 @@ class AutoMfgController
     static constexpr uint64_t kWarmupMs = 3000;     // self-test: before the first change
     static constexpr double kSelfTestPassMs = 40.0; // self-test: worst interval to call it in-place
     static constexpr int kSelfTestSteps = 5;
+    static constexpr int kWrongSamples = 3;         // applied count wrong on this many samples in a row at the end of the watch
+    static constexpr int kBadStatusSamples = 3;     // a non-zero Streamline status that persists on this many samples
     static constexpr int kSignatureSamples = 2;     // the re-creation stall is the interval right after the switch
     static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
     static constexpr int kForgetAfterClean = 10;    // clean switches after which earlier strikes are forgotten
@@ -154,7 +157,7 @@ class AutoMfgController
             Info(out, std::format("AutoMFG: active (highest {}x, target {:.0f} fps, display {:.0f} Hz, limit {:.0f})",
                                   hardMax, target, in.refresh, in.limit));
         }
-        const bool gap = lastTick_ != 0 && now >= lastTick_ && now - lastTick_ > kGapMs;
+        const bool gap = (lastTick_ != 0 && now >= lastTick_ && now - lastTick_ > kGapMs) || in.paused;
         lastTick_ = now;
         if (restart_ || gap)
         {
@@ -188,14 +191,23 @@ class AutoMfgController
             if (in.stateValid)
             {
                 ++w_.samples;
-                if (in.slStatus != 0)
+                if (in.slStatus != 0 && w_.baseStatus == 0) // a status that was already set before the switch is not its fault
                 {
-                    w_.statusBad = true;
+                    ++w_.badRun;
                     w_.statusCode = in.slStatus;
                 }
+                else
+                    w_.badRun = 0;
                 if (in.presented >= 2)
                     w_.seenMulti = true;
             }
+            // 0 means "unknown" (the field is zeroed while frame generation pauses), but it is not the requested count either
+            if (in.detectedGenerated == w_.to - 1)
+                w_.wrongRun = 0;
+            else
+                ++w_.wrongRun;
+            if (in.detectedGenerated > 0)
+                w_.lastDetected = in.detectedGenerated;
             if (now - w_.since >= kWatchMs)
                 Verdict(in, out);
         }
@@ -230,6 +242,7 @@ class AutoMfgController
             w_.from = current;
             w_.to = next;
             w_.baselineMs = fromSelector ? sel_.Last().avgMs : st_.baselineMs;
+            w_.baseStatus = in.stateValid ? in.slStatus : 0;
             if (!fromSelector)
                 sel_.Restart(now);
             out.setFactor = true;
@@ -259,8 +272,11 @@ class AutoMfgController
         double early = 0.0; // longest of the first kSignatureSamples intervals after the switch
         int ticks = 0;
         double baselineMs = 0.0;
-        bool statusBad = false;
+        uint32_t baseStatus = 0; // Streamline status when the switch was made
+        int badRun = 0;          // consecutive samples with a status that was 0 before the switch
         uint32_t statusCode = 0;
+        int wrongRun = 0;        // consecutive samples whose applied count is not the requested one (0 included)
+        int lastDetected = 0;    // last non-zero applied count seen (generated frames)
         bool seenMulti = false;
         int samples = 0;
     };
@@ -318,13 +334,14 @@ class AutoMfgController
         const Watch w = w_;
         w_ = {};
         const int requested = w.to - 1;
-        const bool countWrong = in.detectedGenerated != requested;
+        const bool countWrong = (in.detectedGenerated > 0 && in.detectedGenerated != requested) || w.wrongRun >= kWrongSamples;
+        const bool statusBad = w.badRun >= kBadStatusSamples;
         const bool stuck = w.samples >= 5 && !w.seenMulti;
         const double costlyAt = std::max(kCostlyMs, 3.0 * w.baselineMs);
-        if (w.statusBad || countWrong || stuck)
+        if (statusBad || countWrong || stuck)
         {
             std::string why;
-            if (w.statusBad)
+            if (statusBad)
                 why = std::format("Streamline status {:#x}", w.statusCode);
             else if (countWrong)
                 why = std::format("applied count {} != requested {} (generated frames)", in.detectedGenerated, requested);
@@ -370,7 +387,8 @@ class AutoMfgController
             Info(out, std::format("AutoMFG: {} clean changes since the last long frame, normal hold and probes again",
                                   kForgetAfterClean));
         }
-        Info(out, std::format("AutoMFG: {}x settled (worst interval {:.0f} ms, applied {}x)", w.to, w.worst, w.to));
+        Info(out, std::format("AutoMFG: {}x settled (worst interval {:.0f} ms, applied {})", w.to, w.worst,
+                              w.lastDetected > 0 ? std::format("{}x", w.lastDetected + 1) : std::string("unknown")));
         if (st_.running)
             st_.worst = std::max(st_.worst, w.worst);
         lastGood_ = w.to;
