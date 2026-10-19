@@ -9,6 +9,7 @@
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/presets/NrUserPresets.h"
+#include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 
 #include <Config.h>
@@ -238,13 +239,17 @@ void RenderMenu(float menuResScale)
         bool approxCamera = nr.residualFgApproxCamera.value_or_default();
         if (ImGui::Checkbox("Allow approximate FG camera guides (experimental)", &approxCamera))
             nr.residualFgApproxCamera = approxCamera;
-        HelpMarker("Allows the every-second-frame mode to run its separate NVIDIA FG pass using estimated camera data.\nThis adds FG and image-history work; it is not just a cheap guide toggle. May cause artifacts during camera movement.\nThe GPU breakdown reports cost per call. Normally NR and residual FG run together on NR anchors; the split-work option separates them.");
-        ImGui::BeginDisabled(!residualFg || !approxCamera || !ext::nr::BridgedNativeTitle());
-        bool splitWork = nr.splitFrameWork.value_or_default();
-        if (ImGui::Checkbox("Spread alternating NR across two frames (experimental)", &splitWork))
-            nr.splitFrameWork = splitWork;
-        HelpMarker("FFXIV: run NR on one frame and its private DLSS/FG on the next.\nRetains matching guides and scene images. Adds one extra rendered frame of buffering (two total).\nMay improve pacing but increases latency and memory use. Applies live and restarts private history.");
-        ImGui::EndDisabled();
+        HelpMarker("Allows the every-second-frame mode to run its separate NVIDIA FG pass using estimated camera data.\nThis adds FG and image-history work; it is not just a cheap guide toggle. May cause artifacts during camera movement.\nThe GPU breakdown reports cost per call. Normally NR and residual FG run together on NR anchors; the split-work option (FFXIV only) separates them.");
+        // FFXIV-only option: drawn only on the FFXIV build match.
+        if (ext::nr::BridgedNativeTitle())
+        {
+            ImGui::BeginDisabled(!residualFg || !approxCamera);
+            bool splitWork = nr.splitFrameWork.value_or_default();
+            if (ImGui::Checkbox("Spread alternating NR across two frames (FFXIV, experimental)", &splitWork))
+                nr.splitFrameWork = splitWork;
+            HelpMarker("FFXIV: run NR on one frame and its private DLSS/FG on the next.\nRetains matching guides and scene images. Adds one extra rendered frame of buffering (two total).\nMay improve pacing but increases latency and memory use. Applies live and restarts private history.");
+            ImGui::EndDisabled();
+        }
         ImGui::EndDisabled();
 
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
@@ -602,7 +607,7 @@ void RenderMenu(float menuResScale)
         auto* const lighting = ext::nr::NativeLighting(); // FFXIV native DX11 lighting (B6), null for every other game
         const bool nativeLighting = lighting != nullptr;
         if (nativeLighting)
-            ImGui::TextWrapped("FFXIV applies exposure before NR. Native scanned lighting can detect abrupt lighting changes for history rejection.");
+            ImGui::TextWrapped("(FFXIV) The game applies exposure before NR. Native scanned lighting can detect abrupt lighting changes for history rejection.");
         else
             ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
 
@@ -611,15 +616,15 @@ void RenderMenu(float menuResScale)
 
         if (nativeLighting)
         {
-            static const char* sources[] { "Manual paper white", "Game exposure", "Scanned exposure (native DX11)" };
+            static const char* sources[] { "Manual paper white", "Game exposure", "Scanned exposure (FFXIV native DX11)" };
             int source = (int) std::min(nr.whitePointSource.value_or_default(), 2u);
-            if (ImGui::Combo("Exposure source", &source, sources, IM_ARRAYSIZE(sources)))
+            if (ImGui::Combo("Exposure source (FFXIV)", &source, sources, IM_ARRAYSIZE(sources)))
                 nr.whitePointSource = (uint32_t) source;
             HelpMarker("Scanned exposure follows FFXIV's verified native DX11 lighting shaders.\nThe game has already applied exposure: no additional brightness correction or calibration is used.");
             if (source == 2)
             {
                 bool history = nr.lightingHistory.value_or_default();
-                if (ImGui::Checkbox("Reject abrupt lighting history (experimental)", &history))
+                if (ImGui::Checkbox("Reject abrupt lighting history (FFXIV, experimental)", &history))
                     nr.lightingHistory = history;
                 HelpMarker("Restart NR and its private PreSR reconstruction history when native tone response changes abruptly.\nGradual adaptation and stale readings do not trigger resets. Turn this off to compare while keeping the scan active.");
                 const auto light = lighting->Status();
@@ -1202,6 +1207,51 @@ void RenderMenu(float menuResScale)
             nr.debugView = (uint32_t) debugView;
 
         HelpMarker("Show the model input, raw output, or a 20x amplified difference. Grey in Difference means no change.");
+
+        // Advanced (closed by default): the developer and diagnostic keys, and the experimental placement of the
+        // peripheral spatial compression (offset and shift, saved in the NR presets like the other spatial keys).
+        if (ImGui::TreeNode("Advanced##nr_card"))
+        {
+            const bool spatialOn = nr.spatialCompression.value_or_default();
+            if (spatialOn)
+            {
+                ImGui::TextDisabled("Peripheral spatial compression: placement (experimental)");
+                const auto placement = Spatial::ReadSettings(nr);
+                const float maxOffsetX = Spatial::MaxCenterOffset(placement.centerX);
+                const float maxOffsetY = Spatial::MaxCenterOffset(placement.centerY);
+                const auto shiftLimitsX = Spatial::WorkShiftLimits(placement, false);
+                const auto shiftLimitsY = Spatial::WorkShiftLimits(placement, true);
+                DeferredSlider("Central region offset (horizontal)", &nr.spatialOffsetX, -maxOffsetX, maxOffsetX, 0.0f, "%.1f%%");
+                HelpMarker("Moves the central region away from the middle of the frame, in percent of the frame width. Limited so the region stays inside the frame; the status line above says why a value is refused.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                DeferredSlider("Central region offset (vertical)", &nr.spatialOffsetY, -maxOffsetY, maxOffsetY, 0.0f, "%.1f%%");
+                HelpMarker("The same, in percent of the frame height.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                DeferredSlider("Work shift (horizontal)", &nr.spatialShiftX, shiftLimitsX.first, shiftLimitsX.second, 0.0f, "%.1f%%");
+                HelpMarker("Moves part of the peripheral work budget from one side of the central region to the other, in percent of the frame width. Limited by the work budget and the room each side has.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                DeferredSlider("Work shift (vertical)", &nr.spatialShiftY, shiftLimitsY.first, shiftLimitsY.second, 0.0f, "%.1f%%");
+                HelpMarker("The same, in percent of the frame height.\nThe change is applied when the slider is released. Saved in the NR presets.");
+            }
+            else
+                ImGui::TextDisabled("The placement of the peripheral spatial compression appears here when it is switched on.");
+
+            ImGui::BeginDisabled(ext::nr::BridgedNativeTitle());
+            bool scanExposure = nr.scanExposure.value_or_default();
+            if (ImGui::Checkbox("Scan for the game's exposure (developer)", &scanExposure))
+                nr.scanExposure = scanExposure;
+            HelpMarker("Developer override: run the exposure scan even when the White point source is not Scanned exposure, to watch it in a game that supplies a real exposure and compare the two in the log. Not needed for normal use.\nChecked every frame: applies at once. Has no effect in FFXIV, which uses its native lighting scan instead.");
+            ImGui::EndDisabled();
+
+            bool autoCapture = nr.autoCapture.value_or_default();
+            if (ImGui::Checkbox("Capture frames automatically (once per session)", &autoCapture))
+                nr.autoCapture = autoCapture;
+            HelpMarker("Writes one set of matched before/after frames (at most eight) to a dlssnr-capture folder beside OptiScaler: one capture per session, once the game has run 180 frames; each run overwrites the last.\nChecked every frame: applies at once.");
+
+            bool vitCapture = nr.vitCapture.value_or_default();
+            if (ImGui::Checkbox("Log NR kernel launches (profiling, restart)", &vitCapture))
+                nr.vitCapture = vitCapture;
+            HelpMarker("Profiling aid for a new NR model file, log only: records the CUDA launches of the first NR evaluations and dumps the ViT kernel module to the nr-vit-capture folder beside OptiScaler. Never drops, changes or delays a launch.\nThe runtime creates its CUDA modules when NR starts: applies after a restart.");
+
+            ImGui::TreePop();
+        }
 
         ImGui::PopItemWidth();
     }

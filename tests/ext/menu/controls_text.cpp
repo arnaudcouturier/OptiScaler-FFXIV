@@ -34,35 +34,76 @@ using menuscan::Squash;
 
 struct Row
 {
-    const char* file;                // under OptiScaler/ext
-    const char* widget;              // the widget call up to its label, e.g. ImGui::Combo("ReShade presets"
-    const char* write;               // must sit inside the widget block: the config write from the widget's own value
-    const char* keyPrefix;           // every write of the key in the file: "" = not counted
-    int writes;                      // how many times keyPrefix occurs in the file
-    std::vector<const char*> block;  // phrases that must sit inside the widget block (label end, tooltip)
+    const char* file = "";            // under OptiScaler/ext
+    const char* widget = "";          // the widget call up to its label, e.g. ImGui::Combo("ReShade presets"
+    const char* write = "";           // must sit inside the widget block: the config write from the widget's own value
+    const char* keyPrefix = "";       // every write of the key in the file: "" = not counted
+    int writes = 1;                   // how many times keyPrefix occurs in the file
+    std::vector<const char*> block;   // phrases that must sit inside the widget block (label end, tooltip)
     std::vector<const char*> fileHas; // phrases that must be somewhere in the file
-    const char* fold;                // TreeNode(...) call whose span must contain the widget; "" = no fold check
-    const char* before;              // marker the widget must come before (main view above a fold); "" = no check
+    const char* fold = "";            // TreeNode(...) call whose span must contain the widget; "" = no fold check
+    const char* before = "";          // marker the widget must come before (main view above a fold); "" = no check
     std::vector<const char*> blockNot; // phrases that must NOT sit inside the widget block (e.g. "restart" on a live key)
+    const char* guard = "";           // text ending with '{': the widget must sit inside these braces (game or mode gate)
 };
+
+constexpr const char* kNrAdvanced = "ImGui::TreeNode(\"Advanced##nr_card\")"; // closed by default: plain TreeNode, no DefaultOpen
 
 const Row kRows[] = {
     // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card, read at every UI boundary = applies at once
-    { "hudless/HudlessMenu.cpp", "ImGui::Combo(\"ReShade presets at the UI boundary\"",
-      "ext::Cfg().reshade.presets=std::string(kPresetNames[preset])", "ext::Cfg().reshade.presets=", 1,
-      { "applies at once", "Only used in UI-free mode" }, { "ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default())" }, "",
-      "ImGui::TreeNode(\"Advanced\")", { "restart" } },
+    { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"ReShade presets at the UI boundary\"",
+      .write = "ext::Cfg().reshade.presets=std::string(kPresetNames[preset])", .keyPrefix = "ext::Cfg().reshade.presets=",
+      .block = { "applies at once", "Only used in UI-free mode" },
+      .fileHas = { "ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default())" }, .before = "ImGui::TreeNode(\"Advanced\")",
+      .blockNot = { "restart" } },
     // WP4 item 1: [DLSSG] UIRecomposition (auto/on/off), inside the existing Advanced fold, read when DLSS-G is created = restart
-    { "hudless/HudlessMenu.cpp", "ImGui::Combo(\"UI recomposition (restart)\"",
-      "recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1)", "recompositionSetting=recomposition==0",
-      1, { "applies after a restart", "Recomposition mode only" }, { "auto&recompositionSetting=ext::Cfg().fg.uiRecomposition;" },
-      "ImGui::TreeNode(\"Advanced\")", "", {} },
+    { .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"UI recomposition (restart)\"",
+      .write = "recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1)",
+      .keyPrefix = "recompositionSetting=recomposition==0", .block = { "applies after a restart", "Recomposition mode only" },
+      .fileHas = { "auto&recompositionSetting=ext::Cfg().fg.uiRecomposition;" }, .fold = "ImGui::TreeNode(\"Advanced\")" },
     // WP4 item 2: [XeFG] UnlockMFG and MaxInterpolatedFrames, drawn inside upstream's XeFG card (XeFgExtras); both are read when
     // the provider is loaded / the swapchain is created = restart
-    { "fg/xefg/XefgSeams.cpp", "ImGui::Checkbox(\"Unlock multi frame generation (restart)\"", "fgCfg.xefgUnlock=unlockMfg", "fgCfg.xefgUnlock=", 1,
-      { "applies after a restart", "never changed" }, {}, "", "", {} },
-    { "fg/xefg/XefgSeams.cpp", "ImGui::SliderInt(\"Max XeFG multiplier (restart)\"", "fgCfg.xefgMaxInterpolatedFrames=maxMultiplier-1",
-      "fgCfg.xefgMaxInterpolatedFrames=", 1, { "applies after a restart", "handed to the provider" }, { "BeginDisabled(!unlockMfg)" }, "", "", {} },
+    { .file = "fg/xefg/XefgSeams.cpp", .widget = "ImGui::Checkbox(\"Unlock multi frame generation (restart)\"",
+      .write = "fgCfg.xefgUnlock=unlockMfg", .keyPrefix = "fgCfg.xefgUnlock=", .block = { "applies after a restart", "never changed" } },
+    { .file = "fg/xefg/XefgSeams.cpp", .widget = "ImGui::SliderInt(\"Max XeFG multiplier (restart)\"",
+      .write = "fgCfg.xefgMaxInterpolatedFrames=maxMultiplier-1", .keyPrefix = "fgCfg.xefgMaxInterpolatedFrames=",
+      .block = { "applies after a restart", "handed to the provider" }, .fileHas = { "BeginDisabled(!unlockMfg)" } },
+
+    // WP4 item 4 (a): the two FFXIV-only NR options stay in the NR card, drawn only on the FFXIV build match, "(FFXIV)" in the label
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Spread alternating NR across two frames (FFXIV, experimental)\"",
+      .write = "nr.splitFrameWork=splitWork", .keyPrefix = "nr.splitFrameWork=", .block = { "FFXIV: run NR on one frame" },
+      .fileHas = { "ImGui::BeginDisabled(!residualFg || !approxCamera);" }, .guard = "if (ext::nr::BridgedNativeTitle())\n{" },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Combo(\"Exposure source (FFXIV)\"", .write = "nr.whitePointSource=(uint32_t)source;",
+      .block = { "verified native DX11 lighting shaders" },
+      .fileHas = { "(FFXIV) The game applies exposure before NR.", "\"Scanned exposure (FFXIV native DX11)\"" },
+      .guard = "if (nativeLighting)\n{" },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Reject abrupt lighting history (FFXIV, experimental)\"",
+      .write = "nr.lightingHistory=history", .keyPrefix = "nr.lightingHistory=", .block = { "Restart NR and its private PreSR" },
+      .guard = "if (nativeLighting)\n{" },
+
+    // WP4 item 4 (b): the closed "Advanced" fold at the end of the NR card: developer/diagnostic keys and the spatial placement
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Scan for the game's exposure (developer)\"",
+      .write = "nr.scanExposure=scanExposure", .keyPrefix = "nr.scanExposure=", .block = { "applies at once", "no effect in FFXIV" },
+      .fileHas = { "ImGui::BeginDisabled(ext::nr::BridgedNativeTitle());", "ImGui::TreePop();\n}\n\nImGui::PopItemWidth();" },
+      .fold = kNrAdvanced },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Capture frames automatically (once per session)\"",
+      .write = "nr.autoCapture=autoCapture", .keyPrefix = "nr.autoCapture=", .block = { "one capture per session", "applies at once" },
+      .fold = kNrAdvanced },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Log NR kernel launches (profiling, restart)\"",
+      .write = "nr.vitCapture=vitCapture", .keyPrefix = "nr.vitCapture=", .block = { "applies after a restart", "log only" },
+      .fold = kNrAdvanced },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Central region offset (horizontal)\"",
+      .write = "&nr.spatialOffsetX,-maxOffsetX,maxOffsetX,0.0f", .keyPrefix = "&nr.spatialOffsetX",
+      .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Central region offset (vertical)\"",
+      .write = "&nr.spatialOffsetY,-maxOffsetY,maxOffsetY,0.0f", .keyPrefix = "&nr.spatialOffsetY",
+      .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Work shift (horizontal)\"",
+      .write = "&nr.spatialShiftX,shiftLimitsX.first,shiftLimitsX.second,0.0f", .keyPrefix = "&nr.spatialShiftX",
+      .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
+    { .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Work shift (vertical)\"",
+      .write = "&nr.spatialShiftY,shiftLimitsY.first,shiftLimitsY.second,0.0f", .keyPrefix = "&nr.spatialShiftY",
+      .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
 };
 
 // Squashed code of the file with the widget's block cut out: from the widget to the next input widget, fold or TreePop
@@ -74,7 +115,7 @@ std::string BlockOf(const std::string& code, const std::string& widget)
     static const char* kEnds[] = { "ImGui::Checkbox(", "ImGui::Combo(",       "ImGui::SliderInt(", "ImGui::SliderFloat(",
                                    "ImGui::InputInt(", "ImGui::InputFloat(",  "ImGui::DragInt(",   "ImGui::DragFloat(",
                                    "ImGui::Button(",   "ImGui::SmallButton(", "ImGui::TreeNode(",  "ImGui::TreePop(",
-                                   "ImGui::CollapsingHeader(", "SectionTitle(" };
+                                   "ImGui::CollapsingHeader(", "SectionTitle(", "DeferredSlider(" };
     size_t end = code.size();
     for (const char* e : kEnds)
     {
@@ -101,6 +142,32 @@ bool FoldSpan(const std::string& code, const std::string& node, size_t& start, s
             end = i;
             return true;
         }
+    }
+    return false;
+}
+
+// [start, end) of the braces opened by `guard` (squashed text ending with '{'), up to the matching '}'
+bool GuardSpan(const std::string& code, const std::string& guard, size_t& start, size_t& end)
+{
+    start = code.find(guard);
+    if (start == std::string::npos || code.find(guard, start + guard.size()) != std::string::npos)
+        return false;
+    int depth = 1;
+    for (size_t i = start + guard.size(); i < code.size();)
+    {
+        if (code[i] == '"')
+        {
+            i = menuscan::SkipString(code, i);
+            continue;
+        }
+        if (code[i] == '{')
+            ++depth;
+        else if (code[i] == '}' && --depth == 0)
+        {
+            end = i;
+            return true;
+        }
+        ++i;
     }
     return false;
 }
@@ -145,6 +212,14 @@ std::vector<std::string> Problems(const Row& r, const std::string& code)
         const size_t marker = code.find(Squash(r.before));
         if (marker == std::string::npos || at > marker)
             bad(std::string("the widget does not come before: ") + r.before);
+    }
+    if (r.guard[0] != '\0')
+    {
+        size_t start = 0, end = 0;
+        if (!GuardSpan(code, Squash(r.guard), start, end))
+            bad(std::string("the gate is missing, doubled or never closed: ") + r.guard);
+        else if (at < start || at > end)
+            bad(std::string("the widget is outside its gate: ") + r.guard);
     }
     return p;
 }
@@ -195,6 +270,12 @@ int main(int argc, char** argv)
             const std::string node = Squash(r.fold);
             CHECK(!Problems(r, Replace(code, node, node + "ImGui::TreePop();")).empty()); // the fold closes before the widget
             CHECK(!Problems(r, Replace(code, node, "if(true){")).empty());                  // no fold at all
+        }
+        if (r.guard[0] != '\0')
+        {
+            const std::string gate = Squash(r.guard);
+            CHECK(!Problems(r, Replace(code, gate, "if(true){")).empty());   // no gate at all
+            CHECK(!Problems(r, Replace(code, gate, gate + "}{")).empty());    // the gate closes before the widget
         }
         if (r.before[0] != '\0')
         {
