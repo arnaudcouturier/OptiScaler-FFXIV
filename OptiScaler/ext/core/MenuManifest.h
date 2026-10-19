@@ -46,4 +46,19 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] Diagnostics", // shows the HUD-less diagnostics card
     "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
 };
+
+// Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member
+// called mode), so the key rule of tests/ext/menu/menu_key_controls.cpp cannot tell them apart by name: the menu file (relative
+// to ext/) that draws the control and a text that must be in it (whitespace and comments ignored).
+struct KeyEvidence
+{
+    const char* key;  // "[Section] Key"
+    const char* file;
+    const char* text;
+};
+inline constexpr KeyEvidence kKeyEvidence[] = {
+    { "[HDR] Mode", "hdr/menu/HdrMenu.cpp", "hdr.mode = mode;" },
+    { "[HudLess] Mode", "hudless/HudlessMenu.cpp", "ext::hudless::SetMode(chosen);" },
+    { "[Window] Mode", "window/WindowMenu.cpp", "cfg.mode = std::string(kNames[index]);" },
+};
 } // namespace ext::menu::manifest
