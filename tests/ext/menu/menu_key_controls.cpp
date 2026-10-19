@@ -6,6 +6,9 @@
 // members, upstream's menu_common.cpp). That is the same evidence the menu inventory of the redesign used. It proves the
 // control exists in a file of the menu, not that the widget is correct: the per-widget pins of the WP4 controls live in
 // controls_text, and the card files in their own text-pin tests. A read-only mention would also count as evidence.
+// A second limit: a generic member name (`enabled`, `strength`...) can also be satisfied by an unrelated struct field that a menu
+// file happens to name, not only by another config member. The keys of the WP4 brief all have distinctive names and are pinned
+// one by one in controls_text, so the rule still covers them; for the generic names it is a safety net, not a proof.
 // Member names shared by several configs ("mode" is bound by [HDR], [HudLess] and [Window]) cannot be told apart by name:
 // they carry an explicit proof in MenuManifest.h kKeyEvidence (a menu file and a text that must be in it).
 // The generated NR Pass4..Pass30 keys are built by a loop, not by a literal b.Add, so they are outside the rule.
