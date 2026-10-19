@@ -141,6 +141,13 @@ struct Rig
         return nullptr;
     }
     int ResultLines() const { return Count("AutoMFG self-test: PASS") + Count("AutoMFG self-test: FAIL"); }
+    int LinesWith(const std::string& needle) const
+    {
+        int n = 0;
+        for (const auto& l : lines)
+            n += l.text.find(needle) != std::string::npos;
+        return n;
+    }
 };
 
 void GatingLogsTheReasonOnce()
@@ -582,6 +589,13 @@ void SelfTestFailures()
         r.Run(80000);
         CHECK(r.ResultLines() == 1 && r.Find("AutoMFG self-test: FAIL (re-created: worst interval 190 ms") != nullptr);
         CHECK(r.c.CostlyCount() >= 2 && r.c.Stopped());
+        // The test failed and stopped the mode: the count in force before it comes back, once, and nothing moves it afterwards
+        // (the restore lands through the closed gate on the tick after the stop).
+        CHECK_MSG(r.factor == 3, "the failed, stopped self-test left %dx (3x before the test)", r.factor);
+        CHECK(r.LinesWith("(back to the count in use before the test)") == 1);
+        const size_t n = r.switches.size();
+        r.Run(60000);
+        CHECK(r.switches.size() == n && r.factor == 3);
     }
     {
         Rig r; // slow but not re-created

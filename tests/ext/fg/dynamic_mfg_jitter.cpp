@@ -81,9 +81,41 @@ void NoiseNearTheThresholdsDoesNotMoveTheFactor()
         for (const uint32_t seed : kSeeds)
         {
             const Result r = Run(sc, seed);
-            CHECK_MSG(r.ruleSwitches <= 2, "%s, seed %u: %d rule switches in 5 minutes (all %d)", sc.name, seed,
+            // the correct code makes none on these seeds (Fix 6): a mutant that adds one or two is caught
+            CHECK_MSG(r.ruleSwitches == 0, "%s, seed %u: %d rule switches in 5 minutes (all %d)", sc.name, seed,
                       r.ruleSwitches, r.allSwitches);
             CHECK_MSG(r.finalFactor == (int) sc.expect, "%s, seed %u: ended at %dx", sc.name, seed, r.finalFactor);
+        }
+}
+
+// The other side: a plant 1.5 % beyond the same edges, under the same noise, does move, and soon. Without this a selector that
+// never switches would pass the test above.
+const Scenario kBeyond[] = {
+    { "2x at 0.916 x target (beyond the up edge)", 2, 0.916, 3 },
+    { "3x at 0.916 x target (beyond the up edge)", 3, 0.916, 4 },
+    { "4x at 1.32 x target (beyond the wide down edge)", 4, 1.32, 3 },
+    { "3x at 1.477 x target (beyond the wide down edge)", 3, 1.477, 2 },
+};
+
+void NoiseBeyondTheThresholdsStillMovesTheFactor()
+{
+    for (const auto& sc : kBeyond)
+        for (const uint32_t seed : kSeeds)
+        {
+            Sim s;
+            s.target = kTarget;
+            s.factor = sc.start;
+            s.probe = false;
+            const double baseMs = 1000.0 / (sc.ratio * kTarget / sc.start);
+            Lcg rng(seed);
+            s.Step(baseMs);
+            const uint64_t t0 = s.t;
+            while (s.t < t0 + 60000)
+                s.Step(baseMs * (1.0 + kJitter * (2.0 * rng.Next() - 1.0)));
+            CHECK_MSG(!s.log.empty() && s.log[0].t - t0 <= 10000, "%s, seed %u: first switch after %llu ms", sc.name, seed,
+                      s.log.empty() ? 0ull : s.log[0].t - t0);
+            CHECK_MSG(s.factor == (int) sc.expect && s.log.size() == 1, "%s, seed %u: ended at %dx after %zu switches", sc.name,
+                      seed, s.factor, s.log.size());
         }
 }
 
@@ -116,7 +148,10 @@ void ThePlantReallyCrossesTheThresholds()
             ++samples;
             beyond += (up || down);
         }
-        CHECK_MSG(beyond > 0, "%s: the smoothed rate never reached the threshold (%d samples)", sc.name, samples);
+        std::printf("      info: %s: %d of %d samples beyond the threshold\n", sc.name, beyond, samples);
+        // at least a quarter of a percent of the samples (the plants above reach 0.4 to 2.3 percent)
+        CHECK_MSG(beyond * 400 >= samples, "%s: the smoothed rate reached the threshold on %d of %d samples only", sc.name, beyond,
+                  samples);
     }
 }
 } // namespace
@@ -124,6 +159,7 @@ void ThePlantReallyCrossesTheThresholds()
 int main()
 {
     NoiseNearTheThresholdsDoesNotMoveTheFactor();
+    NoiseBeyondTheThresholdsStillMovesTheFactor();
     ThePlantReallyCrossesTheThresholds();
     if (g_failures)
     {
