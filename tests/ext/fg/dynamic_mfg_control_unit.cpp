@@ -33,6 +33,7 @@ struct Rig
     int hitchLeft = 0;
     uint64_t hitchDue = 0;
     int stallLeft = -1; // with `recreate`: how many switches still stall (-1 = all)
+    bool stallUpOnly = false; // with `recreate`: only a switch to a higher count stalls (a plugin that grows buffers)
     // the plugin applies a new count `lagMs` after the switch (the old count is still reported until then)
     uint64_t lagMs = 150;
     int prevFactor = 2;
@@ -96,8 +97,9 @@ struct Rig
             switches.push_back({ t, factor, out.factor, Why::None });
             prevFactor = factor;
             switchT = t;
+            const bool up = out.factor > factor;
             factor = out.factor;
-            if (recreate && stallLeft != 0)
+            if (recreate && stallLeft != 0 && (up || !stallUpOnly))
             {
                 pendingStall = stallMs;
                 if (stallLeft > 0)
@@ -389,6 +391,51 @@ void TheSignatureHasToRepeatInARow()
     r.Run(90000);
     CHECK_MSG(r.c.CostlyCount() == 2 && !r.c.Stopped(), "two strikes but not in a row: stopped %d", (int) r.c.Stopped());
     CHECK_MSG(r.factor == 2, "factor %dx", r.factor);
+}
+
+void ARecreationOnUpStepsOnlyStillStopsOnTheThirdStrike()
+{
+    // A plugin that re-creates DLS-G only when the count grows: the down steps are clean and break the "two in a row" row,
+    // so the row alone would never stop it. Heavy scene (3x is right) and light scene (2x is right) alternate.
+    Rig r;
+    r.plant.refresh = 0;
+    r.plant.limit = 0;
+    r.recreate = true;
+    r.stallUpOnly = true;
+    int phase = 0;
+    auto runPhase = [&r, &phase]
+    {
+        r.plant.base2x = phase % 2 == 0 ? 10.0 : 4.0;
+        ++phase;
+        r.Run(40000);
+    };
+    runPhase(); // up: strike 1
+    CHECK_MSG(r.switches.size() == 1 && r.c.CostlyCount() == 1 && !r.c.Stopped(), "switches %zu strikes %d", r.switches.size(),
+              r.c.CostlyCount());
+    runPhase(); // down, clean
+    runPhase(); // up: strike 2
+    runPhase(); // down, clean
+    CHECK_MSG(r.switches.size() == 4 && r.c.CostlyCount() == 2 && !r.c.Stopped(), "switches %zu strikes %d stopped %d",
+              r.switches.size(), r.c.CostlyCount(), (int) r.c.Stopped());
+    {
+        // The same history, then the self-test: its first up step stalls (strike 3), the second is clean (that breaks the
+        // row), so only the total stops the mode when the test ends.
+        Rig s = r;
+        s.selfTest = true;
+        s.stallLeft = 1;
+        s.Run(60000);
+        CHECK(s.ResultLines() == 1 && s.Find("AutoMFG self-test: FAIL (re-created") != nullptr);
+        CHECK_MSG(s.c.CostlyCount() == 3 && s.c.Stopped(), "self-test: strikes %d stopped %d", s.c.CostlyCount(),
+                  (int) s.c.Stopped());
+    }
+    runPhase(); // up: strike 3
+    CHECK_MSG(r.c.Stopped() && r.c.CostlyCount() == 3, "strikes %d stopped %d", r.c.CostlyCount(), (int) r.c.Stopped());
+    CHECK(r.Count("AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped") == 1);
+    CHECK(r.switches.size() == 5 && r.recoveries == 0);
+    const size_t n = r.switches.size();
+    runPhase();
+    runPhase();
+    CHECK(r.switches.size() == n); // stopped means stopped
 }
 
 void StrikesAreForgottenAfterTenCleanSwitches()
@@ -724,6 +771,7 @@ int main()
     UnrelatedHitchesDoNotStopTheMode();
     LongFrameLaterInTheWatchIsNotTheSignature();
     TheSignatureHasToRepeatInARow();
+    ARecreationOnUpStepsOnlyStillStopsOnTheThirdStrike();
     StrikesAreForgottenAfterTenCleanSwitches();
     BrokenOutcomesRecoverOnceAndStop();
     ActivationAndGapCloseTheWatchWithoutAVerdict();

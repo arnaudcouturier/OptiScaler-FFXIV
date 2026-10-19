@@ -9,7 +9,8 @@
 // Kill-switch, after each switch (study 3.2):
 //   clean   - worst real-frame interval below the threshold, applied count = requested, Streamline status 0;
 //   costly  - a worst interval >= max(100 ms, 3 x the interval before the switch): the signature of a feature
-//             re-creation. The hold becomes 12 s and probing stops; a second one stops automatic mode for the session;
+//             re-creation. The hold becomes 12 s and probing stops; a second one in a row, or a third without ten clean
+//             switches between, stops automatic mode for the session;
 //   broken  - Streamline status != 0, applied count not reached after the second, or presented stuck at 1: one recovery
 //             through the existing toggle path to the last good count, then automatic mode stops for the session.
 
@@ -125,6 +126,8 @@ class AutoMfgController
     static constexpr int kBadStatusSamples = 3;     // a non-zero Streamline status that persists on this many samples
     static constexpr int kSignatureSamples = 2;     // the re-creation stall is the interval right after the switch
     static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
+    static constexpr int kStrikesInTotalToStop = 3; // so do this many signatures without ten clean switches between (a
+                                                    // plugin that re-creates DLS-G only on up steps breaks the row every time)
     static constexpr int kForgetAfterClean = 10;    // clean switches after which earlier strikes are forgotten
 
     AutoMfgOut Tick(const AutoMfgTick& in)
@@ -320,6 +323,10 @@ class AutoMfgController
 
     static constexpr int kCycle[kSelfTestSteps] = { 2, 3, 4, 3, 2 };
 
+    // The re-creation signature on two switches in a row, or on three without ten clean switches between (costly_ is
+    // forgotten after kForgetAfterClean clean ones, so isolated hitches minutes apart never add up).
+    bool TooManySignatures() const { return streak_ >= kStrikesToStop || costly_ >= kStrikesInTotalToStop; }
+
     void Line(AutoMfgOut& out, bool warn, std::string text) { out.lines.push_back({ warn, std::move(text) }); }
     void Info(AutoMfgOut& out, std::string text) { Line(out, false, std::move(text)); }
     void Warn(AutoMfgOut& out, std::string text) { Line(out, true, std::move(text)); }
@@ -401,7 +408,7 @@ class AutoMfgController
                 ++st_.costly;
                 st_.worst = std::max(st_.worst, w.worst);
             }
-            else if (streak_ >= kStrikesToStop)
+            else if (TooManySignatures())
             {
                 stopped_ = true;
                 Warn(out, "AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped");
@@ -467,7 +474,7 @@ class AutoMfgController
                                   st_.changes, st_.worst));
         else
             Warn(out, std::format("AutoMFG self-test: FAIL ({})", detail));
-        if (streak_ >= kStrikesToStop && !stopped_)
+        if (TooManySignatures() && !stopped_)
         {
             stopped_ = true;
             Warn(out, "AutoMFG: changing the count recreates DLSS-G on this setup; automatic MFG stopped");
