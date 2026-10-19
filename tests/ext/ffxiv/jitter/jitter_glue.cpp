@@ -141,6 +141,7 @@ struct Frame
     std::uint64_t timeMs = 0;
     std::optional<float> ngxJx, ngxJy;
     bool ngxMissing = false; // the block has no Jitter.Offset at all
+    std::optional<std::pair<float, float>> ndcFrom; // the object's NDC values are those of THIS jitter (another frame's) instead of jx/jy
 };
 
 struct Outcome
@@ -152,7 +153,14 @@ struct Outcome
 
 Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool correct)
 {
-    PutObject(e.mem, ObjectFor(f.jx, f.jy, f.s, 1920, 1080, f.counter));
+    RawObject object = ObjectFor(f.jx, f.jy, f.s, 1920, 1080, f.counter);
+    if (f.ndcFrom)
+    {
+        const RawObject other = ObjectFor(f.ndcFrom->first, f.ndcFrom->second, f.s, 1920, 1080, f.counter);
+        object.ndcX = other.ndcX;
+        object.ndcY = other.ndcY;
+    }
+    PutObject(e.mem, object);
     e.floats[Param::JitterX] = f.ngxJx.value_or(f.jx);
     e.floats[Param::JitterY] = f.ngxJy.value_or(f.jy);
     if (f.ngxMissing)
@@ -226,14 +234,128 @@ void TestCorrectionReadsBeforeItWrites()
         f.counter = 100 + i;
         f.timeMs = static_cast<std::uint64_t>(i) * 16;
         const Outcome o = Evaluate(e, engine, f, false, true);
+        if (i == 0)
+            CHECK(o.sets.empty()); // the first evaluate has no previous one to confirm it
+        else
+            CHECK(o.sets.size() == 2);
         if (!o.sets.empty())
         {
             ++written;
             CheckReadsThenWrite(o, 0.15, -0.1);
         }
     }
-    CHECK(written >= 1);
+    CHECK(written == 5);
     CHECK(e.locks == 6 && e.buildLookups == 6);
+}
+
+// Runs a script of frames with the correction on and says, per frame, whether the values were replaced.
+std::vector<bool> Replaced(FakeEnv& e, Engine& engine, const std::vector<Frame>& frames)
+{
+    std::vector<bool> out;
+    for (const Frame& f : frames)
+        out.push_back(!Evaluate(e, engine, f, false, true).sets.empty());
+    return out;
+}
+
+Frame At(int counter, float s, std::uint64_t timeMs, float jx = 0.3f, float jy = -0.2f)
+{
+    Frame f;
+    f.counter = counter;
+    f.s = s;
+    f.timeMs = timeMs;
+    f.jx = jx;
+    f.jy = jy;
+    return f;
+}
+
+// M2: the pair is replaced only when the object's counter increased since the previous evaluate AND its ratio is the previous one's.
+void TestSameFrameRules()
+{
+    using Flags = std::vector<bool>;
+    {
+        // a counter that stalls or goes back holds the value back; the first increase afterwards passes again
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        const Flags got = Replaced(e, engine, { At(100, 1, 0), At(101, 1, 16), At(101, 1, 32), At(102, 1, 48), At(100, 1, 64), At(101, 1, 80), At(102, 1, 96) });
+        CHECK(got == (Flags { false, true, false, true, false, true, true }));
+    }
+    {
+        // a ratio that changes between evaluates holds the value back; two evaluates with the same new ratio pass
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        const Flags got = Replaced(e, engine, { At(100, 1.0f, 0), At(101, 1.0f, 16), At(102, 1.5f, 32), At(103, 1.5f, 48), At(104, 1.0f, 64), At(105, 1.0f, 80) });
+        CHECK(got == (Flags { false, true, false, true, false, true }));
+    }
+    {
+        // a held-back evaluate leaves the game's values in the block (fail open) and does not touch anything else
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Evaluate(e, engine, At(100, 1, 0), false, true);
+        const Outcome held = Evaluate(e, engine, At(100, 1, 16), false, true); // the same counter again
+        CHECK(held.sets.empty());
+        CHECK(e.floats[Param::JitterX] == 0.3f && e.floats[Param::JitterY] == -0.2f);
+    }
+    {
+        // a failed read forgets the previous evaluate: the one after the gap is a first frame again
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Replaced(e, engine, { At(100, 1, 0), At(101, 1, 16) });
+        const std::uint64_t pointer = kBase + kCurrentBuild.jitter.cameraGlobalRva;
+        e.mem.PutU64(pointer, 0); // the camera global is gone for one evaluate
+        Evaluate(e, engine, At(102, 1, 32), false, true);
+        e.mem.PutU64(pointer, kGlobal);
+        const Flags got = Replaced(e, engine, { At(103, 1, 48), At(104, 1, 64) });
+        CHECK(got == (Flags { false, true }));
+    }
+    {
+        // the NDC of the previous frame beside this frame's jitter (the equality proof passes, the ratios do not): nearly never replaced.
+        // The sequence keeps its sign from frame to frame, so the sign guard cannot be what stops it.
+        auto sequence = [](unsigned n, float& jx, float& jy)
+        {
+            auto fraction = [](double v) { return v - std::floor(v); };
+            jx = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.6180339887498949));
+            jy = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.7548776662466927));
+        };
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        FakeEnv control = MakeEnv();
+        Engine controlEngine;
+        int lagged = 0, matched = 0;
+        float px = 0, py = 0;
+        for (unsigned n = 1; n <= 64; ++n)
+        {
+            float jx = 0, jy = 0;
+            sequence(n, jx, jy);
+            Frame f = At(static_cast<int>(n), 1.0f, n * 16ull, jx, jy);
+            matched += Evaluate(control, controlEngine, f, false, true).sets.empty() ? 0 : 1;
+            if (n > 1)
+                f.ndcFrom = std::make_pair(px, py);
+            lagged += Evaluate(e, engine, f, false, true).sets.empty() ? 0 : 1;
+            px = jx;
+            py = jy;
+        }
+        CHECK(matched == 63);
+        CHECK(lagged <= 3);
+    }
+}
+// M2: what the status line says about it, so a session shows whether the correction is inert.
+void TestStatusLineCountsHeldBackFrames()
+{
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    // first status line at the first evaluate (a sample is due); the second window is the four evaluates after it
+    Evaluate(e, engine, At(100, 1.0f, 0), false, true);
+    Evaluate(e, engine, At(101, 1.0f, 100), false, true);   // replaced
+    Evaluate(e, engine, At(101, 1.0f, 200), false, true);   // the counter did not increase
+    Evaluate(e, engine, At(102, 1.5f, 300), false, true);   // the ratio changed
+    const Outcome last = Evaluate(e, engine, At(103, 1.5f, 10000), false, true); // replaced; a status line is due
+    std::string status;
+    for (const std::string& line : last.logs)
+        if (Has(line, "Jitter correction: on;"))
+            status = line;
+    CHECK(!status.empty());
+    CHECK(Has(status, "4 evaluates seen") && Has(status, "2 replaced") && Has(status, "2 passed through unchanged"));
+    CHECK(Has(status, "1 frame counter did not increase") && Has(status, "1 ratio not steady") && Has(status, "0 first frame after a gap"));
 }
 
 // (e) The probe line says what NGX was told BEFORE the write. With both keys on and a write in the same evaluate, the sample line
@@ -391,6 +513,8 @@ int main()
 {
     TestKeysOff();
     TestCorrectionReadsBeforeItWrites();
+    TestSameFrameRules();
+    TestStatusLineCountsHeldBackFrames();
     TestProbeLineShowsTheValuesBeforeTheWrite();
     TestProbeOnlyNeverWrites();
     TestEveryFailedGuardWritesNothing();

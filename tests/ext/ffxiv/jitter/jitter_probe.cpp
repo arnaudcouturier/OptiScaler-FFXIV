@@ -442,6 +442,136 @@ void TestCorrection()
             }
 }
 
+// The analysis of an object whose game applies jitter scaled by s (counter as given), at 1920x1080.
+Analysis AnalysisOf(float jx, float jy, float s, int counter)
+{
+    return Analyse(ObjectFor(jx, jy, s, 1920, 1080, counter), kHd);
+}
+
+void TestFrameRules()
+{
+    // The first evaluate has nothing to compare with; the second, with the counter up by one and the same ratio, passes.
+    {
+        FrameRules r;
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 100)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(-0.25f, 0.1f, 1.0f, 101)) == Guard::None); // another jitter value, the same ratio
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.4f, 0.4f, 1.0f, 105)) == Guard::None);   // the counter may jump (frames not evaluated)
+    }
+    // The counter must INCREASE: equal and lower both hold the value back and re-base; the next increase passes again.
+    {
+        FrameRules r;
+        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 10));
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 11)) == Guard::None);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 11)) == Guard::CounterNotIncreasing); // the same frame evaluated again
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 12)) == Guard::None);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::CounterNotIncreasing);  // camera re-created
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::None);
+    }
+    // The ratio must agree with the previous evaluate's within 2% of it (the probe's criterion), per axis where both have one.
+    {
+        FrameRules r;
+        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1)); // ratio 0.5 on both axes
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f, 2)) == Guard::None);   // +1.9% of the previous ratio
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f, 3)) == Guard::RatioNotSteady); // +3%
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f, 4)) == Guard::None);          // re-based on the held frame
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f * 0.97f, 5)) == Guard::RatioNotSteady); // -3%
+    }
+    // One axis disagreeing is enough; an axis without a ratio (jitter too small) is not compared; no common axis cannot confirm.
+    {
+        FrameRules r;
+        r.Observe(Guard::None, AnalysisOf(0.3f, 0.3f, 1.0f, 1));
+        RawObject o = ObjectFor(0.3f, 0.3f, 1.0f, 1920, 1080, 2);
+        o.ndcY *= 1.1f;
+        CHECK(r.Observe(Guard::None, Analyse(o, kHd)) == Guard::RatioNotSteady);
+        FrameRules t;
+        t.Observe(Guard::None, AnalysisOf(0.3f, 0.3f, 1.0f, 1));
+        CHECK(t.Observe(Guard::None, AnalysisOf(0.005f, 0.3f, 1.0f, 2)) == Guard::None); // X too small this frame: Y alone agrees
+        FrameRules u;
+        u.Observe(Guard::None, AnalysisOf(0.005f, 0.3f, 1.0f, 1)); // only Y has a ratio
+        CHECK(u.Observe(Guard::None, AnalysisOf(0.3f, 0.005f, 1.0f, 2)) == Guard::RatioNotSteady); // only X now: nothing in common
+    }
+    // A failed read forgets everything: the evaluate after the gap is a first frame again.
+    {
+        FrameRules r;
+        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1));
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 2)) == Guard::None);
+        CHECK(r.Observe(Guard::ObjectUnreadable, Analysis {}) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::None);
+    }
+
+    // ApplyFrameRules only ever takes a replacement away, and says why; every other decision is untouched.
+    {
+        CorrectionDecision replace;
+        replace.replace = true;
+        replace.ax = 0.15f;
+        replace.ay = -0.1f;
+        auto same = ApplyFrameRules(replace, Guard::None);
+        CHECK(same.replace && Near(same.ax, 0.15) && Near(same.ay, -0.1) && same.guard == Guard::None);
+        for (Guard g : { Guard::CounterNotIncreasing, Guard::RatioNotSteady })
+        {
+            const auto held = ApplyFrameRules(replace, g);
+            CHECK(!held.replace && held.guard == g && !held.undetermined);
+        }
+        const auto first = ApplyFrameRules(replace, Guard::NoPreviousFrame);
+        CHECK(!first.replace && first.guard == Guard::NoPreviousFrame && first.undetermined); // a first frame changes no episode
+        CorrectionDecision consistent;
+        consistent.consistent = true;
+        CorrectionDecision failed;
+        failed.guard = Guard::SignMismatch;
+        for (Guard g : { Guard::None, Guard::CounterNotIncreasing, Guard::RatioNotSteady, Guard::NoPreviousFrame })
+        {
+            CHECK(ApplyFrameRules(consistent, g).consistent && !ApplyFrameRules(consistent, g).replace && ApplyFrameRules(consistent, g).guard == Guard::None);
+            CHECK(ApplyFrameRules(failed, g).guard == Guard::SignMismatch && !ApplyFrameRules(failed, g).replace);
+        }
+    }
+
+    // The case the rule is there for: the game's NDC values belong to the PREVIOUS frame's jitter while the reported value is this
+    // frame's (the object and the block agree with each other, so the equality proof passes). With a jitter sequence whose consecutive
+    // values keep their sign (positive offsets here, so the sign test does not catch it) the ratio changes with every step of the
+    // sequence, and almost nothing is replaced; a game whose NDC matches the frame is replaced on every frame after the first.
+    // (A base-2 Halton x is caught by the sign test alone, because consecutive values alternate in sign.)
+    {
+        auto sequence = [](unsigned n, float& jx, float& jy)
+        {
+            auto fraction = [](double v) { return v - std::floor(v); };
+            jx = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.6180339887498949));
+            jy = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.7548776662466927));
+        };
+        int matchedReplaced = 0, laggedReplaced = 0, laggedWithoutTheRules = 0, frames = 0;
+        FrameRules matched, lagged;
+        float prevX = 0, prevY = 0;
+        for (unsigned n = 1; n <= 64; ++n)
+        {
+            float jx = 0, jy = 0;
+            sequence(n, jx, jy);
+            const Analysis same = Analyse(ObjectFor(jx, jy, 1.0f, 1920, 1080, static_cast<int>(n)), kHd);
+            RawObject lag = ObjectFor(prevX, prevY, 1.0f, 1920, 1080, static_cast<int>(n)); // the NDC of the frame before ...
+            lag.jx = jx;                                                                    // ... beside this frame's reported jitter
+            lag.jy = jy;
+            const Analysis late = Analyse(lag, kHd);
+            auto replaced = [](FrameRules& rules, const Analysis& a)
+            {
+                CorrectionDecision d = DecideCorrection(Guard::None, a, NgxMatch::Same);
+                d = ApplyFrameRules(d, rules.Observe(Guard::None, a));
+                return d.replace;
+            };
+            matchedReplaced += replaced(matched, same) ? 1 : 0;
+            if (n > 1) // the very first frame has no previous NDC to lag behind
+            {
+                laggedReplaced += replaced(lagged, late) ? 1 : 0;
+                laggedWithoutTheRules += DecideCorrection(Guard::None, late, NgxMatch::Same).replace ? 1 : 0;
+                ++frames;
+            }
+            prevX = jx;
+            prevY = jy;
+        }
+        CHECK(matchedReplaced == 63);
+        CHECK(frames == 63 && laggedReplaced <= 3);  // a lag of one frame is (almost) always caught ...
+        CHECK(laggedWithoutTheRules >= 40);          // ... and without the rules most of those frames would have been replaced
+    }
+}
+
 void TestText()
 {
     Context ctx;
@@ -525,6 +655,7 @@ int main()
     TestNgxMatch();
     TestLimiterAndEpisodes();
     TestCorrection();
+    TestFrameRules();
     TestText();
     return TEST_RESULT("jitter_probe");
 }

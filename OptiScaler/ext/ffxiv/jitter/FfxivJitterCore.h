@@ -141,22 +141,35 @@ class Engine
 
         if (correct)
         {
-            ++_evaluated;
-            const CorrectionDecision decision = DecideCorrection(readGuard, analysis, match);
+            ++_counts.evaluated;
+            const CorrectionDecision proven = DecideCorrection(readGuard, analysis, match);
+            // The same-frame rules look at every evaluate that read the object (they need the previous one), but only a replacement
+            // they refuse is counted as held back.
+            const Guard frame = _frames.Observe(readGuard, analysis);
+            const CorrectionDecision decision = ApplyFrameRules(proven, frame);
+            if (proven.replace && !decision.replace)
+            {
+                if (frame == Guard::CounterNotIncreasing)
+                    ++_counts.heldCounter;
+                else if (frame == Guard::RatioNotSteady)
+                    ++_counts.heldRatio;
+                else
+                    ++_counts.heldFirst;
+            }
             if (decision.replace)
             {
                 // The block is the bridge's own NVSDK_NGX_Parameter (the Evaluate's InParameters, which later goes to the upscaler's
                 // Evaluate and to the frame-generation input). The game sets Jitter.Offset again at its next evaluate.
                 env.SetFloat(Param::JitterX, decision.ax);
                 env.SetFloat(Param::JitterY, decision.ay);
-                ++_replaced;
+                ++_counts.replaced;
                 if (_replacing.Event(true))
                     env.Log(FormatCorrection(analysis, decision));
                 _passThrough.Close();
             }
             else
             {
-                ++_passed;
+                ++_counts.passed;
                 if (!decision.undetermined) // a frame too small to tell changes no episode
                 {
                     _replacing.Event(false);
@@ -185,12 +198,11 @@ class Engine
         }
         if (correct)
         {
-            env.Log(std::format("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through unchanged",
-                                _evaluated, _replaced, _passed));
+            env.Log(FormatStatus(_counts));
             if (_replacing.Suppressed() != 0 || _passThrough.Suppressed() != 0)
                 env.Log(std::format("Jitter correction: log line budget used up, {} further episodes were not logged",
                                     _replacing.Suppressed() + _passThrough.Suppressed()));
-            _evaluated = _replaced = _passed = 0;
+            _counts = StatusCounts {};
         }
     }
 
@@ -201,6 +213,7 @@ class Engine
     EpisodeLog _passThrough;
     EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
     bool _buildNoted = false;
-    std::uint64_t _evaluated = 0, _replaced = 0, _passed = 0; // since the last status line
+    FrameRules _frames;
+    StatusCounts _counts; // since the last status line
 };
 } // namespace ext::ffxiv::jitter

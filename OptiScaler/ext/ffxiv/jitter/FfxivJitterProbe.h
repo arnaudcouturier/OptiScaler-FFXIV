@@ -44,6 +44,8 @@ enum class Guard : std::uint8_t
     ObjectNotThisEvaluate, // the object's jitter differs from what this evaluate carries: it belongs to another frame
     AppliedImplausible,
     SignMismatch,        // reported and applied jitter have opposite signs: the convention is not understood, nothing is touched
+    NoPreviousFrame,     // the first evaluate after a gap: nothing to confirm it with yet
+    RatioNotSteady,      // the applied/reported ratio differs from the previous evaluate's: the NDC values may belong to another frame
 };
 
 constexpr const char* GuardName(Guard g)
@@ -68,6 +70,8 @@ constexpr const char* GuardName(Guard g)
     case Guard::ObjectNotThisEvaluate: return "jitter object does not match this evaluate (another frame)";
     case Guard::AppliedImplausible: return "applied jitter not finite or above 1 pixel";
     case Guard::SignMismatch: return "reported and applied jitter have opposite signs";
+    case Guard::NoPreviousFrame: return "first evaluate after a gap, no previous evaluate to confirm it";
+    case Guard::RatioNotSteady: return "applied/reported ratio differs from the previous evaluate's";
     }
     return "unknown";
 }
@@ -272,8 +276,9 @@ struct CorrectionDecision
 };
 
 // Replace the reported jitter by the applied one only when everything is proven for THIS evaluate; otherwise the game's value stays.
-// `readGuard` is ReadChain's answer (the counter check is the probe's, not the correction's: the proof that the object belongs to this
-// evaluate is that its jitter equals the NGX parameters of this evaluate).
+// `readGuard` is ReadChain's answer (the probe's 10-second counter check is not used here: the proof that the object belongs to this
+// evaluate is that its jitter equals the NGX parameters of this evaluate, and FrameRules below adds the counter and ratio rules that
+// the glue applies on top of this decision).
 inline CorrectionDecision DecideCorrection(Guard readGuard, const Analysis& a, NgxMatch ngx)
 {
     CorrectionDecision d;
@@ -321,6 +326,85 @@ inline CorrectionDecision DecideCorrection(Guard readGuard, const Analysis& a, N
     d.replace = true;
     d.ax = a.ax;
     d.ay = a.ay;
+    return d;
+}
+
+// ---- same-frame rules ----------------------------------------------------------------------------------------------------------
+
+// The equality proof (CompareNgx) covers jx/jy only; the replacement is computed from ndcX/ndcY, and nothing proves those belong to the
+// same frame as jx/jy. Two rules narrow that, applied once per evaluate of the correction path and only ever taking a replacement away:
+//   (i)  the object's counter has INCREASED since the previous evaluate (the same camera step is never corrected twice, and a camera
+//        that was re-created or stalled passes the game's value through);
+//   (ii) the implied ratio agrees with the previous evaluate's within the shared 2% criterion (per axis where both evaluates have one,
+//        at least one axis in common). A one-frame lag between the NDC values and the jitter makes the ratio change with every step of
+//        the jitter sequence, so it fails here; a real scale error is the same on every frame, so it passes.
+// So a replacement needs two consecutive consistent evaluates. A failed read, a first evaluate or any rule failure re-bases (the failing
+// evaluate becomes the reference) and passes the game's value through.
+//
+// What these rules do NOT exclude (stated so nobody trusts them further than they reach): a systematic error that is the same on every
+// frame (the wrong render size for the NDC scale, the wrong convention constant) gives a steady ratio and passes both rules, bounded only
+// by the 1 pixel cap and the sign test; a lag that happens to leave two consecutive ratios within 2% passes; an object whose counter,
+// jx/jy and NDC all belong to a frame other than the one being rendered (a constant offset in time) passes; and a game that evaluates
+// twice per camera step is corrected on every other evaluate only (visible in the held-back counts of the status line).
+class FrameRules
+{
+  public:
+    Guard Observe(Guard readGuard, const Analysis& a)
+    {
+        if (readGuard != Guard::None)
+        {
+            _have = false;
+            return Guard::NoPreviousFrame;
+        }
+        const Reference before = _reference;
+        const bool had = _have;
+        _reference = { a.object.counter, a.haveRx, a.rx, a.haveRy, a.ry };
+        _have = true;
+        if (!had)
+            return Guard::NoPreviousFrame;
+        if (a.object.counter <= before.counter)
+            return Guard::CounterNotIncreasing;
+        return Agree(before, _reference) ? Guard::None : Guard::RatioNotSteady;
+    }
+
+  private:
+    struct Reference
+    {
+        std::int32_t counter = 0;
+        bool haveRx = false;
+        float rx = 0.0f;
+        bool haveRy = false;
+        float ry = 0.0f;
+    };
+
+    static bool Agree(const Reference& previous, const Reference& current)
+    {
+        bool compared = false;
+        auto axis = [&](bool havePrevious, float p, bool haveCurrent, float c)
+        {
+            if (!havePrevious || !haveCurrent)
+                return true; // this axis cannot be compared
+            compared = true;
+            return std::fabs(c - p) <= kRatioTolerance * std::fabs(p);
+        };
+        const bool x = axis(previous.haveRx, previous.rx, current.haveRx, current.rx);
+        const bool y = axis(previous.haveRy, previous.ry, current.haveRy, current.ry);
+        return compared && x && y;
+    }
+
+    bool _have = false;
+    Reference _reference;
+};
+
+// Applies FrameRules' answer to a decision: a replacement the rules refused becomes a pass-through with that reason. A first evaluate is
+// not a failure and changes no episode (flagged like a frame too small to tell). Every other decision is returned unchanged.
+inline CorrectionDecision ApplyFrameRules(CorrectionDecision d, Guard frame)
+{
+    if (!d.replace || frame == Guard::None)
+        return d;
+    d.replace = false;
+    d.guard = frame;
+    d.undetermined = frame == Guard::NoPreviousFrame;
     return d;
 }
 
@@ -479,5 +563,22 @@ inline std::string FormatCorrection(const Analysis& a, const CorrectionDecision&
 inline std::string FormatPassThrough(Guard g)
 {
     return std::format("Jitter correction: game values passed through unchanged, guard failed: {}", GuardName(g));
+}
+
+// What happened to the evaluates since the last status line. `held*` count the evaluates in which the values differed and every guard
+// of DecideCorrection passed, but a same-frame rule refused the replacement: a session in which these dominate is one in which the
+// correction is inert (the game does not give the proof the rules ask for).
+struct StatusCounts
+{
+    std::uint64_t evaluated = 0, replaced = 0, passed = 0;
+    std::uint64_t heldCounter = 0, heldRatio = 0, heldFirst = 0;
+};
+
+inline std::string FormatStatus(const StatusCounts& c)
+{
+    return std::format("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through "
+                       "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
+                       "not steady, {} first frame after a gap)",
+                       c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst);
 }
 } // namespace ext::ffxiv::jitter
