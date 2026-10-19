@@ -313,7 +313,9 @@ inline void Reconcile(Outcome& o, Policy& p)
 // the menu slider. Turning auto on engages the override at once from the last accepted create (or from 0 plus the
 // offset when there is none); turning it off restores the user's value; a changed offset republishes.
 // `scaleMode` is the Scale override ("MB Scale Override"): while it is on, auto does not engage (see Policy::scaleMode).
-inline Outcome Configure(Policy& p, bool enabled, double offset, bool scaleMode = false)
+// `scaleMode` has no default on purpose: a caller that forgot to hand over the live Scale override would compile and engage auto in
+// Scale mode (a blur); the glue pins every call site (tests/ext/upscaler/mip_bias_seam_test.cpp).
+inline Outcome Configure(Policy& p, bool enabled, double offset, bool scaleMode)
 {
     Outcome o;
     p.configured = true;
@@ -328,7 +330,7 @@ inline Outcome Configure(Policy& p, bool enabled, double offset, bool scaleMode 
 // An upscaler feature was created (IFeature::SetInitParameters, through ApplyForcedQuality). Raw NGX parameters in.
 // The sizes are remembered even while auto is off, so ticking the checkbox mid-session applies the current ratio.
 inline Outcome OnCreate(Policy& p, unsigned width, unsigned height, unsigned outWidth, unsigned outHeight,
-                        bool extendedLimits, double outputScaling, bool scaleMode = false)
+                        bool extendedLimits, double outputScaling, bool scaleMode)
 {
     Outcome o;
     const bool modeChanged = p.scaleMode != scaleMode;

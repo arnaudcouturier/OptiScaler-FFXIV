@@ -263,7 +263,26 @@ int main(int argc, char** argv)
         const std::string glue = ReadAll(root + "/OptiScaler/ext/upscaler/MipBias.cpp");
         CHECK(glue.find("Config::Instance()->MipmapBiasScaleOverride.value_or_default()") != std::string::npos);
         CHECK(glue.find("create.scaleMode = ScaleOverrideOn();") != std::string::npos);
-        CHECK(Count(glue, "ScaleOverrideOn()") >= 5); // definition + create + EnsureConfigured + config load + menu + sync
+        // Every entry point of the policy gets the live flag, each pinned in its own function body (a count could be met by
+        // another occurrence while one hand-over is missing): the Configure and OnCreate parameters have no default, so a
+        // missing one does not compile either. Six places in all: the definition and the five below.
+        CHECK(Count(glue, "ScaleOverrideOn()") == 6);
+        CHECK(glue.find("bool ScaleOverrideOn() { return Config::Instance()->MipmapBiasScaleOverride.value_or_default(); }") !=
+              std::string::npos);
+        const auto body = [&glue](const char* head) {
+            const size_t at = glue.find(head);
+            const size_t end = at == std::string::npos ? at : glue.find("\n}\n", at);
+            return end == std::string::npos ? std::string() : glue.substr(at, end - at);
+        };
+        CHECK(body("void EnsureConfigured()").find("settings.mipBiasAutoOffset.value_or_default(), ScaleOverrideOn());") !=
+              std::string::npos);
+        CHECK(body("void OnConfigLoaded(bool enabled, float offset)")
+                  .find("const Outcome o = Configure(policy, enabled, offset, ScaleOverrideOn());") != std::string::npos);
+        CHECK(body("void OnFeatureCreate(").find("create.scaleMode = ScaleOverrideOn();") != std::string::npos);
+        CHECK(body("void OnSettingChanged()")
+                  .find("const Outcome o = Configure(CurrentPolicy(), enabled, offset, ScaleOverrideOn());") !=
+              std::string::npos);
+        CHECK(body("void OnScaleOverrideMaybeChanged()").find("const bool scale = ScaleOverrideOn();") != std::string::npos);
 
         // Once per episode: the config load re-arms the pending warning only when it started the episode, and the
         // catch-up in EnsureConfigured (which runs at a create, with the logger up) logs the warning it owes.

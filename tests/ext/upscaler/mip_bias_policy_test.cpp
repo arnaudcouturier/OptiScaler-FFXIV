@@ -49,9 +49,9 @@ struct Game
 
     Outcome Create(unsigned w, unsigned h, unsigned outW, unsigned outH, bool extended = false, double os = 1.0)
     {
-        return Act(OnCreate(policy, w, h, outW, outH, extended, os));
+        return Act(OnCreate(policy, w, h, outW, outH, extended, os, false));
     }
-    Outcome Config(bool enabled, double offset) { return Act(Configure(policy, enabled, offset)); }
+    Outcome Config(bool enabled, double offset) { return Act(Configure(policy, enabled, offset, false)); }
 
   private:
     Outcome Act(const Outcome& o)
@@ -278,9 +278,9 @@ int main()
     {
         Policy fresh;
         CHECK(!fresh.configured);
-        OnCreate(fresh, 2560, 1440, 3840, 2160, false, 1.0); // a create alone never configures (the glue catches up)
+        OnCreate(fresh, 2560, 1440, 3840, 2160, false, 1.0, false); // a create alone never configures (the glue catches up)
         CHECK(!fresh.configured && !fresh.enabled && fresh.haveSizes);
-        Configure(fresh, false, 0.0);
+        Configure(fresh, false, 0.0, false);
         CHECK(fresh.configured);
     }
 
@@ -403,14 +403,14 @@ int main()
 
         {   // output scaling on, full-res motion vectors, render < display: the upscaler outputs at display size, no multiplier
             Policy p;
-            Configure(p, true, 0.0);
+            Configure(p, true, 0.0, false);
             const Outcome o = OnRawCreate(p, c);
             CHECK(o.accepted && o.outputScaling == 1.0);
             CHECK(Near(o.value, std::log2(2560.0 / 3840.0)));           // -0.585, not -1.170
         }
         {   // the same with low-res motion vectors: the output really is 1.5x the display
             Policy p;
-            Configure(p, true, 0.0);
+            Configure(p, true, 0.0, false);
             c.lowResMv = true;
             const Outcome o = OnRawCreate(p, c);
             CHECK(o.outputScaling == 1.5);
@@ -419,7 +419,7 @@ int main()
         }
         {   // render == display: the upscaler scales its output whatever the vector flag says
             Policy p;
-            Configure(p, true, 0.0);
+            Configure(p, true, 0.0, false);
             RawCreate d = c;
             d.width = 3840;
             d.height = 2160;
@@ -429,7 +429,7 @@ int main()
         }
         {   // option off: the multiplier is ignored whatever the flags are
             Policy p;
-            Configure(p, true, 0.0);
+            Configure(p, true, 0.0, false);
             RawCreate d = c;
             d.outputScalingEnabled = false;
             d.lowResMv = true;
@@ -454,7 +454,7 @@ int main()
         }
         {   // a create that is rejected changes nothing
             Policy p;
-            Configure(p, true, 0.0);
+            Configure(p, true, 0.0, false);
             RawCreate d = c;
             d.outWidth = 0;
             const Outcome o = OnRawCreate(p, d);

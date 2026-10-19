@@ -254,19 +254,19 @@ int main()
         ov.set_from_config(-0.7f);
         Policy policy;
 
-        Apply(ov, Configure(policy, true, 0.0));                                   // config load
+        Apply(ov, Configure(policy, true, 0.0, false));                                   // config load
         CHECK(ov.has_value() && ov.value() == 0.0f);
-        Apply(ov, OnCreate(policy, 3840, 2160, 3840, 2160, false, 1.0));           // login screen
+        Apply(ov, OnCreate(policy, 3840, 2160, 3840, 2160, false, 1.0, false));           // login screen
         CHECK(ov.value() == 0.0f);
-        Apply(ov, OnCreate(policy, 2560, 1440, 3840, 2160, false, 1.0));           // forced Quality
+        Apply(ov, OnCreate(policy, 2560, 1440, 3840, 2160, false, 1.0, false));           // forced Quality
         CHECK(Near(ov.value(), -0.584963));
-        Apply(ov, OnCreate(policy, 576, 960, 1152, 1920, false, 1.0));             // the preview: ignored
+        Apply(ov, OnCreate(policy, 576, 960, 1152, 1920, false, 1.0, false));             // the preview: ignored
         CHECK(Near(ov.value(), -0.584963));
-        Apply(ov, OnCreate(policy, 2258, 1270, 3840, 2160, false, 1.0));           // Balanced
+        Apply(ov, OnCreate(policy, 2258, 1270, 3840, 2160, false, 1.0, false));           // Balanced
         CHECK(Near(ov.value(), -0.766061, 1e-6));
-        Apply(ov, Configure(policy, true, 0.0));                                   // a second config load: no jump to 0
+        Apply(ov, Configure(policy, true, 0.0, false));                                   // a second config load: no jump to 0
         CHECK(Near(ov.value(), -0.766061, 1e-6));
-        Apply(ov, Configure(policy, false, 0.0));                                  // untick
+        Apply(ov, Configure(policy, false, 0.0, false));                                  // untick
         CHECK(Near(ov.value(), -0.7) && !ov.isVolatile);
     }
 
