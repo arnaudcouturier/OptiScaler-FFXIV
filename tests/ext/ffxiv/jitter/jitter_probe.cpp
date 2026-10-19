@@ -709,7 +709,7 @@ void TestText()
     CHECK(Has(FormatPassThrough(Guard::ObjectNotThisEvaluate), "passed through unchanged, guard failed: jitter object does not match this evaluate"));
 
     CHECK(FormatStepException("block exploded") ==
-          "Game jitter: step abandoned after an exception: block exploded (the game's values are left as they are; one line per episode)");
+          "Game jitter: step abandoned after an exception: block exploded (the rest of that evaluate is skipped; one line per episode)");
     CHECK(FormatSuppressed(1, 2, 3) ==
           "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements");
     CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up"));

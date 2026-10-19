@@ -87,9 +87,9 @@ struct ForcedQualityAnswer
 class Engine
 {
   public:
-    // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons that step, which fails open (a write
-    // only follows a complete proof, so whatever was not reached was not written), and is logged once per episode of exceptions, so a
-    // feature that has turned into a no-op leaves a trace.
+    // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons the REST of that step (a write only
+    // follows a complete proof, so whatever was not reached was not written; a pair whose second Set threw stays half written, which the
+    // next evaluate overwrites) and is logged once per episode of exceptions, so a feature that has turned into a no-op leaves a trace.
     template <class Env> void Step(Env& env, bool probe, bool correct)
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
@@ -105,11 +105,11 @@ class Engine
         }
         catch (const std::exception& ex)
         {
-            ReportException(env, ex.what());
+            AbandonStep(env, ex.what());
         }
         catch (...)
         {
-            ReportException(env, "unknown exception");
+            AbandonStep(env, "unknown exception");
         }
     }
 
@@ -123,8 +123,11 @@ class Engine
         _passThrough.Close();
     }
 
-    template <class Env> void ReportException(Env& env, const char* what) noexcept
+    // The step is over: whatever the same-frame rules remembered is no longer "the previous evaluate" (a step that never reached them
+    // has not been seen), so a thrown step forgets like a failed read, and the exception is reported once per episode.
+    template <class Env> void AbandonStep(Env& env, const char* what) noexcept
     {
+        _frames = FrameRules {};
         try
         {
             if (_exceptions.Event(true))

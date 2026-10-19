@@ -220,6 +220,23 @@ void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
         CHECK(exceptionLines(e.logs) == 2 && CountLines(e.logs, "second failure") == 1);
     }
     {
+        // a thrown step forgets the same-frame reference like a failed read: proven, proven, THROWS, proven is not "two consecutive"
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        auto replaced = [&](const Frame& f) { return !Evaluate(e, engine, f, false, true).sets.empty(); };
+        CHECK(!replaced(At(100, 1, 0)));  // a first frame
+        CHECK(replaced(At(101, 1, 16)));  // the second proven evaluate
+        e.fault = [](const char* where)
+        {
+            if (std::string(where) == "GetFloat")
+                throw std::runtime_error("one bad step");
+        };
+        CHECK(!replaced(At(102, 1, 32))); // the step that throws
+        e.fault = nullptr;
+        CHECK(!replaced(At(103, 1, 48))); // a first frame again, NOT compared with 101
+        CHECK(replaced(At(104, 1, 64)));
+    }
+    {
         // not a std::exception
         FakeEnv e = MakeEnv();
         Engine engine;

@@ -629,7 +629,7 @@ inline std::string FormatSampleBudgetUsedUp(std::uint32_t lines)
 
 inline std::string FormatStepException(const char* what)
 {
-    return std::format("Game jitter: step abandoned after an exception: {} (the game's values are left as they are; one line per episode)", what);
+    return std::format("Game jitter: step abandoned after an exception: {} (the rest of that evaluate is skipped; one line per episode)", what);
 }
 
 inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements)
