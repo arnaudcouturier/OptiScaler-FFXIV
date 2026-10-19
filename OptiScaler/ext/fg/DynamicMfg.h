@@ -11,7 +11,8 @@
 //   - probe down: a refresh-bound output pins the presented rate at the refresh, so no rate rule ever steps down. If the
 //     presented rate stays at the target for `probeMs` the factor goes one step down as a trial; it is kept when the new
 //     presented rate still reaches 0.93x the target and reverted (with the interval doubled) otherwise;
-//   - regret guard: an up step that gains less than 4 % presented rate is reverted and refused for 30 s.
+//   - regret guard: an up step that gains less than 4 % presented rate is reverted and refused for 30 s; the gain is judged
+//     on the first half second after the step, so a scene that gets heavier meanwhile does not revert a correct step;
 // Timing includes frame limiting, like the XeFG selector: with a limiter the real interval is capped, see the tests.
 
 #include <algorithm>
@@ -43,6 +44,7 @@ class DynamicMfg
     static constexpr int kFlapFree = 4;                    // switches per window that do not raise the hold
     static constexpr uint64_t kFlapWindowMs = 60000;
     static constexpr uint64_t kJudgeMs = 2000;             // a probe / up step is judged this long after the switch
+    static constexpr uint64_t kRegretEarlyMs = 500;        // an up step is judged on the average this long after it
     static constexpr uint64_t kProbeBaseMs = 12000;
     static constexpr uint64_t kProbeMaxMs = 96000;
     static constexpr uint64_t kRefuseMs = 30000;
@@ -160,6 +162,10 @@ class DynamicMfg
         const double real = 1000.0 / avg_;
         const double presented = real * current;
 
+        // The average of the first half second after an up step (the first interval is dropped by `settle_`).
+        if (pend_.kind == Pend::Regret && pend_.earlyMs == 0.0 && Since(now, pend_.at) >= kRegretEarlyMs)
+            pend_.earlyMs = avg_;
+
         // Verdict on a probe or an up step taken kJudgeMs ago. Nothing else is decided while one is open.
         if (pend_.kind != Pend::None)
         {
@@ -181,11 +187,17 @@ class DynamicMfg
                         return Revert(Why::ProbeRevert, p, presented, now, false);
                     }
                 }
-                else if (presented < kRegretGain * p.presentedBefore)
+                else
                 {
-                    refuseFactor_ = p.to;
-                    refuseUntil_ = now + kRefuseMs;
-                    return Revert(Why::RegretRevert, p, presented, now, true);
+                    // The step is judged on its own cost: the average of the first kRegretEarlyMs after it. The 2 s average
+                    // also holds whatever the scene did meanwhile, and a heavier scene would revert a correct step.
+                    const double judged = p.earlyMs > 0.0 ? 1000.0 / p.earlyMs * current : presented;
+                    if (judged < kRegretGain * p.presentedBefore)
+                    {
+                        refuseFactor_ = p.to;
+                        refuseUntil_ = now + kRefuseMs;
+                        return Revert(Why::RegretRevert, p, judged, now, true);
+                    }
                 }
             }
         }
@@ -269,6 +281,7 @@ class DynamicMfg
         int from = 0, to = 0;
         uint64_t at = 0;
         double presentedBefore = 0.0;
+        double earlyMs = 0.0; // regret trial: average interval kRegretEarlyMs after the step (0 = not taken yet)
     };
 
     static uint64_t Since(uint64_t now, uint64_t then) { return now >= then ? now - then : 0; }

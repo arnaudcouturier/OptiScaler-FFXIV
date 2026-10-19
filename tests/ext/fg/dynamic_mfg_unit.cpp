@@ -303,6 +303,65 @@ void RegretGuardRevertsAndRefuses()
     CHECK(keep.CountWhy(Why::RegretRevert) == 0);
 }
 
+// Runs the plain 40 ms stream until the first up step (2x -> 3x) and returns the simulation at that moment.
+static Sim FirstUpStep()
+{
+    Sim s;
+    s.target = 138;
+    s.Step(40);
+    while (s.log.empty() && s.t < 60000)
+        s.Step(40.0);
+    return s;
+}
+
+void RegretGuardJudgesTheStepNotTheScene()
+{
+    // L5: the verdict used to compare the 2 s average after the step with the rate before it, so a scene that got heavier
+    // during those 2 s reverted a correct step. The step is now judged on the first half second after it.
+
+    // A correct step (3x costs 42 ms per real frame: 71 presented against 50 before) in a scene that gets much heavier 0.7 s
+    // later (85 ms per real frame): the step stays.
+    Sim heavy = FirstUpStep();
+    CHECK(heavy.log.size() == 1 && heavy.log[0].why == Why::Up && heavy.factor == 3);
+    heavy.Run(700, 42.0);
+    heavy.Run(3000, 85.0);
+    CHECK(heavy.CountWhy(Why::RegretRevert) == 0);
+    CHECK(heavy.factor >= 3);
+
+    // The same heavy scene with a step that really gained nothing (3x costs 66 ms per real frame: 45 presented against 50):
+    // still reverted.
+    Sim useless = FirstUpStep();
+    useless.Run(700, 66.0);
+    useless.Run(3000, 85.0);
+    CHECK(useless.CountWhy(Why::RegretRevert) == 1);
+    if (useless.log.size() >= 2)
+        CHECK(useless.log[1].why == Why::RegretRevert && useless.log[1].to == 2);
+
+    // A lighter scene after the step does not make a useless step look good either.
+    Sim light = FirstUpStep();
+    light.Run(700, 66.0);
+    light.Run(3000, 20.0);
+    CHECK(light.CountWhy(Why::RegretRevert) == 1);
+
+    // One slow frame right after the step (it seeds the average) is smoothed out over the half second, not taken as the
+    // step's cost.
+    Sim blip = FirstUpStep();
+    blip.Step(40.0); // the interval right after a switch is dropped
+    blip.Step(70.0);
+    blip.Run(3000, 42.0);
+    CHECK(blip.CountWhy(Why::RegretRevert) == 0);
+
+    // Too few samples in the first half second (a very slow stream): the 2 s average is the fallback, nothing breaks.
+    Sim slow;
+    slow.target = 138;
+    slow.Step(200);
+    while (slow.log.empty() && slow.t < 90000)
+        slow.Step(200.0);
+    CHECK(!slow.log.empty());
+    slow.Run(4000, 200.0);
+    CHECK(slow.CountWhy(Why::RegretRevert) <= 1);
+}
+
 void RestartKeepsWhatWasLearned()
 {
     const double ms4 = 1000.0 / 60.0;
@@ -419,6 +478,7 @@ int main()
     ProbeSuccessWalksDownAndResets();
     ProbeTimerRestartsWhenTheRateDrops();
     RegretGuardRevertsAndRefuses();
+    RegretGuardJudgesTheStepNotTheScene();
     RestartKeepsWhatWasLearned();
     ExternalChangeVoidsATrial();
     ProbeLostToABadSampleBacksOff();
