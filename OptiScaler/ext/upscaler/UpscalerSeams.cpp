@@ -6,6 +6,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/game/Game.h"
 #include "ext/game/GameInterfaces.h"
+#include "ext/upscaler/MipBias.h"
 
 #include <upscalers/IFeature.h>
 
@@ -38,6 +39,18 @@ ForcedQualityStatus& Answer()
 {
     static ForcedQualityStatus answer;
     return answer;
+}
+
+// NVSDK_NGX_DLSS_Feature_Flags_MVLowRes of this create (IFeature::SetInitParameters reads the same parameter): the
+// automatic mipmap bias counts the output scaling multiplier only when the motion vectors are low resolution (or render
+// equals display), the condition the upscalers themselves use before they enlarge their output.
+bool MvLowResFlag(NVSDK_NGX_Parameter* params)
+{
+    int flags = 0;
+    if (params == nullptr || params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags) != NVSDK_NGX_Result_Success)
+        return false;
+
+    return (flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
 }
 } // namespace
 
@@ -85,6 +98,10 @@ bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigne
     // EnsureFfxivNativeQuality() at the top of SetInitParameters regardless of whether a preset is forced.
     if (auto* quality = game::Current().quality)
         quality->EnsureHooks();
+
+    // Also unconditional and before every early exit below: the automatic mipmap bias (ext/upscaler/MipBias.h)
+    // follows every upscaler feature create, whether or not a preset is forced, native DLAA included.
+    mipbias::OnFeatureCreate(width, height, outWidth, outHeight, MvLowResFlag(params));
 
     const bool dlaaRequired = NativeDlaaRequired();
     const int forced = Cfg().upscaler.forcePerfQuality.value_or_default();

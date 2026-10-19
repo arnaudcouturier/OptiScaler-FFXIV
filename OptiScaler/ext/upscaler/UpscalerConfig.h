@@ -22,6 +22,23 @@ struct UpscalerConfig
     CustomOptional<int32_t> forcePerfQuality { -1 };
     CustomOptional<bool> renderSizeFromWidthHeight { false };
 
+    // [Mipmap] MipmapBiasAuto / MipmapBiasAutoOffset (ext/upscaler/MipBias.h): when on, the mipmap bias override follows
+    // log2(render width / display width) of the latest upscaler create, plus the offset (limited to +-3). Default off.
+    // Comment block lives in ext/ini/Mipmap.ini.
+    CustomOptional<bool> mipBiasAuto { false };
+    CustomOptional<float> mipBiasAutoOffset { 0.0f };
+
     void Bind(config::Binder& b);
+    // End of config::Load. Hands the two mip bias keys to ext/upscaler/MipBias.cpp, which registers `onLoaded` at start-up.
+    // A pointer rather than a call so that ExtConfig.cpp keeps no link dependency on the glue (it needs Config.h and
+    // State.h): the unit tests that build ExtConfig.cpp alone find the pointer null and nothing happens.
+    using LoadedHook = void (*)(bool enabled, float offset);
+    static inline LoadedHook onLoaded = nullptr;
+
+    void PostLoad()
+    {
+        if (onLoaded != nullptr)
+            onLoaded(mipBiasAuto.value_or_default(), mipBiasAutoOffset.value_or_default());
+    }
 };
 } // namespace ext
