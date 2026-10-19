@@ -286,7 +286,7 @@ void ThreeZeroSamplesAtTheEndAreStillAFailure()
 {
     Rig r;
     const uint64_t s = RunToFirstSwitch(r);
-    r.zeroFrom = s + 900; // 0 for the last samples of the watch and on
+    r.zeroFrom = s + 800; // 0 for the last 200 ms of the watch and on (a shorter run than kBadRunMs is not a failure)
     r.zeroUntil = s + 60000;
     r.Run(20000);
     CHECK_MSG(r.recoveries == 1 && r.c.Stopped(), "recoveries %d stopped %d", r.recoveries, (int) r.c.Stopped());

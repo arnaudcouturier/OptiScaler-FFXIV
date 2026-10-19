@@ -124,6 +124,9 @@ class AutoMfgController
     static constexpr int kSelfTestSteps = 5;
     static constexpr int kWrongSamples = 3;         // applied count wrong on this many samples in a row at the end of the watch
     static constexpr int kBadStatusSamples = 3;     // a non-zero Streamline status that persists on this many samples
+    // Both runs also have to last this long, from their first sample to the verdict: the samples are game frames, and three
+    // of them are 13 ms at 224 fps. A failed change stays failed for the rest of the watch; a blink does not.
+    static constexpr uint64_t kBadRunMs = 150;
     static constexpr int kSignatureSamples = DynamicMfg::kSettleSamples; // the re-creation stall is one of the first intervals
                                                     // after the switch: the same ones the selector drops from its average
     static constexpr int kStrikesToStop = 2;        // signatures on this many switches in a row stop automatic mode
@@ -197,7 +200,8 @@ class AutoMfgController
                 ++w_.samples;
                 if (in.slStatus != 0 && w_.baseStatus == 0) // a status that was already set before the switch is not its fault
                 {
-                    ++w_.badRun;
+                    if (w_.badRun++ == 0)
+                        w_.badSince = now;
                     w_.statusCode = in.slStatus;
                 }
                 else
@@ -208,8 +212,8 @@ class AutoMfgController
             // 0 means "unknown" (the field is zeroed while frame generation pauses), but it is not the requested count either
             if (in.detectedGenerated == w_.to - 1)
                 w_.wrongRun = 0;
-            else
-                ++w_.wrongRun;
+            else if (w_.wrongRun++ == 0)
+                w_.wrongSince = now;
             if (in.detectedGenerated > 0)
                 w_.lastDetected = in.detectedGenerated;
             if (now - w_.since >= kWatchMs)
@@ -296,8 +300,10 @@ class AutoMfgController
         double baselineMs = 0.0;
         uint32_t baseStatus = 0; // Streamline status when the switch was made
         int badRun = 0;          // consecutive samples with a status that was 0 before the switch
+        uint64_t badSince = 0;   // time of the first sample of that run
         uint32_t statusCode = 0;
         int wrongRun = 0;        // consecutive samples whose applied count is not the requested one (0 included)
+        uint64_t wrongSince = 0; // time of the first sample of that run
         int lastDetected = 0;    // last non-zero applied count seen (generated frames)
         bool seenMulti = false;
         int samples = 0;
@@ -370,8 +376,10 @@ class AutoMfgController
         const Watch w = w_;
         w_ = {};
         const int requested = w.to - 1;
-        const bool countWrong = (in.detectedGenerated > 0 && in.detectedGenerated != requested) || w.wrongRun >= kWrongSamples;
-        const bool statusBad = w.badRun >= kBadStatusSamples;
+        // a count that is not 0 and not the requested one is a real mismatch; 0 ("unknown") has to persist
+        const bool countWrong = (in.detectedGenerated > 0 && in.detectedGenerated != requested) ||
+                                (w.wrongRun >= kWrongSamples && in.nowMs - w.wrongSince >= kBadRunMs);
+        const bool statusBad = w.badRun >= kBadStatusSamples && in.nowMs - w.badSince >= kBadRunMs;
         const bool stuck = w.samples >= 5 && !w.seenMulti;
         const double costlyAt = std::max(kCostlyMs, 3.0 * w.baselineMs);
         if (statusBad || countWrong || stuck)
