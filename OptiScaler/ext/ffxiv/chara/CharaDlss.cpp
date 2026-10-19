@@ -148,6 +148,7 @@ struct SlotGpu
     bool composedFromNr = false; // the composed image was made from the production NR output (written by every alpha pass)
     bool preSrColour = false;    // the SR evaluate of that render was given the pre-SR NR image as its colour (written beside composedFromNr)
     nr::SrColourSource lastColour = nr::SrColourSource::Plain; // the colour source of the last successful SR evaluate (the history reset on a change)
+    nr::SourceResetClock sourceResets; // when this slot last got a history reset for such a change (at most one per kSourceResetMinMs)
 };
 
 struct PassData
@@ -711,6 +712,15 @@ struct PreSrCall
 };
 PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s, const ngx::EvaluateInputs& in); // preview NR pre-SR entry, defined below
 
+// A successful evaluate that ran with a history reset for a change of the colour source: start the slot's debounce and count it (menu, probe table, log).
+void NoteSourceReset(int index, SlotGpu& g, uint64_t now)
+{
+    g.sourceResets.Note(now);
+    const uint64_t n = g_stats.srSourceResets.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 3 || n % 100 == 0)
+        LOG_INFO("CharaView DLSS: slot {} DLSS history reset for a change of the colour source (NR before DLSS <-> plain picture), {} so far", index, n);
+}
+
 void RunSlot(int index, const DrawView& view)
 {
     ReplayScope own; // the upscaler may copy or clear on this context: the hooks must not treat that as the game's work
@@ -788,7 +798,7 @@ void RunSlot(int index, const DrawView& view)
     // since the slot's last successful evaluate (g.lastColour) and the retry after a refused NR image. `in` itself keeps the slot's own reset: the NR
     // model gets that one, and the evaluate gets a copy with the rule's reset.
     const nr::SrEvaluation ev = nr::DecideSrEvaluate(
-        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), nr::SrHistory { in.reset, g.lastColour },
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), nr::SrHistory { in.reset, g.lastColour, g.sourceResets.Due(view.now) },
         [&]
         {
             PreSrCall call = RunNrPreSr(view, g, s, in);
@@ -807,6 +817,8 @@ void RunSlot(int index, const DrawView& view)
         });
     if (ev.ok)
         g.lastColour = ev.colour; // only a successful evaluate moves it: a failed slot is released with its feature
+    if (ev.ok && ev.sourceReset)
+        NoteSourceReset(index, g, view.now);
     if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())
     {
         if (ev.preSrProduced)

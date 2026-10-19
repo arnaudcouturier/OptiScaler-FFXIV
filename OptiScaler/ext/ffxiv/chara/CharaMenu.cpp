@@ -92,8 +92,9 @@ void DrawNrSection(CharaConfig& cfg)
             ImGui::TextDisabled("NR before DLSS: waiting for a preview that DLSS evaluates");
         else
         {
-            ImGui::TextDisabled("NR before DLSS: %llu runs, %llu renders used the plain picture", (unsigned long long) st.preSrRuns,
-                                (unsigned long long) st.preSrFallbacks);
+            ImGui::TextDisabled("NR before DLSS: %llu runs, %llu renders used the plain picture; DLSS history reset %llu time(s) for a picture change",
+                                (unsigned long long) st.preSrRuns, (unsigned long long) st.preSrFallbacks,
+                                (unsigned long long) g_stats.srSourceResets.load(std::memory_order_relaxed));
             if (st.preSrGpuMs > 0.0 || st.preSrCpuMs > 0.0)
                 ImGui::TextDisabled("Last NR run before DLSS: GPU %.2f ms, CPU %.2f ms", st.preSrGpuMs, st.preSrCpuMs);
         }

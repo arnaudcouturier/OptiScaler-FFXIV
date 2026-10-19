@@ -373,22 +373,45 @@ template <class Image> constexpr Image SrColourFor(SrColourSource source, Image 
 // The history reset of an evaluate. The upscaler's history belongs to the pictures it was given: when the colour source of the slot's evaluate changes
 // between two evaluates (plain image <-> NR image: another format and another look) the history of the old source must not be blended into the new
 // picture, which is the one-frame pop of a render that falls back to the plain colour and of the first NR render after the model was built.
-constexpr bool ResetOnSourceChange(SrColourSource previous, SrColourSource now) { return previous != now; }
+// `due` is the debounce below: a reset for a source change is granted at most once per kSourceResetMinMs for a slot.
+constexpr bool ResetOnSourceChange(SrColourSource previous, SrColourSource now, bool due) { return previous != now && due; }
 
-// The reset an evaluate runs with: the slot's own rule (never evaluated, or the last evaluate is old), a change of the colour source, or the retry
-// after a refused call (the refused call may have advanced the feature's history; what it left behind is not known, and this costs one frame once per
-// session because the refusal latches NR before SR off).
-constexpr bool EvaluateResetFor(bool slotReset, SrColourSource previous, SrColourSource now, bool afterRefusal)
+// The debounce of that reset. When the pre-SR run is skipped on every other render (no free command list under GPU load, several preview windows) the
+// colour source alternates render by render, and a reset on every change would reset the upscaler's history on every evaluate: the preview would never
+// accumulate and would show the raw single-frame upscale (aliased, shimmering). So a source change gets its reset only when the slot's last such reset is
+// at least this old. Never held back: the slot's own reset (never evaluated, or the last evaluate is old) and the retry after a refused call.
+inline constexpr uint64_t kSourceResetMinMs = 500;
+
+// When a slot last got a history reset for a change of the colour source (a fresh or released slot has had none).
+struct SourceResetClock
 {
-    return slotReset || ResetOnSourceChange(previous, now) || afterRefusal;
+    bool seen = false;
+    uint64_t atMs = 0;
+
+    // A clock that went backwards counts as due (like the trace limiter's interval).
+    constexpr bool Due(uint64_t nowMs) const { return !seen || nowMs < atMs || nowMs - atMs >= kSourceResetMinMs; }
+    constexpr void Note(uint64_t nowMs)
+    {
+        seen = true;
+        atMs = nowMs;
+    }
+};
+
+// The reset an evaluate runs with: the slot's own rule (never evaluated, or the last evaluate is old), a change of the colour source (debounced), or
+// the retry after a refused call (the refused call may have advanced the feature's history; what it left behind is not known, and this costs one frame
+// once per session because the refusal latches NR before SR off).
+constexpr bool EvaluateResetFor(bool slotReset, SrColourSource previous, SrColourSource now, bool afterRefusal, bool sourceResetDue)
+{
+    return slotReset || ResetOnSourceChange(previous, now, sourceResetDue) || afterRefusal;
 }
 
-// What the slot knows about its history before the evaluate: its own reset and the colour source of its last successful evaluate (a fresh slot has
-// had plain ones, the source every evaluate has without NR before SR).
+// What the slot knows about its history before the evaluate: its own reset, the colour source of its last successful evaluate (a fresh slot has
+// had plain ones, the source every evaluate has without NR before SR) and whether the debounce allows a source-change reset now.
 struct SrHistory
 {
     bool reset = false;
     SrColourSource previous = SrColourSource::Plain;
+    bool sourceResetDue = true;
 };
 
 struct SrEvaluation
@@ -399,6 +422,7 @@ struct SrEvaluation
     bool usedPreSrColour = false;  // the evaluate that succeeded was given that image
     SrColourSource colour = SrColourSource::Plain; // the colour source of the last evaluate that ran (the one that succeeded when `ok`): the slot stores it
     bool resetUsed = false;        // the history reset that last evaluate ran with
+    bool sourceReset = false;      // ... and that last evaluate was given a reset for the change of the colour source (not debounced away): the slot notes it
     bool latchPreSr = false;       // NR before SR must be switched off for the session (write one log line): the image was refused (the plain retry may have failed too) or missing
     bool ok = false;               // an SR evaluate succeeded
 };
@@ -426,7 +450,8 @@ SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool consumerRecent, c
     if (r.preSrProduced)
     {
         r.colour = SrColourSource::PreSr;
-        r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::PreSr, false);
+        r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::PreSr, false, history.sourceResetDue);
+        r.sourceReset = ResetOnSourceChange(history.previous, SrColourSource::PreSr, history.sourceResetDue);
         if (evaluate(SrColourSource::PreSr, r.resetUsed))
         {
             r.ok = r.usedPreSrColour = true;
@@ -435,7 +460,8 @@ SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool consumerRecent, c
         refused = true;
     }
     r.colour = SrColourSource::Plain;
-    r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::Plain, refused);
+    r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::Plain, refused, history.sourceResetDue);
+    r.sourceReset = ResetOnSourceChange(history.previous, SrColourSource::Plain, history.sourceResetDue);
     r.ok = evaluate(SrColourSource::Plain, r.resetUsed);
     // Latched whether or not the plain retry worked: an evaluate that was given the NR image failed first, and a refused foreign image can leave the
     // feature unusable for the plain call of the same render. Without the latch that render would fail the slot, the released slot would come back

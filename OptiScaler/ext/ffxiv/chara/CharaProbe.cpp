@@ -628,6 +628,7 @@ std::string BuildState(uint64_t now)
         t.Add("nr.production.lastGpuMicroseconds", static_cast<uint64_t>(ns.productionGpuMs * 1000.0));
         t.Add("nr.production.imagesUsedByTheAlphaPass", g_stats.nrProductionRuns.load(std::memory_order_relaxed));
         t.Add("nr.production.uiDrawsGivenComposedImage", g_stats.nrProductionSwaps.load(std::memory_order_relaxed));
+        t.Add("nr.preSr.sourceChangeResets", g_stats.srSourceResets.load(std::memory_order_relaxed));
     }
 
     // The table: pointers only, never dereferenced. The format is known for the entries a draw was seen sampling.

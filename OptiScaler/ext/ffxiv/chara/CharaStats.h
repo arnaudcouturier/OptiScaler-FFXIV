@@ -45,6 +45,7 @@ struct Stats
     std::atomic<uint64_t> nrRuns { 0 };          // finisher outputs the dispatcher handed to preview NR that produced a result (bring-up)
     std::atomic<uint64_t> nrProductionRuns { 0 }; // super-resolution outputs preview NR improved and the alpha pass used (production)
     std::atomic<uint64_t> nrProductionSwaps { 0 }; // UI draws that were given a composed image made from the production NR output
+    std::atomic<uint64_t> srSourceResets { 0 };    // DLSS history resets given for a change of the evaluate's colour source (NR before DLSS <-> plain), at most one per slot and 500 ms
 
     // Preview probe (PreviewProbe). Written by the draw thread, read by the menu.
     std::atomic<uint64_t> probeScanned { 0 };       // draws whose first eight pixel-shader resources were compared with the preview textures

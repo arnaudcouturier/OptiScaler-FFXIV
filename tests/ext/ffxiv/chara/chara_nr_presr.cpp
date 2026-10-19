@@ -388,15 +388,17 @@ void TestColourGivenToTheEvaluate()
 // refused call left in the feature's history is not known). Nothing else resets.
 void TestResetRule()
 {
-    CHECK(!ResetOnSourceChange(SrColourSource::Plain, SrColourSource::Plain));
-    CHECK(!ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::PreSr));
-    CHECK(ResetOnSourceChange(SrColourSource::Plain, SrColourSource::PreSr));
-    CHECK(ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::Plain));
+    CHECK(!ResetOnSourceChange(SrColourSource::Plain, SrColourSource::Plain, true));
+    CHECK(!ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::PreSr, true));
+    CHECK(ResetOnSourceChange(SrColourSource::Plain, SrColourSource::PreSr, true));
+    CHECK(ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::Plain, true));
+    CHECK(!ResetOnSourceChange(SrColourSource::Plain, SrColourSource::PreSr, false) && !ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::Plain, false));
     for (const bool slotReset : { false, true })
         for (const SrColourSource previous : { SrColourSource::Plain, SrColourSource::PreSr })
             for (const SrColourSource now : { SrColourSource::Plain, SrColourSource::PreSr })
                 for (const bool afterRefusal : { false, true })
-                    CHECK(EvaluateResetFor(slotReset, previous, now, afterRefusal) == (slotReset || previous != now || afterRefusal));
+                    for (const bool due : { false, true })
+                        CHECK(EvaluateResetFor(slotReset, previous, now, afterRefusal, due) == (slotReset || (previous != now && due) || afterRefusal));
 
     // A slot over a series of renders (the glue stores `ev.colour` after a successful evaluate): the reset is asked exactly on a change of the source.
     struct Step
@@ -442,6 +444,140 @@ void TestResetRule()
         const SrEvaluation failed = Decide(f, true, both, SrHistory { false, SrColourSource::Plain });
         CHECK(!failed.ok && both.resets == (std::vector<bool> { true, true }));
     }
+}
+
+// The debounce of the source-change reset: a render-by-render alternation of the colour source (the pre-SR run skipped on every other render under GPU
+// load) must not reset the upscaler's history on every evaluate. A source-change reset is granted at most once per 500 ms for a slot; the slot's own
+// reset and the retry after a refused call are never held back.
+void TestSourceResetDebounce()
+{
+    CHECK(kSourceResetMinMs == 500);
+    // the clock: a fresh slot is due; 499 ms after a note is not, exactly 500 is; a clock that went backwards is due
+    SourceResetClock clock;
+    CHECK(clock.Due(0) && clock.Due(123456));
+    clock.Note(1000);
+    CHECK(!clock.Due(1000) && !clock.Due(1001) && !clock.Due(1499));
+    CHECK(clock.Due(1500) && clock.Due(1501) && clock.Due(99999));
+    CHECK(clock.Due(999)); // went backwards
+    clock.Note(1500);
+    CHECK(!clock.Due(1999) && clock.Due(2000));
+    CHECK(!SourceResetClock {}.seen && SourceResetClock {}.Due(0));
+
+    // The glue as a series: the history gets `clock.Due(now)`, a successful evaluate that ran with a source-change reset notes the time, the colour is stored.
+    struct Step
+    {
+        uint64_t now;
+        RunOutcome outcome;
+        bool resetExpected;
+        bool sourceResetExpected;
+    };
+    const Step steps[] = {
+        { 0, RunOutcome::Preparing, false, false },  // plain, a fresh slot
+        { 1000, RunOutcome::Ran, true, true },       // plain -> NR: the first change is granted
+        { 1016, RunOutcome::Skipped, false, false }, // NR -> plain 16 ms later: held back
+        { 1032, RunOutcome::Ran, false, false },     // plain -> NR: held back
+        { 1499, RunOutcome::Skipped, false, false }, // 499 ms after the grant: held back
+        { 1500, RunOutcome::Ran, true, true },       // exactly 500 ms: granted (the previous render was plain)
+        { 1501, RunOutcome::Skipped, false, false },
+        { 2000, RunOutcome::Ran, true, true },       // 500 ms after the last grant
+        { 2001, RunOutcome::Ran, false, false },     // no change
+        { 2600, RunOutcome::Skipped, true, true },   // NR -> plain, 600 ms after the last grant
+    };
+    const PlumbingFacts f = BothOn();
+    SrColourSource previous = SrColourSource::Plain;
+    SourceResetClock slot;
+    int granted = 0, resets = 0;
+    for (const Step& step : steps)
+    {
+        Fake e;
+        e.answer = { step.outcome, step.outcome == RunOutcome::Ran };
+        const SrEvaluation r = Decide(f, true, e, SrHistory { false, previous, slot.Due(step.now) });
+        CHECK(r.ok && e.resets.size() == 1);
+        CHECK(e.resets[0] == step.resetExpected);
+        CHECK(r.sourceReset == step.sourceResetExpected);
+        resets += e.resets[0] ? 1 : 0;
+        if (r.ok)
+            previous = r.colour;
+        if (r.ok && r.sourceReset)
+        {
+            slot.Note(step.now);
+            ++granted;
+        }
+    }
+    CHECK(granted == 4 && resets == 4); // 10 renders with 8 source changes among them: 4 resets, not 8
+    // the same series without the debounce resets on every change (what this replaces)
+    {
+        SrColourSource prev = SrColourSource::Plain;
+        int every = 0;
+        for (const Step& step : steps)
+        {
+            Fake e;
+            e.answer = { step.outcome, step.outcome == RunOutcome::Ran };
+            const SrEvaluation r = Decide(f, true, e, SrHistory { false, prev, true });
+            every += e.resets[0] ? 1 : 0;
+            prev = r.colour;
+        }
+        CHECK(every == 8);
+    }
+
+    // never held back: the slot's own reset, and the retry after a refused call (neither is counted as a source-change reset)
+    for (const SrColourSource previousSource : { SrColourSource::Plain, SrColourSource::PreSr })
+    {
+        Fake own;
+        const SrEvaluation r = Decide(f, true, own, SrHistory { true, previousSource, false });
+        CHECK(r.ok && own.resets == (std::vector<bool> { true }) && r.resetUsed && !r.sourceReset);
+    }
+    {
+        Fake refused;
+        refused.nrEvaluate = false;
+        const SrEvaluation r = Decide(f, true, refused, SrHistory { false, SrColourSource::Plain, false });
+        CHECK(r.ok && r.latchPreSr && refused.resets == (std::vector<bool> { false, true }) && !r.sourceReset); // the NR call: change held back; the retry resets
+        Fake refusedAfterNr;
+        refusedAfterNr.nrEvaluate = false;
+        const SrEvaluation s = Decide(f, true, refusedAfterNr, SrHistory { false, SrColourSource::PreSr, false });
+        CHECK(s.ok && refusedAfterNr.resets == (std::vector<bool> { false, true }) && !s.sourceReset);
+        Fake bothFail;
+        bothFail.nrEvaluate = false;
+        bothFail.plainEvaluate = false;
+        const SrEvaluation t = Decide(f, true, bothFail, SrHistory { false, SrColourSource::Plain, false });
+        CHECK(!t.ok && bothFail.resets == (std::vector<bool> { false, true }));
+    }
+    // due: the plain retry after NR renders is both a change and a refusal, and the flag says so
+    {
+        Fake e;
+        e.nrEvaluate = false;
+        const SrEvaluation r = Decide(f, true, e, SrHistory { false, SrColourSource::PreSr, true });
+        CHECK(r.ok && e.resets == (std::vector<bool> { false, true }) && r.sourceReset);
+    }
+}
+
+// The slot's own reset is the NR-image evaluate's reset too (and the plain branch's under the pre-SR placement). A pause longer than the slot's window must
+// reset the history whatever the last colour source was, so `history.reset` must reach the evaluate: passing a literal false there passed every earlier test.
+void TestSlotResetReachesTheEvaluate()
+{
+    const PlumbingFacts f = BothOn();
+    for (const SrColourSource previous : { SrColourSource::Plain, SrColourSource::PreSr })
+        for (const bool due : { false, true })
+        {
+            // NR image given and taken: the slot's reset, no more
+            Fake e;
+            const SrEvaluation r = Decide(f, true, e, SrHistory { true, previous, due });
+            CHECK(r.ok && r.usedPreSrColour && e.resets == (std::vector<bool> { true }) && r.resetUsed);
+            // NR image refused: both calls carry the slot's reset
+            Fake refused;
+            refused.nrEvaluate = false;
+            const SrEvaluation s = Decide(f, true, refused, SrHistory { true, previous, due });
+            CHECK(s.ok && refused.resets == (std::vector<bool> { true, true }));
+            // no image (the plain branch under the pre-SR placement): the slot's reset
+            Fake preparing;
+            preparing.answer = { RunOutcome::Preparing, false };
+            const SrEvaluation p = Decide(f, true, preparing, SrHistory { true, previous, due });
+            CHECK(p.ok && p.placement == Placement::PreSr && !p.usedPreSrColour && preparing.resets == (std::vector<bool> { true }));
+        }
+    // and without it, with the source unchanged, no reset at all
+    Fake none;
+    const SrEvaluation n = Decide(f, true, none, SrHistory { false, SrColourSource::PreSr, true });
+    CHECK(n.ok && none.resets == (std::vector<bool> { false }) && !n.resetUsed);
 }
 
 // ---- The slot step with the pre-SR placement -------------------------------------------------------------------------------------------
@@ -788,6 +924,8 @@ int main()
     TestSlotRenderPreSr();
     TestColourGivenToTheEvaluate();
     TestResetRule();
+    TestSourceResetDebounce();
+    TestSlotResetReachesTheEvaluate();
     TestPostSrNrStatistic();
     TestTintFor();
     TestShapes();
