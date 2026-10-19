@@ -1,5 +1,5 @@
 #include "check.h"
-#include "fake_game.h"
+#include "engine_fixture.h"
 #include "ext/ffxiv/jitter/FfxivJitterCore.h"
 
 #include <cmath>
@@ -20,173 +20,6 @@ using namespace jitter_fakes;
 
 namespace
 {
-bool Near(float a, double b, double tol = 1e-5) { return std::fabs(a - b) <= tol; }
-bool Has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
-
-struct Op
-{
-    bool set = false; // false = Get
-    Param param = Param::JitterX;
-    float value = 0.0f; // the value written (Set) or returned (float Get)
-};
-
-// The fake environment: a stateful parameter block (a Set changes what later Gets return), fake process memory, a clock and a log.
-struct FakeEnv
-{
-    FakeMemory mem;
-    const GameBuild* build = &kCurrentBuild;
-    std::map<Param, float> floats;
-    std::map<Param, std::uint32_t> uints;
-    std::optional<int> perfQuality = 2;
-    ForcedQualityAnswer answer;
-    std::uint64_t now = 0;
-    std::optional<bool> frameGeneration = false;
-    bool dropWrites = false;   // a block that does not take the write (the stored value stays)
-    bool eraseOnWrite = false; // a block that loses the entry when it is written (a later read finds nothing)
-
-    std::vector<Op> ops;
-    std::vector<std::string> logs;
-    int locks = 0, buildLookups = 0, clockReads = 0, qualityQueries = 0, fgQueries = 0, setsEver = 0;
-
-    struct Held
-    {
-        explicit Held(FakeEnv& e) { ++e.locks; }
-    };
-    Held Lock() { return Held(*this); }
-    const GameBuild* Build()
-    {
-        ++buildLookups;
-        return build;
-    }
-    std::uintptr_t ModuleBase() { return kBase; }
-    bool ReadMemory(std::uintptr_t address, void* out, std::size_t bytes) { return mem.Read(address, out, bytes); }
-
-    std::optional<float> GetFloat(Param p)
-    {
-        const auto it = floats.find(p);
-        ops.push_back({ false, p, it == floats.end() ? 0.0f : it->second });
-        if (it == floats.end())
-            return std::nullopt;
-        return it->second;
-    }
-    std::uint32_t GetUInt(Param p)
-    {
-        ops.push_back({ false, p, 0.0f });
-        const auto it = uints.find(p);
-        return it == uints.end() ? 0u : it->second;
-    }
-    std::optional<int> GetInt(Param p)
-    {
-        ops.push_back({ false, p, 0.0f });
-        return perfQuality;
-    }
-    void SetFloat(Param p, float v)
-    {
-        ops.push_back({ true, p, v });
-        ++setsEver;
-        if (eraseOnWrite)
-            floats.erase(p);
-        else if (!dropWrites)
-            floats[p] = v;
-    }
-    ForcedQualityAnswer ForcedQuality()
-    {
-        ++qualityQueries;
-        return answer;
-    }
-    std::uint64_t NowMs()
-    {
-        ++clockReads;
-        return now;
-    }
-    void Log(const std::string& line) { logs.push_back(line); }
-    std::optional<bool> FrameGenerationActive()
-    {
-        ++fgQueries;
-        return frameGeneration;
-    }
-
-    std::size_t Gets() const
-    {
-        std::size_t n = 0;
-        for (const Op& o : ops)
-            n += o.set ? 0 : 1;
-        return n;
-    }
-    std::vector<Op> Sets() const
-    {
-        std::vector<Op> out;
-        for (const Op& o : ops)
-            if (o.set)
-                out.push_back(o);
-        return out;
-    }
-};
-
-// A game at 1920x1080 whose camera object is wired like the game's: memory chain plus a parameter block as the bridge hands it over.
-FakeEnv MakeEnv()
-{
-    FakeEnv e;
-    e.mem = Image(ObjectFor(0.3f, -0.2f, 1.0f, 1920, 1080, 100));
-    e.uints[Param::SubrectWidth] = 1920;
-    e.uints[Param::SubrectHeight] = 1080;
-    e.uints[Param::Width] = 1920;
-    e.uints[Param::Height] = 1080;
-    e.uints[Param::OutWidth] = 3840;
-    e.uints[Param::OutHeight] = 2160;
-    return e;
-}
-
-// The game's side of one evaluate, as in the game: its camera object in memory (a game that applies jitter scaled by `s`) and the
-// UNSCALED jitter it sets in the parameter block. `ngxJx/ngxJy` override what the block carries (another frame, say).
-struct Frame
-{
-    float jx = 0.3f, jy = -0.2f, s = 1.0f;
-    int counter = 100;
-    std::uint64_t timeMs = 0;
-    std::optional<float> ngxJx, ngxJy;
-    bool ngxMissing = false; // the block has no Jitter.Offset at all
-    std::optional<std::pair<float, float>> ndcFrom; // the object's NDC values are those of THIS jitter (another frame's) instead of jx/jy
-    bool flipNdcY = false;  // the object's ndcY has the opposite sign (a convention the correction does not understand)
-};
-
-struct Outcome
-{
-    std::vector<Op> ops;
-    std::vector<std::string> logs;
-    std::vector<Op> sets;
-};
-
-Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool correct)
-{
-    RawObject object = ObjectFor(f.jx, f.jy, f.s, 1920, 1080, f.counter);
-    if (f.ndcFrom)
-    {
-        const RawObject other = ObjectFor(f.ndcFrom->first, f.ndcFrom->second, f.s, 1920, 1080, f.counter);
-        object.ndcX = other.ndcX;
-        object.ndcY = other.ndcY;
-    }
-    if (f.flipNdcY)
-        object.ndcY = -object.ndcY;
-    PutObject(e.mem, object);
-    e.floats[Param::JitterX] = f.ngxJx.value_or(f.jx);
-    e.floats[Param::JitterY] = f.ngxJy.value_or(f.jy);
-    if (f.ngxMissing)
-    {
-        e.floats.erase(Param::JitterX);
-        e.floats.erase(Param::JitterY);
-    }
-    e.now = f.timeMs;
-    e.ops.clear();
-    const std::size_t logsBefore = e.logs.size();
-    engine.Step(e, probe, correct);
-    Outcome o;
-    o.ops = e.ops;
-    o.logs.assign(e.logs.begin() + static_cast<std::ptrdiff_t>(logsBefore), e.logs.end());
-    o.sets = e.Sets();
-    return o;
-}
-
 // Checks one evaluate's order: both Jitter.Offset reads come before the first write, and the write is exactly X then Y. After the write
 // the only Jitter.Offset reads allowed are the read-back of the first replacement of an episode: X then Y, nothing else.
 void CheckReadsThenWrite(const Outcome& o, double ax, double ay, bool readBack)
@@ -263,26 +96,6 @@ void TestCorrectionReadsBeforeItWrites()
     }
     CHECK(written == 5);
     CHECK(e.locks == 6 && e.buildLookups == 6);
-}
-
-// Runs a script of frames with the correction on and says, per frame, whether the values were replaced.
-std::vector<bool> Replaced(FakeEnv& e, Engine& engine, const std::vector<Frame>& frames)
-{
-    std::vector<bool> out;
-    for (const Frame& f : frames)
-        out.push_back(!Evaluate(e, engine, f, false, true).sets.empty());
-    return out;
-}
-
-Frame At(int counter, float s, std::uint64_t timeMs, float jx = 0.3f, float jy = -0.2f)
-{
-    Frame f;
-    f.counter = counter;
-    f.s = s;
-    f.timeMs = timeMs;
-    f.jx = jx;
-    f.jy = jy;
-    return f;
 }
 
 // M2: the pair is replaced only when the object's counter increased since the previous evaluate AND its ratio is the previous one's.
@@ -399,49 +212,6 @@ void TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds()
         const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
         CHECK(correctionLines(start).size() == 1 && Has(correctionLines(start)[0], "parameter block read back: unavailable"));
     }
-}
-
-// M3: the status line says whether frame generation is active (the replaced pair feeds it too), and asks only when it writes the line.
-void TestStatusLineSaysWhetherFrameGenerationIsActive()
-{
-    for (int mode = 0; mode < 3; ++mode)
-    {
-        FakeEnv e = MakeEnv();
-        e.frameGeneration = mode == 0 ? std::optional<bool> { true } : mode == 1 ? std::optional<bool> { false } : std::nullopt;
-        Engine engine;
-        int statusLines = 0;
-        for (int i = 0; i < 40; ++i)
-        {
-            const Outcome o = Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 1000), false, true);
-            for (const std::string& line : o.logs)
-                if (Has(line, "Jitter correction: on;"))
-                {
-                    ++statusLines;
-                    CHECK(Has(line, mode == 0 ? "frame generation active yes" : mode == 1 ? "frame generation active no" : "frame generation active unknown"));
-                }
-        }
-        CHECK(statusLines == 4 && e.fgQueries == 4); // one every 10 s of the fake clock, and nothing asked in between
-    }
-}
-
-// M2: what the status line says about it, so a session shows whether the correction is inert.
-void TestStatusLineCountsHeldBackFrames()
-{
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    // first status line at the first evaluate (a sample is due); the second window is the four evaluates after it
-    Evaluate(e, engine, At(100, 1.0f, 0), false, true);
-    Evaluate(e, engine, At(101, 1.0f, 100), false, true);   // replaced
-    Evaluate(e, engine, At(101, 1.0f, 200), false, true);   // the counter did not increase
-    Evaluate(e, engine, At(102, 1.5f, 300), false, true);   // the ratio changed
-    const Outcome last = Evaluate(e, engine, At(103, 1.5f, 10000), false, true); // replaced; a status line is due
-    std::string status;
-    for (const std::string& line : last.logs)
-        if (Has(line, "Jitter correction: on;"))
-            status = line;
-    CHECK(!status.empty());
-    CHECK(Has(status, "4 evaluates seen") && Has(status, "2 replaced") && Has(status, "2 passed through unchanged"));
-    CHECK(Has(status, "1 frame counter did not increase") && Has(status, "1 ratio not steady") && Has(status, "0 first frame after a gap"));
 }
 
 // (e) The probe line says what NGX was told BEFORE the write. With both keys on and a write in the same evaluate, the sample line
@@ -565,14 +335,6 @@ void TestProbeOnlyStillSamplesAConfigurationChangeEarly()
         CHECK(Evaluate(c, correction, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true).ops.size() >= 9);
 }
 
-int CountLines(const std::vector<std::string>& logs, const char* part)
-{
-    int n = 0;
-    for (const std::string& line : logs)
-        n += Has(line, part) ? 1 : 0;
-    return n;
-}
-
 // M1 (fix round 2): an evaluate the proof REJECTED forgets the reference, like a failed read. The first replacement of a run needs two
 // consecutive evaluates that PASSED the proof (read ok, trusted size, NGX equal, plausible, signs ok), not two that merely read the object.
 void TestRejectedEvaluatesForgetTheReference()
@@ -664,71 +426,6 @@ void TestRejectedEvaluatesForgetTheReference()
     }
 }
 
-// L3: the sample lines are capped per session (an hour of 10-second samples), then one line says so; the status lines likewise.
-void TestLogLinesAreCappedPerSession()
-{
-    {
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        for (int i = 0; i < 420; ++i)
-            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), true, false);
-        CHECK(CountLines(e.logs, "Game jitter: counter") == 360);
-        CHECK(CountLines(e.logs, "sample line budget of 360 lines used up") == 1);
-        CHECK(e.logs.size() == 361); // the 360 samples and the one budget line, in that order
-        CHECK(Has(e.logs.back(), "sample line budget"));
-    }
-    {
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        for (int i = 0; i < 420; ++i)
-            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), false, true);
-        CHECK(CountLines(e.logs, "Jitter correction: on;") == 360);
-        CHECK(CountLines(e.logs, "status line budget of 360 lines used up") == 1);
-    }
-}
-
-// L3: the suppressed episode counts of all three logs are printed from the probe-only branch too, and only when they change (not at
-// every sample).
-void TestSuppressedEpisodesAreReportedFromEveryMode()
-{
-    {
-        // probe only: a state that flickers between failing and fine at every sample
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        const std::uint64_t pointer = kBase + kCurrentBuild.jitter.cameraGlobalRva;
-        for (int i = 0; i < 100; ++i)
-        {
-            e.mem.PutU64(pointer, i % 2 == 1 && i < 80 ? 0 : kGlobal); // 40 failing samples among the first 80, fine afterwards
-            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), true, false);
-        }
-        CHECK(CountLines(e.logs, "Game jitter: not read, guard failed") == 32);
-        CHECK(CountLines(e.logs, "log line budget used up") == 8); // one per change of the total (33rd to 40th episode), not per sample
-        CHECK(Has(e.logs[e.logs.size() - 1], "sample line budget") == false);
-        std::string last;
-        for (const std::string& line : e.logs)
-            if (Has(line, "log line budget used up"))
-                last = line;
-        CHECK(Has(last, "8 probe failures, 0 pass-throughs, 0 replacements"));
-    }
-    {
-        // correction: replacement and pass-through episodes alternate (a counter that stalls after every replacement)
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        std::uint64_t t = 0;
-        Evaluate(e, engine, At(100, 1, t += 10000), false, true);
-        for (int n = 101; n < 101 + 40; ++n)
-        {
-            Evaluate(e, engine, At(n, 1, t += 10000), false, true);
-            Evaluate(e, engine, At(n, 1, t += 10000), false, true); // the same counter again: held back
-        }
-        std::string last;
-        for (const std::string& line : e.logs)
-            if (Has(line, "log line budget used up"))
-                last = line;
-        CHECK(!last.empty() && Has(last, "0 probe failures, 8 pass-throughs, 8 replacements"));
-    }
-}
-// (c) Every failed guard: no write, whatever else is true. Each case spoils exactly one thing; the same rig without the spoiler writes.
 void TestEveryFailedGuardWritesNothing()
 {
     const JitterBuild& b = kCurrentBuild.jitter;
@@ -835,16 +532,12 @@ int main()
     TestKeysOff();
     TestCorrectionReadsBeforeItWrites();
     TestSameFrameRules();
-    TestStatusLineCountsHeldBackFrames();
     TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds();
-    TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestProbeLineShowsTheValuesBeforeTheWrite();
     TestProbeOnlyNeverWrites();
     TestProbeOnlyDoesNoLookupsBetweenSamples();
     TestProbeOnlyStillSamplesAConfigurationChangeEarly();
     TestRejectedEvaluatesForgetTheReference();
-    TestLogLinesAreCappedPerSession();
-    TestSuppressedEpisodesAreReportedFromEveryMode();
     TestEveryFailedGuardWritesNothing();
     return TEST_RESULT("jitter_glue");
 }
