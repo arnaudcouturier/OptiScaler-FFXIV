@@ -657,6 +657,9 @@ void TestText()
     }
     CHECK(Has(FormatPassThrough(Guard::ObjectNotThisEvaluate), "passed through unchanged, guard failed: jitter object does not match this evaluate"));
 
+    CHECK(FormatSuppressed(1, 2, 3) ==
+          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements");
+    CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up") && Has(FormatStatusBudgetUsedUp(360), "status line budget of 360 lines used up"));
     // the configuration key follows every field that matters: each one, changed alone, changes the key
     Context c2 = ctx;
     CHECK(ConfigurationKey(ctx) == ConfigurationKey(c2));

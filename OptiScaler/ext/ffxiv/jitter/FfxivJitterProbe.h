@@ -585,6 +585,24 @@ struct StatusCounts
     std::uint64_t heldCounter = 0, heldRatio = 0, heldFirst = 0;
 };
 
+// What a session still logs once the budgets run out (EpisodeLog::kMaxLines per kind of episode, Engine::kMaxSampleLines sample lines and
+// Engine::kMaxStatusLines status lines): one line per budget, and the counts of the episodes that were not logged.
+inline std::string FormatSampleBudgetUsedUp(std::uint32_t lines)
+{
+    return std::format("Game jitter: sample line budget of {} lines used up for this session, further samples are not logged", lines);
+}
+
+inline std::string FormatStatusBudgetUsedUp(std::uint32_t lines)
+{
+    return std::format("Jitter correction: status line budget of {} lines used up for this session, further status lines are not logged", lines);
+}
+
+inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements)
+{
+    return std::format("Game jitter: log line budget used up, episodes not logged so far: {} probe failures, {} pass-throughs, {} replacements",
+                       probeFailures, passThroughs, replacements);
+}
+
 // `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too.
 inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration)
 {

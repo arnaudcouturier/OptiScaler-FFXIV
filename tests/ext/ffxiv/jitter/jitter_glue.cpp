@@ -562,6 +562,78 @@ void TestProbeOnlyStillSamplesAConfigurationChangeEarly()
         CHECK(Evaluate(c, correction, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true).ops.size() >= 9);
 }
 
+int CountLines(const std::vector<std::string>& logs, const char* part)
+{
+    int n = 0;
+    for (const std::string& line : logs)
+        n += Has(line, part) ? 1 : 0;
+    return n;
+}
+
+// L3: the sample lines are capped per session (an hour of 10-second samples), then one line says so; the status lines likewise.
+void TestLogLinesAreCappedPerSession()
+{
+    {
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        for (int i = 0; i < 420; ++i)
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), true, false);
+        CHECK(CountLines(e.logs, "Game jitter: counter") == 360);
+        CHECK(CountLines(e.logs, "sample line budget of 360 lines used up") == 1);
+        CHECK(e.logs.size() == 361); // the 360 samples and the one budget line, in that order
+        CHECK(Has(e.logs.back(), "sample line budget"));
+    }
+    {
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        for (int i = 0; i < 420; ++i)
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), false, true);
+        CHECK(CountLines(e.logs, "Jitter correction: on;") == 360);
+        CHECK(CountLines(e.logs, "status line budget of 360 lines used up") == 1);
+    }
+}
+
+// L3: the suppressed episode counts of all three logs are printed from the probe-only branch too, and only when they change (not at
+// every sample).
+void TestSuppressedEpisodesAreReportedFromEveryMode()
+{
+    {
+        // probe only: a state that flickers between failing and fine at every sample
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        const std::uint64_t pointer = kBase + kCurrentBuild.jitter.cameraGlobalRva;
+        for (int i = 0; i < 100; ++i)
+        {
+            e.mem.PutU64(pointer, i % 2 == 1 && i < 80 ? 0 : kGlobal); // 40 failing samples among the first 80, fine afterwards
+            Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 10000), true, false);
+        }
+        CHECK(CountLines(e.logs, "Game jitter: not read, guard failed") == 32);
+        CHECK(CountLines(e.logs, "log line budget used up") == 8); // one per change of the total (33rd to 40th episode), not per sample
+        CHECK(Has(e.logs[e.logs.size() - 1], "sample line budget") == false);
+        std::string last;
+        for (const std::string& line : e.logs)
+            if (Has(line, "log line budget used up"))
+                last = line;
+        CHECK(Has(last, "8 probe failures, 0 pass-throughs, 0 replacements"));
+    }
+    {
+        // correction: replacement and pass-through episodes alternate (a counter that stalls after every replacement)
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        std::uint64_t t = 0;
+        Evaluate(e, engine, At(100, 1, t += 10000), false, true);
+        for (int n = 101; n < 101 + 40; ++n)
+        {
+            Evaluate(e, engine, At(n, 1, t += 10000), false, true);
+            Evaluate(e, engine, At(n, 1, t += 10000), false, true); // the same counter again: held back
+        }
+        std::string last;
+        for (const std::string& line : e.logs)
+            if (Has(line, "log line budget used up"))
+                last = line;
+        CHECK(!last.empty() && Has(last, "0 probe failures, 8 pass-throughs, 8 replacements"));
+    }
+}
 // (c) Every failed guard: no write, whatever else is true. Each case spoils exactly one thing; the same rig without the spoiler writes.
 void TestEveryFailedGuardWritesNothing()
 {
@@ -676,6 +748,8 @@ int main()
     TestProbeOnlyNeverWrites();
     TestProbeOnlyDoesNoLookupsBetweenSamples();
     TestProbeOnlyStillSamplesAConfigurationChangeEarly();
+    TestLogLinesAreCappedPerSession();
+    TestSuppressedEpisodesAreReportedFromEveryMode();
     TestEveryFailedGuardWritesNothing();
     return TEST_RESULT("jitter_glue");
 }

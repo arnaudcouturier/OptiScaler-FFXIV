@@ -204,18 +204,40 @@ class Engine
             else
             {
                 _probeFailures.ShouldLog(Guard::None);
-                env.Log(FormatSample(analysis, match, ngxX, ngxY, ctx));
+                if (_sampleLines < kMaxSampleLines)
+                {
+                    ++_sampleLines;
+                    env.Log(FormatSample(analysis, match, ngxX, ngxY, ctx));
+                    if (_sampleLines == kMaxSampleLines)
+                        env.Log(FormatSampleBudgetUsedUp(kMaxSampleLines));
+                }
             }
         }
         if (correct)
         {
-            env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
-            if (_replacing.Suppressed() != 0 || _passThrough.Suppressed() != 0)
-                env.Log(std::format("Jitter correction: log line budget used up, {} further episodes were not logged",
-                                    _replacing.Suppressed() + _passThrough.Suppressed()));
+            if (_statusLines < kMaxStatusLines)
+            {
+                ++_statusLines;
+                env.Log(FormatStatus(_counts, env.FrameGenerationActive()));
+                if (_statusLines == kMaxStatusLines)
+                    env.Log(FormatStatusBudgetUsedUp(kMaxStatusLines));
+            }
             _counts = StatusCounts {};
         }
+
+        // The episodes the three logs had no budget left for, in either mode, and only when the total changed since the last report.
+        const std::uint64_t suppressed = _probeFailures.Suppressed() + _passThrough.Suppressed() + _replacing.Suppressed();
+        if (suppressed != _reportedSuppressed)
+        {
+            _reportedSuppressed = suppressed;
+            env.Log(FormatSuppressed(_probeFailures.Suppressed(), _passThrough.Suppressed(), _replacing.Suppressed()));
+        }
     }
+
+  public:
+    // An hour of one line per 10 seconds: a session cannot grow its log without bound.
+    static constexpr std::uint32_t kMaxSampleLines = 360;
+    static constexpr std::uint32_t kMaxStatusLines = 360;
 
   private:
     static constexpr std::uint32_t kKeyCheckEvery = 16;
@@ -237,6 +259,8 @@ class Engine
     EpisodeLog _passThrough;
     EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
     bool _buildNoted = false;
+    std::uint32_t _sampleLines = 0, _statusLines = 0;
+    std::uint64_t _reportedSuppressed = 0; // the total of suppressed episodes the last report showed
     FrameRules _frames;
     StatusCounts _counts; // since the last status line
 };
