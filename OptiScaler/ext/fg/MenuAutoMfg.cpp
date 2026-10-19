@@ -16,14 +16,24 @@
 
 namespace
 {
+// A real answer of IdentifyGpu is kept; one with vendor Invalid (empty adapter list) is not, it is asked again in a few seconds.
 bool IsBlackwell()
 {
-    static const bool blackwell = []
+    static bool known = false, blackwell = false;
+    static uint64_t triedAt = 0;
+    if (known)
+        return blackwell;
+    const uint64_t now = GetTickCount64();
+    if (triedAt != 0 && now - triedAt < 5000)
+        return blackwell;
+    triedAt = now;
+    const auto gpu = IdentifyGpu::getPrimaryGpu();
+    if (gpu.vendorId != VendorId::Invalid)
     {
-        const auto gpu = IdentifyGpu::getPrimaryGpu();
-        return gpu.vendorId == VendorId::Nvidia &&
-               ext::fg::IsBlackwellArchitecture(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id));
-    }();
+        known = true;
+        blackwell = gpu.vendorId == VendorId::Nvidia &&
+                    ext::fg::IsBlackwellArchitecture(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id));
+    }
     return blackwell;
 }
 

@@ -42,6 +42,7 @@ struct World
     TestState st;
     uint64_t now = 100000;
     bool isDx12 = true, dlssgOut = true, isNvidia = true, dmfg = true, isPaused = false;
+    bool gpuIsKnown = true; // false: the GPU has not been identified (yet); nvidia() and architecture() are not to be trusted
     uint32_t arch = 0x190; // Ada
     int maxGen = 5;        // the Ada unlock is on: up to 6x
     unsigned unlocked = 5;
@@ -63,6 +64,7 @@ struct World
     }
     bool dx12() { return isDx12; }
     bool dlssgOutputActive() { return dlssgOut; }
+    bool gpuKnown() { return gpuIsKnown; }
     bool nvidia() { return isNvidia; }
     uint32_t architecture() { return arch; }
     int maxGenerated()
@@ -395,6 +397,36 @@ void AClosedGateThatCannotReopenStopsTicking()
     CHECK(d.w.locks == locks + 50);
 }
 
+void AnUnidentifiedGpuIsNotAClosedGate()
+{
+    // IdentifyGpu answered with an empty adapter list (it retries on its next call): that must not read as "not NVIDIA" and
+    // latch the closed gate for the whole session. Nothing happens until the GPU is known: no tick, no lock, no latch, no line.
+    Rig r;
+    r.w.isNvidia = false; // what the fake would say about an unknown GPU if it were asked
+    r.w.gpuIsKnown = false;
+    r.observing = true;
+    r.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
+    r.Run(60, 20.0);
+    CHECK(r.opt.numFramesToGenerate == 2 && r.Count() == 2);
+    CHECK(!r.glue.ClosedForGood() && !r.glue.EverActive());
+    CHECK(r.w.Lines("inactive") == 0);
+    CHECK_MSG(r.w.locks == 60, "%d locks (only the observation may take one per frame)", r.w.locks); // Observe: the key is on
+    // known now and really not NVIDIA: the closed gate is reported once and latched
+    r.w.gpuIsKnown = true;
+    r.Run(3, 20.0);
+    CHECK(r.w.Lines("AutoMFG: inactive, the GPU is not an NVIDIA one", 1) == 1);
+    CHECK(r.glue.ClosedForGood());
+
+    // known later and NVIDIA: the selector works
+    Rig n;
+    n.w.gpuIsKnown = false;
+    n.Run(30, 20.0);
+    CHECK(!n.glue.EverActive() && n.glue.controller.Status().gate == AutoMfgGate::KeyOff);
+    n.w.gpuIsKnown = true;
+    n.Run(30, 20.0);
+    CHECK(n.glue.EverActive() && n.glue.controller.Status().gate == AutoMfgGate::Open);
+}
+
 void KeyOffAfterAnActivationStopsTicking()
 {
     // The key goes off after the mode ran: the full tick that sees it says so and restores, then the glue stops ticking until a
@@ -673,6 +705,7 @@ int main()
     RefreshBelow24HzIsUnknownAndRead5sApart();
     AClosedGateThatCannotReopenStopsTicking();
     KeyOffAfterAnActivationStopsTicking();
+    AnUnidentifiedGpuIsNotAClosedGate();
     AFailingTickFailsOpen();
     ALogFailureDoesNotLoseACommittedSwitch();
     SelfTestEndStateReachesTheCount();

@@ -27,20 +27,31 @@ ext::fg::AutoMfgGlue g_glue;
 
 struct GpuFacts
 {
+    bool known = false; // IdentifyGpu answered with a real vendor
     bool nvidia = false;
     uint32_t arch = 0;
 };
 
+// The facts of the primary GPU. IdentifyGpu answers with a default (vendor Invalid) when its adapter list is empty and tries
+// again on its next call, so only a real answer is kept; an unknown one is asked again every few seconds (the glue does
+// nothing meanwhile, see AutoMfgGlue::TickOnce). Called from the SetOptions thread only.
 const GpuFacts& Gpu()
 {
-    static const GpuFacts facts = []
+    static GpuFacts facts;
+    static uint64_t triedAt = 0;
+    if (facts.known)
+        return facts;
+    const uint64_t now = GetTickCount64();
+    if (triedAt != 0 && now - triedAt < 5000)
+        return facts;
+    triedAt = now;
+    const auto gpu = IdentifyGpu::getPrimaryGpu();
+    if (gpu.vendorId != VendorId::Invalid)
     {
-        const auto gpu = IdentifyGpu::getPrimaryGpu();
-        GpuFacts f;
-        f.nvidia = gpu.vendorId == VendorId::Nvidia;
-        f.arch = static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id);
-        return f;
-    }();
+        facts.known = true;
+        facts.nvidia = gpu.vendorId == VendorId::Nvidia;
+        facts.arch = static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id);
+    }
     return facts;
 }
 
@@ -60,6 +71,7 @@ struct LiveWorld
     }
     bool dx12() { return dynamic_cast<IFGFeature_Dx12*>(fg) != nullptr; }
     bool dlssgOutputActive() { return State::Instance().activeFgOutput == FGOutput::DLSSG; }
+    bool gpuKnown() { return Gpu().known; }
     bool nvidia() { return Gpu().nvidia; }
     uint32_t architecture() { return Gpu().arch; }
     int maxGenerated() { return fg->GetMaxInterpolationCount(); }

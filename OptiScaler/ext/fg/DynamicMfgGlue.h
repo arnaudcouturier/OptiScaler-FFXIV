@@ -11,7 +11,8 @@
 //   state()       the upstream State: lastFGFrameTime, dlssgDetectedInterpolationCount, fgChanged
 //   nowMs()       the clock, in ms
 //   readRefreshHz()  the raw display refresh of the window's monitor (a system call: only read through the 5 s cache)
-//   dx12(), dlssgOutputActive(), nvidia(), architecture(), maxGenerated(), dmfgSupported(), paused(), unlockedMax()
+//   dx12(), dlssgOutputActive(), gpuKnown(), nvidia(), architecture(), maxGenerated(), dmfgSupported(), paused(), unlockedMax()
+//                 (gpuKnown() false = the GPU is not identified yet: nvidia() and architecture() are not asked, nothing is latched)
 //   lock()        a guard held while the controller runs (the menu reads its status from another thread)
 //   log(warn, text)
 // Options is sl::DLSSGOptions (mode, numFramesToGenerate).
@@ -147,6 +148,11 @@ class AutoMfgGlue
   private:
     template <class World, class Options> bool TickOnce(World& w, Options& options, bool keyOn, bool selfTest)
     {
+        // The GPU is not identified (yet): its facts would read as "not NVIDIA" and close the gate for the whole session.
+        // Nothing to do this frame, nothing latched; asked again on the next one.
+        if (!w.gpuKnown())
+            return false;
+
         auto& cfg = w.fgConfig();
         auto& config = w.config();
         auto& state = w.state();
