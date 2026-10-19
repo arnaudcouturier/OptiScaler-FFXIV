@@ -114,8 +114,9 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
     CHECK(card.find("\"fg_dlssg\"") != std::string::npos); // right after the DLSSG card
     CHECK(card.find("can still cost one long frame (about 0.2 s)") != std::string::npos);
     CHECK(card.find("Untested in game") != std::string::npos);
-    CHECK(card.find("kBlackwellArchitecture") != std::string::npos); // hidden on RTX 50
-    CHECK(card.find("FGOutput::DLSSG") != std::string::npos);        // and when DLSS-G is not the active output
+    // the visibility rule itself is tested in dynamic_mfg_gate_unit (AutoMfgCardVisible); here only that the card asks it
+    CHECK(card.find("AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell())") != std::string::npos);
+    CHECK(card.find("IsBlackwellArchitecture(") != std::string::npos); // the card and the gate share the RTX 50 test
 }
 
 // The selector writes the count with set_volatile_value: Save Settings must keep storing what the user chose.

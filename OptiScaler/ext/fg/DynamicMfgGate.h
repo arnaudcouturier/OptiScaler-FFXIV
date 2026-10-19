@@ -11,6 +11,16 @@ namespace ext::fg
 {
 // NV_GPU_ARCHITECTURE_GB100: below it a card is Ada or older (nvngx_dlssg's own gate, see MfgUnlock.h).
 inline constexpr uint32_t kBlackwellArchitecture = 0x1B0;
+inline constexpr bool IsBlackwellArchitecture(uint32_t archId)
+{
+    return archId >= kBlackwellArchitecture;
+}
+// The menu card (MenuAutoMfg.cpp) is shown for the DLSS-G output on every card but RTX 50, where NVIDIA's own dynamic mode
+// is the tool. Pure, so the visibility rule is tested without ImGui; the card passes the two facts in.
+inline constexpr bool AutoMfgCardVisible(bool dlssgOutputActive, bool blackwell)
+{
+    return dlssgOutputActive && !blackwell;
+}
 // An automatic choice (ours or NVIDIA's dynamic mode) never goes above 4x: three generated frames.
 inline constexpr int kAutoMaxGenerated = 3;
 
@@ -82,7 +92,7 @@ inline AutoMfgGate EvaluateGate(const GateInputs& in)
         return AutoMfgGate::NotDlssg;
     if (!in.nvidia)
         return AutoMfgGate::NotNvidia;
-    if (in.archId >= kBlackwellArchitecture)
+    if (IsBlackwellArchitecture(in.archId))
         return AutoMfgGate::Blackwell;
     if (in.followsGame)
         return AutoMfgGate::FollowsGame;

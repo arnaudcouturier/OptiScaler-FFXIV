@@ -117,6 +117,18 @@ void RefreshIsUnknownBelow24Hz()
     CHECK(ResolveTarget(0, 224, UsableRefresh(240)) == 224);
 }
 
+void MenuCardVisibility()
+{
+    // The card is for the DLSS-G output on every card but RTX 50 (NVIDIA's own dynamic mode is the tool there).
+    CHECK(AutoMfgCardVisible(true, false));
+    CHECK(!AutoMfgCardVisible(false, false)); // another frame generation output is active, or none
+    CHECK(!AutoMfgCardVisible(true, true));   // Blackwell
+    CHECK(!AutoMfgCardVisible(false, true));
+    // the Blackwell test of the card and the one of the gate are the same threshold
+    CHECK(IsBlackwellArchitecture(0x1B0) && IsBlackwellArchitecture(0x1C0) && !IsBlackwellArchitecture(0x1AF));
+    CHECK(!IsBlackwellArchitecture(0x190));
+}
+
 void CeilingArithmetic()
 {
     CHECK(HardMaxFactor(4, 5) == 4); // never 5x/6x, whatever the unlock allows
@@ -185,6 +197,7 @@ int main()
     GatingTable();
     TargetResolution();
     RefreshIsUnknownBelow24Hz();
+    MenuCardVisibility();
     CeilingArithmetic();
     OptionsGuard();
     if (g_failures)

@@ -22,12 +22,15 @@ bool IsBlackwell()
     {
         const auto gpu = IdentifyGpu::getPrimaryGpu();
         return gpu.vendorId == VendorId::Nvidia &&
-               static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id) >= ext::fg::kBlackwellArchitecture;
+               ext::fg::IsBlackwellArchitecture(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id));
     }();
     return blackwell;
 }
 
-bool AutoMfgVisible(const ext::menu::Ctx& ctx) { return ctx.state.activeFgOutput == FGOutput::DLSSG && !IsBlackwell(); }
+bool AutoMfgVisible(const ext::menu::Ctx& ctx)
+{
+    return ext::fg::AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell());
+}
 
 void DrawAutoMfg(ext::menu::Ctx& ctx)
 {
