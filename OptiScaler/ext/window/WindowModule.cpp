@@ -11,6 +11,7 @@
 #include <Config.h>
 #include <State.h>
 
+#include <atomic>
 #include <mutex>
 
 // The live side of the window-mode module: the real Env behind Controller, one controller for the process and the entry
@@ -36,6 +37,15 @@ struct Unlocked : live::UnlockedScope<std::recursive_mutex>
 {
     Unlocked() : live::UnlockedScope<std::recursive_mutex>(ModuleLock(), t_lockDepth) {}
 };
+
+// R3-L5: the first time a call out ended with the lock depth raised, say so once (the depth was put right by the scope).
+void ReportLockDepth()
+{
+    static std::atomic<bool> reported { false };
+    if (live::DepthViolations() != 0 && !reported.exchange(true))
+        LOG_WARN("Window: a nested entry left the module lock depth raised during a call out; the depth was put right (a bug in "
+                 "the module, reported once)");
+}
 
 class LiveEnv final : public Env
 {
@@ -83,15 +93,23 @@ class LiveEnv final : public Env
 
     bool ApplyExStyle(uint64_t hwnd, uint32_t exstyle) override
     {
-        Unlocked unlocked;
-        return win32::ApplyExStyle(hwnd, exstyle);
+        bool ok = false;
+        {
+            Unlocked unlocked;
+            ok = win32::ApplyExStyle(hwnd, exstyle);
+        }
+        ReportLockDepth();
+        return ok;
     }
 
     // What upstream's hkSetFullscreenState does first when frame generation is active: fgChanged, UpdateTarget, Deactivate.
     void RequestFgOff() override
     {
-        Unlocked unlocked;
-        live::RequestOff(State::Instance().currentFG, State::Instance().fgChanged);
+        {
+            Unlocked unlocked;
+            live::RequestOff(State::Instance().currentFG, State::Instance().fgChanged);
+        }
+        ReportLockDepth();
     }
     uint64_t NowMs() override { return GetTickCount64(); }
 
@@ -104,8 +122,13 @@ class LiveEnv final : public Env
     // and is never dereferenced.
     int32_t Replay(uint64_t native, bool fullscreen) override
     {
-        Unlocked unlocked;
-        return live::ReplaySetFullscreen(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(native)), fullscreen);
+        int32_t hr = 0;
+        {
+            Unlocked unlocked;
+            hr = live::ReplaySetFullscreen(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(native)), fullscreen);
+        }
+        ReportLockDepth();
+        return hr;
     }
 
     // The log macro puts the function name in front of the text; the module's own prefix "Window:" follows it.

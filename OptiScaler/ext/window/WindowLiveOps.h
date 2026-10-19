@@ -3,7 +3,7 @@
 // as templates over the type they call, so a test drives the very same code with fakes that record what they were asked. No
 // Windows or upstream types here.
 
-#include <cassert>
+#include <atomic>
 #include <cstdint>
 
 namespace ext::window::live
@@ -36,6 +36,16 @@ int32_t ReplaySetFullscreen(Chain* chain, bool fullscreen)
 
 // ---- the module lock around the calls out (L2) ------------------------------------------------------------------------------
 
+// How often an UnlockedScope ended with the lock depth raised, which the stack discipline of LockDepthGuard rules out: a counter,
+// not an assert (R3-L5). The project's Debug and ReleaseDebug configurations do not define NDEBUG (upstream's ReleaseDebug
+// defines NODEBUG), so an assert would abort inside the game's Present; the module reports the first violation once instead.
+inline std::atomic<uint32_t>& DepthViolationCounter()
+{
+    static std::atomic<uint32_t> count { 0 };
+    return count;
+}
+inline uint32_t DepthViolations() { return DepthViolationCounter().load(); }
+
 // Entry points take the module's recursive mutex once per call and count it in `depth`, a per-thread number: how often THIS
 // thread holds the mutex. An entry point's guard raises it for the length of the call.
 class LockDepthGuard
@@ -67,7 +77,8 @@ class UnlockedScope
     }
     ~UnlockedScope()
     {
-        assert(_depth == 0 && "a nested entry left the lock depth raised");
+        if (_depth != 0) // a nested entry left the depth raised: counted, and put right below
+            ++DepthViolationCounter();
         for (int i = 0; i < _held; ++i)
             _mutex.lock();
         _depth = _held;

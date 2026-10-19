@@ -98,5 +98,29 @@ int main()
         CHECK(m.violations == 0);
     }
 
+    // R3-L5: a nested entry that leaves the lock depth raised is a bug, but it must never abort the process (the game's Present
+    // is on the stack, and Debug and ReleaseDebug builds of this project define NODEBUG, not NDEBUG): it is counted, the lock
+    // and the depth are put right, and the module reports it once.
+    {
+        FakeMutex m;
+        int depth = 0;
+        m.lock();
+        live::LockDepthGuard entry(depth);
+        CHECK(live::DepthViolations() == 0); // none of the scopes above counted
+        {
+            live::UnlockedScope<FakeMutex> out(m, depth);
+            ++depth; // a nested entry that never came back
+        }
+        CHECK(live::DepthViolations() == 1);
+        CHECK(m.owned == 1 && depth == 1); // put right: the entry's own level
+        CHECK(m.violations == 0);
+        {
+            live::UnlockedScope<FakeMutex> again(m, depth); // and the machinery keeps working
+            CHECK(m.owned == 0 && depth == 0);
+        }
+        CHECK(m.owned == 1 && depth == 1);
+        CHECK(live::DepthViolations() == 1);
+    }
+
     return wt::g_failed ? 1 : 0;
 }
