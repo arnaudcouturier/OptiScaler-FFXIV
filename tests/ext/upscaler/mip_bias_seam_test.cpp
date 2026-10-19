@@ -52,6 +52,94 @@ static size_t Count(const std::string& text, const std::string& needle)
     return n;
 }
 
+static std::string Trim(const std::string& s)
+{
+    const size_t b = s.find_first_not_of(" \t");
+    if (b == std::string::npos)
+        return {};
+    return s.substr(b, s.find_last_not_of(" \t") - b + 1);
+}
+
+// Only what the compiler would see: `#if 0` blocks, `//` and `/* */` comments, and the inside of string and character
+// literals are blanked, so a wiring line that was commented out, disabled or moved into a string does not count.
+static std::string StripNonCode(const std::string& text)
+{
+    std::string kept;
+    {
+        std::istringstream in(text);
+        std::string line;
+        int skipDepth = 0; // > 0 inside an `#if 0` block (nested #if counted)
+        while (std::getline(in, line))
+        {
+            const std::string t = Trim(line);
+            if (skipDepth > 0)
+            {
+                if (t.rfind("#if", 0) == 0)
+                    ++skipDepth;
+                else if (t.rfind("#endif", 0) == 0)
+                    --skipDepth;
+                kept += '\n';
+            }
+            else if (t == "#if 0")
+            {
+                skipDepth = 1;
+                kept += '\n';
+            }
+            else
+            {
+                kept += line + '\n';
+            }
+        }
+    }
+
+    std::string out;
+    for (size_t i = 0; i < kept.size();)
+    {
+        if (kept.compare(i, 2, "//") == 0)
+        {
+            while (i < kept.size() && kept[i] != '\n')
+                ++i;
+        }
+        else if (kept.compare(i, 2, "/*") == 0)
+        {
+            const size_t end = kept.find("*/", i + 2);
+            i = end == std::string::npos ? kept.size() : end + 2;
+            out += ' ';
+        }
+        else if (kept[i] == '"' || kept[i] == '\'')
+        {
+            const char quote = kept[i];
+            out += quote;
+            ++i;
+            while (i < kept.size() && kept[i] != quote && kept[i] != '\n')
+            {
+                if (kept[i] == '\\')
+                    ++i;
+                ++i;
+            }
+            if (i < kept.size() && kept[i] == quote)
+            {
+                out += quote;
+                ++i;
+            }
+        }
+        else
+        {
+            out += kept[i++];
+        }
+    }
+    return out;
+}
+
+static std::string NoSpace(const std::string& s)
+{
+    std::string out;
+    for (const char c : s)
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+            out += c;
+    return out;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2)
@@ -61,10 +149,22 @@ int main(int argc, char** argv)
     }
     const std::string root = argv[1];
 
+    // ---- 0. the code filter itself: commented-out, disabled and quoted copies of a wiring line must not count -------------
+    {
+        const std::string sample = "void f()\n{\n    // mipbias::OnFeatureCreate(a);\n    /* mipbias::OnFeatureCreate(b); */\n"
+                                   "    const char* s = \"mipbias::OnFeatureCreate(c);\";\n#if 0\n    mipbias::OnFeatureCreate(d);\n"
+                                   "#if 1\n    mipbias::OnFeatureCreate(e);\n#endif\n#endif\n    mipbias::OnFeatureCreate(f);\n}\n";
+        const std::string code = StripNonCode(sample);
+        CHECK(Count(code, "mipbias::OnFeatureCreate(") == 1);
+        CHECK(Count(code, "\n    mipbias::OnFeatureCreate(f);") == 1);
+    }
+
     // ---- 1. the call in ApplyForcedQuality ------------------------------------------------------------------------
     {
-        const std::string seams = ReadAll(root + "/OptiScaler/ext/upscaler/UpscalerSeams.cpp");
-        CHECK(Count(seams, "mipbias::OnFeatureCreate(width, height, outWidth, outHeight, MvLowResFlag(params));") == 1);
+        const std::string seams = StripNonCode(ReadAll(root + "/OptiScaler/ext/upscaler/UpscalerSeams.cpp"));
+        // Live code only, and the call starts a statement (not part of a comment, an `#if 0` block or a string).
+        CHECK(Count(seams, "\n    mipbias::OnFeatureCreate(width, height, outWidth, outHeight, MvLowResFlag(params));") == 1);
+        CHECK(Count(seams, "mipbias::OnFeatureCreate(") == 1);
 
         // The MVLowRes create flag is read from the NGX parameters the seam is handed (output scaling counts only with
         // low-res motion vectors or render == display).
@@ -168,6 +268,39 @@ int main(int argc, char** argv)
         const std::string menu = ReadAll(root + "/OptiScaler/menu/menu_common.cpp");
         CHECK(menu.find("{ \"mipmap\", \"Textures\", \"Mipmap Bias\", nullptr, RenderApiAndTextureSettings }") !=
               std::string::npos);
+    }
+
+    // ---- 5. upstream's CustomOptional is what mip_bias_glue's FakeOverride copies ---------------------------------------------
+    // If an upstream sync changes one of these bodies, the fake would keep passing while the product loses the user's value
+    // (for example a set_volatile_value that overwrites the saved ini value every time): fail here, and update the fake.
+    {
+        const std::string config = NoSpace(StripNonCode(ReadAll(root + "/OptiScaler/Config.h")));
+        const char* const bodies[] = {
+            // set_volatile_value: the previously set value is saved only while not volatile
+            "constexprvoidset_volatile_value(constT&value){if(!_volatile){if(this->has_value())_configIni=this->value();"
+            "else_configIni=std::nullopt;}_volatile=true;std::optional<T>::operator=(value);}",
+            // set_from_config
+            "constexprvoidset_from_config(conststd::optional<T>&opt){if(!this->has_value()){_configIni=opt;"
+            "std::optional<T>::operator=(opt);}}",
+            // every operator= overload clears the volatile flag
+            "constexprCustomOptional&operator=(constT&value){_volatile=false;std::optional<T>::operator=(value);return*this;}",
+            "constexprCustomOptional&operator=(T&&value){_volatile=false;std::optional<T>::operator=(std::move(value));"
+            "return*this;}",
+            "constexprCustomOptional&operator=(conststd::optional<T>&opt){_volatile=false;std::optional<T>::operator=(opt);"
+            "return*this;}",
+            "constexprCustomOptional&operator=(std::optional<T>&&opt){_volatile=false;"
+            "std::optional<T>::operator=(std::move(opt));return*this;}",
+            // value_for_config of a NoDefault option: the saved ini value while volatile
+            "requires(defaultState!=WithDefault){if(_volatile)return_configIni;if(this->has_value())returnthis->value();"
+            "returnstd::nullopt;}",
+        };
+        for (const char* body : bodies)
+        {
+            const bool found = config.find(body) != std::string::npos;
+            if (!found)
+                std::printf("upstream CustomOptional changed: %s\n", body);
+            CHECK(found);
+        }
     }
 
     if (g_failed != 0)
