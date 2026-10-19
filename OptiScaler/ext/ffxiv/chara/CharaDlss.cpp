@@ -146,6 +146,7 @@ struct SlotGpu
     uint32_t ngxGeneration = 0; // the NGX instance (g_ngxGeneration) that created params and handle
     bool failureLogged = false;
     bool composedFromNr = false; // the composed image was made from the production NR output (written by every alpha pass)
+    nr::SrColourSource lastColour = nr::SrColourSource::Plain; // the colour source of the last successful SR evaluate (the history reset on a change)
 };
 
 struct PassData
@@ -782,23 +783,29 @@ void RunSlot(int index, const DrawView& view)
     ComPtr<ID3D11Texture2D> preSrColour; // the pre-SR NR result, with a reference of its own for the evaluate
     NVSDK_NGX_Result result = NVSDK_NGX_Result_Success;
     NVSDK_NGX_Result nrColourResult = NVSDK_NGX_Result_Success;
+    // The history reset of each evaluate is the rule's too (nr::EvaluateResetFor): the slot's own reset (`in.reset`), a change of the colour source
+    // since the slot's last successful evaluate (g.lastColour) and the retry after a refused NR image. `in` itself keeps the slot's own reset: the NR
+    // model gets that one, and the evaluate gets a copy with the rule's reset.
     const nr::SrEvaluation ev = nr::DecideSrEvaluate(
-        PlumbingNow(), true, nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs),
+        PlumbingNow(), nr::ConsumerRecentFor(g_consumed, view.rtvTexture, view.now, kNrLiveWindowMs), nr::SrHistory { in.reset, g.lastColour },
         [&]
         {
             PreSrCall call = RunNrPreSr(view, g, s, in);
             preSrColour = std::move(call.texture);
             return call.answer;
         },
-        [&](nr::SrColourSource source)
+        [&](nr::SrColourSource source, bool reset)
         {
-            ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, in, nr::SrColourFor<ID3D11Resource*>(source, preSrColour.Get(), g.color.texture.Get()),
+            ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, ngx::WithReset(in, reset),
+                                                             nr::SrColourFor<ID3D11Resource*>(source, preSrColour.Get(), g.color.texture.Get()),
                                                              g.output.texture.Get(), g.depth.texture.Get(), g.motion.texture.Get());
             result = evaluate(context, g.handle, g.params, nullptr);
             if (source == nr::SrColourSource::PreSr)
                 nrColourResult = result;
             return result == NVSDK_NGX_Result_Success;
         });
+    if (ev.ok)
+        g.lastColour = ev.colour; // only a successful evaluate moves it: a failed slot is released with its feature
     if (ev.latchPreSr && nr::SharedLatches().LatchPreSr())
     {
         if (ev.preSrProduced)
@@ -881,8 +888,9 @@ void RunSlot(int index, const DrawView& view)
     }
     if (diag::TraceEnabled())
         diag::Trace(diag::TraceCategory::Guides, view.now,
-                    std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} reversedZ {} pass {}", index, w, h, g_pass.jitter.x,
-                                g_pass.jitter.y, in.reset, g_reversedZ, g_pass.counter));
+                    std::format("evaluated slot {} {}x{} jitter {:.4f}/{:.4f} reset {} (slot rule {}) colour {} reversedZ {} pass {}", index, w, h,
+                                g_pass.jitter.x, g_pass.jitter.y, ev.resetUsed, in.reset, ev.usedPreSrColour ? "pre-SR NR" : "plain", g_reversedZ,
+                                g_pass.counter));
 }
 
 // ---- Preview NR hooks -----------------------------------------------------------------------------------------------------

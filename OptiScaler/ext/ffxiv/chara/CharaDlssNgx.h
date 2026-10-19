@@ -138,6 +138,14 @@ constexpr EvaluateGuides EvaluateGuidesOf(const EvaluateInputs& in)
     return EvaluateGuides { in.width, in.height, static_cast<float>(in.width), static_cast<float>(in.height) };
 }
 
+// The inputs of one evaluate with the history reset replaced: the slot's own rule gives the reset of its inputs, and the colour-source rules of NR
+// before SR (EvaluateResetFor, CharaNrPlumbing.h) may ask for a reset on top of it for a single call.
+constexpr EvaluateInputs WithReset(EvaluateInputs in, bool reset)
+{
+    in.reset = reset;
+    return in;
+}
+
 // `R` is the resource handle type of the NGX parameter object (ID3D11Resource*). `S` additionally provides
 // SetResource(name, R).
 template <class S, class R> void ApplyEvaluate(S& s, const EvaluateInputs& in, R color, R output, R depth, R motionVectors)

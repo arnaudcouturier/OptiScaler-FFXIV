@@ -206,12 +206,13 @@ constexpr bool RunProductionNow(const PlumbingFacts& f, bool srEvaluateSucceeded
 }
 
 // ---- NR before SR (the pre-SR placement) ----------------------------------------------------------------------------------------------
-// Where preview NR runs for a render the SR path is evaluating (`srInCharge`: the slot is served by SR, as it is whenever RunSlot runs). NR runs
-// before SR only when the key says so, both paths can work, and the SR evaluate has not refused an NR image before; in every other case it runs
-// after SR, exactly as without the key. With the key off the answer is PostSr for every input.
-constexpr Placement PlacementFor(const PlumbingFacts& f, bool srInCharge)
+// Where preview NR runs for a render the SR path is evaluating. It is asked from RunSlot only, which runs for a slot SR serves (a failed or too large
+// slot never gets there), so there is no "SR in charge" argument. NR runs before SR only when the key says so, both paths can work, and the SR evaluate
+// has not refused an NR image before; in every other case it runs after SR, exactly as without the key. With the key off the answer is PostSr for
+// every input.
+constexpr Placement PlacementFor(const PlumbingFacts& f)
 {
-    return (f.preSrWanted && !f.preSrLatched && srInCharge && SrUsable(f) && NrUsable(f)) ? Placement::PreSr : Placement::PostSr;
+    return (f.preSrWanted && !f.preSrLatched && SrUsable(f) && NrUsable(f)) ? Placement::PreSr : Placement::PostSr;
 }
 
 // The pre-SR entry runs before the SR evaluate, for a window somebody shows (the same liveness rule as both other entries).
@@ -364,26 +365,50 @@ template <class Image> constexpr Image SrColourFor(SrColourSource source, Image 
     return source == SrColourSource::PreSr ? preSrColour : plainColour;
 }
 
+// The history reset of an evaluate. The upscaler's history belongs to the pictures it was given: when the colour source of the slot's evaluate changes
+// between two evaluates (plain image <-> NR image: another format and another look) the history of the old source must not be blended into the new
+// picture, which is the one-frame pop of a render that falls back to the plain colour and of the first NR render after the model was built.
+constexpr bool ResetOnSourceChange(SrColourSource previous, SrColourSource now) { return previous != now; }
+
+// The reset an evaluate runs with: the slot's own rule (never evaluated, or the last evaluate is old), a change of the colour source, or the retry
+// after a refused call (the refused call may have advanced the feature's history; what it left behind is not known, and this costs one frame once per
+// session because the refusal latches NR before SR off).
+constexpr bool EvaluateResetFor(bool slotReset, SrColourSource previous, SrColourSource now, bool afterRefusal)
+{
+    return slotReset || ResetOnSourceChange(previous, now) || afterRefusal;
+}
+
+// What the slot knows about its history before the evaluate: its own reset and the colour source of its last successful evaluate (a fresh slot has
+// had plain ones, the source every evaluate has without NR before SR).
+struct SrHistory
+{
+    bool reset = false;
+    SrColourSource previous = SrColourSource::Plain;
+};
+
 struct SrEvaluation
 {
     Placement placement = Placement::PostSr;
     bool preSrOffered = false;     // the pre-SR entry was run for this render
     bool preSrProduced = false;    // it returned an NR image
     bool usedPreSrColour = false;  // the evaluate that succeeded was given that image
+    SrColourSource colour = SrColourSource::Plain; // the colour source of the last evaluate that ran (the one that succeeded when `ok`): the slot stores it
+    bool resetUsed = false;        // the history reset that last evaluate ran with
     bool latchPreSr = false;       // NR before SR must be switched off for the session (write one log line): the image was refused (the plain retry may have failed too) or missing
     bool ok = false;               // an SR evaluate succeeded
 };
 
-// `runPreSr() -> ProductionAnswer` runs the pre-SR entry (called only when RunPreSrNow allows it, before any evaluate). `evaluate(SrColourSource)
-// -> bool` runs the SR evaluate with that colour and says whether it succeeded. With the key off (or any other reason for PostSr) the pre-SR
-// entry is not called and the evaluate runs once on the plain colour, exactly as before this existed. When both evaluates fail the render fails as
-// it always did, but the latch is set all the same when the NR image was given to an evaluate or was missing (a failure with no NR image involved
-// latches nothing).
+// `runPreSr() -> ProductionAnswer` runs the pre-SR entry (called only when RunPreSrNow allows it, before any evaluate). `evaluate(SrColourSource,
+// bool reset) -> bool` runs the SR evaluate with that colour and that history reset and says whether it succeeded; the reset is EvaluateResetFor of
+// `history` (the slot's own rule and its last colour source), plus the retry after a refused call. With the key off (or any other reason for
+// PostSr) the pre-SR entry is not called and the evaluate runs once on the plain colour with the slot's own reset, exactly as before this existed.
+// When both evaluates fail the render fails as it always did, but the latch is set all the same when the NR image was given to an evaluate or was
+// missing (a failure with no NR image involved latches nothing).
 template <class RunPreSr, class Evaluate>
-SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool srInCharge, bool consumerRecent, RunPreSr&& runPreSr, Evaluate&& evaluate)
+SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool consumerRecent, const SrHistory& history, RunPreSr&& runPreSr, Evaluate&& evaluate)
 {
     SrEvaluation r;
-    r.placement = PlacementFor(facts, srInCharge);
+    r.placement = PlacementFor(facts);
     r.preSrOffered = RunPreSrNow(facts, r.placement, consumerRecent);
     bool ranWithoutImage = false;
     if (r.preSrOffered)
@@ -395,14 +420,18 @@ SrEvaluation DecideSrEvaluate(const PlumbingFacts& facts, bool srInCharge, bool 
     bool refused = false;
     if (r.preSrProduced)
     {
-        if (evaluate(SrColourSource::PreSr))
+        r.colour = SrColourSource::PreSr;
+        r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::PreSr, false);
+        if (evaluate(SrColourSource::PreSr, r.resetUsed))
         {
             r.ok = r.usedPreSrColour = true;
             return r;
         }
         refused = true;
     }
-    r.ok = evaluate(SrColourSource::Plain);
+    r.colour = SrColourSource::Plain;
+    r.resetUsed = EvaluateResetFor(history.reset, history.previous, SrColourSource::Plain, refused);
+    r.ok = evaluate(SrColourSource::Plain, r.resetUsed);
     // Latched whether or not the plain retry worked: an evaluate that was given the NR image failed first, and a refused foreign image can leave the
     // feature unusable for the plain call of the same render. Without the latch that render would fail the slot, the released slot would come back
     // and fail the same way, and four failures within a minute would end the whole SR path for a problem of the NR image.

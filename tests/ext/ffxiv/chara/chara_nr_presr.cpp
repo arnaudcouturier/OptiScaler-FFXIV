@@ -55,42 +55,42 @@ PlumbingFacts BothOn()
 void TestPlacementFor()
 {
     long cases = 0;
+    // PlacementFor has no "SR in charge" argument: it is asked from RunSlot only, which runs for a slot SR serves (a failed or too large slot never gets
+    // there), so the answer depends on the facts alone
     for (int bits = 0; bits < kFactsBits; ++bits)
-        for (const bool srInCharge : { false, true })
-        {
-            const PlumbingFacts f = FactsOf(bits);
-            // typed independently of the helpers
-            const bool srOk = f.srWanted && !f.srLatched && f.srGateOpen;
-            const bool nrOk = f.nrWanted && !f.nrLatched && f.nrAvailable;
-            const bool before = f.preSrWanted && !f.preSrLatched && srInCharge && srOk && nrOk;
-            CHECK(PlacementFor(f, srInCharge) == (before ? Placement::PreSr : Placement::PostSr));
-            if (!f.preSrWanted || f.preSrLatched)
-                CHECK(PlacementFor(f, srInCharge) == Placement::PostSr); // key off or latched off: after SR, whatever else is true
-            for (const bool recent : { false, true })
-                for (const Placement p : kPlacements)
-                {
-                    const bool run = p == Placement::PreSr && recent && srOk && nrOk;
-                    CHECK(RunPreSrNow(f, p, recent) == run);
-                }
-            ++cases;
-        }
-    CHECK(cases == kFactsBits * 2);
+    {
+        const PlumbingFacts f = FactsOf(bits);
+        // typed independently of the helpers
+        const bool srOk = f.srWanted && !f.srLatched && f.srGateOpen;
+        const bool nrOk = f.nrWanted && !f.nrLatched && f.nrAvailable;
+        const bool before = f.preSrWanted && !f.preSrLatched && srOk && nrOk;
+        CHECK(PlacementFor(f) == (before ? Placement::PreSr : Placement::PostSr));
+        if (!f.preSrWanted || f.preSrLatched)
+            CHECK(PlacementFor(f) == Placement::PostSr); // key off or latched off: after SR, whatever else is true
+        for (const bool recent : { false, true })
+            for (const Placement p : kPlacements)
+            {
+                const bool run = p == Placement::PreSr && recent && srOk && nrOk;
+                CHECK(RunPreSrNow(f, p, recent) == run);
+            }
+        ++cases;
+    }
+    CHECK(cases == kFactsBits);
     // each condition alone turns the placement back to after SR
     PlumbingFacts on = BothOn();
-    CHECK(PlacementFor(on, true) == Placement::PreSr);
+    CHECK(PlacementFor(on) == Placement::PreSr);
     PlumbingFacts f = on;
     f.preSrWanted = false;
-    CHECK(PlacementFor(f, true) == Placement::PostSr);
+    CHECK(PlacementFor(f) == Placement::PostSr);
     f = on;
     f.preSrLatched = true;
-    CHECK(PlacementFor(f, true) == Placement::PostSr);
+    CHECK(PlacementFor(f) == Placement::PostSr);
     f = on;
     f.nrWanted = false; // "no effect unless PreviewNR is on"
-    CHECK(PlacementFor(f, true) == Placement::PostSr);
+    CHECK(PlacementFor(f) == Placement::PostSr);
     f = on;
     f.srWanted = false; // "... and PreviewDLSS"
-    CHECK(PlacementFor(f, true) == Placement::PostSr);
-    CHECK(PlacementFor(on, false) == Placement::PostSr);
+    CHECK(PlacementFor(f) == Placement::PostSr);
 }
 
 // ---- The SR evaluate with NR before it -------------------------------------------------------------------------------------------------
@@ -102,23 +102,25 @@ struct Fake
     bool plainEvaluate = true; // the evaluate given the plain colour succeeds
     int nrImage = 0, plainImage = 0;
     std::vector<const int*> colours; // what each evaluate was given
+    std::vector<bool> resets;        // the history reset each evaluate was given
 
     ProductionAnswer RunPreSr()
     {
         log.push_back("presr");
         return answer;
     }
-    bool Evaluate(SrColourSource source)
+    bool Evaluate(SrColourSource source, bool reset)
     {
         log.push_back(source == SrColourSource::PreSr ? "eval-nr" : "eval-plain");
         colours.push_back(SrColourFor<const int*>(source, &nrImage, &plainImage));
+        resets.push_back(reset);
         return source == SrColourSource::PreSr ? nrEvaluate : plainEvaluate;
     }
 };
 
-SrEvaluation Decide(const PlumbingFacts& f, bool srInCharge, bool recent, Fake& e)
+SrEvaluation Decide(const PlumbingFacts& f, bool recent, Fake& e, SrHistory history = {})
 {
-    return DecideSrEvaluate(f, srInCharge, recent, [&] { return e.RunPreSr(); }, [&](SrColourSource s) { return e.Evaluate(s); });
+    return DecideSrEvaluate(f, recent, history, [&] { return e.RunPreSr(); }, [&](SrColourSource s, bool reset) { return e.Evaluate(s, reset); });
 }
 
 // Key off, latched off, or not eligible: the pre-SR entry is never called and the evaluate runs exactly once on the plain colour, as it did before.
@@ -128,20 +130,23 @@ void TestKeyOffIsUnchanged()
     for (int bits = 0; bits < kFactsBits; ++bits)
     {
         const PlumbingFacts f = FactsOf(bits);
-        for (const bool srInCharge : { false, true })
-            for (const bool recent : { false, true })
-                for (const bool plainOk : { false, true })
+        for (const bool recent : { false, true })
+            for (const bool plainOk : { false, true })
+                for (const bool slotReset : { false, true })
                 {
                     Fake e;
                     e.plainEvaluate = plainOk;
                     e.nrEvaluate = !plainOk; // would be different if it were ever used
-                    const SrEvaluation r = Decide(f, srInCharge, recent, e);
+                    // the slot's last evaluate was on the plain colour, as every evaluate is without NR before SR
+                    const SrEvaluation r = Decide(f, recent, e, SrHistory { slotReset, SrColourSource::Plain });
                     ++cases;
                     if (r.placement != Placement::PreSr)
                     {
                         CHECK(e.log == (Log { "eval-plain" }));
                         CHECK(e.colours.size() == 1 && e.colours[0] == &e.plainImage);
                         CHECK(r.ok == plainOk && !r.preSrOffered && !r.preSrProduced && !r.usedPreSrColour && !r.latchPreSr);
+                        // the evaluate gets exactly the slot's own reset: no extra reset reaches the default path
+                        CHECK(e.resets.size() == 1 && e.resets[0] == slotReset && r.resetUsed == slotReset && r.colour == SrColourSource::Plain);
                     }
                     if (!f.preSrWanted)
                         CHECK(r.placement == Placement::PostSr);
@@ -157,7 +162,7 @@ void TestEvaluateOutcomes()
     // the NR image is produced and the evaluate takes it
     {
         Fake e;
-        const SrEvaluation r = Decide(f, true, true, e);
+        const SrEvaluation r = Decide(f, true, e);
         CHECK(e.log == (Log { "presr", "eval-nr" }));
         CHECK(e.colours.size() == 1 && e.colours[0] == &e.nrImage);
         CHECK(r.placement == Placement::PreSr && r.preSrOffered && r.preSrProduced && r.usedPreSrColour && r.ok && !r.latchPreSr);
@@ -166,7 +171,7 @@ void TestEvaluateOutcomes()
     {
         Fake e;
         e.nrEvaluate = false;
-        const SrEvaluation r = Decide(f, true, true, e);
+        const SrEvaluation r = Decide(f, true, e);
         CHECK(e.log == (Log { "presr", "eval-nr", "eval-plain" }));
         CHECK(e.colours.size() == 2 && e.colours[0] == &e.nrImage && e.colours[1] == &e.plainImage);
         CHECK(r.preSrProduced && !r.usedPreSrColour && r.ok && r.latchPreSr);
@@ -174,7 +179,7 @@ void TestEvaluateOutcomes()
         PlumbingFacts latched = f;
         latched.preSrLatched = true;
         Fake next;
-        const SrEvaluation n = Decide(latched, true, true, next);
+        const SrEvaluation n = Decide(latched, true, next);
         CHECK(n.placement == Placement::PostSr && next.log == (Log { "eval-plain" }) && !n.latchPreSr);
     }
     // both evaluates fail: the render fails as it always did (the caller fails the slot), and NR before SR is latched off all the same: the NR image
@@ -184,7 +189,7 @@ void TestEvaluateOutcomes()
         Fake e;
         e.nrEvaluate = false;
         e.plainEvaluate = false;
-        const SrEvaluation r = Decide(f, true, true, e);
+        const SrEvaluation r = Decide(f, true, e);
         CHECK(e.log == (Log { "presr", "eval-nr", "eval-plain" }));
         CHECK(!r.ok && r.latchPreSr && !r.usedPreSrColour && r.preSrProduced);
     }
@@ -198,7 +203,7 @@ void TestEvaluateOutcomes()
                 e.answer = { outcome, hasImage }; // an image next to a non-Ran outcome is not trusted
                 e.nrEvaluate = false;
                 e.plainEvaluate = plainOk;
-                const SrEvaluation r = Decide(f, true, true, e);
+                const SrEvaluation r = Decide(f, true, e);
                 CHECK(e.log == (Log { "presr", "eval-plain" }));
                 CHECK(e.colours[0] == &e.plainImage);
                 CHECK(r.placement == Placement::PreSr && r.preSrOffered && !r.preSrProduced && !r.usedPreSrColour && r.ok == plainOk && !r.latchPreSr);
@@ -207,19 +212,19 @@ void TestEvaluateOutcomes()
     {
         Fake e;
         e.answer = { RunOutcome::Ran, false };
-        const SrEvaluation r = Decide(f, true, true, e);
+        const SrEvaluation r = Decide(f, true, e);
         CHECK(e.log == (Log { "presr", "eval-plain" }));
         CHECK(!r.preSrProduced && r.ok && r.latchPreSr);
         Fake both;
         both.answer = { RunOutcome::Ran, false };
         both.plainEvaluate = false;
-        const SrEvaluation failed = Decide(f, true, true, both);
+        const SrEvaluation failed = Decide(f, true, both);
         CHECK(!failed.ok && failed.latchPreSr); // a defect of the module: latched whether or not the plain evaluate worked
     }
     // a window nobody shows: the entry is not called
     {
         Fake e;
-        const SrEvaluation r = Decide(f, true, false, e);
+        const SrEvaluation r = Decide(f, false, e);
         CHECK(e.log == (Log { "eval-plain" }) && r.placement == Placement::PreSr && !r.preSrOffered && !r.latchPreSr);
     }
     // NR unusable (latched, off, unavailable): after SR, the entry is not called
@@ -230,7 +235,7 @@ void TestEvaluateOutcomes()
         n.nrWanted = what != 1;
         n.nrAvailable = what != 2;
         Fake e;
-        const SrEvaluation r = Decide(n, true, true, e);
+        const SrEvaluation r = Decide(n, true, e);
         CHECK(r.placement == Placement::PostSr && e.log == (Log { "eval-plain" }));
     }
 }
@@ -246,13 +251,13 @@ void TestNrImageProblemCostsOneFailure()
     {
         bool imageGiven = false;
         const SrEvaluation r = DecideSrEvaluate(
-            facts, true, true,
+            facts, true, SrHistory {},
             [&]
             {
                 ++offered;
                 return ProductionAnswer { RunOutcome::Ran, true };
             },
-            [&](SrColourSource source)
+            [&](SrColourSource source, bool)
             {
                 if (source == SrColourSource::PreSr)
                 {
@@ -271,21 +276,46 @@ void TestNrImageProblemCostsOneFailure()
 }
 
 // The glue's evaluate, recorded through the real ApplyEvaluate (the CharaDlssNgx.h pattern): the same lambda body as RunSlot's, with a fake in place of
-// the NGX parameter object. Color is the NR result when the pre-SR run produced one and the evaluate took it, the plain colour otherwise; the retry
-// differs from the first evaluate in Color only.
+// the NGX parameter object (chara_dlss_glue_text pins the text of the glue's lambda). Every value an evaluate sets is kept apart and checked against
+// the inputs typed here, not against another call of the same function.
 struct NgxRecorder
 {
     const void* colour = nullptr;
-    std::vector<std::string> others; // every other value set by this evaluate, in order
-    void SetUInt(const char* n, uint32_t v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
-    void SetInt(const char* n, int v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
-    void SetFloat(const char* n, float v) { others.push_back(std::string(n) + "=" + std::to_string(v)); }
+    const void* output = nullptr;
+    const void* depth = nullptr;
+    const void* motion = nullptr;
+    float jitterX = -99.0f, jitterY = -99.0f;
+    uint32_t subrectW = 0, subrectH = 0;
+    int reset = -1;
+    void SetUInt(const char* n, uint32_t v)
+    {
+        if (std::string(n) == ngx::kSubrectWidth)
+            subrectW = v;
+        else if (std::string(n) == ngx::kSubrectHeight)
+            subrectH = v;
+    }
+    void SetInt(const char* n, int v)
+    {
+        if (std::string(n) == ngx::kReset)
+            reset = v;
+    }
+    void SetFloat(const char* n, float v)
+    {
+        if (std::string(n) == ngx::kJitterX)
+            jitterX = v;
+        else if (std::string(n) == ngx::kJitterY)
+            jitterY = v;
+    }
     void SetResource(const char* n, const void* r)
     {
         if (std::string(n) == ngx::kColor)
             colour = r;
-        else
-            others.push_back(std::string(n) + "@" + std::to_string(reinterpret_cast<uintptr_t>(r)));
+        else if (std::string(n) == ngx::kOutput)
+            output = r;
+        else if (std::string(n) == ngx::kDepth)
+            depth = r;
+        else if (std::string(n) == ngx::kMotionVectors)
+            motion = r;
     }
 };
 
@@ -297,22 +327,29 @@ void TestColourGivenToTheEvaluate()
     in.height = 960;
     in.jitterX = 0.25f;
     in.jitterY = -0.5f;
-    in.reset = true;
+    in.reset = false; // the slot's own rule asks for no reset: every reset below is the rules' own
     struct Case
     {
         bool keyOn;
         ProductionAnswer answer;
         bool nrEvaluate;
+        SrColourSource previous;       // the colour source of the slot's last successful evaluate
         std::vector<const void*> want; // the Color of each evaluate, in order
+        std::vector<int> wantReset;    // the Reset of each evaluate, in order
         bool latch;
     };
+    const SrColourSource P = SrColourSource::PreSr, L = SrColourSource::Plain;
     const Case cases[] = {
-        { true, { RunOutcome::Ran, true }, true, { &nrImage }, false },               // NR ran, the evaluate took it
-        { true, { RunOutcome::Ran, true }, false, { &nrImage, &plainImage }, true },  // refused: again on the plain colour, latch
-        { true, { RunOutcome::Preparing, false }, true, { &plainImage }, false },     // no image yet
-        { true, { RunOutcome::Failed, false }, true, { &plainImage }, false },
-        { true, { RunOutcome::Skipped, true }, true, { &plainImage }, false },        // an image next to a non-Ran outcome is not used
-        { false, { RunOutcome::Ran, true }, true, { &plainImage }, false },           // key off: never the NR image
+        { true, { RunOutcome::Ran, true }, true, P, { &nrImage }, { 0 }, false },                 // NR ran, the evaluate took it, same source as before
+        { true, { RunOutcome::Ran, true }, true, L, { &nrImage }, { 1 }, false },                 // ... after plain renders: the source changed
+        { true, { RunOutcome::Ran, true }, false, L, { &nrImage, &plainImage }, { 1, 1 }, true }, // refused: again on the plain colour, latch
+        { true, { RunOutcome::Ran, true }, false, P, { &nrImage, &plainImage }, { 0, 1 }, true }, // refused: the retry resets although the first call did not
+        { true, { RunOutcome::Preparing, false }, true, P, { &plainImage }, { 1 }, false },       // no image yet, after NR renders: the source changed
+        { true, { RunOutcome::Preparing, false }, true, L, { &plainImage }, { 0 }, false },
+        { true, { RunOutcome::Failed, false }, true, L, { &plainImage }, { 0 }, false },
+        { true, { RunOutcome::Skipped, true }, true, L, { &plainImage }, { 0 }, false },          // an image next to a non-Ran outcome is not used
+        { false, { RunOutcome::Ran, true }, true, L, { &plainImage }, { 0 }, false },             // key off: never the NR image, no reset
+        { false, { RunOutcome::Ran, true }, true, P, { &plainImage }, { 1 }, false },             // key switched off after NR renders: one reset
     };
     for (const Case& c : cases)
     {
@@ -320,23 +357,90 @@ void TestColourGivenToTheEvaluate()
         f.preSrWanted = c.keyOn;
         std::vector<NgxRecorder> recorded;
         const SrEvaluation r = DecideSrEvaluate(
-            f, true, true, [&] { return c.answer; },
-            [&](SrColourSource source)
+            f, true, SrHistory { in.reset, c.previous }, [&] { return c.answer; },
+            [&](SrColourSource source, bool reset)
             {
                 NgxRecorder rec;
-                // RunSlot's lambda: Color is SrColourFor(source, the NR result, g.color); the rest does not depend on it
-                ngx::ApplyEvaluate<NgxRecorder, const void*>(rec, in, SrColourFor<const void*>(source, &nrImage, &plainImage), &outImage, &depthImage,
-                                                              &motionImage);
+                // RunSlot's lambda: Color is SrColourFor(source, the NR result, g.color), the reset is the one it is given, the rest is the slot's own
+                ngx::ApplyEvaluate<NgxRecorder, const void*>(rec, ngx::WithReset(in, reset), SrColourFor<const void*>(source, &nrImage, &plainImage),
+                                                              &outImage, &depthImage, &motionImage);
                 recorded.push_back(rec);
                 return source == SrColourSource::PreSr ? c.nrEvaluate : true;
             });
-        CHECK(recorded.size() == c.want.size());
-        for (size_t i = 0; i < recorded.size() && i < c.want.size(); ++i)
+        CHECK(recorded.size() == c.want.size() && recorded.size() == c.wantReset.size());
+        for (size_t i = 0; i < recorded.size() && i < c.want.size() && i < c.wantReset.size(); ++i)
         {
-            CHECK(recorded[i].colour == c.want[i]);
-            CHECK(recorded[i].others == recorded[0].others); // the retry carries the same jitter, reset, guides and output
+            const NgxRecorder& rec = recorded[i];
+            CHECK(rec.colour == c.want[i]);
+            CHECK(rec.reset == c.wantReset[i]);
+            // the retry carries the same output, guides, jitter and sub-rectangle as the first call
+            CHECK(rec.output == &outImage && rec.depth == &depthImage && rec.motion == &motionImage);
+            CHECK(rec.jitterX == 0.25f && rec.jitterY == -0.5f && rec.subrectW == 576 && rec.subrectH == 960);
         }
         CHECK(r.ok && r.latchPreSr == c.latch);
+        CHECK(!c.want.empty() && r.resetUsed == (c.wantReset.back() != 0));
+        CHECK(r.colour == (c.want.back() == &nrImage ? SrColourSource::PreSr : SrColourSource::Plain) && r.usedPreSrColour == (r.colour == SrColourSource::PreSr));
+    }
+}
+
+// The history reset of an evaluate: the slot's own rule, a change of the colour source since the slot's last successful evaluate (NR image <-> plain
+// image: another format and another look, so the upscaler's history does not belong to the new picture), or the retry after a refused call (what the
+// refused call left in the feature's history is not known). Nothing else resets.
+void TestResetRule()
+{
+    CHECK(!ResetOnSourceChange(SrColourSource::Plain, SrColourSource::Plain));
+    CHECK(!ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::PreSr));
+    CHECK(ResetOnSourceChange(SrColourSource::Plain, SrColourSource::PreSr));
+    CHECK(ResetOnSourceChange(SrColourSource::PreSr, SrColourSource::Plain));
+    for (const bool slotReset : { false, true })
+        for (const SrColourSource previous : { SrColourSource::Plain, SrColourSource::PreSr })
+            for (const SrColourSource now : { SrColourSource::Plain, SrColourSource::PreSr })
+                for (const bool afterRefusal : { false, true })
+                    CHECK(EvaluateResetFor(slotReset, previous, now, afterRefusal) == (slotReset || previous != now || afterRefusal));
+
+    // A slot over a series of renders (the glue stores `ev.colour` after a successful evaluate): the reset is asked exactly on a change of the source.
+    struct Step
+    {
+        RunOutcome outcome;
+        bool resetExpected;
+    };
+    const Step steps[] = {
+        { RunOutcome::Preparing, false }, // plain, as before
+        { RunOutcome::Preparing, false },
+        { RunOutcome::Ran, true }, // first NR image: plain -> NR
+        { RunOutcome::Ran, false },
+        { RunOutcome::Ran, false },
+        { RunOutcome::Skipped, true }, // NR -> plain
+        { RunOutcome::Failed, false },
+        { RunOutcome::Ran, true }, // plain -> NR
+        { RunOutcome::Ran, false },
+    };
+    const PlumbingFacts f = BothOn();
+    SrColourSource previous = SrColourSource::Plain; // a fresh slot
+    int count = 0;
+    for (const Step& step : steps)
+    {
+        Fake e;
+        e.answer = { step.outcome, step.outcome == RunOutcome::Ran };
+        const SrEvaluation r = Decide(f, true, e, SrHistory { false, previous });
+        CHECK(r.ok && e.resets.size() == 1);
+        CHECK(e.resets[0] == step.resetExpected);
+        if (r.ok)
+            previous = r.colour;
+        ++count;
+    }
+    CHECK(count == 9);
+    // a refusal ends in the plain source and resets the retry; two failing evaluates reset both (the slot fails, so no source is stored)
+    {
+        Fake e;
+        e.nrEvaluate = false;
+        const SrEvaluation r = Decide(f, true, e, SrHistory { false, SrColourSource::PreSr });
+        CHECK(r.ok && r.colour == SrColourSource::Plain && r.latchPreSr && e.resets == (std::vector<bool> { false, true }));
+        Fake both;
+        both.nrEvaluate = false;
+        both.plainEvaluate = false;
+        const SrEvaluation failed = Decide(f, true, both, SrHistory { false, SrColourSource::Plain });
+        CHECK(!failed.ok && both.resets == (std::vector<bool> { true, true }));
     }
 }
 
@@ -652,6 +756,7 @@ int main()
     TestNrImageProblemCostsOneFailure();
     TestSlotRenderPreSr();
     TestColourGivenToTheEvaluate();
+    TestResetRule();
     TestTintFor();
     TestShapes();
     TestResultKinds();
