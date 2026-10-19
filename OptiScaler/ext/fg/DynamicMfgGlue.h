@@ -47,6 +47,8 @@ class AutoMfgGlue
     AutoMfgObservation observed;  // guarded by World::lock()
 
     bool EverActive() const { return everActive_.load(std::memory_order_relaxed); }
+    // A closed gate that cannot reopen was seen (the observation of the DLS-G state is not needed then).
+    bool ClosedForGood() const { return closedForGood_.load(std::memory_order_relaxed); }
 
     // One tick per game frame, before the guard. True = the selector (or the self-test) is in charge of this frame's count.
     // Fail open: whatever goes wrong in here, the options stay the game's and the answer is false.
@@ -59,7 +61,7 @@ class AutoMfgGlue
             return false;
         // A closed gate that cannot reopen (RTX 50, not NVIDIA, not D3D12, stopped by the kill-switch): the tick has said
         // what it had to say once (the inactive line, the self-test result); until the keys change there is nothing to do.
-        if (closedForGood_ && keyOn == latchedKeyOn_ && selfTest == latchedSelfTest_)
+        if (ClosedForGood() && keyOn == latchedKeyOn_ && selfTest == latchedSelfTest_)
             return false;
 
         bool controls = false;
@@ -165,7 +167,7 @@ class AutoMfgGlue
         }
         // Latched only after a full tick has seen the closed gate (the inactive line, the self-test result and the restore
         // of the count all happen inside that tick).
-        closedForGood_ = IsPermanentlyClosed(gate);
+        closedForGood_.store(IsPermanentlyClosed(gate), std::memory_order_relaxed);
         latchedKeyOn_ = keyOn;
         latchedSelfTest_ = selfTest;
         if (out.controls)
@@ -173,13 +175,16 @@ class AutoMfgGlue
 
         // Applied before anything is formatted or logged: a failure further down must not lose a switch the controller
         // already committed to (its watch would then see the old count and call it a broken change).
-        // In Frame Gen "Default" the game owns the count: nothing is written there.
-        if ((out.setFactor || out.recover) && !in.gate.followsGame)
+        if (out.setFactor || out.recover)
         {
             const int generated = std::max(1, out.factor - 1);
-            // In memory only: Save Settings keeps storing the value the user chose.
+            // In memory only: Save Settings keeps storing the value the user chose. Written in Frame Gen "Default" too: the
+            // configured count is not used there (Config::FGInterpolationCount), but a self-test restore must not leave
+            // the test's last step behind for when the user leaves Default.
             config.FGDLSSGInterpolationCount.set_volatile_value(generated);
-            options.numFramesToGenerate = static_cast<uint32_t>(generated);
+            // In Default the game owns this frame's count.
+            if (!in.gate.followsGame)
+                options.numFramesToGenerate = static_cast<uint32_t>(generated);
             if (out.recover)
                 state.fgChanged = true; // the existing toggle path, once
         }
@@ -225,7 +230,7 @@ class AutoMfgGlue
     std::atomic<bool> everActive_ { false };
     uint64_t refreshReadAt_ = 0;
     double refresh_ = 0.0;
-    bool closedForGood_ = false;
+    std::atomic<bool> closedForGood_ { false };
     bool latchedKeyOn_ = false;
     bool latchedSelfTest_ = false;
     bool failing_ = false;

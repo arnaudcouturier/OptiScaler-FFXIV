@@ -87,6 +87,10 @@ void AutoMfgAdjustOptions(IFGFeature* fg, sl::DLSSGOptions& options)
 
 void AutoMfgObserve(bool queryOk, uint32_t status, uint32_t presented)
 {
+    // Nothing to watch once the gate is closed for good (RTX 50, not NVIDIA, not D3D12, stopped).
+    if (g_glue.ClosedForGood())
+        return;
+
     if (!g_glue.EverActive() && !ext::Cfg().fg.autoMfg.value_or_default() && !ext::Cfg().fg.autoMfgSelfTest.value_or_default())
         return;
 

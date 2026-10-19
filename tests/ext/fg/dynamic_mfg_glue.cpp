@@ -104,6 +104,7 @@ struct Rig
     sl::DLSSGOptions opt;
     bool forceDmfg = false;     // [DLSSG] ForceDMFG
     bool pluginFollows = true;  // the plugin reports the count it was given (one frame later)
+    int gameGenerated = 2;      // the count the game asks for in Frame Gen "Default" (Config::FGInterpolationCount)
 
     Rig() { w.fg.autoMfg = true; }
 
@@ -117,7 +118,7 @@ struct Rig
         w.st.lastFGFrameTime = ms;
         opt = {};
         opt.mode = forceDmfg ? sl::DLSSGMode::eDynamic : sl::DLSSGMode::eOn;
-        opt.numFramesToGenerate = (uint32_t) std::clamp(Count(), 1, w.maxGen);
+        opt.numFramesToGenerate = (uint32_t) std::clamp(w.cfg.followsGame ? gameGenerated : Count(), 1, w.maxGen);
         glue.Adjust(w, opt);
         if (pluginFollows)
             w.st.dlssgDetectedInterpolationCount = (int) opt.numFramesToGenerate;
@@ -129,7 +130,7 @@ struct Rig
         w.st.lastFGFrameTime = ms;
         opt = {};
         opt.mode = forceDmfg ? sl::DLSSGMode::eDynamic : sl::DLSSGMode::eOn;
-        opt.numFramesToGenerate = (uint32_t) std::clamp(Count(), 1, w.maxGen);
+        opt.numFramesToGenerate = (uint32_t) std::clamp(w.cfg.followsGame ? gameGenerated : Count(), 1, w.maxGen);
         const bool controls = glue.Tick(w, opt);
         glue.Guard(w, opt, controls);
         if (pluginFollows)
@@ -334,6 +335,7 @@ void AClosedGateThatCannotReopenStopsTicking()
         Rig r;
         c.apply(r.w);
         r.Run(2, 20.0); // the full tick, which logs the reason, then the latch
+        CHECK_MSG(r.glue.ClosedForGood(), "%s: latched (the observation of the DLS-G state is skipped too)", c.name);
         CHECK_MSG(r.w.Lines("inactive", 1) == 1, "%s: the reason is logged once", c.name);
         const int locks = r.w.locks, reads = r.w.refreshReads;
         r.Run(400, 20.0);
@@ -365,6 +367,7 @@ void AClosedGateThatCannotReopenStopsTicking()
     Rig d;
     d.w.cfg.followsGame = true;
     d.Run(2, 20.0);
+    CHECK(!d.glue.ClosedForGood());
     const int locks = d.w.locks;
     d.Run(50, 20.0);
     CHECK(d.w.locks == locks + 50);
@@ -454,7 +457,8 @@ void SelfTestEndStateReachesTheCount()
     r.Run(100, 20.0);
     CHECK(r.opt.numFramesToGenerate == 2 && r.Count() == 2);
 
-    // Frame Gen switched to Default at that moment instead: the game owns the count, nothing is written.
+    // Frame Gen switched to Default at that moment instead: the game's count stays in the options, and the configured count
+    // (unused in Default) still goes back to the one before the test for when the user leaves Default.
     Rig g;
     g.w.fg.autoMfgSelfTest = true;
     g.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
@@ -467,9 +471,10 @@ void SelfTestEndStateReachesTheCount()
     CHECK(g.Count() == 3);
     g.Run(10, 20.0);
     g.w.cfg.followsGame = true;
+    g.gameGenerated = 1;
     g.Frame(20.0);
-    CHECK_MSG(g.opt.numFramesToGenerate == 3 && g.Count() == 3, "the glue wrote %d over the game's count",
-              (int) g.opt.numFramesToGenerate);
+    CHECK_MSG(g.opt.numFramesToGenerate == 1, "the glue wrote %d over the game's count", (int) g.opt.numFramesToGenerate);
+    CHECK_MSG(g.Count() == 2 && g.Saved() == std::optional<int>(2), "the configured count was left at %d", g.Count());
 }
 } // namespace
 
