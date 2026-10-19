@@ -63,7 +63,7 @@ std::optional<int> GetInt(const NVSDK_NGX_Parameter* p, const char* name)
     return std::nullopt;
 }
 
-void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
+void Run(NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
 {
     const GameBuild* build = Build();
     State& st = S();
@@ -118,12 +118,10 @@ void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
         const CorrectionDecision decision = DecideCorrection(readGuard, analysis, match);
         if (decision.replace)
         {
-            // The block is the game's own non-const NVSDK_NGX_Parameter (IFeature_Dx11wDx12::Evaluate's InParameters, which later goes to
-            // the upscaler's Evaluate and to the frame-generation input); the seam only declares it const. The game sets Jitter.Offset
-            // again at its next evaluate, so nothing persists past this frame.
-            auto* writable = const_cast<NVSDK_NGX_Parameter*>(parameters);
-            writable->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, decision.ax);
-            writable->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, decision.ay);
+            // The block is the bridge's own NVSDK_NGX_Parameter (IFeature_Dx11wDx12::Evaluate's InParameters, which later goes to the
+            // upscaler's Evaluate and to the frame-generation input). The game sets Jitter.Offset again at its next evaluate.
+            parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, decision.ax);
+            parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, decision.ay);
             ++st.replaced;
             if (st.replacing.Event(true))
                 LOG_INFO("{}", FormatCorrection(analysis, decision));
@@ -169,7 +167,7 @@ void Run(const NVSDK_NGX_Parameter* parameters, bool probe, bool correct)
 }
 } // namespace
 
-void OnUpscaleBoundary(const NVSDK_NGX_Parameter* parameters) noexcept
+void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
 {
     try
     {

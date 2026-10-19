@@ -75,7 +75,7 @@ void OnD3D11Unhook()
 namespace ext::dx11bridge
 {
 void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
-                       const NVSDK_NGX_Parameter* parameters)
+                       NVSDK_NGX_Parameter* parameters)
 {
     if (auto* lighting = game::Current().lighting)
     {

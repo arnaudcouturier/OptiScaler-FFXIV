@@ -1,4 +1,5 @@
 #include "check.h"
+#include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/jitter/FfxivJitterProbe.h"
 #include "ext/upscaler/RenderGeometry.h"
 
@@ -7,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include <vector>
 
 using namespace ext::ffxiv;
@@ -83,6 +85,14 @@ FakeMemory Image(const RawObject& o)
 Guard Read(FakeMemory& m, RawObject& out, const GameBuild* build = &kCurrentBuild)
 {
     return ReadChain(m.Reader(), build, kBase, out);
+}
+
+// The entry point takes the NGX parameter block as a NON-const pointer: the correction writes into it, and a const declaration would
+// need a const_cast at the write. (This is also the type the bridge's Evaluate passes, so the seam needs no upstream change.)
+void TestEntryPointWritesThroughANonConstBlock()
+{
+    CHECK((std::is_same_v<decltype(&ext::ffxiv::jitter::OnUpscaleBoundary), void (*)(NVSDK_NGX_Parameter*) noexcept>));
+    CHECK(!(std::is_same_v<decltype(&ext::ffxiv::jitter::OnUpscaleBoundary), void (*)(const NVSDK_NGX_Parameter*) noexcept>));
 }
 
 void TestConstants()
@@ -570,6 +580,7 @@ void TestText()
 
 int main()
 {
+    TestEntryPointWritesThroughANonConstBlock();
     TestConstants();
     TestReadChain();
     TestCounterTracker();
