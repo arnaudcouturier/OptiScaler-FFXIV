@@ -14,6 +14,7 @@
 #include "ext/window/WindowRules.h"
 
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <optional>
 #include <string>
@@ -290,10 +291,17 @@ class Controller
         f.wouldReturn = before == DeferState::Idle ? f.verdict == DeferVerdict::Defer : prevent;
         f.returned = prevent;
         env.Log(FormatProbeLine(f), false);
+        // A hold says what it intends here; the line that says "handler returns true" is written once the hold stands (R3-L4): this
+        // line comes before the frame generation request, which can fail.
         if (action != nullptr)
-            env.Log(std::format("Window: SetFullscreenState({}) {}; handler returns {}", ev.fullscreen ? "TRUE" : "FALSE",
-                                action, prevent ? "true (prevent)" : "false"),
-                    false);
+        {
+            if (commit == Commit::Hold)
+                env.Log(std::format("Window: SetFullscreenState({}) {}", ev.fullscreen ? "TRUE" : "FALSE", action), false);
+            else
+                env.Log(std::format("Window: SetFullscreenState({}) {}; handler returns {}", ev.fullscreen ? "TRUE" : "FALSE",
+                                    action, prevent ? "true (prevent)" : "false"),
+                        false);
+        }
 
         // Nothing below logs. State is settled first, then the call out; if the call out throws, the hold is cancelled.
         switch (commit)
@@ -303,6 +311,7 @@ class Controller
         case Commit::DropMoot:
             _deferral.Cancel();
             _pendingNative = 0;
+            _reRequestNoted = false;
             break;
         case Commit::Replace:
             _deferral.Replace(ev.fullscreen);
@@ -317,15 +326,31 @@ class Controller
             {
                 AskFgOff(env);
             }
+            catch (const std::exception& e)
+            {
+                CancelFailedHold(env, ev.fullscreen, e.what());
+                throw;
+            }
             catch (...)
             {
-                _deferral.Cancel();
-                _pendingNative = 0;
+                CancelFailedHold(env, ev.fullscreen, "unknown error");
                 throw;
+            }
+            // The hold stands: say so. A logger that throws here must not change the answer (the held call must not also pass).
+            try
+            {
+                env.Log(std::format("Window: SetFullscreenState({}) held back, frame generation asked off; handler returns true "
+                                    "(prevent)",
+                                    ev.fullscreen ? "TRUE" : "FALSE"),
+                        false);
+            }
+            catch (...)
+            {
             }
             break;
         }
-        }        return prevent;
+        }
+        return prevent;
     }
 
     // Test access.
@@ -485,6 +510,26 @@ class Controller
     // out, another thread's resize that arrives meanwhile is not nested.
     bool Nested(Env& env) const { return _actionDepth > 0 && _actionThread == env.CurrentThread(); }
 
+    // The frame generation request failed while a call was being held: the hold is cancelled, the call passes (the entry point
+    // returns false once the exception has gone through), and the log says so (R3-L4). The line is written under its own guard, so
+    // that a failing logger cannot replace the original exception.
+    void CancelFailedHold(Env& env, bool fullscreen, const char* what)
+    {
+        _deferral.Cancel();
+        _pendingNative = 0;
+        _reRequestNoted = false;
+        try
+        {
+            env.Log(std::format("Window: SetFullscreenState({}) hold cancelled, the frame generation request failed ({}); handler "
+                                "returns false (the call passes; a returned=true above is void)",
+                                fullscreen ? "TRUE" : "FALSE", what),
+                    true);
+        }
+        catch (...)
+        {
+        }
+    }
+
     // Drops a held call without replaying it (nothing else to release: no reference is taken on the swapchain).
     void DropHold(Env& env, const char* why, bool warn = false)
     {
@@ -576,13 +621,14 @@ class Controller
         _reRequestNoted = false;
 
         ReplayGuard logGuard(_deferral, _actionDepth, _actionThread, env.CurrentThread()); // a throwing log must not leave Replaying stuck
-        int32_t hr = 0;
+        // R3-L3: the call first, both lines after it. A line that throws (the formatter, the logger) must not lose the held call:
+        // the machine is already Replaying, the guard ends it, and the call has been made.
+        const int32_t hr = env.Replay(native, fullscreen);
         env.Log(std::format("Window: replaying SetFullscreenState({}) with a null target: {} (after {} presents, {} ms, {} "
                             "earlier call(s) replaced, fg={})",
                             fullscreen ? "TRUE" : "FALSE", WaitResultName(result), presents, waited, replaced,
                             FgStateName(fg)),
                 result == WaitResult::ReplayAtHardLimit);
-        hr = env.Replay(native, fullscreen);
         env.Log(std::format("Window: replayed SetFullscreenState({}) returned {:#010x}", fullscreen ? "TRUE" : "FALSE",
                             static_cast<uint32_t>(hr)),
                 hr < 0);

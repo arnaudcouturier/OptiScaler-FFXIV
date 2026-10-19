@@ -351,9 +351,37 @@ int main()
             threw = true;
         }
         CHECK(threw);
+        // R3-L3: the held call was not lost: the replay ran (once) before the line that threw, and nothing is held any more.
+        CHECK(env.replays.size() == 1);
         env.throwOn.clear();
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.size() == 1); // never a second replay
         env.fg = kActive;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // held again: not stuck
+    }
+    // R3-L3: the same when the line after the replay (its result) throws.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        env.throwOn = "replayed SetFullscreenState";
+        bool threw = false;
+        try
+        {
+            Present(c, env, Mode::On, kPaused, kPaused);
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(env.replays.size() == 1);
+        env.throwOn.clear();
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // not stuck
     }
 
     // M4: the event target. 0 and the window's own monitor are held; any other output passes (the replay drops the target).
@@ -420,11 +448,91 @@ int main()
         }
         CHECK(threw);
         env.onRequestOff = nullptr;
+        // R3-L4: the log never claims a prevent that did not happen; it says the hold was cancelled and the call passes.
+        CHECK(!AnyLogContains(env, "handler returns true"));
+        CHECK(AnyLogContains(env, "hold cancelled"));
+        CHECK_CONTAINS(env.Last(), "handler returns false");
+        CHECK_CONTAINS(env.Last(), "request"); // what went wrong
         for (int i = 0; i < 30; ++i)
             Present(c, env, Mode::On, kPaused, kPaused);
         CHECK(env.replays.empty());
         env.fg = kActive;
         CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+    }
+    {
+        // R3-L4: a line that throws inside the cancel path cannot replace the original exception, and the hold is still gone
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        env.onRequestOff = [&] { throw std::runtime_error("request"); };
+        env.throwOn = "hold cancelled";
+        std::string what;
+        try
+        {
+            c.OnSetFullscreenState(env, Mode::On, Event(true));
+        }
+        catch (const std::exception& e)
+        {
+            what = e.what();
+        }
+        CHECK(what == "request");
+        env.onRequestOff = nullptr;
+        env.throwOn.clear();
+        for (int i = 0; i < 30; ++i)
+            Present(c, env, Mode::On, kPaused, kPaused);
+        CHECK(env.replays.empty());
+    }
+    {
+        // R3-L4: while the request runs the claim is not logged yet; once the hold stands it is
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        bool claimedEarly = false;
+        env.onRequestOff = [&] { claimedEarly = AnyLogContains(env, "handler returns"); };
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        CHECK(!claimedEarly);
+        CHECK(env.fgOffRequests == 1);
+        CHECK_CONTAINS(env.Last(), "handler returns true (prevent)");
+        // a throwing logger after the hold stands cannot undo it: the hold is replayed later, once
+        FakeEnv env2;
+        Controller c2;
+        c2.SetReplayConfirm(1, 0);
+        Running(c2, env2);
+        env2.throwOn = "handler returns true";
+        bool prevented = false;
+        try
+        {
+            prevented = c2.OnSetFullscreenState(env2, Mode::On, Event(true));
+        }
+        catch (...)
+        {
+            CHECK(false); // a log after the commit must not escape: the handler must answer true for the held call
+        }
+        CHECK(prevented);
+        env2.throwOn.clear();
+        Present(c2, env2, Mode::On, kPaused, kPaused);
+        Present(c2, env2, Mode::On, kPaused, kPaused);
+        CHECK(env2.replays.size() == 1);
+    }
+    // R3-L4: a moot drop forgets that "frame generation came back" was noted: the next hold notes it again.
+    {
+        FakeEnv env;
+        Controller c;
+        c.SetReplayConfirm(1, 0);
+        Running(c, env);
+        env.exclusive = false;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true)));
+        Present(c, env, Mode::On, kActive, kActive);
+        CHECK(!c.OnSetFullscreenState(env, Mode::On, Event(false))); // moot: dropped
+        env.fg = kActive;
+        CHECK(c.OnSetFullscreenState(env, Mode::On, Event(true))); // a new hold
+        Present(c, env, Mode::On, kActive, kActive);
+        int notes = 0;
+        for (const auto& l : env.logs)
+            notes += l.find("frame generation came back while a call is held") != std::string::npos ? 1 : 0;
+        CHECK(notes == 2);
     }
     {
         // a throwing line while a held call is replaced leaves the held call as it was
