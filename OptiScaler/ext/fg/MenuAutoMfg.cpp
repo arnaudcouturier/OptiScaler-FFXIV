@@ -71,6 +71,14 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
         cfg.autoMfgTarget = target;
     ext::menu::Tooltip("Frame rate to reach. Auto is the lower of the frame rate limit and the display refresh rate.");
 
+    bool selfTest = cfg.autoMfgSelfTest.value_or_default();
+    if (ImGui::Checkbox("Run the self-test once##AutoMfg", &selfTest))
+        cfg.autoMfgSelfTest = selfTest;
+    ext::menu::Tooltip("One-off check of the in-place changes: 2X, 3X, 4X, 3X, 2X, six seconds apart; one log line starts with\n"
+                       "\"AutoMFG self-test: PASS\" or \"AutoMFG self-test: FAIL\". It starts after 20 calm seconds (a stall waits\n"
+                       "or interrupts it), needs the Frame Gen slider on a fixed 3X or 4X and the INFO log level, and takes\n"
+                       "about 45 seconds. It runs once per session.");
+
     const auto status = ext::fg::AutoMfgGetStatus();
     if (enabled && status.gate == ext::fg::AutoMfgGate::Open)
     {

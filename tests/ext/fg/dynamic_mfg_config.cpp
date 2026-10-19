@@ -145,6 +145,12 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
           std::string::npos);
     CHECK(card.find("stops after a second one") == std::string::npos);
     CHECK(card.find("Untested in game") != std::string::npos);
+    // the self-test key is a checkbox of the card: read from the key, written back to the key, nothing else writes it
+    CHECK(card.find("bool selfTest = cfg.autoMfgSelfTest.value_or_default();") != std::string::npos);
+    CHECK(card.find("if (ImGui::Checkbox(\"Run the self-test once##AutoMfg\", &selfTest))") != std::string::npos);
+    CHECK(card.find("cfg.autoMfgSelfTest = selfTest;") != std::string::npos);
+    CHECK(card.find("cfg.autoMfgSelfTest = ") == card.rfind("cfg.autoMfgSelfTest = ")); // exactly one write
+    CHECK(card.find("It starts after 20 calm seconds") != std::string::npos);
     // the visibility rule itself is tested in dynamic_mfg_gate_unit (AutoMfgCardVisible); here only that the card asks it
     // the GPU is asked only after the cheap output check (a lambda, so a card that is not shown never enumerates adapters)
     CHECK(card.find("AutoMfgCardVisibleAsking(ctx.state.activeFgOutput == FGOutput::DLSSG, [] { return IsBlackwell(); })") !=
