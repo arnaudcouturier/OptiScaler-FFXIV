@@ -37,6 +37,18 @@ const Row kRows[] = {
     { "upscaler/menu/UpscalerMenu.cpp",
       { "SectionTitle(\"Forced quality level\")", "{ \"forced_quality\", \"Upscaling\", \"Forced quality level\", Draw," },
       { "\"Quality Preset\"" } },
+    // Frame generation unlocks: titled, and the RTX 20/30 runtime says "frame-generation runtime" ("Companion" means only
+    // the FFXIV nameplates). The Ampere tuning keys are not part of this step.
+    { "fg/MenuFgUnlocks.cpp",
+      { "SectionTitle(\"Frame generation unlocks\")", "TreeNode(\"RTX 20/30 frame-generation runtime (experimental)\")",
+        "Checkbox(\"Load RTX 20/30 frame-generation runtime (restart)\"", "SliderInt(\"RTX 20/30 max generated frames (restart)\"",
+        "Combo(\"Runtime control\"", "SliderInt(\"Runtime factor\"", "SliderInt(\"Runtime target FPS\"", "Button(\"Apply runtime controls\")",
+        "{ \"fg_unlocks\", \"Frame Gen\", \"Frame generation unlocks\", DrawFgUnlocks," },
+      { "SM86/SM75", "ompanion" } },
+    // Automatic multi frame generation: titled (title == picker name)
+    { "fg/MenuAutoMfg.cpp",
+      { "SectionTitle(\"Automatic multi frame generation\")", "{ \"fg_auto_mfg\", \"Frame Gen\", \"Automatic multi frame generation\", DrawAutoMfg," },
+      {} },
 };
 
 std::vector<std::string> Problems(const Row& r, const std::string& text)

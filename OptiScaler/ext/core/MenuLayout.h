@@ -43,13 +43,14 @@ inline constexpr Slot kSlots[] = {
     { "dlss_nr",                  "Upscaling",     "upscaler" },
     { "forced_quality",           "Upscaling",     "upscale_ratio" },
 
-    // Frame Gen: the runtime cards (fg_fsrfg .. fg_sl_inputs) are one shared function, our card follows its last box
-    { "fg_unlocks",               "Frame Gen",     "fg_selection" },
-    { "fg_auto_mfg",              "Frame Gen",     "fg_sl_inputs" },
+    // Frame Gen: the runtime cards (fg_fsrfg .. fg_sl_inputs) are one shared function; our two DLSS-G cards come after it,
+    // together: the unlocks first, then the automatic multiplier
+    { "fg_unlocks",               "Frame Gen",     "fg_sl_inputs" },
+    { "fg_auto_mfg",              "Frame Gen",     "fg_unlocks" },
 
     // FFXIV (tab hidden outside the FFXIV build match), after the Frame Gen cards, in the order of the tab:
     // display, image quality, HUD, diagnostics
-    { "window_mode",              "FFXIV",         "fg_sl_inputs" },
+    { "window_mode",              "FFXIV",         "fg_auto_mfg" },
     { "ffxiv_hdr",                "FFXIV",         "window_mode" },
     { "ffxiv_jitter",             "FFXIV",         "ffxiv_hdr" },
     { "ffxiv_character_preview",  "FFXIV",         "ffxiv_jitter" },

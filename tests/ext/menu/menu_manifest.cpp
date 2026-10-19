@@ -91,8 +91,8 @@ constexpr const char* kShippedForkIds[] = {
 };
 
 // Cards that do not have their SectionTitle yet. Empty when the titles are done: an entry is an error as soon as its card
-// has the title. (WP3 adds the titles of the two Frame Gen cards.)
-constexpr const char* kTitleExceptions[] = { "fg_unlocks", "fg_auto_mfg" };
+// has the title. Empty now: every card is titled.
+const std::vector<const char*> kTitleExceptions = {};
 
 Violations Check(const Model& m)
 {

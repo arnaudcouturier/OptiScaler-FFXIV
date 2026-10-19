@@ -11,7 +11,8 @@
 
 #include <menu/menu_common.h>
 
-// Card `fg_auto_mfg` (tab "Frame Gen", after the DLSSG card): the automatic 2X-4X multiplier of DynamicMfgSeams.cpp.
+// Card `fg_auto_mfg` (tab "Frame Gen", after fg_unlocks, which follows the runtime cards; position: ext/core/MenuLayout.h):
+// the automatic 2X-4X multiplier of DynamicMfgSeams.cpp.
 // Hidden when the DLSS-G output is not the active one and on RTX 50 (NVIDIA's own dynamic mode is the tool there).
 
 namespace
@@ -47,6 +48,8 @@ void DrawAutoMfg(ext::menu::Ctx& ctx)
 {
     (void) ctx;
     auto& cfg = ext::Cfg().fg;
+
+    ext::menu::SectionTitle("Automatic multi frame generation");
 
     bool enabled = cfg.autoMfg.value_or_default();
     if (ImGui::Checkbox("Automatic multiplier (2X-4X, experimental)", &enabled))

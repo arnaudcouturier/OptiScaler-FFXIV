@@ -8,20 +8,21 @@
 
 #include <menu/menu_common.h>
 
-// Card `fg_unlocks` (tab "Frame Gen"): MFG unlocks for DLSS-G, D4 (RTX 20/30 companion runtime) and D1 (built-in Ada
+// Card `fg_unlocks` (tab "Frame Gen", after the runtime cards, then fg_auto_mfg; position: ext/core/MenuLayout.h): MFG unlocks
+// for DLSS-G, D4 (RTX 20/30 frame-generation runtime) and D1 (built-in Ada
 // unlock). Was inline at the top of RenderFrameGenerationSelection.
 
 namespace
 {
-void DrawAmpereCompanion(ext::FgConfig& cfg)
+void DrawAmpereRuntime(ext::FgConfig& cfg)
 {
-    if (!ImGui::TreeNode("SM86/SM75 companion runtime (experimental)"))
+    if (!ImGui::TreeNode("RTX 20/30 frame-generation runtime (experimental)"))
         return;
 
     bool enabled = cfg.ampereMfgUnlock.value_or_default();
-    if (ImGui::Checkbox("Load RTX 20/30 companion (restart)", &enabled))
+    if (ImGui::Checkbox("Load RTX 20/30 frame-generation runtime (restart)", &enabled))
         cfg.ampereMfgUnlock = enabled;
-    ext::menu::Tooltip("Save settings and restart. Supply the companion DLL in OptiScaler/dlssg_sm86.\nOptiFG remains the frame producer. Do not enable the built-in Ada unlock with this runtime.");
+    ext::menu::Tooltip("Save settings and restart. Supply the runtime DLL in OptiScaler/dlssg_sm86.\nOptiFG remains the frame producer. Do not enable the built-in Ada unlock with this runtime.");
     auto runtime = AmpereMfgLoader::LastStatus();
     if (ImGui::Button("Detect installed runtime"))
         runtime = AmpereMfgLoader::ProbeCandidate(true);
@@ -30,18 +31,18 @@ void DrawAmpereCompanion(ext::FgConfig& cfg)
     if (!runtime.ErrorMessage.empty())
         ImGui::TextWrapped("%s", runtime.ErrorMessage.c_str());
     if (enabled && cfg.adaMfgUnlock.value_or_default())
-        ImGui::TextWrapped("Disable the built-in Ada unlock before enabling this companion.");
+        ImGui::TextWrapped("Disable the built-in Ada unlock before enabling this runtime.");
     int maxFrames = cfg.ampereMfgMaxFrames.value_or_default();
-    if (ImGui::SliderInt("Companion max generated frames (restart)", &maxFrames, 1, 5))
+    if (ImGui::SliderInt("RTX 20/30 max generated frames (restart)", &maxFrames, 1, 5))
         cfg.ampereMfgMaxFrames = maxFrames;
     ImGui::BeginDisabled(!runtime.DllLoaded || !runtime.LiveControlSupported);
     static int mode = 0, factor = 2, target = 144;
     const char* modes[] = { "Follow OptiFG", "Dynamic", "Fixed factor" };
-    ImGui::Combo("Companion control", &mode, modes, 3);
-    ImGui::SliderInt("Companion factor", &factor, 2, runtime.Is3101Runtime ? 4 : 6);
-    ImGui::SliderInt("Companion target FPS", &target, 30, 360);
+    ImGui::Combo("Runtime control", &mode, modes, 3);
+    ImGui::SliderInt("Runtime factor", &factor, 2, runtime.Is3101Runtime ? 4 : 6);
+    ImGui::SliderInt("Runtime target FPS", &target, 30, 360);
     static std::string result;
-    if (ImGui::Button("Apply companion controls"))
+    if (ImGui::Button("Apply runtime controls"))
         result = AmpereMfgLoader::ApplyLiveControl(mode, target, factor)
                      ? "Runtime accepted the request"
                      : "Runtime rejected or does not support this request";
@@ -57,7 +58,9 @@ void DrawFgUnlocks(ext::menu::Ctx& ctx)
     (void) ctx;
     auto& cfg = ext::Cfg().fg;
 
-    DrawAmpereCompanion(cfg);
+    ext::menu::SectionTitle("Frame generation unlocks");
+
+    DrawAmpereRuntime(cfg);
 
     /// FG INPUTS
     bool adaUnlock = cfg.adaMfgUnlock.value_or_default();

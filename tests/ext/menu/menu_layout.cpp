@@ -298,8 +298,8 @@ void RealTable(const std::string& repo)
 
     CHECK_EQ(tabIds("Upscaling"), "upscaler dlss_nr sharpness upscale_ratio forced_quality output_scaling shader_times magnifier");
     CHECK_EQ(tabIds("Frame Gen"),
-             "fg_selection fg_unlocks fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx fg_fsrfg_inputs "
-             "fg_sl_inputs fg_auto_mfg");
+             "fg_selection fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx fg_fsrfg_inputs "
+             "fg_sl_inputs fg_unlocks fg_auto_mfg");
     CHECK_EQ(tabIds("FFXIV"),
              "window_mode ffxiv_hdr ffxiv_jitter ffxiv_character_preview fg_hudless ffxiv_companion hudless_diag "
              "ffxiv_advanced");
