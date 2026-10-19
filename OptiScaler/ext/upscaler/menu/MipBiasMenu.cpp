@@ -53,7 +53,9 @@ void Draw(ext::menu::Ctx& ctx)
                        "while it is on.\n\n"
                        "Like the manual value it only reaches textures created\n"
                        "after a change, and only those the game already biases\n"
-                       "(tick \"MB Override All Textures\" above for the rest).");
+                       "(tick \"MB Override All Textures\" above for the rest).\n\n"
+                       "A tick of \"MB Scale Override\" in the card above is noticed while this card is on screen,\n"
+                       "otherwise at the next quality change.");
 
     // Applied while dragging (the number is stored at once), published when the slider is let go: one log line per
     // adjustment instead of one per frame.
@@ -66,7 +68,9 @@ void Draw(ext::menu::Ctx& ctx)
 
     ext::menu::Tooltip("Added to the automatic value. Negative makes textures sharper.");
 
-    // "MB Scale Override" can be ticked in the card above at any time: give the override back (or take it again) now.
+    // "MB Scale Override" can be ticked in the card above at any time: give the override back (or take it again) now. This is the ONLY
+    // place that looks between two creates (nothing else of the module runs every frame or every draw), so with this card not drawn
+    // (only upstream's Mipmap Bias card pinned to the Custom Tab, another tab open) the tick waits for the next feature create.
     mipbias::OnScaleOverrideMaybeChanged();
 
     if (on)

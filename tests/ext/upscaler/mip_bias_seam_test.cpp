@@ -254,6 +254,17 @@ int main(int argc, char** argv)
         // The Scale override blocks auto: the card shows the red status line instead of the numbers, the note is shown
         // always, and the card notices a tick of "MB Scale Override" made between two creates.
         CHECK(card.find("mipbias::OnScaleOverrideMaybeChanged();") != std::string::npos);
+        // ... and ONLY there: nothing else of the module runs every frame or every draw (the sampler hooks are upstream's), so a tick
+        // made while this card is not drawn (only upstream's Mipmap Bias card pinned to the Custom Tab, another tab open) waits for
+        // the next feature create. The texts say so (third review, M2).
+        CHECK(card.find("is noticed while this card is on screen,") != std::string::npos);
+        CHECK(card.find("otherwise at the next quality change.") != std::string::npos);
+        CHECK(Count(ReadAll(root + "/OptiScaler/ext/upscaler/MipBias.cpp"), "OnScaleOverrideMaybeChanged") == 1); // the definition
+        CHECK(Count(card, "OnScaleOverrideMaybeChanged") == 1);                                                  // the one caller
+        const std::string docs = ReadAll(root + "/docs/FEATURES.md");
+        CHECK(docs.find("takes effect at once while the Automatic Mipmap Bias card is on screen, and otherwise at the next quality change") !=
+              std::string::npos);
+        CHECK(docs.find("Ticking or unticking Scale while the option is on takes effect at once (") == std::string::npos);
         CHECK(card.find("if (status.blocked)\n            Red(mipbias::BlockedLine(status.blocked));") !=
               std::string::npos);
         CHECK(card.find("ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));") != std::string::npos);

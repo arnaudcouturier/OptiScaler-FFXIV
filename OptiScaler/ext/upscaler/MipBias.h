@@ -570,8 +570,9 @@ void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigne
 // The menu card changed the checkbox or the offset (they are already stored in ext::Cfg().upscaler).
 void OnSettingChanged();
 
-// The menu card calls this each time it is drawn: "MB Scale Override" can be ticked without any create or setting change
-// in between. Acts (give the override back, or take it again, and log) only when the Scale override differs from what the
+// The menu card calls this each time it is drawn (and nothing else does: the module has no per-frame hook, so a tick made while the
+// card is not on screen is handed over by the next feature create): "MB Scale Override" can be ticked without any create or setting
+// change in between. Acts (give the override back, or take it again, and log) only when the Scale override differs from what the
 // policy last saw, or a blocked policy still owes its warning.
 void OnScaleOverrideMaybeChanged();
 
