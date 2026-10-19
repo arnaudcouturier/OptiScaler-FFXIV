@@ -57,6 +57,12 @@ const Row kRows[] = {
       "recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1)", "recompositionSetting=recomposition==0",
       1, { "applies after a restart", "Recomposition mode only" }, { "auto&recompositionSetting=ext::Cfg().fg.uiRecomposition;" },
       "ImGui::TreeNode(\"Advanced\")", "", {} },
+    // WP4 item 2: [XeFG] UnlockMFG and MaxInterpolatedFrames, drawn inside upstream's XeFG card (XeFgExtras); both are read when
+    // the provider is loaded / the swapchain is created = restart
+    { "fg/xefg/XefgSeams.cpp", "ImGui::Checkbox(\"Unlock multi frame generation (restart)\"", "fgCfg.xefgUnlock=unlockMfg", "fgCfg.xefgUnlock=", 1,
+      { "applies after a restart", "never changed" }, {}, "", "", {} },
+    { "fg/xefg/XefgSeams.cpp", "ImGui::SliderInt(\"Max XeFG multiplier (restart)\"", "fgCfg.xefgMaxInterpolatedFrames=maxMultiplier-1",
+      "fgCfg.xefgMaxInterpolatedFrames=", 1, { "applies after a restart", "handed to the provider" }, { "BeginDisabled(!unlockMfg)" }, "", "", {} },
 };
 
 // Squashed code of the file with the widget's block cut out: from the widget to the next input widget, fold or TreePop

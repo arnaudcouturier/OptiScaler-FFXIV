@@ -145,5 +145,24 @@ void XeFgExtras(IFGFeature* fgOutput)
             "frames over at once and only spaces out the last one, which\n"
             "reads as judder at 4X and above\n\n"
             "NEEDS GAME RESTART TO BE ACTIVE!");
+
+    // Fork: the two provider-unlock keys of the [XeFG] section. Both are read once, when the provider is loaded and the
+    // swapchain is created (XeFGUnlock::Apply), so a change is stored for the next start.
+    bool unlockMfg = fgCfg.xefgUnlock.value_or_default();
+    if (ImGui::Checkbox("Unlock multi frame generation (restart)", &unlockMfg))
+        fgCfg.xefgUnlock = unlockMfg;
+    Tooltip("Unlocks 3X and higher multi frame generation in Intel's XeFG provider: OptiScaler patches the loaded provider\n"
+            "image in memory (the file on disk is never changed). Without it the provider reports a single generated\n"
+            "frame (2X) on other makers' GPUs. Turn it off if the provider misbehaves or its build is not recognised.\n\n"
+            "The patches are applied when the provider is loaded: applies after a restart.");
+
+    int maxMultiplier = std::clamp(fgCfg.xefgMaxInterpolatedFrames.value_or_default(), 1, ext::kXeFgMaxInterpolations) + 1;
+    ImGui::BeginDisabled(!unlockMfg);
+    if (ImGui::SliderInt("Max XeFG multiplier (restart)", &maxMultiplier, 2, ext::kXeFgMaxInterpolations + 1, "%dX"))
+        fgCfg.xefgMaxInterpolatedFrames = maxMultiplier - 1;
+    Tooltip("The highest multiplier the XeFG menu offers, 2X to 8X (default 8X). If a high multiplier turns out to be\n"
+            "unstable, try 4X first.\n\n"
+            "The same number is handed to the provider when the swapchain is created: applies after a restart.");
+    ImGui::EndDisabled();
 }
 } // namespace ext::menu
