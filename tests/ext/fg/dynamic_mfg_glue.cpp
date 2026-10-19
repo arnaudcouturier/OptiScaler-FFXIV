@@ -446,12 +446,25 @@ void KeyOffAfterAnActivationStopsTicking()
     CHECK_MSG(r.w.locks == locks, "%d locks in 400 frames with the key off", r.w.locks - locks);
     CHECK(r.w.refreshReads == reads);
     CHECK(r.w.Lines("AutoMFG: switched off", 0) == 1);
-    // the key comes back: one full tick, a new activation line, ticking (and observing) again
+    // the key comes back: one full tick, a new activation line, ticking (and observing) again. The observation is proven by what
+    // the stored state says (distinctive values, set while the glue was latched, so the stored ones are stale), and the lock
+    // count is exact: a tick and an observation per frame. A lock count of "at least 100" would also pass with the tick alone.
+    CHECK(r.glue.observed.valid && r.glue.observed.status == 0 && r.glue.observed.presented == 3); // the last one before the latch
+    r.obsStatus = 0x5;
+    r.obsPresented = 7;
     r.w.fg.autoMfg = true;
-    r.Run(100, 20.0);
+    r.Frame(20.0);
+    CHECK_MSG(r.glue.observed.valid && r.glue.observed.status == 0x5 && r.glue.observed.presented == 7,
+              "the observation did not resume with the key (status %#x presented %u)", r.glue.observed.status,
+              r.glue.observed.presented);
+    r.obsStatus = 0;
+    r.obsPresented = -1;
+    r.Run(99, 20.0);
     CHECK(r.w.Lines("AutoMFG: active", 0) == 2);
     CHECK(r.glue.EverActive() && !r.glue.ClosedForGood());
-    CHECK_MSG(r.w.locks >= locks + 100, "only %d locks in 100 frames with the key on", r.w.locks - locks);
+    CHECK_MSG(r.w.locks == locks + 200, "%d locks in 100 frames with the key on (a tick and an observation per frame)",
+              r.w.locks - locks);
+    CHECK(r.glue.observed.status == 0 && r.glue.observed.presented == (uint32_t) r.opt.numFramesToGenerate + 1);
 
     // Only the self-test key on while AutoMFG is off: the self-test says why it did not run, once, then the same.
     Rig s;
