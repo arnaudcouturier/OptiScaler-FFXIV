@@ -338,20 +338,26 @@ inline CorrectionDecision DecideCorrection(Guard readGuard, const Analysis& a, N
 //   (ii) the implied ratio agrees with the previous evaluate's within the shared 2% criterion (per axis where both evaluates have one,
 //        at least one axis in common). A one-frame lag between the NDC values and the jitter makes the ratio change with every step of
 //        the jitter sequence, so it fails here; a real scale error is the same on every frame, so it passes.
-// So a replacement needs two consecutive consistent evaluates. A failed read, a first evaluate or any rule failure re-bases (the failing
-// evaluate becomes the reference) and passes the game's value through.
+// So a replacement needs two consecutive evaluates that PASSED the proof (the guard of DecideCorrection is None: object read, trusted
+// size, NGX jitter equal, plausible, signs ok) and that agree under both rules. An evaluate the proof rejected, for any reason, FORGETS
+// the reference like a failed read does (the next evaluate is a first frame again and passes the game's value through); a first
+// evaluate or a rule failure re-bases (the failing evaluate becomes the reference) and passes the game's value through.
 //
 // What these rules do NOT exclude (stated so nobody trusts them further than they reach): a systematic error that is the same on every
 // frame (the wrong render size for the NDC scale, the wrong convention constant) gives a steady ratio and passes both rules, bounded only
 // by the 1 pixel cap and the sign test; a lag that happens to leave two consecutive ratios within 2% passes; an object whose counter,
-// jx/jy and NDC all belong to a frame other than the one being rendered (a constant offset in time) passes; and a game that evaluates
-// twice per camera step is corrected on every other evaluate only (visible in the held-back counts of the status line).
+// jx/jy and NDC all belong to a frame other than the one being rendered (a constant offset in time) passes; a game that evaluates
+// twice per camera step is corrected on every other evaluate only (visible in the held-back counts of the status line); and a game that
+// also evaluates a second, differently sized DLSS feature in the same frame makes the correction inert, because that evaluate is rejected
+// and forgets the reference every frame (the safe side; it shows as "first frame after a gap" dominating the status line).
 class FrameRules
 {
   public:
-    Guard Observe(Guard readGuard, const Analysis& a)
+    // `rejection` is the guard DecideCorrection answered for this evaluate (Guard::None = the proof passed; a failed read of the object
+    // arrives here as its read guard).
+    Guard Observe(Guard rejection, const Analysis& a)
     {
-        if (readGuard != Guard::None)
+        if (rejection != Guard::None)
         {
             _have = false;
             return Guard::NoPreviousFrame;
@@ -608,7 +614,7 @@ inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>
 {
     return std::format("Jitter correction: on; since the last status line {} evaluates seen, {} replaced by the applied jitter, {} passed through "
                        "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
-                       "not steady, {} first frame after a gap); frame generation active {}",
+                       "not steady, {} first frame after a gap or a rejected evaluate); frame generation active {}",
                        c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,
                        frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown");
 }

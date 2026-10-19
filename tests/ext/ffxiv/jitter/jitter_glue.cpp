@@ -147,6 +147,7 @@ struct Frame
     std::optional<float> ngxJx, ngxJy;
     bool ngxMissing = false; // the block has no Jitter.Offset at all
     std::optional<std::pair<float, float>> ndcFrom; // the object's NDC values are those of THIS jitter (another frame's) instead of jx/jy
+    bool flipNdcY = false;  // the object's ndcY has the opposite sign (a convention the correction does not understand)
 };
 
 struct Outcome
@@ -165,6 +166,8 @@ Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool co
         object.ndcX = other.ndcX;
         object.ndcY = other.ndcY;
     }
+    if (f.flipNdcY)
+        object.ndcY = -object.ndcY;
     PutObject(e.mem, object);
     e.floats[Param::JitterX] = f.ngxJx.value_or(f.jx);
     e.floats[Param::JitterY] = f.ngxJy.value_or(f.jy);
@@ -570,6 +573,97 @@ int CountLines(const std::vector<std::string>& logs, const char* part)
     return n;
 }
 
+// M1 (fix round 2): an evaluate the proof REJECTED forgets the reference, like a failed read. The first replacement of a run needs two
+// consecutive evaluates that PASSED the proof (read ok, trusted size, NGX equal, plausible, signs ok), not two that merely read the object.
+void TestRejectedEvaluatesForgetTheReference()
+{
+    using Flags = std::vector<bool>;
+    struct Case
+    {
+        const char* name;
+        Guard guard; // what the rejected evaluate must be rejected for
+        std::function<void(FakeEnv&, Frame&)> spoil;
+        std::function<void(FakeEnv&)> restore;
+    };
+    const std::vector<Case> cases = {
+        { "NGX jitter of another frame", Guard::ObjectNotThisEvaluate, [](FakeEnv&, Frame& f) { f.ngxJx = 0.29f; }, nullptr },
+        { "NGX jitter missing", Guard::NgxJitterUnavailable, [](FakeEnv&, Frame& f) { f.ngxMissing = true; }, nullptr },
+        { "untrusted render size", Guard::RenderSizeUnknown,
+          [](FakeEnv& e, Frame&)
+          {
+              e.uints.erase(Param::Width);
+              e.uints.erase(Param::Height);
+          },
+          [](FakeEnv& e)
+          {
+              e.uints[Param::Width] = 1920;
+              e.uints[Param::Height] = 1080;
+          } },
+        { "applied jitter implausible", Guard::AppliedImplausible,
+          [](FakeEnv&, Frame& f)
+          {
+              f.jx = 0.4f;
+              f.jy = 0.4f;
+              f.s = 8.0f;
+          },
+          nullptr },
+        { "sign mismatch", Guard::SignMismatch, [](FakeEnv&, Frame& f) { f.flipNdcY = true; }, nullptr },
+    };
+    for (const Case& c : cases)
+    {
+        // good, REJECTED, good, good, good: the evaluate right after the rejection is a first frame again (held), the next ones pass
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Flags got;
+        got.push_back(!Evaluate(e, engine, At(100, 1, 0), false, true).sets.empty());
+        Frame bad = At(101, 1, 16);
+        c.spoil(e, bad);
+        const Outcome rejected = Evaluate(e, engine, bad, false, true);
+        got.push_back(!rejected.sets.empty());
+        CHECK(CountLines(rejected.logs, GuardName(c.guard)) == 1); // rejected for the guard the case names
+        if (c.restore)
+            c.restore(e);
+        got.push_back(!Evaluate(e, engine, At(102, 1, 32), false, true).sets.empty());
+        got.push_back(!Evaluate(e, engine, At(103, 1, 48), false, true).sets.empty());
+        got.push_back(!Evaluate(e, engine, At(104, 1, 64), false, true).sets.empty());
+        if (got != (Flags { false, false, false, true, true }))
+            std::printf("  case: %s\n", c.name);
+        CHECK(got == (Flags { false, false, false, true, true }));
+    }
+    {
+        // the review's reproduction: the very first evaluate carries the NGX jitter of another frame; the next one must pass through
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        Frame first = At(100, 1, 0);
+        first.ngxJx = 0.29f;
+        const Flags got = Replaced(e, engine, { first, At(101, 1, 16), At(102, 1, 32) });
+        CHECK(got == (Flags { false, false, true }));
+    }
+    {
+        // a second, differently sized DLSS evaluate in every game frame: it is rejected (its NGX jitter is not the object's) and
+        // forgets, so the main feature is never replaced. That is the safe side (inert), shown in the status counts as first frames.
+        FakeEnv e = MakeEnv();
+        Engine engine;
+        int replaced = 0, interferingLines = 0;
+        for (int k = 0; k < 20; ++k)
+        {
+            replaced += Evaluate(e, engine, At(100 + k, 1, k * 32ull), false, true).sets.empty() ? 0 : 1; // the main feature
+            e.uints[Param::Width] = e.uints[Param::SubrectWidth] = 1280;
+            e.uints[Param::Height] = e.uints[Param::SubrectHeight] = 720;
+            Frame second = At(100 + k, 1, k * 32ull + 16);
+            second.ngxJx = 0.11f;
+            second.ngxJy = 0.07f;
+            const Outcome o = Evaluate(e, engine, second, false, true);
+            replaced += o.sets.empty() ? 0 : 1;
+            interferingLines += CountLines(o.logs, GuardName(Guard::ObjectNotThisEvaluate));
+            e.uints[Param::Width] = e.uints[Param::SubrectWidth] = 1920;
+            e.uints[Param::Height] = e.uints[Param::SubrectHeight] = 1080;
+        }
+        CHECK(replaced == 0);
+        CHECK(interferingLines == 1); // one episode, one line
+    }
+}
+
 // L3: the sample lines are capped per session (an hour of 10-second samples), then one line says so; the status lines likewise.
 void TestLogLinesAreCappedPerSession()
 {
@@ -748,6 +842,7 @@ int main()
     TestProbeOnlyNeverWrites();
     TestProbeOnlyDoesNoLookupsBetweenSamples();
     TestProbeOnlyStillSamplesAConfigurationChangeEarly();
+    TestRejectedEvaluatesForgetTheReference();
     TestLogLinesAreCappedPerSession();
     TestSuppressedEpisodesAreReportedFromEveryMode();
     TestEveryFailedGuardWritesNothing();

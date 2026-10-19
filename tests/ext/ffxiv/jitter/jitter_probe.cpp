@@ -526,6 +526,25 @@ void TestFrameRules()
         CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::None);
     }
 
+    // An evaluate the PROOF rejected (DecideCorrection's guard, whatever it is) forgets the reference exactly like a failed read: the next
+    // evaluate is a first frame again, and only the one after that can pass.
+    for (Guard rejection : { Guard::RenderSizeUnknown, Guard::NgxJitterUnavailable, Guard::ObjectNotThisEvaluate, Guard::AppliedImplausible,
+                             Guard::SignMismatch, Guard::ObjectUnreadable, Guard::NdcOutOfRange })
+    {
+        FrameRules r;
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 2)) == Guard::None);
+        CHECK(r.Observe(rejection, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 5)) == Guard::None);
+    }
+    // a rejected evaluate is never the reference, whatever its counter and ratio say (it would have agreed with the next one)
+    {
+        FrameRules r;
+        CHECK(r.Observe(Guard::ObjectNotThisEvaluate, AnalysisOf(0.3f, -0.2f, 1.0f, 100)) == Guard::NoPreviousFrame);
+        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 101)) == Guard::NoPreviousFrame);
+    }
+
     // ApplyFrameRules only ever takes a replacement away, and says why; every other decision is untouched.
     {
         CorrectionDecision replace;
@@ -651,7 +670,7 @@ void TestText()
         counts.heldFirst = 1;
         CHECK(FormatStatus(counts, true) ==
               "Jitter correction: on; since the last status line 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
-              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap); "
+              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap or a rejected evaluate); "
               "frame generation active yes");
         CHECK(Has(FormatStatus(counts, false), "frame generation active no") && Has(FormatStatus(counts, std::nullopt), "frame generation active unknown"));
     }

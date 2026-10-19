@@ -149,9 +149,10 @@ class Engine
         {
             ++_counts.evaluated;
             const CorrectionDecision proven = DecideCorrection(readGuard, analysis, match);
-            // The same-frame rules look at every evaluate that read the object (they need the previous one), but only a replacement
-            // they refuse is counted as held back.
-            const Guard frame = _frames.Observe(readGuard, analysis);
+            // The same-frame rules look at every evaluate and need the previous one. An evaluate the proof rejected (for any reason,
+            // not only an unreadable object) is not a reference: it makes the next evaluate a first frame again. Only a replacement
+            // the rules refuse is counted as held back.
+            const Guard frame = _frames.Observe(proven.guard, analysis);
             const CorrectionDecision decision = ApplyFrameRules(proven, frame);
             if (proven.replace && !decision.replace)
             {
