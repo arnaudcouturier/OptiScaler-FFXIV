@@ -852,19 +852,21 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     StreamState& st = m.table.At(index);
 
     const bool late = s.late; // decided when the stream was created: the run and its consumer always agree
-    FramePlan plan;
-    plan.width = s.width;
-    plan.height = s.height;
-    // Bring-up: the motion image is zeroed on the first run and the depth is cleared to far (below). Production: both hold the preview's
-    // own guides, copied in by the hand-off, and must never be overwritten.
-    plan.initGuides = production == nullptr && !s.guidesInit;
+    PlanInputs planInputs;
+    planInputs.width = s.width;
+    planInputs.height = s.height;
+    planInputs.carriesGuides = production != nullptr;
+    planInputs.guidesInit = s.guidesInit;
     if (production != nullptr)
-        plan.guides = production->guides;
+    {
+        planInputs.guides = production->guides;
+        planInputs.superResolutionReset = production->superResolutionReset;
+    }
+    planInputs.late = late;
+    planInputs.now = req.now;
+    ResetReason reset = ResetReason::None;
+    FramePlan plan = MakeFramePlan(st, planInputs, &reset); // the one place the plan is made (tested as it is)
     const int resultBuffer = ResultBufferForRun(st.runs);
-    plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                 // the result image this run writes
-    plan.colour = (late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
-    const ResetReason reset = DecideReset(st.everRan, st.lastRun, req.now, production != nullptr && production->superResolutionReset);
-    plan.reset = reset != ResetReason::None;
     plan.settings = SettingsFromConfig();
     plan.tuning = TuningFromBackend();
 

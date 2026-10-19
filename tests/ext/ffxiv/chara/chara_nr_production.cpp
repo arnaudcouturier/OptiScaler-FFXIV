@@ -9,6 +9,7 @@
 #include "check.h"
 
 #include "ext/ffxiv/chara/CharaDlssNgx.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaNrGuides.h"
 #include "ext/ffxiv/chara/CharaNrPlumbing.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
@@ -69,17 +70,24 @@ ngx::EvaluateInputs SrInputs(uint32_t width, uint32_t height, bool reset)
     return in;
 }
 
-// A production plan for the render the evaluate `sr` was made for: the colour is the evaluate's output (twice its size), the guides come from the
-// same inputs, the reset follows the evaluate's.
+// A production plan for the render the evaluate `sr` was made for, made by the module's own MakeFramePlan (the function Run() records from): the
+// colour is the evaluate's output (twice its size), the guides come from the same inputs, the reset follows the evaluate's. The stream is one that
+// ran a moment ago, so DecideReset alone says "continue": a reset in the plan can only come from the evaluate's reset.
 FramePlan ProductionPlan(const ngx::EvaluateInputs& sr, bool reversedZ)
 {
-    FramePlan p;
-    p.width = sr.width * ngx::kOutputScale;
-    p.height = sr.height * ngx::kOutputScale;
-    p.initGuides = false; // production never zeroes the motion image: it holds the preview's own motion
-    p.reset = sr.reset;
-    p.guides = GuidesOf(sr, reversedZ);
-    return p;
+    StreamState st;
+    st.everRan = true;
+    st.lastRun = 1000;
+    st.runs = 5;
+    PlanInputs in;
+    in.width = sr.width * ngx::kOutputScale;
+    in.height = sr.height * ngx::kOutputScale;
+    in.carriesGuides = true;
+    in.guidesInit = true;
+    in.guides = GuidesOf(sr, reversedZ);
+    in.superResolutionReset = sr.reset;
+    in.now = 1016;
+    return MakeFramePlan(st, in);
 }
 
 // The values the super-resolution evaluate is given, recorded through its own composition.
@@ -183,7 +191,8 @@ void TestGuidesOf()
                 CHECK(rec.call.width == w * ngx::kOutputScale && rec.call.height == h * ngx::kOutputScale);
                 CHECK(rec.call.depthInverted == (reversedZ ? 1 : 0) && rec.call.reset == (reset ? 1 : 0));
 
-                // the check above has teeth: inputs at the OUTPUT size (the mistake of passing the colour image's size) give other guides
+                // GuidesOf depends on the inputs it is given (the comparisons above are not between equal constants): inputs at the OUTPUT size
+                // give other guides. That the glue passes the render-size inputs is guarded by chara_dlss_glue_text, not by this assertion.
                 const GuideSetup wrong = GuidesOf(SrInputs(w * ngx::kOutputScale, h * ngx::kOutputScale, reset), reversedZ);
                 CHECK(wrong.mvScaleX != sr.mvX && wrong.mvScaleY != sr.mvY);
                 CHECK(wrong.width != sr.subW && wrong.height != sr.subH);
@@ -200,6 +209,66 @@ void TestRecipe()
     CHECK(f.constants[0].Mode == DlssNrMode_Encode && f.constants[0].Width == kOutW && f.constants[0].Height == kOutH);
     CHECK(f.constants[1].Mode == DlssNrMode_Resolve && f.constants[1].Width == kOutW && f.constants[1].Height == kOutH);
     CHECK(f.constants[0].Passthrough == 1 && f.constants[1].Passthrough == 1); // the SR output is already display referred
+}
+
+// MakeFramePlan is the one place Run() makes its plan: the bring-up keeps its synthetic guides, a stream with copied guides never initialises or
+// clears them, and the super-resolution evaluate's reset reaches the plan only there.
+void TestFramePlan()
+{
+    PlanInputs in;
+    in.width = kRenderW;
+    in.height = kRenderH;
+    in.now = 5000;
+    ResetReason why = ResetReason::None;
+
+    // bring-up: first run -> synthetic guides are set up, history starts; later runs continue; a gap resets
+    StreamState fresh;
+    FramePlan p = MakeFramePlan(fresh, in, &why);
+    CHECK(p.initGuides && p.reset && why == ResetReason::FirstRun);
+    CHECK(p.width == kRenderW && p.height == kRenderH && p.guides.width == 0 && p.guides.height == 0);
+    CHECK(p.result == Tex::Result0 && p.colour == Tex::Colour0);
+    in.guidesInit = true;
+    StreamState ran;
+    ran.everRan = true;
+    ran.lastRun = 4900;
+    ran.runs = 3;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.initGuides && !p.reset && why == ResetReason::None);
+    CHECK(p.result == Tex::Result1); // the result image alternates with the run count
+    ran.lastRun = 4000;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::Gap);
+    // the bring-up never takes the super-resolution reset, whatever the caller says
+    ran.lastRun = 4900;
+    in.superResolutionReset = true;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.reset && why == ResetReason::None);
+    in.superResolutionReset = false;
+    // the late variant alternates the colour images with the result images
+    in.late = true;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour1);
+    ran.runs = 4;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour0 && MakeFramePlan(ran, in).result == Tex::Result0);
+    in.late = false;
+    ran.runs = 3;
+    CHECK(MakeFramePlan(ran, in).colour == Tex::Colour0); // not late: one colour image
+
+    // copied guides: never initialised, taken from the caller, and the evaluate's reset restarts the history of a stream that continues
+    in.carriesGuides = true;
+    in.guidesInit = false; // even before the first guides run: the images hold the preview's own guides
+    in.guides = GuideSetup { kRenderW, kRenderH, true, 576.0f, 960.0f };
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(!p.initGuides && !p.reset && why == ResetReason::None);
+    CHECK(p.guides.width == kRenderW && p.guides.height == kRenderH && p.guides.depthInverted && p.guides.mvScaleX == 576.0f && p.guides.mvScaleY == 960.0f);
+    in.superResolutionReset = true;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::SuperResolution);
+    // a first run or a gap are reported as such, not as the evaluate's reset
+    p = MakeFramePlan(fresh, in, &why);
+    CHECK(p.reset && why == ResetReason::FirstRun);
+    ran.lastRun = 4000;
+    p = MakeFramePlan(ran, in, &why);
+    CHECK(p.reset && why == ResetReason::Gap);
 }
 
 StreamShape BringUp()
@@ -326,6 +395,7 @@ int main()
     TestModelCall();
     TestGuidesOf();
     TestRecipe();
+    TestFramePlan();
     TestStreamModes();
     TestInputsFit();
     return TEST_RESULT("chara_nr_production");

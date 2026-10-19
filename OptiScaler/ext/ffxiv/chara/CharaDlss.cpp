@@ -794,7 +794,7 @@ void RunSlot(int index, const DrawView& view)
         },
         [&](nr::AlphaInput input, nr::TintKind kind)
         {
-            ID3D11ShaderResourceView* colour = input == nr::AlphaInput::NrOutput ? nrOutput.Get() : g.output.srv.Get();
+            ID3D11ShaderResourceView* colour = nr::AlphaColourFor<ID3D11ShaderResourceView*>(input, nrOutput.Get(), g.output.srv.Get());
             return scope.Alpha(colour, g.nativeSrv.Get(), g.composed.rtv.Get(), outW, outH, ToGuideTint(kind));
         });
     if (!render.alphaOk)

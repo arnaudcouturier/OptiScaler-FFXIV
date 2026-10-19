@@ -9,7 +9,7 @@
 // alpha pass) leaves the super-resolution output as it is, counts as "NR did not produce a result" and withdraws the older result, while a
 // produced image does the opposite; the effects run in the glue's order and only when the rules allow them; and the new functions agree with the
 // logic the glue used to carry inline (copied below as the oracle) over a sweep of every input.
-// What it cannot prove: that the glue passes the right fact into each argument (the facts snapshot of the finisher is taken before the slot
+// What it cannot prove here: that the glue passes the right fact into each argument (guarded as source text by chara_dlss_glue_text; the facts snapshot of the finisher is taken before the slot
 // step, the fresh one inside it) and the one line that carries "composed from NR" from the slot step to the finisher step.
 #include "check.h"
 
@@ -312,7 +312,8 @@ void TestOrderAndGating()
         const FinisherRender f = Finisher(facts, true, true, false, false, e);
         CHECK(e.log == (std::vector<std::string> { "bringup" }) && f.nrProducedForRender);
     }
-    // the withdrawal reads the snapshot given to the finisher step, not the module's state at the end
+    // the withdrawal reads the facts it is given (held: withdrawn, empty: nothing to withdraw). Which snapshot the glue gives it (the one taken at
+    // the top of the dispatcher call) cannot be seen here: chara_dlss_glue_text guards that call.
     {
         Effects e;
         PlumbingFacts held = facts;
@@ -324,6 +325,40 @@ void TestOrderAndGating()
         // and a production success (carried by the flag) is never withdrawn in the render that made it
         CHECK(!Finisher(held, true, true, true, true, e).invalidate);
     }
+}
+
+// The image the alpha pass reads: the NR output exactly when the decision says NrOutput, the SR output otherwise. Two distinct handles, so a swapped
+// pair or a missing hand-off cannot give the same answer; and through DecideSlotRender, so the colour follows the module's answer.
+void TestAlphaColourFor()
+{
+    int nrImage = 0, srImage = 0;
+    const int* nr = &nrImage;
+    const int* sr = &srImage;
+    CHECK(AlphaColourFor(AlphaInput::NrOutput, nr, sr) == nr);
+    CHECK(AlphaColourFor(AlphaInput::SrOutput, nr, sr) == sr);
+    CHECK(AlphaColourFor(AlphaInput::NrOutput, nr, sr) != AlphaColourFor(AlphaInput::SrOutput, nr, sr));
+
+    PlumbingFacts facts;
+    facts.srWanted = facts.nrWanted = true;
+    facts.srGateOpen = true;
+    for (const bool recent : { false, true })
+        for (const RunOutcome outcome : kOutcomes)
+            for (const bool hasView : { false, true })
+            {
+                Effects e;
+                e.answer = { outcome, hasView };
+                const int* given = nullptr;
+                const SlotRender r = DecideSlotRender(
+                    facts, recent, false, [&] { return e.Production(); },
+                    [&](AlphaInput input, TintKind)
+                    {
+                        given = AlphaColourFor(input, nr, sr);
+                        return true;
+                    });
+                const bool nrImageIsUsed = recent && outcome == RunOutcome::Ran && hasView;
+                CHECK(r.produced == nrImageIsUsed);
+                CHECK(given == (nrImageIsUsed ? nr : sr));
+            }
 }
 
 void TestConsumerRecentFor()
@@ -352,6 +387,7 @@ int main()
     TestAgainstTheOldGlue();
     TestFailOpen();
     TestOrderAndGating();
+    TestAlphaColourFor();
     TestConsumerRecentFor();
     return TEST_RESULT("chara_nr_render");
 }

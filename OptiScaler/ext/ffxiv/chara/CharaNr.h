@@ -53,6 +53,41 @@ struct RunRequest
 
 // RunOutcome (what an entry point answers) is declared in CharaNrRules.h, next to the pure rules that decide on it.
 
+// What the plan of one run is made from. Pure, so the plan the module records is the plan the tests check (MakeFramePlan below).
+struct PlanInputs
+{
+    uint32_t width = 0;                // the stream's colour image and model input size
+    uint32_t height = 0;
+    bool carriesGuides = false;        // the preview's own depth and motion are copied in (production, pre-SR): never initialised or cleared
+    bool guidesInit = false;           // the bring-up's synthetic guides were set up by an earlier run
+    GuideSetup guides {};              // where the copied guides stand (used when carriesGuides)
+    bool superResolutionReset = false; // the super-resolution evaluate of this render reset its history (copied-guides streams only)
+    bool late = false;                 // the stream's hand-off variant
+    uint64_t now = 0;
+};
+
+// The plan of the next run of a stream (the settings and the model tuning are filled in by the caller). `reason` (optional) receives why the
+// model history restarts, if it does.
+inline FramePlan MakeFramePlan(const StreamState& st, const PlanInputs& in, ResetReason* reason = nullptr)
+{
+    FramePlan plan;
+    plan.width = in.width;
+    plan.height = in.height;
+    // Bring-up: the motion image is zeroed on the first run and the depth is cleared to far. With copied guides both hold the preview's own
+    // guides, copied in by the hand-off, and must never be overwritten.
+    plan.initGuides = !in.carriesGuides && !in.guidesInit;
+    if (in.carriesGuides)
+        plan.guides = in.guides;
+    const int resultBuffer = ResultBufferForRun(st.runs);
+    plan.result = resultBuffer == 0 ? Tex::Result0 : Tex::Result1;                    // the result image this run writes
+    plan.colour = (in.late && resultBuffer == 1) ? Tex::Colour1 : Tex::Colour0;       // the late variant alternates the colour images too
+    const ResetReason why = DecideReset(st.everRan, st.lastRun, in.now, in.carriesGuides && in.superResolutionReset);
+    plan.reset = why != ResetReason::None;
+    if (reason != nullptr)
+        *reason = why;
+    return plan;
+}
+
 // Config switch [FFXIV] PreviewNR.
 bool Wanted();
 // The NR latch (independent of the super-resolution latch).

@@ -218,6 +218,13 @@ enum class AlphaInput : uint8_t
 
 constexpr AlphaInput ChooseAlphaInput(bool productionProduced) { return productionProduced ? AlphaInput::NrOutput : AlphaInput::SrOutput; }
 
+// The image the alpha pass reads for an input: the NR output for NrOutput, the SR output for SrOutput. A template on the handle type, so the glue
+// (D3D11 view pointers) and the tests (two distinct pointers) run the same code.
+template <class Image> constexpr Image AlphaColourFor(AlphaInput input, Image nrOutput, Image srOutput)
+{
+    return input == AlphaInput::NrOutput ? nrOutput : srOutput;
+}
+
 // ---- The debug tint (PreviewDebugTint) ----------------------------------------------------------------------------------------------
 // The tint is the on-screen proof of which image reached the screen: magenta for the super-resolution image (as before), cyan for an
 // image NR produced (the bring-up result and the production output both), none for the native image.
