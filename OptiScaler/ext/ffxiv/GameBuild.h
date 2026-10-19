@@ -147,6 +147,25 @@ struct CharaViewBuild
     std::uint32_t maxTextBytes = 128u << 20;  // the .text scan is refused above this size
 };
 
+// The game's camera jitter object (ext/ffxiv/jitter, docs/RECONSTRUCTION-NICKLE.md): the scene camera owns a 20-byte object
+// { float jx, jy; float ndcX, ndcY; int counter } that the game's jitter generator fills (pixel jitter jx, jy in [-0.5, 0.5],
+// the NDC translation the projection matrix gets, and a frame counter). Reached through three pointers:
+//   G = [exe base + cameraGlobalRva] ; S = [G + cameraOffset] ; P = [S + jitterPointerOffset] ; object = P.
+// Read only, by ext/ffxiv/jitter (the probe and the optional correction). Study: STUDY-jitter.md section 2.2 (RVAs 0x373dc0, 0x25f610,
+// 0x2ebae0 of the supported build). If a game patch moves them, docs/FFXIV-PATCH-RUNBOOK.md says how to find them again.
+struct JitterBuild
+{
+    std::uint32_t cameraGlobalRva = 0x28f8ba0;
+    std::uint32_t cameraOffset = 0x3028;
+    std::uint32_t jitterPointerOffset = 0x278;
+    std::uint32_t jitterXOffset = 0x00;
+    std::uint32_t jitterYOffset = 0x04;
+    std::uint32_t ndcXOffset = 0x08;
+    std::uint32_t ndcYOffset = 0x0c;
+    std::uint32_t counterOffset = 0x10;
+    std::uint32_t objectBytes = 0x14;
+};
+
 struct GameBuild
 {
     std::uint32_t timeDateStamp = 0x6ac3dc96;
@@ -154,6 +173,7 @@ struct GameBuild
     NativeQualityBuild nativeQuality {};
     CompanionBuild companion {};
     CharaViewBuild charaView {};
+    JitterBuild jitter {};
 };
 
 inline constexpr GameBuild kCurrentBuild {};

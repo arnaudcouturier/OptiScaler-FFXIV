@@ -3,6 +3,7 @@
 #include "ext/ffxiv/chara/CharaIdentify.h"
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
+#include "ext/ffxiv/chara/CharaJitter.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/ffxiv/chara/CharaTags.h"
@@ -135,8 +136,8 @@ void LogEndOfBurst(uint64_t now)
         const uint64_t swaps = g_stats.consumerSwaps.load() - s.startSwaps;
         if (!finishes.empty() || evaluations != 0 || live != 0 || slots != 0 || swaps != 0)
             LOG_INFO("CharaView: DLSS path in that burst: passes jittered and replayed {}, preview slots acquired {}, finish outcomes: {}, "
-                     "evaluations {}, UI draws given the processed image {}",
-                     live, slots, finishes.empty() ? std::string("none") : finishes, evaluations, swaps);
+                     "evaluations {}, UI draws given the processed image {}, jitter cycle {} phases",
+                     live, slots, finishes.empty() ? std::string("none") : finishes, evaluations, swaps, kJitterPhases);
     }
     s.inActivity = false;
 }

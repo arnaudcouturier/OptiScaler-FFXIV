@@ -107,9 +107,11 @@ void Banner(); // once, right after upstream logs its version line
 // NGX shutdown / feature release on the D3D11 entry points (C6). State: ext/dx11bridge/NgxLifecycle.cpp
 namespace dx11bridge
 {
-// C5/B6: the bridge passes its original input color and feature flags; dispatch stays inside the fork seam.
+// C5/B6: the bridge passes its original input color and feature flags; dispatch stays inside the fork seam. `parameters` is the
+// bridge's own non-const parameter block: the lighting scan only reads it, the FFXIV jitter correction (default off) writes
+// Jitter.Offset.X/Y into it (ext/ffxiv/jitter/FfxivJitter.h).
 void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
-                       const NVSDK_NGX_Parameter* parameters);
+                       NVSDK_NGX_Parameter* parameters);
 // _CopyDx11BackBufferToShared, right after the backbuffer copy (before the source texture is released): C7
 // dispatches to the FFXIV Companion module's source-copy diagnostics (DrawSourceMarkers). `target` is the shared
 // copy's destination texture, the same image the copy just wrote. Dispatch only; Companion's own entry point is

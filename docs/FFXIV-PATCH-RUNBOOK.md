@@ -180,3 +180,13 @@ So after a patch that is not yet followed, the game still runs with the fork's g
 3. If a guard warning appears, find the function again (section 4), edit `GameBuild.h`, build, test, play (section 5).
 4. Check the shader fingerprint tables if the lighting scan, scene HDR, HUD-less boundary or nameplate replay stay off although the addresses were accepted.
 5. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, the evidence for each moved RVA, and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
+
+### Game jitter chain (probe and correction, ext/ffxiv/jitter)
+
+| Name in `GameBuild.h` | Value | What it is | Guard | Used by |
+|---|---|---|---|---|
+| `JitterBuild::cameraGlobalRva` | `0x28f8ba0` | Global holding the scene camera holder G; the camera is `[G + 0x3028]`, its 20-byte jitter object `{jx, jy, ndcX, ndcY, counter}` is at `[camera + 0x278]` | none (pointer chain; every hop is range- and readability-checked at run time, the exe build must match) | `FfxivJitterProbe` |
+
+**Finding it again after a game patch.** Search the string `Jitter.Offset.X`; its only user is the game's DLSS evaluate wrapper (RVA `0x378540` in the supported build), which copies two floats of a descriptor. The function that records that descriptor from the scene camera (`0x373dc0`) loads `[[global] + 0x3028]` and then `[camera + 0x278]`: that global and those offsets are the constants. The camera update (vtable slot 6, `0x25f610`) calls the Halton generator (`0x2ebae0`: `index % count + 1`) and increments the counter. Check offline that the object is `{float, float, float, float, int}` with `|jx|,|jy| <= 0.5`.
+
+**Fallback patch site (documented, NOT built).** The DLSS-mode cycle length is the immediate of `mov edx, 0xFFFFFFFF` at RVA `0x25f6b2` (bytes `BA FF FF FF FF`; guard: the 48 bytes at `0x25f6a1`: `48 8B 05 ?? ?? ?? ?? 0F 57 F6 48 8B 9F 78 02 00 00 BA FF FF FF FF 48 8B 88 28 04 00 00 48 8B F1 8B C1 48 C1 EE 20 F3 48 0F 2A F0 41 80 F8 02 74`). The game's own cycle never repeats in that mode, so it is not needed; a finite value there should only ever lengthen a finite cycle.

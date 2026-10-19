@@ -325,7 +325,7 @@ What it does, per preview render:
 
 1. A UI draw that samples a preview output within 250 ms of its finisher claims a slot (up to 16). Only then is the preview
    jittered, replayed and upscaled, and the very first evaluation of a slot is not jittered.
-2. Depth prepass and G-buffer draws run with the viewport shifted by a Halton (2, 3) jitter over 16 phases. The opaque
+2. Depth prepass and G-buffer draws run with the viewport shifted by a Halton (2, 3) jitter over 32 phases. The opaque
    G-buffer draws are replayed once into a private RGBA16F target with render target 3 only and depth writes off, which keeps the
    signed motion that the game's 8-bit target cannot hold. The replay is skipped while an occlusion or statistics query is
    open, with unordered access views or stream-out targets bound, on multisampled or non-opaque targets, and for pixel
@@ -362,3 +362,5 @@ output-size colour image, image quality on the alpha-masked silhouette, cost wit
 The design, the reasons for running the model on the Direct3D 12 side of the bridge, and the independence of the NR and
 Super Resolution paths are described in the feature section of FEATURES.md. The debug probe (`PreviewProbe`, `PreviewDebugFlood`,
 `chara-probe.cmd`) is also new work and has no counterpart in that build.
+
+**Jitter (CharaView, deliberate difference).** The preview's jitter cycle is 32 phases (`kJitterPhases`, derived from the fixed 2:1 preview scale by `RecommendedPhases`), where the community build's string-level reading suggests 16; the main scene is unchanged (the game's own generator never repeats in its DLSS mode). The read-only game-jitter probe and the experimental jitter correction are fork additions (`[FFXIV] JitterProbe`, `JitterCorrection`, both off by default; see FEATURES.md).
