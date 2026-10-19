@@ -184,11 +184,14 @@ class AutoMfgGlue
         }
         // Latched only after a full tick has seen the closed gate (the inactive line, the self-test result and the restore
         // of the count all happen inside that tick).
-        closedForGood_.store(IsPermanentlyClosed(gate), std::memory_order_relaxed);
+        const bool closedForGood = IsPermanentlyClosed(gate);
+        closedForGood_.store(closedForGood, std::memory_order_relaxed);
         latchedKeyOn_ = keyOn;
         latchedSelfTest_ = selfTest;
         if (out.controls)
             everActive_.store(true, std::memory_order_relaxed);
+        else if (closedForGood)
+            everActive_.store(false, std::memory_order_relaxed); // key off after a run: the cheap exit takes over
 
         // Applied before anything is formatted or logged: a failure further down must not lose a switch the controller
         // already committed to (its watch would then see the old count and call it a broken change).

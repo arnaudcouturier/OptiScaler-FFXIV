@@ -110,12 +110,13 @@ inline double UsableRefresh(double hz)
     return std::isfinite(hz) && hz >= 24.0 ? hz : 0.0;
 }
 
-// Gates that cannot reopen during a session without a change of the key: the GPU and the DLS-G output type are fixed, and the
-// kill-switch only ends with the process. The glue stops ticking once one of them was seen (DynamicMfgGlue.h).
+// Gates that cannot reopen during a session without a change of the keys: the GPU and the DLS-G output type are fixed, the
+// kill-switch only ends with the process, and a key that is off stays off until the user ticks it (the glue notices that: a
+// change of either key is a full tick). The glue stops ticking once one of them was seen (DynamicMfgGlue.h).
 inline constexpr bool IsPermanentlyClosed(AutoMfgGate gate)
 {
     return gate == AutoMfgGate::NotNvidia || gate == AutoMfgGate::Blackwell || gate == AutoMfgGate::NotDx12 ||
-           gate == AutoMfgGate::Stopped;
+           gate == AutoMfgGate::Stopped || gate == AutoMfgGate::KeyOff;
 }
 
 // Target frame rate: [DLSSG] AutoMFGTarget when set, else the lower of the frame rate limit and the display refresh

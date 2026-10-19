@@ -132,9 +132,9 @@ void MenuCardVisibility()
 void PermanentGates()
 {
     // Gates that cannot reopen without a change of the keys: the glue stops ticking on them (DynamicMfgGlue.h).
-    for (auto g : { AutoMfgGate::NotNvidia, AutoMfgGate::Blackwell, AutoMfgGate::NotDx12, AutoMfgGate::Stopped })
+    for (auto g : { AutoMfgGate::NotNvidia, AutoMfgGate::Blackwell, AutoMfgGate::NotDx12, AutoMfgGate::Stopped, AutoMfgGate::KeyOff })
         CHECK(IsPermanentlyClosed(g));
-    for (auto g : { AutoMfgGate::Open, AutoMfgGate::KeyOff, AutoMfgGate::NotDlssg, AutoMfgGate::FollowsGame,
+    for (auto g : { AutoMfgGate::Open, AutoMfgGate::NotDlssg, AutoMfgGate::FollowsGame,
                     AutoMfgGate::DynamicMode, AutoMfgGate::MaxBelow3x })
         CHECK(!IsPermanentlyClosed(g)); // the user or the game can change these at any time
 }

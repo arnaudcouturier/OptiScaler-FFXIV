@@ -395,6 +395,44 @@ void AClosedGateThatCannotReopenStopsTicking()
     CHECK(d.w.locks == locks + 50);
 }
 
+void KeyOffAfterAnActivationStopsTicking()
+{
+    // The key goes off after the mode ran: the full tick that sees it says so and restores, then the glue stops ticking until a
+    // key changes (it used to take the lock every frame for the rest of the session).
+    Rig r;
+    r.observing = true;
+    r.w.cfg.FGDLSSGInterpolationCount.set_from_config(2);
+    r.Run(100, 20.0);
+    CHECK(r.glue.EverActive() && !r.glue.ClosedForGood());
+    r.w.fg.autoMfg = false;
+    r.Frame(20.0);
+    CHECK(r.w.Lines("AutoMFG: switched off", 0) == 1);
+    CHECK(r.glue.ClosedForGood());
+    CHECK(!r.glue.EverActive()); // the cheap exit of everybody who never turned it on takes over
+    const int locks = r.w.locks, reads = r.w.refreshReads;
+    r.Run(400, 20.0); // the observation of every frame is skipped too: it would take the lock
+    CHECK_MSG(r.w.locks == locks, "%d locks in 400 frames with the key off", r.w.locks - locks);
+    CHECK(r.w.refreshReads == reads);
+    CHECK(r.w.Lines("AutoMFG: switched off", 0) == 1);
+    // the key comes back: one full tick, a new activation line, ticking (and observing) again
+    r.w.fg.autoMfg = true;
+    r.Run(100, 20.0);
+    CHECK(r.w.Lines("AutoMFG: active", 0) == 2);
+    CHECK(r.glue.EverActive() && !r.glue.ClosedForGood());
+    CHECK_MSG(r.w.locks >= locks + 100, "only %d locks in 100 frames with the key on", r.w.locks - locks);
+
+    // Only the self-test key on while AutoMFG is off: the self-test says why it did not run, once, then the same.
+    Rig s;
+    s.w.fg.autoMfg = false;
+    s.w.fg.autoMfgSelfTest = true;
+    s.Run(2, 20.0);
+    CHECK(s.w.Lines("self-test: FAIL (not run: AutoMFG is off)", 1) == 1);
+    CHECK(s.glue.ClosedForGood());
+    const int sl = s.w.locks;
+    s.Run(300, 20.0);
+    CHECK(s.w.locks == sl);
+}
+
 void AFailingTickFailsOpen()
 {
     // Something throws before the controller is reached: the options stay the game's, one warning per episode.
@@ -634,6 +672,7 @@ int main()
     ForcedDynamicModeNeedsStreamlineSupport();
     RefreshBelow24HzIsUnknownAndRead5sApart();
     AClosedGateThatCannotReopenStopsTicking();
+    KeyOffAfterAnActivationStopsTicking();
     AFailingTickFailsOpen();
     ALogFailureDoesNotLoseACommittedSwitch();
     SelfTestEndStateReachesTheCount();
