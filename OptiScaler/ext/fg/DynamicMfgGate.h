@@ -21,6 +21,51 @@ inline constexpr bool AutoMfgCardVisible(bool dlssgOutputActive, bool blackwell)
 {
     return dlssgOutputActive && !blackwell;
 }
+// The same rule for a caller whose Blackwell fact is not free (a GPU enumeration): `blackwell` is called only when the DLSS-G
+// output is the active one, so the menu does not ask the GPU on every draw while another output (or none) is in use.
+template <class AskBlackwell>
+bool AutoMfgCardVisibleAsking(bool dlssgOutputActive, AskBlackwell&& blackwell)
+{
+    return dlssgOutputActive && !blackwell();
+}
+
+// Asking IdentifyGpu for the primary GPU. It answers with vendor Invalid while its adapter list is empty, and every call then
+// repeats the whole enumeration (and writes its own error line when the DXGI factory fails). So the ask is spaced by
+// kRetryMs and capped at kMaxTries; after the last try the GPU stays unknown for the session and GaveUp() says so once, for
+// the caller to log. One object per asking thread (not synchronised).
+class GpuAsk
+{
+  public:
+    static constexpr uint64_t kRetryMs = 5000;
+    static constexpr int kMaxTries = 12;
+
+    // True when the caller should ask now (the first time at once).
+    bool ShouldAsk(uint64_t nowMs)
+    {
+        if (answered_ || tries_ >= kMaxTries)
+            return false;
+        if (tries_ != 0 && nowMs - lastMs_ < kRetryMs)
+            return false;
+        lastMs_ = nowMs;
+        ++tries_;
+        return true;
+    }
+    void Answered() { answered_ = true; }
+    // After an unusable answer: true exactly once, when that was the last try.
+    bool GaveUp()
+    {
+        if (answered_ || tries_ < kMaxTries || told_)
+            return false;
+        told_ = true;
+        return true;
+    }
+
+  private:
+    bool answered_ = false;
+    bool told_ = false;
+    int tries_ = 0;
+    uint64_t lastMs_ = 0;
+};
 // An automatic choice (ours or NVIDIA's dynamic mode) never goes above 4x: three generated frames.
 inline constexpr int kAutoMaxGenerated = 3;
 

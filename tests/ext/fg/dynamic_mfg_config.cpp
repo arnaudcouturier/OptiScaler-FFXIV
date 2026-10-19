@@ -123,7 +123,11 @@ void MenuCardKeepsTheCaveat(const std::string& repo)
     CHECK(card.find("stops after a second one") == std::string::npos);
     CHECK(card.find("Untested in game") != std::string::npos);
     // the visibility rule itself is tested in dynamic_mfg_gate_unit (AutoMfgCardVisible); here only that the card asks it
-    CHECK(card.find("AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell())") != std::string::npos);
+    // the GPU is asked only after the cheap output check (a lambda, so a card that is not shown never enumerates adapters)
+    CHECK(card.find("AutoMfgCardVisibleAsking(ctx.state.activeFgOutput == FGOutput::DLSSG, [] { return IsBlackwell(); })") !=
+          std::string::npos);
+    CHECK(card.find("AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell())") == std::string::npos);
+    CHECK(card.find("GpuAsk ask;") != std::string::npos); // the retries are capped and spaced by the tested class
     CHECK(card.find("IsBlackwellArchitecture(") != std::string::npos); // the card and the gate share the RTX 50 test
 }
 

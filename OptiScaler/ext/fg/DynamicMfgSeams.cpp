@@ -33,25 +33,26 @@ struct GpuFacts
 };
 
 // The facts of the primary GPU. IdentifyGpu answers with a default (vendor Invalid) when its adapter list is empty and tries
-// again on its next call, so only a real answer is kept; an unknown one is asked again every few seconds (the glue does
-// nothing meanwhile, see AutoMfgGlue::TickOnce). Called from the SetOptions thread only.
+// again on its next call, so only a real answer is kept; an unknown one is asked again every few seconds, at most
+// GpuAsk::kMaxTries times (the glue does nothing meanwhile, see AutoMfgGlue::TickOnce; after the last try the mode stays
+// off for the session and one line says so). Called from the SetOptions thread only.
 const GpuFacts& Gpu()
 {
     static GpuFacts facts;
-    static uint64_t triedAt = 0;
-    if (facts.known)
+    static ext::fg::GpuAsk ask;
+    if (facts.known || !ask.ShouldAsk(GetTickCount64()))
         return facts;
-    const uint64_t now = GetTickCount64();
-    if (triedAt != 0 && now - triedAt < 5000)
-        return facts;
-    triedAt = now;
     const auto gpu = IdentifyGpu::getPrimaryGpu();
     if (gpu.vendorId != VendorId::Invalid)
     {
+        ask.Answered();
         facts.known = true;
         facts.nvidia = gpu.vendorId == VendorId::Nvidia;
         facts.arch = static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id);
     }
+    else if (ask.GaveUp())
+        LOG_WARN("AutoMFG: the GPU could not be identified after {} tries, automatic mode stays off for this session",
+                 ext::fg::GpuAsk::kMaxTries);
     return facts;
 }
 

@@ -16,30 +16,31 @@
 
 namespace
 {
-// A real answer of IdentifyGpu is kept; one with vendor Invalid (empty adapter list) is not, it is asked again in a few seconds.
+// A real answer of IdentifyGpu is kept; one with vendor Invalid (empty adapter list) is asked again every few seconds, at most
+// GpuAsk::kMaxTries times (then the card stays offered and the log says so once). UI thread only.
 bool IsBlackwell()
 {
     static bool known = false, blackwell = false;
-    static uint64_t triedAt = 0;
-    if (known)
+    static ext::fg::GpuAsk ask;
+    if (known || !ask.ShouldAsk(GetTickCount64()))
         return blackwell;
-    const uint64_t now = GetTickCount64();
-    if (triedAt != 0 && now - triedAt < 5000)
-        return blackwell;
-    triedAt = now;
     const auto gpu = IdentifyGpu::getPrimaryGpu();
     if (gpu.vendorId != VendorId::Invalid)
     {
         known = true;
+        ask.Answered();
         blackwell = gpu.vendorId == VendorId::Nvidia &&
                     ext::fg::IsBlackwellArchitecture(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id));
     }
+    else if (ask.GaveUp())
+        LOG_WARN("AutoMFG menu card: the GPU could not be identified after {} tries, the card stays offered", ext::fg::GpuAsk::kMaxTries);
     return blackwell;
 }
 
+// The cheap check (is the DLSS-G output active) comes first: IsBlackwell() can be an adapter enumeration.
 bool AutoMfgVisible(const ext::menu::Ctx& ctx)
 {
-    return ext::fg::AutoMfgCardVisible(ctx.state.activeFgOutput == FGOutput::DLSSG, IsBlackwell());
+    return ext::fg::AutoMfgCardVisibleAsking(ctx.state.activeFgOutput == FGOutput::DLSSG, [] { return IsBlackwell(); });
 }
 
 void DrawAutoMfg(ext::menu::Ctx& ctx)

@@ -129,6 +129,68 @@ void MenuCardVisibility()
     CHECK(!IsBlackwellArchitecture(0x190));
 }
 
+// The menu asks the card's visibility every time it is drawn; the Blackwell fact can be a whole adapter enumeration, so it is
+// asked only when the DLSS-G output is the active one (the cheap check comes first), and only once for a visible card.
+void MenuCardAsksTheGpuLast()
+{
+    int asked = 0;
+    const auto answer = [&asked](bool blackwell) {
+        return [&asked, blackwell] {
+            ++asked;
+            return blackwell;
+        };
+    };
+    CHECK(!AutoMfgCardVisibleAsking(false, answer(false)) && asked == 0);
+    CHECK(!AutoMfgCardVisibleAsking(false, answer(true)) && asked == 0);
+    CHECK(AutoMfgCardVisibleAsking(true, answer(false)) && asked == 1);
+    CHECK(!AutoMfgCardVisibleAsking(true, answer(true)) && asked == 2);
+    // the same answers as the two-bool rule
+    for (const bool out : { false, true })
+        for (const bool bw : { false, true })
+            CHECK(AutoMfgCardVisibleAsking(out, [bw] { return bw; }) == AutoMfgCardVisible(out, bw));
+}
+
+// IdentifyGpu answers with vendor Invalid while its adapter list is empty, and every call then repeats the enumeration. The
+// ask is spaced by kRetryMs and capped at kMaxTries; the caller tells the user once when it gives up.
+void TheGpuIsAskedAtMostTwelveTimes()
+{
+    static_assert(GpuAsk::kRetryMs == 5000 && GpuAsk::kMaxTries == 12);
+    GpuAsk a;
+    uint64_t t = 1000;
+    CHECK(a.ShouldAsk(t));                    // the first ask is at once
+    CHECK(!a.ShouldAsk(t) && !a.ShouldAsk(t + 4999)); // spaced
+    CHECK(!a.GaveUp());
+    int asks = 1;
+    uint64_t gaveUpAt = 0;
+    for (int i = 0; i < 200; ++i)
+    {
+        t += 5000; // exactly the spacing counts
+        if (a.ShouldAsk(t))
+        {
+            ++asks;
+            if (a.GaveUp())
+            {
+                CHECK(gaveUpAt == 0);
+                gaveUpAt = t;
+            }
+        }
+    }
+    CHECK_MSG(asks == GpuAsk::kMaxTries, "%d asks", asks);
+    CHECK_MSG(gaveUpAt == 1000 + 5000 * 11, "gave up at %llu", (unsigned long long) gaveUpAt); // on the 12th ask, once
+    CHECK(!a.GaveUp() && !a.ShouldAsk(t + 1000000));
+    // an answer ends the asking for good, and nothing is told
+    GpuAsk b;
+    CHECK(b.ShouldAsk(10));
+    b.Answered();
+    CHECK(!b.ShouldAsk(100000) && !b.GaveUp());
+    // an answer on the last ask is not a give-up
+    GpuAsk c;
+    for (int i = 0; i < GpuAsk::kMaxTries; ++i)
+        CHECK(c.ShouldAsk(10 + 5000ull * i));
+    c.Answered();
+    CHECK(!c.GaveUp());
+}
+
 void PermanentGates()
 {
     // Gates that cannot reopen without a change of the keys: the glue stops ticking on them (DynamicMfgGlue.h).
@@ -208,6 +270,8 @@ int main()
     TargetResolution();
     RefreshIsUnknownBelow24Hz();
     MenuCardVisibility();
+    MenuCardAsksTheGpuLast();
+    TheGpuIsAskedAtMostTwelveTimes();
     PermanentGates();
     CeilingArithmetic();
     OptionsGuard();
