@@ -348,7 +348,7 @@ void TestJitterPhasePerSlot()
         CHECK(u.Slot(s[0]).renders == 10 && u.Slot(s[1]).renders == 10);
     }
 
-    // One preview: its own sequence 1, 2, 3 ... (all 16 phases, both signs)
+    // One preview: its own sequence 1, 2, 3 ... (kJitterPhases = 32 phases, both signs)
     {
         SlotTable one;
         one.NoteRecent(kA, 100, 1);
