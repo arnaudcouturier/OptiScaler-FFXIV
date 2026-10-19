@@ -46,7 +46,7 @@ struct Drv
         gate.maxGenerated = 5;
     }
 
-    AutoMfgOut Tick(uint64_t at, double realMs, uint32_t status, int detected, uint32_t presented)
+    AutoMfgOut Tick(uint64_t at, double realMs, uint32_t status, int detected, uint32_t presented, bool valid = true)
     {
         AutoMfgTick in;
         in.nowMs = at;
@@ -57,7 +57,7 @@ struct Drv
         in.limit = plant.limit;
         in.refresh = plant.refresh;
         in.gate = gate;
-        in.stateValid = true;
+        in.stateValid = valid;
         in.slStatus = status;
         in.presented = presented;
         in.detectedGenerated = detected;
@@ -206,6 +206,127 @@ void ZeroCountBounds()
     CHECK(d.Clean());
 }
 
+// ---- A fault that is still in progress when the second is over (the third review, M1) -----------------------------------
+// The verdict used to close the watch at 1000 ms. A fault that began in the last 150 ms was too young to convict and was never
+// looked at again (a status that was already non-zero at the next switch is taken for the game's own). The watch now stays
+// open while a young fault is in progress, for at most kBadRunMs past the second, so that it can still be convicted.
+
+// Healthy ticks every 20 ms up to (not including) `from`, then the faulty ticks every 20 ms from `from` to `to` (both included).
+Drv FaultFromTo(Fault fault, uint64_t from, uint64_t to)
+{
+    Drv d;
+    d.ToFirstSwitch();
+    CHECK_MSG(d.sw != 0 && d.factor == 3, "no switch to watch");
+    for (uint64_t r = 20; r < from; r += 20)
+        d.Good(d.sw + r);
+    for (uint64_t r = from; r <= to; r += 20)
+        d.Tick(d.sw + r, d.plant.Ms(d.factor), fault == Fault::Status ? 0x2u : 0u, fault == Fault::Zero ? 0 : d.factor - 1,
+               (uint32_t) d.factor);
+    return d;
+}
+
+void RunLateFault(Fault fault, const char* name)
+{
+    // Begins 100 ms before the end of the second and goes on: convicted once it is 150 ms old, not at the verdict.
+    {
+        const Drv d = FaultFromTo(fault, 900, 1300);
+        CHECK_MSG(d.Broken(), "%s: a fault that began 100 ms before the end of the watch and persisted was not convicted", name);
+    }
+    // Begins at the verdict tick itself.
+    {
+        const Drv d = FaultFromTo(fault, 1000, 1300);
+        CHECK_MSG(d.Broken(), "%s: a fault that began at the end of the watch and persisted was not convicted", name);
+    }
+    // The existing lower side of the span (a run 140 ms old at the verdict) is convicted as soon as it is 160 ms old.
+    {
+        const Drv d = FaultFromTo(fault, 860, 1020);
+        CHECK_MSG(d.Broken(), "%s: a run that was 140 ms old at the verdict and went on to 160 ms was not convicted", name);
+    }
+    // Not yet convicted before the 150 ms are over: the run is 140 ms old at 1000 and nothing has happened.
+    {
+        const Drv d = FaultFromTo(fault, 860, 1000);
+        CHECK_MSG(d.Clean() && !d.Has("settled"), "%s: the verdict was given while a young fault was in progress", name);
+    }
+    // A blink that ends inside the extra time is still not a failure, and the watch then closes with its normal verdict.
+    {
+        Drv d = FaultFromTo(fault, 900, 1040); // 8 faulty ticks, 140 ms
+        d.Good(d.sw + 1060);
+        CHECK_MSG(d.Clean(), "%s: a blink of 140 ms at the end of the watch was a failure", name);
+        CHECK_MSG(d.Has("AutoMFG: 3x settled"), "%s: the watch did not close with its verdict after the blink", name);
+        d.Good(d.sw + 1400);
+        d.Good(d.sw + 1420);
+        CHECK(d.Clean());
+    }
+    // Three faulty ticks within 10 ms at the end, then healthy again: still the case the span rule is for.
+    {
+        Drv d = Watch(fault, { 990, 995, 1000 });
+        d.Good(d.sw + 1020);
+        CHECK_MSG(d.Clean() && d.Has("AutoMFG: 3x settled"), "%s: three bad ticks within 10 ms at the end were a failure", name);
+    }
+    // The sample count still holds in the extra time: two faulty ticks over 200 ms and then healthy ones are not a failure.
+    {
+        Drv d = Watch(fault, { 800, 1000 });
+        d.Good(d.sw + 1020);
+        CHECK_MSG(d.Clean(), "%s: two bad samples were a failure", name);
+    }
+    // After the verdict nothing watches any more: a fault that begins after a healthy verdict belongs to nobody. This also
+    // pins that the extra time is only given to a fault that is in progress, not to every watch.
+    {
+        Drv d;
+        d.ToFirstSwitch();
+        for (uint64_t r = 20; r <= 1000; r += 20)
+            d.Good(d.sw + r);
+        CHECK(d.Has("AutoMFG: 3x settled"));
+        for (uint64_t r = 1020; r <= 1400; r += 20)
+            d.Tick(d.sw + r, d.plant.Ms(d.factor), fault == Fault::Status ? 0x2u : 0u,
+                   fault == Fault::Zero ? 0 : d.factor - 1, (uint32_t) d.factor);
+        CHECK_MSG(d.Clean(), "%s: a fault that began after the watch was closed was held against the switch", name);
+    }
+}
+
+void ALateFaultIsConvicted()
+{
+    RunLateFault(Fault::Status, "status");
+    RunLateFault(Fault::Zero, "zero count");
+}
+
+void TheExtraTimeIsBounded()
+{
+    // A young fault whose samples stop coming (the state query fails): the watch is not held open for ever. It closes at the
+    // first tick after the extra 150 ms, without a conviction (two samples are not enough).
+    Drv d;
+    d.ToFirstSwitch();
+    for (uint64_t r = 20; r < 900; r += 20)
+        d.Good(d.sw + r);
+    d.Tick(d.sw + 900, d.plant.Ms(d.factor), 0x2u, d.factor - 1, (uint32_t) d.factor);
+    d.Tick(d.sw + 1000, d.plant.Ms(d.factor), 0x2u, d.factor - 1, (uint32_t) d.factor);
+    CHECK(d.Clean() && !d.Has("settled"));
+    for (uint64_t r = 1020; r <= 1140; r += 20)
+        d.Tick(d.sw + r, d.plant.Ms(d.factor), 0u, d.factor - 1, (uint32_t) d.factor, false);
+    CHECK_MSG(!d.Has("settled"), "the watch closed before the extra time was over");
+    d.Tick(d.sw + 1160, d.plant.Ms(d.factor), 0u, d.factor - 1, (uint32_t) d.factor, false);
+    CHECK_MSG(d.Clean() && d.Has("AutoMFG: 3x settled"), "the watch was held open past the extra time");
+}
+
+void AStatusThatWasAlreadySetBeforeTheSwitchIsNotAFault()
+{
+    // The earlier requirement stays: a status that is non-zero when the switch is made is not the switch's fault, however
+    // long it goes on, in the watch or in its extra time.
+    Drv d;
+    for (int i = 0; i < 2000 && d.sw == 0; ++i)
+    {
+        d.t += 20;
+        if (d.Tick(d.t, d.plant.Ms(d.factor), 0x2u, d.factor - 1, (uint32_t) d.factor).setFactor)
+            d.sw = d.t;
+    }
+    CHECK_MSG(d.sw != 0 && d.factor == 3, "no switch to watch");
+    for (uint64_t r = 20; r <= 2000; r += 20)
+        d.Tick(d.sw + r, d.plant.Ms(d.factor), 0x2u, d.factor - 1, (uint32_t) d.factor);
+    CHECK_MSG(d.Clean(), "a status that was set before the switch was held against it");
+    CHECK(d.Has("AutoMFG: 3x settled"));
+    CHECK(!d.Has("Streamline status"));
+}
+
 void ANonZeroWrongCountIsNotUnknown()
 {
     // A count that is not zero and not the requested one is a real mismatch, not "unknown": one sample at the verdict is
@@ -254,6 +375,9 @@ int main()
 {
     StatusBounds();
     ZeroCountBounds();
+    ALateFaultIsConvicted();
+    TheExtraTimeIsBounded();
+    AStatusThatWasAlreadySetBeforeTheSwitchIsNotAFault();
     ANonZeroWrongCountIsNotUnknown();
     TheSignatureIsOneOfTheFirstTwoIntervals();
     if (g_failures)

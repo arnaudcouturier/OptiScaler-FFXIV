@@ -12,7 +12,9 @@
 //             re-creation. The hold becomes 12 s and probing stops; a second one in a row, or a third without ten clean
 //             switches between, stops automatic mode for the session;
 //   broken  - Streamline status != 0, applied count not reached after the second, or presented stuck at 1: one recovery
-//             through the existing toggle path to the last good count, then automatic mode stops for the session.
+//             through the existing toggle path to the last good count, then automatic mode stops for the session. A bad
+//             status or count that began in the last kBadRunMs of the second is not dropped: the watch stays open (at most
+//             kBadRunMs more) until it is convicted or gone.
 
 #include "ext/fg/DynamicMfg.h"
 #include "ext/fg/DynamicMfgGate.h"
@@ -221,7 +223,16 @@ class AutoMfgController
             if (in.detectedGenerated > 0)
                 w_.lastDetected = in.detectedGenerated;
             if (now - w_.since >= kWatchMs)
-                Verdict(in, out);
+            {
+                // A fault that is in progress but too young to convict (it began in the last kBadRunMs) keeps the watch open
+                // for at most kBadRunMs more: closing it here would let the next switch take the already faulty status as
+                // its baseline, and nothing would ever look at that fault again.
+                const bool young = FaultTooYoung(w_, in);
+                if (young && w_.graceEnd == 0)
+                    w_.graceEnd = now + kBadRunMs;
+                if (!young || now >= w_.graceEnd)
+                    Verdict(in, out);
+            }
         }
         if (stopped_) // the verdict just stopped it
         {
@@ -311,6 +322,7 @@ class AutoMfgController
         int lastDetected = 0;    // last non-zero applied count seen (generated frames)
         bool seenMulti = false;
         int samples = 0;
+        uint64_t graceEnd = 0;   // 0, or the time at which a still young fault stops holding the watch open
     };
 
     struct SelfTest
@@ -375,15 +387,29 @@ class AutoMfgController
         restore_ = 0;
     }
 
+    // a count that is not 0 and not the requested one is a real mismatch; 0 ("unknown") has to persist
+    static bool CountWrong(const Watch& w, const AutoMfgTick& in)
+    {
+        return (in.detectedGenerated > 0 && in.detectedGenerated != w.to - 1) ||
+               (w.wrongRun >= kWrongSamples && in.nowMs - w.wrongSince >= kBadRunMs);
+    }
+    static bool StatusBad(const Watch& w, const AutoMfgTick& in)
+    {
+        return w.badRun >= kBadStatusSamples && in.nowMs - w.badSince >= kBadRunMs;
+    }
+    // A bad run (status or applied count) is going on and is not yet old enough to be a failure.
+    static bool FaultTooYoung(const Watch& w, const AutoMfgTick& in)
+    {
+        return (w.badRun > 0 || w.wrongRun > 0) && !StatusBad(w, in) && !CountWrong(w, in);
+    }
+
     void Verdict(const AutoMfgTick& in, AutoMfgOut& out)
     {
         const Watch w = w_;
         w_ = {};
         const int requested = w.to - 1;
-        // a count that is not 0 and not the requested one is a real mismatch; 0 ("unknown") has to persist
-        const bool countWrong = (in.detectedGenerated > 0 && in.detectedGenerated != requested) ||
-                                (w.wrongRun >= kWrongSamples && in.nowMs - w.wrongSince >= kBadRunMs);
-        const bool statusBad = w.badRun >= kBadStatusSamples && in.nowMs - w.badSince >= kBadRunMs;
+        const bool countWrong = CountWrong(w, in);
+        const bool statusBad = StatusBad(w, in);
         const bool stuck = w.samples >= 5 && !w.seenMulti;
         const double costlyAt = std::max(kCostlyMs, 3.0 * w.baselineMs);
         if (statusBad || countWrong || stuck)
