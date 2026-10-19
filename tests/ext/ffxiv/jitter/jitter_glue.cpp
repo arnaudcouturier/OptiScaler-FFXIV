@@ -490,6 +490,78 @@ void TestProbeOnlyNeverWrites()
     CHECK(e.floats[Param::JitterX] == 0.3f && e.floats[Param::JitterY] == -0.2f); // the block still holds the game's values
 }
 
+// L2: with the probe alone the parameters are not even looked at between samples. The clock decides whether a sample can be due; only the
+// configuration key (render size, preset) needs the parameters, and it is looked at on every 16th evaluate.
+void TestProbeOnlyDoesNoLookupsBetweenSamples()
+{
+    constexpr std::size_t kLookups = 9; // Jitter X/Y, subrect W/H, Width, Height, OutWidth, OutHeight, PerfQualityValue
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    const Outcome first = Evaluate(e, engine, At(100, 1, 0), true, false);
+    CHECK(first.ops.size() == kLookups);
+    CHECK(first.logs.size() == 1 && Has(first.logs[0], "Game jitter: counter"));
+
+    // the first 2 s: nothing at all is asked of the block, the process or the quality answer
+    const int memoryReads = e.mem.reads, qualityQueries = e.qualityQueries;
+    for (int i = 1; i <= 60; ++i)
+    {
+        const Outcome o = Evaluate(e, engine, At(100 + i, 1, static_cast<std::uint64_t>(i) * 30), true, false);
+        CHECK(o.ops.empty() && o.logs.empty());
+    }
+    CHECK(e.mem.reads == memoryReads && e.qualityQueries == qualityQueries);
+
+    // 2 s to 10 s, configuration unchanged: the parameters are read on every 16th evaluate only, and that is all
+    int evaluates = 0, passes = 0;
+    for (std::uint64_t t = 2000; t < 10000; t += 100)
+    {
+        const Outcome o = Evaluate(e, engine, At(200 + evaluates, 1, t), true, false);
+        ++evaluates;
+        if (!o.ops.empty())
+        {
+            ++passes;
+            CHECK(o.ops.size() == kLookups);
+        }
+        CHECK(o.logs.empty()); // and no sample: the configuration did not change
+    }
+    CHECK(evaluates == 80 && passes >= 4 && passes <= 6);
+    CHECK(e.mem.reads == memoryReads); // the process was not read either
+
+    // the interval over: the very next evaluate samples
+    const Outcome due = Evaluate(e, engine, At(300, 1, 10000), true, false);
+    CHECK(due.ops.size() >= kLookups && due.logs.size() == 1 && Has(due.logs[0], "Game jitter: counter"));
+}
+
+// L2: a change of the render size is still sampled early, within 16 evaluates of the change (and not before the 2 s minimum).
+void TestProbeOnlyStillSamplesAConfigurationChangeEarly()
+{
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    Evaluate(e, engine, At(100, 1, 0), true, false);
+    e.uints[Param::Width] = 1280; // the game changed its render size (Width/Height/subrect are what the key is made of)
+    e.uints[Param::SubrectWidth] = 1280;
+    int taken = 0;
+    for (int i = 1; i <= 40; ++i)
+    {
+        // before 2 s since the last sample nothing can be taken, whatever changed
+        const std::uint64_t t = i <= 10 ? static_cast<std::uint64_t>(i) * 100 : 3000 + static_cast<std::uint64_t>(i) * 10;
+        const Outcome o = Evaluate(e, engine, At(100 + i, 1, t), true, false);
+        if (!o.logs.empty())
+        {
+            ++taken;
+            CHECK(t >= 2000);
+            CHECK(i <= 10 + 16); // within 16 evaluates of the moment the 2 s have passed
+            CHECK(Has(o.logs[0], "render 1280x1080") || Has(o.logs[0], "Width/Height 1280x1080"));
+        }
+    }
+    CHECK(taken == 1);
+
+    // with the correction on, nothing is skipped: every evaluate reads the parameters
+    FakeEnv c = MakeEnv();
+    Engine correction;
+    for (int i = 0; i < 20; ++i)
+        CHECK(Evaluate(c, correction, At(100 + i, 1, static_cast<std::uint64_t>(i) * 16), false, true).ops.size() >= 9);
+}
+
 // (c) Every failed guard: no write, whatever else is true. Each case spoils exactly one thing; the same rig without the spoiler writes.
 void TestEveryFailedGuardWritesNothing()
 {
@@ -602,6 +674,8 @@ int main()
     TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestProbeLineShowsTheValuesBeforeTheWrite();
     TestProbeOnlyNeverWrites();
+    TestProbeOnlyDoesNoLookupsBetweenSamples();
+    TestProbeOnlyStillSamplesAConfigurationChangeEarly();
     TestEveryFailedGuardWritesNothing();
     return TEST_RESULT("jitter_glue");
 }

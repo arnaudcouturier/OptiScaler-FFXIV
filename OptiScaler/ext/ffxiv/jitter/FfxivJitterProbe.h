@@ -419,6 +419,12 @@ class SampleLimiter
     static constexpr std::uint64_t kChangeMinMs = 2000;
     static constexpr std::uint32_t kMaxChangeSamples = 16;
 
+    // The two cheap questions the probe-only path asks BEFORE it reads any parameter (the configuration key is the only thing that needs
+    // them): is the interval over (or nothing sampled yet), and could a configuration change be taken at all (2 s since the last sample,
+    // early-sample budget left). If both are no, Allow cannot say yes whatever the key is.
+    bool IntervalElapsed(std::uint64_t nowMs) const { return !_have || Elapsed(nowMs) >= kIntervalMs; }
+    bool ChangeWindowOpen(std::uint64_t nowMs) const { return _have && Elapsed(nowMs) >= kChangeMinMs && _changeSamples < kMaxChangeSamples; }
+
     bool Allow(std::uint64_t nowMs, std::uint64_t configurationKey)
     {
         bool take = false;
@@ -426,7 +432,7 @@ class SampleLimiter
             take = true;
         else
         {
-            const std::uint64_t elapsed = nowMs >= _last ? nowMs - _last : 0;
+            const std::uint64_t elapsed = Elapsed(nowMs);
             if (elapsed >= kIntervalMs)
                 take = true;
             else if (configurationKey != _key && elapsed >= kChangeMinMs && _changeSamples < kMaxChangeSamples)
@@ -445,6 +451,8 @@ class SampleLimiter
     }
 
   private:
+    std::uint64_t Elapsed(std::uint64_t nowMs) const { return nowMs >= _last ? nowMs - _last : 0; } // a clock going backwards is "no time passed"
+
     bool _have = false;
     std::uint64_t _last = 0, _key = 0;
     std::uint32_t _changeSamples = 0;

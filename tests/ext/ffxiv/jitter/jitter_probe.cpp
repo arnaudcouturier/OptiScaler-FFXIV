@@ -321,6 +321,32 @@ void TestLimiterAndEpisodes()
     CHECK(early == SampleLimiter::kMaxChangeSamples);
     CHECK(total <= 40 + SampleLimiter::kMaxChangeSamples); // 400 s / 10 s plus the early ones
 
+    // The two questions the probe-only precheck asks without reading any parameter: is the interval over, and could a configuration
+    // change be taken at all. Together they never say "no" where Allow would say "yes", whatever the key.
+    {
+        SampleLimiter q;
+        CHECK(q.IntervalElapsed(0) && !q.ChangeWindowOpen(0)); // nothing sampled yet: due at once
+        CHECK(q.Allow(1000, 1));
+        CHECK(!q.IntervalElapsed(1000) && !q.IntervalElapsed(10999) && q.IntervalElapsed(11000));
+        CHECK(!q.ChangeWindowOpen(2999) && q.ChangeWindowOpen(3000));
+        CHECK(!q.IntervalElapsed(500) && !q.ChangeWindowOpen(500)); // the clock going backwards opens nothing
+        SampleLimiter walk;
+        uint64_t key = 0;
+        for (uint64_t now = 0; now <= 400000; now += 250)
+        {
+            SampleLimiter probe = walk; // what Allow would do from here, without changing the walk
+            const bool open = walk.IntervalElapsed(now) || walk.ChangeWindowOpen(now);
+            const bool accepted = probe.Allow(now, key);
+            if (!open)
+                CHECK(!accepted);
+            if (accepted)
+                CHECK(open);
+            if (now % 2000 == 0)
+                ++key; // a new configuration every 2 s: the early-sample budget runs out after 16
+            walk.Allow(now, key);
+        }
+        CHECK(!walk.ChangeWindowOpen(400000 + 2500)); // the early-sample budget is spent
+    }
     EpisodeLog e;
     CHECK(!e.ShouldLog(Guard::None));
     CHECK(e.ShouldLog(Guard::CameraInvalid)); // first failure of the episode

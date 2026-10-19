@@ -105,6 +105,12 @@ class Engine
 
         const std::uint64_t now = env.NowMs();
 
+        // Probe only: the clock alone says whether a sample can be due, and nothing is read from the parameters in between. The
+        // configuration key (render size, preset) is the one thing that needs them, so it is looked at on every 16th evaluate. The
+        // correction needs every evaluate and skips this.
+        if (!correct && !SampleMayBeDue(now))
+            return;
+
         // The values this evaluate carries to NGX, read BEFORE any replacement: the probe compares against the game's own, and the
         // correction decides on them. Nothing below is allowed to move these two reads behind the write.
         const std::optional<float> ngxX = env.GetFloat(Param::JitterX);
@@ -128,7 +134,7 @@ class Engine
         }
         const RenderSize size = ResolveRenderSize(ctx.subrectW, ctx.subrectH, ctx.widthParam, ctx.heightParam);
 
-        // Probe only: one sample per interval, and nothing is read in between. The correction needs every evaluate.
+        // One sample per interval (and early after a configuration change); the correction decides on every evaluate regardless.
         const bool allowed = _limiter.Allow(now, ConfigurationKey(ctx));
         if (!correct && !allowed)
             return;
@@ -212,7 +218,20 @@ class Engine
     }
 
   private:
+    static constexpr std::uint32_t kKeyCheckEvery = 16;
+
+    bool SampleMayBeDue(std::uint64_t now)
+    {
+        if (_limiter.IntervalElapsed(now))
+            return true;
+        if (++_sinceKeyCheck < kKeyCheckEvery)
+            return false;
+        _sinceKeyCheck = 0;
+        return _limiter.ChangeWindowOpen(now);
+    }
+
     SampleLimiter _limiter;
+    std::uint32_t _sinceKeyCheck = 0; // evaluates since the configuration key was last looked at (probe only)
     CounterTracker _counter;
     EpisodeLog _probeFailures;
     EpisodeLog _passThrough;
