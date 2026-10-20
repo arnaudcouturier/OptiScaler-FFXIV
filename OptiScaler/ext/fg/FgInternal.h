@@ -27,4 +27,7 @@ void AutoMfgObserve(bool queryOk, const sl::DLSSGState& state);
 void ResetAutoMfg();
 // For the menu card.
 AutoMfgStatus AutoMfgGetStatus();
+
+// WS2: the DLSS-G render preset section of the fg_unlocks card (MenuFgPreset.cpp).
+void DrawRenderPresetSection();
 } // namespace ext::fg

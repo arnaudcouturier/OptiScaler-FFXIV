@@ -13,6 +13,7 @@ void FgConfig::Bind(config::Binder& b)
     b.Add("DLSSG", "AdaMfgUnlock", adaMfgUnlock);
 
     b.Add("DLSSG", "UIRecomposition", uiRecomposition);
+    b.Add("DLSSG", "RenderPreset", renderPreset);
 
     b.Add("DLSSG", "AutoMFG", autoMfg);
     b.Add("DLSSG", "AutoMFGMax", autoMfgMax);
@@ -50,6 +51,10 @@ void FgConfig::PostLoad()
     auto& count = Config::Instance()->FGXeFGInterpolationCount;
     if (count.has_value() && count.value() > kXeFgMaxInterpolations)
         count.reset();
+
+    // WS2: the render preset is 0 (Auto) or 1..3 (A, B, C); anything else means unset.
+    if (renderPreset.has_value() && (renderPreset.value() < 0 || renderPreset.value() > 3))
+        renderPreset.reset();
 
     // Dynamic MFG: the multiplier range is 2x..4x, the target 0 (auto) or a frame rate. Anything else means unset.
     if (autoMfgMax.has_value() && (autoMfgMax.value() < 2 || autoMfgMax.value() > 4))
