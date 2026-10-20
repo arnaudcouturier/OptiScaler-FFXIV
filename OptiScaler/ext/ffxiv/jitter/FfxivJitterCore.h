@@ -319,7 +319,6 @@ class Engine
             const std::optional<float> previous = _manual;
             _manual = manual;
             _cal.Reset();
-            _written.Forget();
             _staleOpen = false;
             _keyText.clear();
             // The first scaled pair is announced (with the read-back) when a manual scale is switched on from off. A change of the value keeps the
@@ -335,11 +334,12 @@ class Engine
         {
             if (ManualScaleIsBaseline(*_manual))
             {
-                ++_counts.idle; // the baseline: the game's values are left alone
+                Apply(env, ngxX, ngxY, std::nullopt); // the baseline: the game's raw pair is put back when the block still holds ours
+                ++_counts.idle;
                 _notUsable.Event(false);
             }
             else
-                Scale(env, ngxX, ngxY, *_manual);
+                Apply(env, ngxX, ngxY, *_manual);
             return;
         }
 
@@ -351,7 +351,6 @@ class Engine
             _keyText = KeyText(ctx);
             if (keyResult == Calibrator::KeyResult::Changed)
             {
-                _written.Forget();
                 _announceScaled = false;
                 _staleOpen = false;
                 if (_configChanged.Occurrence())
@@ -365,8 +364,7 @@ class Engine
         const Observation observation = _cal.Observe(readGuard, analysis, now);
         if (observation.change != CalibrationChange::None)
         {
-            // A new ratio: the pair written with the old one is no longer what the block is expected to hold.
-            _written.Forget();
+            // A new ratio: the remembered pair stays (the block may still hold it); the next Apply re-derives from the raw pair.
             _announceScaled = _cal.mode() == Mode::Scale;
             _staleOpen = false;
             if (observation.change == CalibrationChange::Adopted)
@@ -399,52 +397,95 @@ class Engine
         switch (_cal.mode())
         {
         case Mode::Learning:
+            Apply(env, ngxX, ngxY, std::nullopt); // the raw pair is put back when the block still holds ours
             ++_counts.learning;
             _notUsable.Event(false);
             break;
         case Mode::Neutral:
         case Mode::Refused:
+            Apply(env, ngxX, ngxY, std::nullopt);
             ++_counts.idle;
             _notUsable.Event(false);
             break;
-        case Mode::Scale: Scale(env, ngxX, ngxY, _cal.ratio()); break;
+        case Mode::Scale: Apply(env, ngxX, ngxY, _cal.ratio()); break;
         }
     }
 
-    // Multiply the NGX pair this evaluate carries (read before any write) by `ratio`: the adopted ratio (Scale mode) or the manual scale.
-    template <class Env> void Scale(Env& env, const std::optional<float>& ngxX, const std::optional<float>& ngxY, float ratio)
+    enum class Applied : std::uint8_t
     {
-        const ScaleDecision d = DecideScale(ngxX, ngxY, ratio, _written);
-        if (d.action == ScaleAction::NotUsable)
+        Nothing,
+        Scaled,
+        AlreadyScaled,
+        NotUsable
+    };
+
+    // Bring the NGX pair of this evaluate to what the state asks for. `ratio` = the adopted ratio (Scale mode) or a manual scale; nullopt = nothing
+    // is to be applied (learning, Neutral, Refused, the manual baseline). The pair READ is the game's own unless it equals the pair this core
+    // wrote last: then the game did not refresh the block, its raw pair is the one remembered with it, and the desired pair is re-derived from
+    // THAT (so a new ratio or a slider drag never compounds, and a state that applies nothing puts the raw pair back).
+    template <class Env> Applied Apply(Env& env, const std::optional<float>& ngxX, const std::optional<float>& ngxY, std::optional<float> ratio)
+    {
+        const bool unrefreshed = _written.has() && ngxX && ngxY && _written.Matches(*ngxX, *ngxY);
+        float rawX = 0.0f, rawY = 0.0f;
+        float wantX = 0.0f, wantY = 0.0f;
+        if (!ratio)
         {
-            ++_counts.notUsable;
-            if (_notUsable.Event(true))
-                env.Log(FormatNotUsable(d.guard));
-            return;
+            if (!unrefreshed)
+            {
+                _written.Forget(); // the game refreshed the block (or nothing was written): nothing to restore
+                return Applied::Nothing;
+            }
+            rawX = wantX = _rawX;
+            rawY = wantY = _rawY;
         }
-        _notUsable.Event(false);
-        if (d.action == ScaleAction::AlreadyScaled)
+        else
         {
-            ++_counts.alreadyScaled;
-            return;
+            ScaleDecision d = DecideScale(ngxX, ngxY, *ratio, _written);
+            if (d.action == ScaleAction::NotUsable)
+            {
+                if (!unrefreshed)
+                    _written.Forget();
+                ++_counts.notUsable;
+                if (_notUsable.Event(true))
+                    env.Log(FormatNotUsable(d.guard));
+                return Applied::NotUsable;
+            }
+            _notUsable.Event(false);
+            if (d.action == ScaleAction::AlreadyScaled)
+            {
+                rawX = _rawX;
+                rawY = _rawY;
+                d = DecideScale(rawX, rawY, *ratio, WrittenPair {}); // from the raw pair, with the current ratio
+                if (d.action != ScaleAction::Scale || _written.Matches(d.x, d.y))
+                {
+                    ++_counts.alreadyScaled;
+                    return Applied::AlreadyScaled;
+                }
+            }
+            else
+            {
+                rawX = *ngxX;
+                rawY = *ngxY;
+            }
+            wantX = d.x;
+            wantY = d.y;
         }
 
         // The block is the bridge's own NVSDK_NGX_Parameter (the Evaluate's InParameters, which later goes to the upscaler's Evaluate and
-        // to the frame-generation input). The game sets Jitter.Offset again at its next evaluate (whether it does on EVERY evaluate is what
-        // the "already scaled" count of the status line answers).
-        // What the block is believed to hold after OUR writes is what gets remembered: nothing before the first Set (a Set that throws
-        // leaves the block as it was), the full pair after both Sets, and after a failed Y either nothing (X put back: the block holds the
-        // game's own pair again) or the mixed pair (the put-back failed too).
+        // to the frame-generation input). What the block is believed to hold after OUR writes is what gets remembered, together with the
+        // game's raw pair: nothing before the first Set (a Set that throws leaves the block as it was), the full pair after both Sets (or
+        // nothing when the raw pair was restored), and after a failed Y either what it held before (X put back) or the mixed pair (the
+        // put-back failed too).
+        const WrittenPair before = _written;
+        const float beforeRawX = _rawX, beforeRawY = _rawY;
         _written.Forget();
-        env.SetFloat(Param::JitterX, d.x);
+        env.SetFloat(Param::JitterX, wantX);
         try
         {
-            env.SetFloat(Param::JitterY, d.y);
+            env.SetFloat(Param::JitterY, wantY);
         }
         catch (...)
         {
-            // Half written: X is scaled, Y is the game's. Put the game's own X back (best effort, a failing Set here is swallowed) so that
-            // the pair that goes on to the upscaler is not a mixed one, then let Step abandon the evaluate.
             bool putBack = false;
             try
             {
@@ -454,11 +495,31 @@ class Engine
             catch (...)
             {
             }
-            if (!putBack)
-                _written.Remember(d.x, *ngxY);
+            if (putBack)
+            {
+                if (unrefreshed)
+                {
+                    _written = before;
+                    _rawX = beforeRawX;
+                    _rawY = beforeRawY;
+                }
+            }
+            else
+            {
+                _written.Remember(wantX, *ngxY);
+                _rawX = rawX;
+                _rawY = rawY;
+            }
             throw;
         }
-        _written.Remember(d.x, d.y);
+        if (!ratio)
+        {
+            _written.Forget();
+            return Applied::Nothing;
+        }
+        _written.Remember(wantX, wantY);
+        _rawX = rawX;
+        _rawY = rawY;
         ++_counts.scaled;
         if (_announceScaled)
         {
@@ -468,9 +529,10 @@ class Engine
                 // The first pair of a calibration: ask the block what it holds now, so the line shows what it really took.
                 const std::optional<float> storedX = env.GetFloat(Param::JitterX);
                 const std::optional<float> storedY = env.GetFloat(Param::JitterY);
-                env.Log(FormatFirstScaled(*ngxX, *ngxY, d.x, d.y, ratio, storedX, storedY));
+                env.Log(FormatFirstScaled(rawX, rawY, wantX, wantY, *ratio, storedX, storedY));
             }
         }
+        return Applied::Scaled;
     }
 
   public:
@@ -507,6 +569,7 @@ class Engine
     std::uint64_t _reportedSuppressed = 0; // the total of suppressed episodes the last report showed
     Calibrator _cal;
     WrittenPair _written;     // the pair the core last wrote, as passed to SetFloat (see WrittenPair)
+    float _rawX = 0.0f, _rawY = 0.0f; // the game's own pair that _written was derived from (valid while _written.has())
     std::string _keyText;     // the readable form of the configuration key the calibration belongs to
     bool _announceScaled = false; // the next scaled pair is the first of its calibration: log it with the read-back
     bool _staleOpen = false;      // a "verification stale" episode is open

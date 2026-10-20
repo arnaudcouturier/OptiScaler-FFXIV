@@ -278,9 +278,9 @@ void TestTheValueCanBeChangedLive()
     CHECK(CountLines(logs, "first scaled pair") == 1); // announced when switched on from off, not at every change of the value
 }
 
-// A change of the value forgets the remembered pair (the scale it was written with is gone): the block of a game that never refreshes it
-// holds the pair written with the old value, and it is scaled once more with the new one.
-void TestAChangeOfTheValueForgetsTheRememberedPair()
+// A change of the value never compounds (F1): the block of a game that never refreshes it holds the pair written with the old value; the new
+// value is applied to the game's RAW pair remembered with it, and a baseline (1.0) or 0 puts the raw pair back.
+void TestAChangeOfTheValueIsAppliedToTheRawPair()
 {
     Session g;
     g.manual = 0.8f;
@@ -290,8 +290,35 @@ void TestAChangeOfTheValueForgetsTheRememberedPair()
     for (int i = 0; i < 3; ++i)
         CHECK(g.Next().sets.empty());
     g.manual = 0.5f;
-    CHECK(Wrote(g.Next(), 0.12, -0.08)); // 0.3 * 0.8 * 0.5: the block held our result and the new value is applied to it
-    CHECK(g.Next().sets.empty());        // and that result is remembered
+    CHECK(Wrote(g.Next(), 0.15, -0.1)); // 0.3 * 0.5, not 0.3 * 0.8 * 0.5
+    CHECK(g.Next().sets.empty());       // and that result is remembered
+    g.manual = 1.0f;                     // the baseline writes nothing new, but the raw pair is put back
+    CHECK(Wrote(g.Next(), 0.3, -0.2));
+    CHECK(g.Next().sets.empty());
+    g.manual = 0.6f;
+    CHECK(Wrote(g.Next(), 0.18, -0.12));
+    g.manual = 0.6005f; // a step far below any tolerance is still a different pair and is written
+    CHECK(Wrote(g.Next(), 0.3 * 0.6005, -0.2 * 0.6005, 1e-6));
+    g.manual = 0.0f; // off: the calibration is learning, the raw pair is put back
+    CHECK(Wrote(g.Next(), 0.3, -0.2));
+    CHECK(g.Next().sets.empty());
+}
+
+// A 100-value slider sweep on a block the game never refreshes: every evaluate ends at raw * value (or raw for 0 and the baseline).
+void TestASweepOnAnUnrefreshedBlockAlwaysEndsAtRawTimesValue()
+{
+    Session g;
+    g.sequence = false;
+    g.refresh = false;
+    for (int i = 0; i < 100; ++i)
+    {
+        const float v = i % 10 == 9 ? 0.0f : (i % 10 == 8 ? 1.0f : 0.30f + 0.006f * static_cast<float>(i));
+        g.manual = v;
+        g.Next();
+        const double k = v == 0.0f || v == 1.0f ? 1.0 : v;
+        CHECK_MSG(Near(g.e.floats[Param::JitterX], 0.3 * k) && Near(g.e.floats[Param::JitterY], -0.2 * k), "value %.3f ends at %f/%f", v,
+                  g.e.floats[Param::JitterX], g.e.floats[Param::JitterY]);
+    }
 }
 
 // Switching the correction off (the probe still on) and on again starts the manual scale fresh: the line and the read-back come again.
@@ -533,9 +560,10 @@ void TestAHalfWrittenPairIsHandledLikeTheCalibratedOne()
         g.Next();
         CHECK(exceptions(g) == 1 && Near(g.e.floats[Param::JitterX], 0.24) && Near(g.e.floats[Param::JitterY], -0.2));
         g.e.fault = nullptr;
-        for (int i = 0; i < 5; ++i)
+        CHECK(Wrote(g.Next(), 0.24, -0.16)); // the mixed pair is recognised, the raw pair re-derived: Y is repaired
+        for (int i = 0; i < 4; ++i)
             CHECK(g.Next().sets.empty());
-        CHECK(Near(g.e.floats[Param::JitterX], 0.24) && Near(g.e.floats[Param::JitterY], -0.2));
+        CHECK(Near(g.e.floats[Param::JitterX], 0.24) && Near(g.e.floats[Param::JitterY], -0.16));
     }
 }
 } // namespace
@@ -549,7 +577,8 @@ int main()
     TestInvalidValuesAreIgnoredWithOneLinePerEpisode();
     TestTheOverrideTakesPrecedenceOverAnAdoptedRatioAndSwitchingOffLearnsFromScratch();
     TestTheValueCanBeChangedLive();
-    TestAChangeOfTheValueForgetsTheRememberedPair();
+    TestAChangeOfTheValueIsAppliedToTheRawPair();
+    TestASweepOnAnUnrefreshedBlockAlwaysEndsAtRawTimesValue();
     TestASweepOfTheValueDoesNotUseUpTheCalibrationLines();
     TestTheSnapOfTheSlider();
     TestSwitchingTheCorrectionOffAndOnStartsTheManualScaleFresh();

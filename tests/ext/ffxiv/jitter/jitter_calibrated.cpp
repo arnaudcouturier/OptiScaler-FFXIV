@@ -445,12 +445,11 @@ void TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered()
         CHECK(exceptions(g) == 1);
         CHECK(Near(g.e.floats[Param::JitterX], 0.18) && Near(g.e.floats[Param::JitterY], -0.2));
         g.e.fault = nullptr;
-        for (int i = 0; i < 5; ++i)
-        {
-            const Outcome next = g.Next();
-            CHECK_MSG(next.sets.empty(), "evaluate %d scaled the mixed pair again", i);
-        }
-        CHECK(Near(g.e.floats[Param::JitterX], 0.18) && Near(g.e.floats[Param::JitterY], -0.2));
+        const Outcome repair = g.Next(); // read == written: the block is not refreshed, the raw pair is re-derived and the mixed pair repaired
+        CHECK(Wrote(repair, 0.18, -0.12));
+        for (int i = 0; i < 4; ++i)
+            CHECK_MSG(g.Next().sets.empty(), "evaluate %d scaled again after the repair", i);
+        CHECK(Near(g.e.floats[Param::JitterX], 0.18) && Near(g.e.floats[Param::JitterY], -0.12));
     }
     {
         // X refused: nothing was written, nothing is put back, nothing is remembered
@@ -507,9 +506,9 @@ void TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered()
     }
 }
 
-// A new ratio forgets the remembered pair (R6): the block of a game that never refreshes it holds the pair written with the OLD ratio, and
-// it is scaled once more with the new one. (The price of forgetting; keeping the pair would hold the block at the old ratio instead.)
-void TestARatioChangeForgetsTheRememberedPair()
+// A new ratio never compounds (F1): the block of a game that never refreshes it holds the pair written with the OLD ratio; the new ratio is
+// applied to the game's RAW pair that was remembered with it (0.3 * 0.8 = 0.24, not 0.18 * 0.8 = 0.144).
+void TestARatioChangeIsAppliedToTheRawPairNotTheHeldResult()
 {
     Session g;
     g.sequence = false;
@@ -520,9 +519,14 @@ void TestARatioChangeForgetsTheRememberedPair()
     g.s = 1.6f;                          // the game's ratio becomes 0.8
     for (int i = 6; i <= 9; ++i)
         CHECK_MSG(g.Next().sets.empty(), "evaluate %d: already scaled, the contradiction is not yet a new ratio", i);
-    const Outcome o = g.Next(); // the fifth contradicting snapshot: the ratio is replaced, the remembered pair is forgotten
-    CHECK_MSG(Wrote(o, 0.18 * 0.8, -0.12 * 0.8), "%zu sets", o.sets.size());
+    const Outcome o = g.Next(); // the fifth contradicting snapshot: the ratio is replaced
+    CHECK_MSG(Wrote(o, 0.24, -0.16), "%zu sets", o.sets.size());
     CHECK(g.Next().sets.empty()); // and the new result is remembered
+    // a ratio that goes back to Neutral restores the raw pair
+    g.s = 2.0f;
+    for (int i = 0; i < 4; ++i)
+        g.Next();
+    CHECK(Wrote(g.Next(), 0.3, -0.2));
 }
 
 // Reads of the NGX pair come before the first write; the write is X then Y; the read-back belongs to the first pair of a calibration only.
@@ -651,22 +655,67 @@ void TestTheSeamRunningTwicePerEvaluateScalesOnce()
     }
 }
 
-// A new calibration forgets the remembered pair: a ratio change and a key change both scale a block that happens to hold the same numbers.
-void TestTheRememberedPairIsForgottenWithTheRatio()
+// The remembered pair survives a key change (F1): the game stops refreshing, the key changes, and while the new calibration is learning the
+// block's raw pair is put back (the evaluate that sees the key restores it, the following ones have nothing to do); the fifth snapshot
+// adopts and the block is scaled from the RAW pair, not from the held result.
+void TestAKeyChangeOnAnUnrefreshedBlockRestoresTheRawPairWhileLearning()
 {
     Session g;
     g.sequence = false;
     for (int i = 1; i <= 8; ++i)
         g.Next(); // adopted, the game refreshes (0.3, -0.2)
-    // the key changes: the calibration and the remembered pair go; the game stops refreshing, the block holds our last (0.18, -0.12)
     g.e.perfQuality = 3;
-    g.refresh = false;
-    for (int i = 1; i <= 4; ++i)
+    g.refresh = false; // from now on the block holds our last (0.18, -0.12)
+    CHECK(Wrote(g.Next(), 0.3, -0.2)); // the evaluate that sees the new key restores the raw pair
+    for (int i = 2; i <= 4; ++i)
+        CHECK_MSG(g.Next().sets.empty(), "evaluate %d while learning", i);
+    CHECK(Near(g.e.floats[Param::JitterX], 0.3) && Near(g.e.floats[Param::JitterY], -0.2));
+    CHECK(Wrote(g.Next(), 0.18, -0.12)); // adopted again: raw * 0.6, never 0.18 * 0.6
+    CHECK(g.Next().sets.empty());
+}
+
+// F1 corner cases of the remembered raw pair.
+void TestTheRawPairSurvivesAFailedRepairAndAStalePairIsNotMistakenForOurs()
+{
+    {
+        // The block is not refreshed, the ratio changes and the write fails half way AND the put-back fails: the mixed pair is remembered with
+        // the TRUE raw pair, so the next evaluate repairs it to raw * 0.8 (0.24, -0.16), not to a value derived from the held result.
+        Session g;
+        g.sequence = false;
+        g.refresh = false;
+        for (int i = 1; i <= 5; ++i)
+            g.Next();       // adopted at 0.6, the block holds (0.18, -0.12)
+        g.s = 1.6f;
+        for (int i = 6; i <= 9; ++i)
+            g.Next();
+        g.e.fault = [](const char* where)
+        {
+            static int sets = 0;
+            if (std::string(where) == "SetFloat" && ++sets >= 2)
+                throw std::runtime_error("refused");
+        };
+        g.Next(); // the fifth contradiction replaces the ratio; X is written, Y and the put-back are refused
+        g.e.fault = nullptr;
+        CHECK(Wrote(g.Next(), 0.24, -0.16));
         CHECK(g.Next().sets.empty());
-    // the fifth snapshot of the new key adopts 0.6 again: the block holds 0.18/-0.12 which is NOT the remembered pair any more, so the
-    // evaluate scales it (the price of forgetting: once more); had the pair been kept, it would be recognised as already scaled
-    const Outcome o = g.Next();
-    CHECK_MSG(Wrote(o, 0.18 * 0.6, -0.12 * 0.6), "%zu sets", o.sets.size());
+    }
+    {
+        // A remembered pair that the game has since refreshed away is not ours any more: when the game later sends exactly that pair as its own
+        // new value while we apply nothing, it is left alone (not "restored" to an old raw pair).
+        Session g;
+        g.sequence = false;
+        for (int i = 1; i <= 6; ++i)
+            g.Next(); // adopted at 0.6, the game refreshes (0.3, -0.2) every evaluate; we wrote (0.18, -0.12) last
+        const float writtenX = g.e.attempted[g.e.attempted.size() - 2].value, writtenY = g.e.attempted[g.e.attempted.size() - 1].value;
+        g.e.perfQuality = 3; // key change: learning, nothing to apply
+        g.Next();            // refreshed (0.3, -0.2): the remembered pair must be dropped here
+        Frame f = g.Make();
+        f.jx = writtenX;
+        f.jy = writtenY;
+        const Outcome o = Evaluate(g.e, g.engine, f, false, true);
+        CHECK_MSG(o.sets.empty(), "%zu sets: the game's own pair equal to an old written pair was restored", o.sets.size());
+        CHECK(g.e.floats[Param::JitterX] == writtenX && g.e.floats[Param::JitterY] == writtenY);
+    }
 }
 
 // ---- pairs that are not usable --------------------------------------------------------------------------------------------------------
@@ -849,13 +898,14 @@ int main()
     TestSwitchingTheCorrectionOffAndOnStartsLearningAgain();
     TestAnExceptionMidLearningDropsTheRunButAnAdoptedRatioSurvives();
     TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered();
-    TestARatioChangeForgetsTheRememberedPair();
+    TestARatioChangeIsAppliedToTheRawPairNotTheHeldResult();
+    TestTheRawPairSurvivesAFailedRepairAndAStalePairIsNotMistakenForOurs();
     TestReadsComeBeforeTheWriteAndTheReadBackIsOnceAndShowsTheBlock();
     TestAGameThatNeverRefreshesTheBlockIsScaledOnce();
     TestAGameThatRefreshesEveryEvaluateIsScaledEveryTime();
     TestAGameThatRefreshesEverySecondEvaluate();
     TestTheSeamRunningTwicePerEvaluateScalesOnce();
-    TestTheRememberedPairIsForgottenWithTheRatio();
+    TestAKeyChangeOnAnUnrefreshedBlockRestoresTheRawPairWhileLearning();
     TestAPairThatIsNotUsableIsPassedThroughAndLoggedPerEpisode();
     TestTheProbeLineShowsTheValuesBeforeTheWrite();
     TestTheLinesOfASession();
