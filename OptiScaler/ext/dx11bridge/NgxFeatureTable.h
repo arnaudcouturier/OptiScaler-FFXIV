@@ -181,7 +181,6 @@ class EvalRegistry
         static constexpr size_t kSlots = 8;
         bool closed = false;
         int total = 0;
-        int overflow = 0;
         std::array<size_t, kSlots> tid {};
         std::array<int, kSlots> count {};
 
@@ -199,10 +198,7 @@ class EvalRegistry
                     freeSlot = i;
             }
             if (freeSlot == kSlots)
-            {
-                ++overflow;
-                return;
-            }
+                return; // no slot: counted in `total` only
             tid[freeSlot] = key;
             count[freeSlot] = 1;
         }
@@ -214,8 +210,6 @@ class EvalRegistry
                     --count[i];
                     return;
                 }
-            if (overflow > 0)
-                --overflow;
         }
         bool Has(size_t key) const
         {
