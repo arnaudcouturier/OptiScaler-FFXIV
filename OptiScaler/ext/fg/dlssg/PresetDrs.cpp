@@ -3,6 +3,7 @@
 #include "PresetDrs.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/fg/dlssg/PresetLogRelay.h"
 
 #include <atomic>
 
@@ -28,6 +29,9 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
         return status;
 
     const bool isNumber = found && setting->settingType == NVDRS_DWORD_TYPE;
+    if (settingId == kRenderPresetSettingId)
+        ReadoutState().NoteDriverQuery(true); // the runtime asked, whatever the answer
+
     const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0);
     if (!edit.replace)
         return status;
