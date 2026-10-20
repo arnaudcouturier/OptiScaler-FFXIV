@@ -20,7 +20,7 @@
 #include "ext/Seams.h"
 
 static ID3D11Device* D3D11Device = nullptr;
-static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Dx11>> Dx11Contexts;
+static ext::dx11bridge::ContextTable<ContextData<IFeature_Dx11>> Dx11Contexts; // ext: locked, reference-stable (was an unordered_dense map)
 static int evalCounter = 0;
 static bool shutdown = false;
 static bool _skipInit = false;
@@ -53,7 +53,7 @@ static bool IsFGSourceFeature(unsigned int handleId)
     bool bestMatchesSwapchain = false;
     UINT64 bestArea = 0;
 
-    for (const auto& [id, context] : Dx11Contexts)
+    for (const auto& [id, context] : Dx11Contexts.Locked()) // ext: under the table lock
     {
         auto feature = context.feature.get();
 
@@ -656,7 +656,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_CreateFeature(ID3D11DeviceContext
 
     if (deviceContext->ModuleLoaded() && deviceContext->Init(D3D11Device, InDevCtx, InParameters))
     {
-        State::Instance().currentFeature = deviceContext;
+        ext::dx11bridge::SetCurrentFeature(deviceContext); // ext: under the table lock
         UpscalerInputsDx11wDx12::Reset();
         return NVSDK_NGX_Result_Success;
     }
@@ -706,22 +706,18 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (auto deviceContext = Dx11Contexts[handleId].feature.get(); deviceContext != nullptr)
     {
-        if (!ext::dx11bridge::BeforeReleaseFeature(*deviceContext, shutdown)) // ext: C6 drain the queues first
+        const auto drain = ext::dx11bridge::BeforeReleaseFeature(*deviceContext, handleId, shutdown); // ext: C6 drain the queues first
+        if (drain == ext::dx11bridge::ReleaseDrain::Failed)
             return NVSDK_NGX_Result_FAIL_PlatformError;
 
-        if (!shutdown)
+        if (!shutdown && !ext::dx11bridge::ShouldSkipReleaseSleep(drain)) // ext: skipped only on a proven drain
         {
             LOG_TRACE("sleeping for 500ms before reset()!");
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
-        if (deviceContext == State::Instance().currentFeature)
-            State::Instance().currentFeature = nullptr;
-
-        Dx11Contexts[handleId].feature.reset();
-        auto it = std::find_if(Dx11Contexts.begin(), Dx11Contexts.end(),
-                               [&handleId](const auto& p) { return p.first == handleId; });
-        Dx11Contexts.erase(it);
+        ext::dx11bridge::ClearCurrentFeatureIf(deviceContext); // ext: under the table lock
+        { auto detached = Dx11Contexts.Extract(handleId); } // ext: detached under the lock, destroyed after it (was reset + erase)
 
         if (!shutdown && Config::Instance()->Dx11DelayedInit.value_or_default())
         {
@@ -806,6 +802,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
         }
     }
 
+    ext::dx11bridge::EvaluatePin evaluatePin(handleId); // ext: counted as in flight until this call returns
+    if (!evaluatePin) // ext: the handle is being released, nothing may start on it
+        return NVSDK_NGX_Result_Success;
+
     evalCounter++;
     if (Config::Instance()->SkipFirstFrames.has_value() && evalCounter < Config::Instance()->SkipFirstFrames.value())
         return NVSDK_NGX_Result_Success;
@@ -841,7 +841,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
 
         // FG reads render size etc. from currentFeature, so it has to stay on the game image upscaler
         if (state.currentFeature == nullptr || IsFGSourceFeature(handleId))
-            state.currentFeature = deviceContext;
+            ext::dx11bridge::SetCurrentFeature(deviceContext); // ext: under the table lock
     }
 
     const auto targetApiName =

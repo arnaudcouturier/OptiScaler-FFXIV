@@ -2,7 +2,11 @@
 
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/dx11bridge/ReleaseSequence.h"
 #include "ext/game/Game.h"
+#include "ext/upscaler/NgxThreadTrace.h"
+
+#include <chrono>
 
 #include <Config.h>
 #include <OwnedMutex.h>
@@ -60,25 +64,94 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice)
     return true;
 }
 
-bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
+bool ShouldSkipReleaseSleep(ReleaseDrain drain)
 {
-    if (!IsolatesNgx() || !feature.IsWithDx12())
-        return true;
+    // shuttingDown is false here by construction: the caller only asks on the non-shutdown path.
+    return SkipReleaseSleep(drain, ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default(), false);
+}
 
-    auto fg = State::Instance().currentFG;
+void SetCurrentFeature(IFeature* feature)
+{
+    TableGuard lock; // only the pointer store happens under the lock
+    State::Instance().currentFeature = feature;
+}
+
+void ClearCurrentFeatureIf(IFeature* feature)
+{
+    TableGuard lock;
+    if (State::Instance().currentFeature == feature)
+        State::Instance().currentFeature = nullptr;
+}
+
+namespace
+{
+// Production side of ReleaseSequence.h: the real queues. DrainFg also cancels the FG's pending work first, under its mutex.
+struct ReleaseOps
+{
+    IFGFeature_Dx12* fg = nullptr;
+    bool fgRequired = false;
     ID3D12CommandQueue* fgQueue = nullptr;
-    if (&feature == State::Instance().currentFeature && fg != nullptr &&
-        State::Instance().activeFgInput == FGInput::Upscaler)
+
+    gpu::QueueDrain DrainFg()
     {
         OwnedLockGuard guard(fg->Mutex, 5);
         ext::Access::CancelPendingUpscalerWork(*fg);
         fgQueue = fg->GetCommandQueue();
-        if (!gpu::DrainQueue(fgQueue))
-            return false;
+        return gpu::DrainQueueEx(fgQueue);
     }
-    auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
-    if (upscaleQueue != fgQueue && !gpu::DrainQueue(upscaleQueue))
-        return false;
+
+    gpu::QueueDrain DrainUpscale(gpu::QueueDrain fgResult)
+    {
+        auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
+        // One queue serving both roles was waited for once, above.
+        if (fgRequired && upscaleQueue == fgQueue)
+            return fgResult;
+        return gpu::DrainQueueEx(upscaleQueue);
+    }
+};
+} // namespace
+
+ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, bool shuttingDown)
+{
+    // Before the early return: the thread of every release is wanted in the log, whatever the game.
+    ext::upscaler::LogReleaseThread(handleId);
+
+    if (!IsolatesNgx() || !feature.IsWithDx12())
+        return ReleaseDrain::NotApplicable;
+
+    const auto started = std::chrono::steady_clock::now();
+    auto fg = State::Instance().currentFG;
+
+    ReleaseOps ops;
+    ops.fg = fg;
+    ops.fgRequired = &feature == State::Instance().currentFeature && fg != nullptr &&
+                     State::Instance().activeFgInput == FGInput::Upscaler;
+
+    // The XeFG context rebuild below runs after the drain and tears down GPU state the drain does not cover, so a release that
+    // will do it is not proven: it keeps the old flow in full (sleep kept, handle never closed).
+    const bool xefgRebuild = !shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG &&
+                             ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() &&
+                             &feature == State::Instance().currentFeature && fg != nullptr &&
+                             State::Instance().activeFgInput == FGInput::Upscaler;
+
+    ReleasePlan plan;
+    plan.handleId = handleId;
+    plan.fgRequired = ops.fgRequired;
+    // Closing the handle and waiting for the evaluates in flight is what makes skipping the sleep safe; with the key off
+    // (or on shutdown, where nothing is skipped anyway) the flow is the old one.
+    plan.gate = !shuttingDown && !xefgRebuild && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();
+
+    const auto outcome = PrepareRelease(Registry(), plan, ops);
+    if (outcome.threw)
+        LOG_ERROR("FFXIV upscaler release: exception while draining the queues");
+    const auto result = outcome.result;
+    const double waitedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (result == ReleaseDrain::Failed)
+    {
+        LOG_WARN("FFXIV upscaler release: handle {} result=failed, the release is refused", handleId);
+        return result;
+    }
 
     // D3: the upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps running straight across that
     // hole: CancelPendingUpscalerWork only switches it off and back on, so the provider's presentation timing history
@@ -89,9 +162,7 @@ bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
     // Upstream OptiScaler destroys the FG context on this event instead, so frame generation restarts with a clean
     // history. Do the same, after the queues above have drained: XeFG_Dx12 recreates the context on the next frame when
     // _fgContext is null.
-    if (!shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG &&
-        ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() && &feature == State::Instance().currentFeature &&
-        fg != nullptr && State::Instance().activeFgInput == FGInput::Upscaler)
+    if (xefgRebuild)
     {
         OwnedLockGuard guard(fg->Mutex, 5);
         LOG_INFO("FFXIV upscaler release: rebuilding FG context so pacing restarts clean");
@@ -99,6 +170,9 @@ bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
         fg->DestroyFGContext();
     }
 
-    return true;
+    LOG_INFO("FFXIV upscaler release: handle {} result={} (fg queue required={}, fg={}, upscale={}, handle {}), waited {:.2f} ms, sleep {}",
+             handleId, Name(result), plan.fgRequired, (int) outcome.fg, (int) outcome.upscale, Name(outcome.quiet), waitedMs,
+             shuttingDown ? "n/a (shutdown)" : (ShouldSkipReleaseSleep(result) ? "skipped" : "kept (500 ms)"));
+    return result;
 }
 } // namespace ext::dx11bridge

@@ -184,6 +184,8 @@ void WindowConfig::Bind(config::Binder& b) { b.Add("Window", "Mode", mode); }
 
 void MenuStyleConfig::Bind(config::Binder& b) { b.Add("Menu", "Style", look); }
 
+void NgxReleaseConfig::Bind(config::Binder& b) { b.Add("NgxRelease", "SkipReleaseSleep", skipReleaseSleep); }
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -196,6 +198,7 @@ void ExtConfig::Bind(config::Binder& b)
     reshade.Bind(b);
     window.Bind(b);
     menuStyle.Bind(b);
+    ngxRelease.Bind(b);
 }
 
 void ExtConfig::PostLoad()
