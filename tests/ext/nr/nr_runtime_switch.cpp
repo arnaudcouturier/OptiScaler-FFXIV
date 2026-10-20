@@ -179,6 +179,38 @@ static void TwentyRapidSwitches()
     CHECK(host.reuseDrops == 20);
 }
 
+// The whole chain on a fake clock: clicks reach the Selector (250 ms coalescing), frames poll it and apply the revision to the fake pass.
+static void ClicksToFeatures()
+{
+    FakeHost host;
+    uint64_t applied = 0;
+    const std::vector<Entry> entries { Folder(L"NR.310.8"), Folder(L"NR.310.9") };
+    int resolves = 0;
+    Selector selector([&](std::wstring_view r) { ++resolves; return MakeSnapshot(entries, r); });
+    const wchar_t* names[] = { L"NR.310.8", L"NR.310.9" };
+    uint64_t now = 0;
+    const auto frame = [&](const wchar_t* wanted)
+    {
+        const auto snapshot = selector.Poll(wanted, now);
+        ApplyRuntimeChange(host, *snapshot, applied);
+        host.Frame();
+        now += 16; // a frame every 16 ms
+    };
+    for (int i = 0; i < 10; ++i)
+        frame(names[0]);
+    CHECK(host.created == 1 && host.builtFrom.back() == entries[0].path);
+    // 21 clicks in a row, one every frame, alternating; the last one asks for NR.310.9
+    for (int i = 0; i < 20; ++i)
+        frame(names[(i + 1) % 2]);
+    frame(names[1]);
+    for (int i = 0; i < 40; ++i) // the quiet period passes
+        frame(names[1]);
+    CHECK(applied == 2);       // exactly one switch for the whole burst
+    CHECK(resolves == 2);      // the first poll and the one after the burst
+    CHECK(host.created == 2 && host.parked == 1 && host.live.size() == 1u);
+    CHECK(host.builtFrom.back() == entries[1].path);
+    CHECK(host.model == entries[1].path);
+}
 int main()
 {
     OrderAndFirstRevision();
@@ -186,6 +218,7 @@ int main()
     UnavailableAndRecovery();
     OtherFailuresSurvive();
     TwentyRapidSwitches();
+    ClicksToFeatures();
     if (failures == 0)
         std::puts("PASS: NR runtime switch");
     return failures == 0 ? 0 : 1;
