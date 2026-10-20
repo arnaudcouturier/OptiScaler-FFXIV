@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <functional>
 #include <future>
 #include <memory>
@@ -69,6 +70,61 @@ static void WithWatchdog(const char* what, const std::function<void()>& body)
         std::fflush(stdout);
         std::_Exit(2);
     }
+}
+
+// Counts heap allocations made by the thread that set the flag (the pin is on the per-frame path and must not allocate).
+static thread_local bool t_countAllocs = false;
+static thread_local int t_allocs = 0;
+void* operator new(size_t n)
+{
+    if (t_countAllocs)
+        ++t_allocs;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+
+static void TestPinIsAllocationFree()
+{
+    EvalRegistry reg;
+    reg.TryEnter(31); // the first use of a handle may allocate its entry
+    reg.Leave(31);
+    t_allocs = 0;
+    t_countAllocs = true;
+    for (int i = 0; i < 1000; ++i)
+    {
+        EvaluatePin pin(reg, 31);
+        CHECK(static_cast<bool>(pin));
+    }
+    t_countAllocs = false;
+    CHECK(t_allocs == 0);
+    CHECK(reg.InFlight(31) == 0);
+
+    // more threads inside one handle than the registry has per-thread slots: every enter/leave still balances and the wait sees them
+    EvalRegistry many;
+    constexpr int kThreads = 14;
+    std::atomic<int> inside { 0 };
+    std::atomic<bool> go { false };
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; ++i)
+        threads.emplace_back([&] {
+            EvaluatePin pin(many, 77);
+            ++inside;
+            while (!go)
+                std::this_thread::sleep_for(1ms);
+        });
+    while (inside < kThreads)
+        std::this_thread::sleep_for(1ms);
+    CHECK(many.InFlight(77) == kThreads);
+    many.Close(77);
+    CHECK(many.WaitIdle(77, 50ms) == Quiescence::EvaluateInFlight);
+    go = true;
+    for (auto& t : threads)
+        t.join();
+    CHECK(many.InFlight(77) == 0);
+    CHECK(many.WaitIdle(77, 50ms) == Quiescence::Idle);
 }
 
 static void TestRegistry()
@@ -344,6 +400,7 @@ static void TestLockOrder()
 int main()
 {
     TestRegistry();
+    TestPinIsAllocationFree();
     TestTable();
     TestStress();
     TestLockOrder();

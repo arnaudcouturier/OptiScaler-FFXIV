@@ -21,6 +21,7 @@
 
 #include "ext/dx11bridge/ReleaseDrain.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -91,17 +92,18 @@ class EvalRegistry
     bool TryEnter(unsigned id)
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        auto& e = _entries[id];
+        auto& e = _entries[id]; // allocates only the first time a handle is seen
         if (e.closed)
             return false;
         ++e.total;
-        ++e.perThread[detail::ThisThreadKey()];
+        e.Add(detail::ThisThreadKey());
         return true;
     }
 
     // Pairs with a successful TryEnter. A handle forgotten in between is ignored.
     void Leave(unsigned id)
     {
+        bool wake = false;
         {
             std::lock_guard<std::mutex> lock(_mutex);
             auto it = _entries.find(id);
@@ -110,11 +112,11 @@ class EvalRegistry
             auto& e = it->second;
             if (e.total > 0)
                 --e.total;
-            auto t = e.perThread.find(detail::ThisThreadKey());
-            if (t != e.perThread.end() && --t->second <= 0)
-                e.perThread.erase(t);
+            e.Remove(detail::ThisThreadKey());
+            wake = e.closed; // only a release waits, and only on a closed handle
         }
-        _changed.notify_all();
+        if (wake)
+            _changed.notify_all();
     }
 
     void Close(unsigned id)
@@ -149,7 +151,7 @@ class EvalRegistry
         auto it = _entries.find(id);
         if (it == _entries.end())
             return Quiescence::Idle;
-        if (it->second.perThread.count(detail::ThisThreadKey()) != 0)
+        if (it->second.Has(detail::ThisThreadKey()))
             return Quiescence::SelfInside; // would wait for itself
         const bool idle = _changed.wait_for(lock, timeout, [&] {
             auto now = _entries.find(id);
@@ -172,11 +174,56 @@ class EvalRegistry
     }
 
   private:
+    // Per-thread counts live in a small fixed array (no allocation per Evaluate); more concurrent threads than slots only
+    // lose the self-inside detection for the extra ones (the wait is bounded anyway).
     struct Entry
     {
+        static constexpr size_t kSlots = 8;
         bool closed = false;
         int total = 0;
-        std::map<size_t, int> perThread;
+        int overflow = 0;
+        std::array<size_t, kSlots> tid {};
+        std::array<int, kSlots> count {};
+
+        void Add(size_t key)
+        {
+            size_t freeSlot = kSlots;
+            for (size_t i = 0; i < kSlots; ++i)
+            {
+                if (count[i] > 0 && tid[i] == key)
+                {
+                    ++count[i];
+                    return;
+                }
+                if (count[i] == 0 && freeSlot == kSlots)
+                    freeSlot = i;
+            }
+            if (freeSlot == kSlots)
+            {
+                ++overflow;
+                return;
+            }
+            tid[freeSlot] = key;
+            count[freeSlot] = 1;
+        }
+        void Remove(size_t key)
+        {
+            for (size_t i = 0; i < kSlots; ++i)
+                if (count[i] > 0 && tid[i] == key)
+                {
+                    --count[i];
+                    return;
+                }
+            if (overflow > 0)
+                --overflow;
+        }
+        bool Has(size_t key) const
+        {
+            for (size_t i = 0; i < kSlots; ++i)
+                if (count[i] > 0 && tid[i] == key)
+                    return true;
+            return false;
+        }
     };
     mutable std::mutex _mutex;
     std::condition_variable _changed;
