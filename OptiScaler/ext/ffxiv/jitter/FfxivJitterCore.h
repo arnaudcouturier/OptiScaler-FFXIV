@@ -1,8 +1,8 @@
 #pragma once
-// The decision and ordering core of the game-jitter probe and correction. Pure logic, templated on a small environment so that
-// tests/ext/ffxiv/jitter/jitter_glue.cpp can run it against a fake parameter block, fake process memory, a fake clock and a fake log:
+// The decision and ordering core of the game-jitter probe and the calibrate-and-scale correction. Pure logic, templated on a small
+// environment so that tests/ext/ffxiv/jitter can run it against a fake parameter block, fake process memory, a fake clock and a fake log:
 // the rules that must never be broken (nothing runs with both keys off, every read of the game's values happens before the write, no
-// write unless every guard passed) are pinned by tests instead of by reading. FfxivJitterProbe.cpp supplies the real environment and
+// write unless a ratio is calibrated) are pinned by tests instead of by reading. FfxivJitterProbe.cpp supplies the real environment and
 // keeps OnUpscaleBoundary as a thin wrapper.
 //
 // The environment `Env` provides (none of it needs to be noexcept: Step catches what the calls throw and logs it once per episode, and
@@ -22,8 +22,15 @@
 //   std::string FrameGenerationInput();           the active frame-generation input as text ("" = not known); asked with it
 //
 // Order inside one step (this is the contract the tests pin): key gate, lock, build, [probe-only time precheck], read the NGX jitter
-// and the other parameters, limiter, read the game's object, decide, write (correction only), then the log lines.
+// and the other parameters, limiter, read the game's object, then (correction) the configuration key, the snapshot of the object, the
+// scaling write, then the log lines.
+//
+// The correction in one paragraph: the game applies a fraction of the jitter it reports to NGX. That fraction is learned from snapshots of
+// the game's object (FfxivJitterCalibration.h; a snapshot does not have to belong to the evaluate in hand), and once five snapshots agree
+// the NGX Jitter.Offset pair of EVERY evaluate is multiplied by it. The pair the core wrote last is remembered, so a block the game did
+// not refresh is not scaled twice.
 
+#include "ext/ffxiv/jitter/FfxivJitterCalibration.h"
 #include "ext/ffxiv/jitter/FfxivJitterProbe.h"
 
 #include <cstdint>
@@ -87,12 +94,12 @@ struct ForcedQualityAnswer
 class Engine
 {
   public:
-    // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons the REST of that step (a write only
-    // follows a complete proof, so whatever was not reached was not written; a pair whose second Set threw is put back to the game's own
-    // X when that Set works, see Run, so the pair that goes on to the upscaler is the game's) and is logged once per episode of
-    // exceptions, so a feature that has turned into a no-op leaves a trace. An episode is the same place failing again and again: a step
-    // that gets at least as far as the place that threw ends it, a step that returned before that place proves nothing (the status line
-    // is built on sample ticks only, the steps between the ticks do not reach it).
+    // One evaluate. Never throws (except from env.Lock()): an exception anywhere in a step abandons the REST of that step (the learning run
+    // and the contradiction candidate are dropped, an adopted ratio is not; a pair whose second Set threw is put back to the game's own
+    // X when that Set works, see Scale) and is logged once per episode of exceptions, so a feature that has turned into a no-op leaves a
+    // trace. An episode is the same place failing again and again: a step that gets at least as far as the place that threw ends it, a step
+    // that returned before that place proves nothing (the status line is built on sample ticks only, the steps between the ticks do not
+    // reach it).
     template <class Env> void Step(Env& env, bool probe, bool correct)
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
@@ -124,25 +131,29 @@ class Engine
     {
         Start,  // key gate passed: the build, the clock, the early return of a probe-only step
         Reads,  // the parameter reads, the quality answer and the limiter
-        Decide, // the game's object, the decision, the write, the correction lines
+        Decide, // the game's object, the calibration, the write, the correction lines
         Sample, // a sample is due: the probe lines, the status line, the report
     };
 
-    // The correction is off in this step (the probe alone is on): whatever the same-frame rules and the episode logs remember about the
-    // correction is stale by the time it is switched on again, so it is dropped. (Both keys off touches nothing, by design.)
+    // The correction is off in this step (the probe alone is on): whatever the calibration and the episode logs remember about the
+    // correction is stale by the time it is switched on again, so the whole calibration is dropped (adopted ratio, runs, remembered
+    // counter, the pair last written). Learning starts again when it is switched back on. (Both keys off touches nothing, by design: a
+    // pause with both keys off keeps an adopted ratio.)
     void ForgetCorrectionState()
     {
-        _frames = FrameRules {};
-        _haveLastEvaluate = false;
-        _replacing.Close();
-        _passThrough.Close();
+        _cal.Reset();
+        _written.Forget();
+        _announceScaled = false;
+        _staleOpen = false;
+        _keyText.clear();
+        _notUsable.Close();
     }
 
-    // The step is over: whatever the same-frame rules remembered is no longer "the previous evaluate" (a step that never reached them
-    // has not been seen), so a thrown step forgets like a failed read, and the exception is reported once per episode.
+    // The step is over: the learning run and the contradiction candidate are dropped (a step that never reached the snapshot has not seen
+    // it, and a run must be consecutive), an adopted ratio is not; the exception is reported once per episode.
     template <class Env> void AbandonStep(Env& env, const char* what) noexcept
     {
-        _frames = FrameRules {};
+        _cal.AbandonRun();
         if (_thrownAt != _stage)
             _exceptions.Close(); // another place is another episode, even while one is open
         _thrownAt = _stage;
@@ -183,8 +194,8 @@ class Engine
             return;
 
         _stage = Stage::Reads;
-        // The values this evaluate carries to NGX, read BEFORE any replacement: the probe compares against the game's own, and the
-        // correction decides on them. Nothing below is allowed to move these two reads behind the write.
+        // The values this evaluate carries to NGX, read BEFORE any write: the probe compares against the game's own, and the scaling
+        // starts from them. Nothing below is allowed to move these two reads behind the write.
         const std::optional<float> ngxX = env.GetFloat(Param::JitterX);
         const std::optional<float> ngxY = env.GetFloat(Param::JitterY);
         Context ctx;
@@ -205,9 +216,10 @@ class Engine
             ctx.answeredDisplayH = answer.displayHeight;
         }
         const RenderSize size = ResolveRenderSize(ctx.subrectW, ctx.subrectH, ctx.widthParam, ctx.heightParam);
+        const std::uint64_t key = ConfigurationKey(ctx);
 
-        // One sample per interval (and early after a configuration change); the correction decides on every evaluate regardless.
-        const bool allowed = _limiter.Allow(now, ConfigurationKey(ctx));
+        // One sample per interval (and early after a configuration change); the correction works on every evaluate regardless.
+        const bool allowed = _limiter.Allow(now, key);
         if (!correct && !allowed)
             return;
 
@@ -219,76 +231,7 @@ class Engine
         const NgxMatch match = readGuard == Guard::None ? CompareNgx(object, ngxX, ngxY) : NgxMatch::Unavailable;
 
         if (correct)
-        {
-            ++_counts.evaluated;
-            const CorrectionDecision proven = DecideCorrection(readGuard, analysis, match);
-            // The same-frame rules look at every evaluate and need the previous one. An evaluate the proof rejected (for any reason,
-            // not only an unreadable object) is not a reference: it makes the next evaluate a first frame again. Only a replacement
-            // the rules refuse is counted as held back.
-            // Evaluates further apart than kFrameGapMs are not consecutive (a pause, a loading screen, alt-tab): the reference from before
-            // the pause is dropped, so the first evaluate after it is a first frame again. A clock that goes backwards is no time.
-            if (_haveLastEvaluate && now > _lastEvaluateMs && now - _lastEvaluateMs > kFrameGapMs)
-                _frames = FrameRules {};
-            _lastEvaluateMs = now;
-            _haveLastEvaluate = true;
-            const Guard frame = _frames.Observe(proven.guard, analysis);
-            const CorrectionDecision decision = ApplyFrameRules(proven, frame);
-            if (proven.replace && !decision.replace)
-            {
-                if (frame == Guard::CounterNotIncreasing)
-                    ++_counts.heldCounter;
-                else if (frame == Guard::RatioNotSteady)
-                    ++_counts.heldRatio;
-                else
-                    ++_counts.heldFirst;
-            }
-            if (decision.replace)
-            {
-                // The block is the bridge's own NVSDK_NGX_Parameter (the Evaluate's InParameters, which later goes to the upscaler's
-                // Evaluate and to the frame-generation input). The game sets Jitter.Offset again at its next evaluate.
-                env.SetFloat(Param::JitterX, decision.ax);
-                try
-                {
-                    env.SetFloat(Param::JitterY, decision.ay);
-                }
-                catch (...)
-                {
-                    // Half written: X is corrected, Y is the game's. Put the game's own X back (best effort, a failing Set here is
-                    // swallowed) so that the pair that goes on to the upscaler is not a mixed one, then let Step abandon the evaluate.
-                    // A replacement needs the NGX jitter to match, so ngxX is set here.
-                    if (ngxX)
-                    {
-                        try
-                        {
-                            env.SetFloat(Param::JitterX, *ngxX);
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-                    throw;
-                }
-                ++_counts.replaced;
-                if (_replacing.Event(true))
-                {
-                    // The first replacement of an episode: ask the block what it holds now, so the line shows what it really took.
-                    const std::optional<float> storedX = env.GetFloat(Param::JitterX);
-                    const std::optional<float> storedY = env.GetFloat(Param::JitterY);
-                    env.Log(FormatCorrection(analysis, decision, storedX, storedY));
-                }
-                _passThrough.Close();
-            }
-            else
-            {
-                ++_counts.passed;
-                if (!decision.undetermined) // a frame too small to tell changes no episode
-                {
-                    _replacing.Event(false);
-                    if (_passThrough.ShouldLog(decision.guard))
-                        env.Log(FormatPassThrough(decision.guard));
-                }
-            }
-        }
+            Correct(env, now, key, ctx, ngxX, ngxY, readGuard, analysis);
 
         if (!allowed)
             return;
@@ -319,30 +262,167 @@ class Engine
         // The line is built BEFORE its slot is taken: a failing frame-generation query must not use up the thinned slots without a line.
         if (correct && _statusLog.Ready(now))
         {
-            const std::string status = FormatStatus(_counts, env.FrameGenerationActive(), env.FrameGenerationInput());
+            const std::string status = FormatStatus(_counts, StateText(_cal, _keyText.empty() ? std::string("n/a") : _keyText), _cal.counts(),
+                                                    _cal.Stale(now), env.FrameGenerationActive(), env.FrameGenerationInput());
             _statusLog.Take(now);
             env.Log(status);
         }
 
-        // The episodes the three logs had no budget left for, in either mode, only when the total changed since the last report and
-        // thinned the same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that
-        // comes between two permitted reports is written at the next permitted one.
-        const std::uint64_t suppressed = static_cast<std::uint64_t>(_probeFailures.Suppressed()) + _passThrough.Suppressed() +
-                                         _replacing.Suppressed() + _exceptions.Suppressed();
+        // The episodes the logs had no budget left for, in either mode, only when the total changed since the last report and thinned the
+        // same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that comes between
+        // two permitted reports is written at the next permitted one.
+        const std::uint64_t calibration = static_cast<std::uint64_t>(_learningStarted.Suppressed()) + _adopted.Suppressed() + _ratioChanged.Suppressed() +
+                                          _configChanged.Suppressed() + _staleLog.Suppressed() + _staleBackLog.Suppressed();
+        const std::uint64_t suppressed = static_cast<std::uint64_t>(_probeFailures.Suppressed()) + _notUsable.Suppressed() +
+                                         _firstScaled.Suppressed() + _exceptions.Suppressed() + calibration;
         if (suppressed != _reportedSuppressed && _suppressedLog.Take(now))
         {
             _reportedSuppressed = suppressed;
-            env.Log(FormatSuppressed(_probeFailures.Suppressed(), _passThrough.Suppressed(), _replacing.Suppressed(),
-                                     _exceptions.Suppressed()));
+            env.Log(FormatSuppressed(_probeFailures.Suppressed(), _notUsable.Suppressed(), _firstScaled.Suppressed(), _exceptions.Suppressed(),
+                                     calibration));
+        }
+    }
+
+    // The correction of one evaluate: the configuration key, the snapshot of the object, then the scaling of the NGX pair.
+    template <class Env>
+    void Correct(Env& env, std::uint64_t now, std::uint64_t key, const Context& ctx, const std::optional<float>& ngxX,
+                 const std::optional<float>& ngxY, Guard readGuard, const Analysis& analysis)
+    {
+        ++_counts.evaluated;
+
+        // One slot: a different configuration drops the ratio, the runs and the remembered counter (and the remembered pair: the ratio it
+        // was written with is gone); the evaluate that sees the new key passes the game's values through and learning starts again.
+        const Calibrator::KeyResult keyResult = _cal.UseKey(key);
+        if (keyResult != Calibrator::KeyResult::Unchanged)
+        {
+            _keyText = KeyText(ctx);
+            if (keyResult == Calibrator::KeyResult::Changed)
+            {
+                _written.Forget();
+                _announceScaled = false;
+                _staleOpen = false;
+                if (_configChanged.Occurrence())
+                    env.Log(FormatConfigurationChanged(_keyText));
+            }
+            else if (_learningStarted.Occurrence())
+                env.Log(FormatLearningStarted(_keyText));
+        }
+
+        const float oldRatio = _cal.ratio();
+        const Observation observation = _cal.Observe(readGuard, analysis, now);
+        if (observation.change != CalibrationChange::None)
+        {
+            // A new ratio: the pair written with the old one is no longer what the block is expected to hold.
+            _written.Forget();
+            _announceScaled = _cal.mode() == Mode::Scale;
+            _staleOpen = false;
+            if (observation.change == CalibrationChange::Adopted)
+            {
+                if (_adopted.Occurrence())
+                    env.Log(FormatAdopted(_cal, _keyText));
+            }
+            else if (_ratioChanged.Occurrence())
+                env.Log(FormatRatioChanged(oldRatio, _cal, _keyText));
+        }
+
+        // An adopted ratio keeps being applied when no snapshot arrives (it is a property of the game's formula, not of a frame); the
+        // log says that nobody is checking it any more, once per episode, and once when the snapshots are back.
+        if (_cal.Stale(now))
+        {
+            if (!_staleOpen)
+            {
+                _staleOpen = true;
+                if (_staleLog.Occurrence())
+                    env.Log(FormatVerificationStale());
+            }
+        }
+        else if (_staleOpen)
+        {
+            _staleOpen = false;
+            if (_staleBackLog.Occurrence())
+                env.Log(FormatSnapshotsAgain());
+        }
+
+        switch (_cal.mode())
+        {
+        case Mode::Learning:
+            ++_counts.learning;
+            _notUsable.Event(false);
+            break;
+        case Mode::Neutral:
+        case Mode::Refused:
+            ++_counts.idle;
+            _notUsable.Event(false);
+            break;
+        case Mode::Scale: Scale(env, ngxX, ngxY); break;
+        }
+    }
+
+    // Scale mode: multiply the NGX pair this evaluate carries (read before any write) by the adopted ratio.
+    template <class Env> void Scale(Env& env, const std::optional<float>& ngxX, const std::optional<float>& ngxY)
+    {
+        const ScaleDecision d = DecideScale(ngxX, ngxY, _cal.ratio(), _written);
+        if (d.action == ScaleAction::NotUsable)
+        {
+            ++_counts.notUsable;
+            if (_notUsable.Event(true))
+                env.Log(FormatNotUsable(d.guard));
+            return;
+        }
+        _notUsable.Event(false);
+        if (d.action == ScaleAction::AlreadyScaled)
+        {
+            ++_counts.alreadyScaled;
+            return;
+        }
+
+        // The block is the bridge's own NVSDK_NGX_Parameter (the Evaluate's InParameters, which later goes to the upscaler's Evaluate and
+        // to the frame-generation input). The game sets Jitter.Offset again at its next evaluate (whether it does on EVERY evaluate is what
+        // the "already scaled" count of the status line answers).
+        // What the block is believed to hold after OUR writes is what gets remembered: nothing before the first Set (a Set that throws
+        // leaves the block as it was), the full pair after both Sets, and after a failed Y either nothing (X put back: the block holds the
+        // game's own pair again) or the mixed pair (the put-back failed too).
+        _written.Forget();
+        env.SetFloat(Param::JitterX, d.x);
+        try
+        {
+            env.SetFloat(Param::JitterY, d.y);
+        }
+        catch (...)
+        {
+            // Half written: X is scaled, Y is the game's. Put the game's own X back (best effort, a failing Set here is swallowed) so that
+            // the pair that goes on to the upscaler is not a mixed one, then let Step abandon the evaluate.
+            bool putBack = false;
+            try
+            {
+                env.SetFloat(Param::JitterX, *ngxX);
+                putBack = true;
+            }
+            catch (...)
+            {
+            }
+            if (!putBack)
+                _written.Remember(d.x, *ngxY);
+            throw;
+        }
+        _written.Remember(d.x, d.y);
+        ++_counts.scaled;
+        if (_announceScaled)
+        {
+            _announceScaled = false;
+            if (_firstScaled.Occurrence())
+            {
+                // The first pair of a calibration: ask the block what it holds now, so the line shows what it really took.
+                const std::optional<float> storedX = env.GetFloat(Param::JitterX);
+                const std::optional<float> storedY = env.GetFloat(Param::JitterY);
+                env.Log(FormatFirstScaled(*ngxX, *ngxY, d.x, d.y, _cal.ratio(), storedX, storedY));
+            }
         }
     }
 
   public:
     // An hour of one line per 10 seconds: a session cannot grow its log without bound.
     static constexpr std::uint32_t kMaxSampleLines = 360;
-    // Two correction evaluates further apart than this are not "consecutive" for the same-frame rules. The game evaluates every frame
-    // (tens of milliseconds); a second without one is a pause, and the rules would otherwise compare with an evaluate from before it.
-    static constexpr std::uint64_t kFrameGapMs = 1000;
 
   private:
     static constexpr std::uint32_t kKeyCheckEvery = 16;
@@ -361,18 +441,22 @@ class Engine
     std::uint32_t _sinceKeyCheck = 0; // evaluates since the configuration key was last looked at (probe only)
     CounterTracker _counter;
     EpisodeLog _probeFailures;
-    EpisodeLog _passThrough;
-    EpisodeLog _replacing; // runs of evaluates in which the correction replaced the values
-    EpisodeLog _exceptions; // runs of steps that ended in an exception, at the same place
+    EpisodeLog _notUsable;       // runs of evaluates whose NGX pair could not be scaled
+    EpisodeLog _firstScaled;     // the first scaled pair of each calibration (with the read-back)
+    EpisodeLog _exceptions;      // runs of steps that ended in an exception, at the same place
+    // One event each, one line per occurrence under the 32-line budget (EpisodeLog::Occurrence):
+    EpisodeLog _learningStarted, _adopted, _ratioChanged, _configChanged, _staleLog, _staleBackLog;
     Stage _stage = Stage::Start;    // how far the step in progress has got
     Stage _thrownAt = Stage::Start; // where the last exception happened
     bool _buildNoted = false;
     std::uint32_t _sampleLines = 0;
     LineDecimator _statusLog, _suppressedLog; // thinned: the first 60 lines at every sample tick, then one per 60 s
     std::uint64_t _reportedSuppressed = 0; // the total of suppressed episodes the last report showed
-    FrameRules _frames;
-    std::uint64_t _lastEvaluateMs = 0; // the clock of the last correction evaluate that reached the same-frame rules
-    bool _haveLastEvaluate = false;
-    StatusCounts _counts; // totals since the start of the session
+    Calibrator _cal;
+    WrittenPair _written;     // the pair the core last wrote, as passed to SetFloat (see WrittenPair)
+    std::string _keyText;     // the readable form of the configuration key the calibration belongs to
+    bool _announceScaled = false; // the next scaled pair is the first of its calibration: log it with the read-back
+    bool _staleOpen = false;      // a "verification stale" episode is open
+    CorrectionCounts _counts; // totals since the start of the session
 };
 } // namespace ext::ffxiv::jitter

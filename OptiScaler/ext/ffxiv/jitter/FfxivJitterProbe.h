@@ -1,7 +1,8 @@
 #pragma once
-// Read-only look at the game's own camera jitter, and the optional correction built on it ([FFXIV] JitterProbe, [FFXIV] JitterCorrection,
+// Read-only look at the game's own camera jitter, and the optional calibrate-and-scale correction built on it ([FFXIV] JitterProbe, [FFXIV] JitterCorrection,
 // both off by default). Pure logic only: no logging, no pch, no Windows calls. The glue (FfxivJitterProbe.cpp) supplies the reader of
 // process memory, the NGX parameters and the clock, so every decision here is covered by tests/ext/ffxiv/jitter on fake memory images.
+// The calibration (learning the ratio, scaling the NGX pair) is in FfxivJitterCalibration.h; this header is the reading and analysis layer.
 //
 // What it is about: the game renders with an NDC jitter translation (ndcX, ndcY) it computes as s * jitter / size, but tells NGX the
 // UNSCALED pixel jitter (jx, jy). They describe the same shift only when s == 2. The applied pixel jitter is
@@ -38,16 +39,13 @@ enum class Guard : std::uint8_t
     JitterOutOfRange,    // jx or jy not finite or |value| > 0.5
     NdcOutOfRange,       // ndcX or ndcY not finite or |value| > 1
     CounterNotIncreasing,
-    // Correction only (the object itself was fine):
+    // Correction only (the object itself was fine; the calibration also reports why it skipped a snapshot or did not scale a pair):
     RenderSizeUnknown,   // no trusted render size (the game's Width/Height parameters are missing)
     NgxJitterUnavailable,
     JitterTooSmall,        // an axis has too little reported jitter to give a ratio (the calibration skips the snapshot)
     ReportedOutOfRange,    // the jitter this evaluate carries to NGX is above the plausible reported size (not scaled)
-    ObjectNotThisEvaluate, // the object's jitter differs from what this evaluate carries: it belongs to another frame
     AppliedImplausible,
     SignMismatch,        // reported and applied jitter have opposite signs: the convention is not understood, nothing is touched
-    NoPreviousFrame,     // the first evaluate after a gap: nothing to confirm it with yet
-    RatioNotSteady,      // the applied/reported ratio differs from the previous evaluate's: the NDC values may belong to another frame
 };
 
 constexpr const char* GuardName(Guard g)
@@ -71,11 +69,8 @@ constexpr const char* GuardName(Guard g)
     case Guard::NgxJitterUnavailable: return "NGX jitter parameters not readable";
     case Guard::JitterTooSmall: return "reported jitter too small on an axis to give a ratio";
     case Guard::ReportedOutOfRange: return "NGX jitter value above 0.55 pixel";
-    case Guard::ObjectNotThisEvaluate: return "jitter object does not match this evaluate (another frame)";
     case Guard::AppliedImplausible: return "applied jitter not finite or above 1 pixel";
     case Guard::SignMismatch: return "reported and applied jitter have opposite signs";
-    case Guard::NoPreviousFrame: return "first evaluate after a gap, no previous evaluate to confirm it";
-    case Guard::RatioNotSteady: return "applied/reported ratio differs from the previous evaluate's";
     }
     return "unknown";
 }
@@ -268,156 +263,6 @@ inline NgxMatch CompareNgx(const RawObject& o, const std::optional<float>& ngxX,
     return std::fabs(*ngxX - o.jx) <= kSame && std::fabs(*ngxY - o.jy) <= kSame ? NgxMatch::Same : NgxMatch::Different;
 }
 
-// ---- correction ----------------------------------------------------------------------------------------------------------------
-
-struct CorrectionDecision
-{
-    bool replace = false;
-    bool consistent = false;   // the game already hands NGX what it applies (ratios within 2% of 1): nothing to do, not a failure
-    bool undetermined = false; // both axes too small this frame to tell: values left alone, not a failure
-    Guard guard = Guard::None;
-    float ax = 0.0f, ay = 0.0f;
-};
-
-// Replace the reported jitter by the applied one only when everything is proven for THIS evaluate; otherwise the game's value stays.
-// `readGuard` is ReadChain's answer (the probe's 10-second counter check is not used here: the proof that the object belongs to this
-// evaluate is that its jitter equals the NGX parameters of this evaluate, and FrameRules below adds the counter and ratio rules that
-// the glue applies on top of this decision).
-inline CorrectionDecision DecideCorrection(Guard readGuard, const Analysis& a, NgxMatch ngx)
-{
-    CorrectionDecision d;
-    if (readGuard != Guard::None)
-    {
-        d.guard = readGuard;
-        return d;
-    }
-    if (!a.size.trusted || !a.haveApplied)
-    {
-        d.guard = Guard::RenderSizeUnknown;
-        return d;
-    }
-    if (ngx == NgxMatch::Unavailable)
-    {
-        d.guard = Guard::NgxJitterUnavailable;
-        return d;
-    }
-    if (ngx == NgxMatch::Different)
-    {
-        d.guard = Guard::ObjectNotThisEvaluate;
-        return d;
-    }
-    if (!std::isfinite(a.ax) || !std::isfinite(a.ay) || std::fabs(a.ax) > kMaxAppliedPixels || std::fabs(a.ay) > kMaxAppliedPixels)
-    {
-        d.guard = Guard::AppliedImplausible;
-        return d;
-    }
-    if (a.signMismatchX || a.signMismatchY)
-    {
-        d.guard = Guard::SignMismatch;
-        return d;
-    }
-    // One criterion for the probe and the correction: the verdict of Analyse (ratios within 2% of 1).
-    if (a.verdict == Verdict::Consistent)
-    {
-        d.consistent = true;
-        return d;
-    }
-    if (a.verdict == Verdict::Undetermined) // both axes too small to tell: leave the values, change no episode
-    {
-        d.undetermined = true;
-        return d;
-    }
-    d.replace = true;
-    d.ax = a.ax;
-    d.ay = a.ay;
-    return d;
-}
-
-// ---- same-frame rules ----------------------------------------------------------------------------------------------------------
-
-// The equality proof (CompareNgx) covers jx/jy only; the replacement is computed from ndcX/ndcY, and nothing proves those belong to the
-// same frame as jx/jy. Two rules narrow that, applied once per evaluate of the correction path and only ever taking a replacement away:
-//   (i)  the object's counter has INCREASED since the previous evaluate (the same camera step is never corrected twice, and a camera
-//        that was re-created or stalled passes the game's value through);
-//   (ii) the implied ratio agrees with the previous evaluate's within the shared 2% criterion (per axis where both evaluates have one,
-//        at least one axis in common). A one-frame lag between the NDC values and the jitter makes the ratio change with every step of
-//        the jitter sequence, so it fails here; a real scale error is the same on every frame, so it passes.
-// So a replacement needs two consecutive evaluates that PASSED the proof (the guard of DecideCorrection is None: object read, trusted
-// size, NGX jitter equal, plausible, signs ok) and that agree under both rules. An evaluate the proof rejected, for any reason, FORGETS
-// the reference like a failed read does (the next evaluate is a first frame again and passes the game's value through); a first
-// evaluate or a rule failure re-bases (the failing evaluate becomes the reference) and passes the game's value through.
-//
-// What these rules do NOT exclude (stated so nobody trusts them further than they reach): a systematic error that is the same on every
-// frame (the wrong render size for the NDC scale, the wrong convention constant) gives a steady ratio and passes both rules, bounded only
-// by the 1 pixel cap and the sign test; a lag that happens to leave two consecutive ratios within 2% passes; an object whose counter,
-// jx/jy and NDC all belong to a frame other than the one being rendered (a constant offset in time) passes; a game that evaluates
-// twice per camera step is corrected on every other evaluate only (visible in the held-back counts of the status line); and a game that
-// also evaluates a second, differently sized DLSS feature in the same frame makes the correction inert, because that evaluate is rejected
-// and forgets the reference every frame (the safe side; it shows as "first frame after a gap" dominating the status line).
-class FrameRules
-{
-  public:
-    // `rejection` is the guard DecideCorrection answered for this evaluate (Guard::None = the proof passed; a failed read of the object
-    // arrives here as its read guard).
-    Guard Observe(Guard rejection, const Analysis& a)
-    {
-        if (rejection != Guard::None)
-        {
-            _have = false;
-            return Guard::NoPreviousFrame;
-        }
-        const Reference before = _reference;
-        const bool had = _have;
-        _reference = { a.object.counter, a.haveRx, a.rx, a.haveRy, a.ry };
-        _have = true;
-        if (!had)
-            return Guard::NoPreviousFrame;
-        if (a.object.counter <= before.counter)
-            return Guard::CounterNotIncreasing;
-        return Agree(before, _reference) ? Guard::None : Guard::RatioNotSteady;
-    }
-
-  private:
-    struct Reference
-    {
-        std::int32_t counter = 0;
-        bool haveRx = false;
-        float rx = 0.0f;
-        bool haveRy = false;
-        float ry = 0.0f;
-    };
-
-    static bool Agree(const Reference& previous, const Reference& current)
-    {
-        bool compared = false;
-        auto axis = [&](bool havePrevious, float p, bool haveCurrent, float c)
-        {
-            if (!havePrevious || !haveCurrent)
-                return true; // this axis cannot be compared
-            compared = true;
-            return std::fabs(c - p) <= kRatioTolerance * std::fabs(p);
-        };
-        const bool x = axis(previous.haveRx, previous.rx, current.haveRx, current.rx);
-        const bool y = axis(previous.haveRy, previous.ry, current.haveRy, current.ry);
-        return compared && x && y;
-    }
-
-    bool _have = false;
-    Reference _reference;
-};
-
-// Applies FrameRules' answer to a decision: a replacement the rules refused becomes a pass-through with that reason. A first evaluate is
-// not a failure and changes no episode (flagged like a frame too small to tell). Every other decision is returned unchanged.
-inline CorrectionDecision ApplyFrameRules(CorrectionDecision d, Guard frame)
-{
-    if (!d.replace || frame == Guard::None)
-        return d;
-    d.replace = false;
-    d.guard = frame;
-    d.undetermined = frame == Guard::NoPreviousFrame;
-    return d;
-}
-
 // ---- rate limit and episodes ---------------------------------------------------------------------------------------------------
 
 // One sample per 10 s; a change of the feature configuration (render size, preset) is sampled early (after 2 s), at most 16 times a
@@ -493,6 +338,13 @@ class EpisodeLog
         }
         ++_lines;
         return true;
+    }
+    // One event, not a run (a configuration change, a ratio adopted): true while the line budget lasts, and the event closes at once.
+    bool Occurrence()
+    {
+        const bool logged = Event(true);
+        _open = false;
+        return logged;
     }
     void Close() { _open = false; }
     std::uint32_t Suppressed() const { return _suppressed; }
@@ -601,30 +453,6 @@ inline std::string FormatSample(const Analysis& a, NgxMatch ngx, const std::opti
 
 inline std::string FormatProbeFailure(Guard g) { return std::format("Game jitter: not read, guard failed: {}", GuardName(g)); }
 
-// `readX/readY` are what the parameter block returned when it was asked again after the write (nullopt = the read failed): the line
-// shows the intended values and the stored ones side by side, so a block that did not take the write is visible.
-inline std::string FormatCorrection(const Analysis& a, const CorrectionDecision& d, const std::optional<float>& readX,
-                                    const std::optional<float>& readY)
-{
-    const std::string stored = readX && readY ? std::format("({:.4f},{:.4f})", *readX, *readY) : std::string("unavailable");
-    return std::format("Jitter correction: reported ({:.4f},{:.4f}) replaced by applied ({:.4f},{:.4f}), ratio {:.3f}/{:.3f}; parameter block read back: {}",
-                       a.object.jx, a.object.jy, d.ax, d.ay, a.haveRx ? a.rx : 0.0f, a.haveRy ? a.ry : 0.0f, stored);
-}
-inline std::string FormatPassThrough(Guard g)
-{
-    return std::format("Jitter correction: game values passed through unchanged, guard failed: {}", GuardName(g));
-}
-
-// What happened to the evaluates since the correction started (totals for the whole session, never reset: the status lines are thinned,
-// so each one has to carry everything). `held*` count the evaluates in which the values differed and every guard
-// of DecideCorrection passed, but a same-frame rule refused the replacement: a session in which these dominate is one in which the
-// correction is inert (the game does not give the proof the rules ask for).
-struct StatusCounts
-{
-    std::uint64_t evaluated = 0, replaced = 0, passed = 0;
-    std::uint64_t heldCounter = 0, heldRatio = 0, heldFirst = 0;
-};
-
 // What a session still logs once the budgets run out (EpisodeLog::kMaxLines per kind of episode, Engine::kMaxSampleLines sample lines): one
 // line for the sample budget, and the counts of the episodes that were not logged. The status lines have no budget, they are thinned
 // (LineDecimator).
@@ -638,24 +466,14 @@ inline std::string FormatStepException(const char* what)
     return std::format("Game jitter: step abandoned after an exception: {} (the rest of that evaluate is skipped; one line per episode)", what);
 }
 
+// `passThroughs` = jitter pairs that were not usable, `replacements` = first scaled pairs of a calibration, `calibrationEvents` = learning started,
+// calibrated, consistent, refused, ratio changed, configuration changed, verification stale and fresh again. The first three fields and their
+// order are the probe-only report of the earlier versions.
 inline std::string FormatSuppressed(std::uint64_t probeFailures, std::uint64_t passThroughs, std::uint64_t replacements,
-                                    std::uint64_t abandonedSteps)
+                                    std::uint64_t abandonedSteps, std::uint64_t calibrationEvents)
 {
     return std::format("Game jitter: log line budget used up, episodes not logged so far: {} probe failures, {} pass-throughs, {} replacements, "
-                       "{} abandoned steps",
-                       probeFailures, passThroughs, replacements, abandonedSteps);
-}
-
-// `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The replaced pair feeds it too, but
-// only through the Upscaler input (the others get their jitter elsewhere), so `input` (State::activeFgInput as text, empty = not known)
-// is printed next to it.
-inline std::string FormatStatus(const StatusCounts& c, const std::optional<bool>& frameGeneration, const std::string& input)
-{
-    const std::string inputText = input.empty() ? std::string() : std::format(" (input {})", input);
-    return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} replaced by the applied jitter, {} passed through "
-                       "unchanged (held back by the same-frame rules although the values differed: {} frame counter did not increase, {} ratio "
-                       "not steady, {} first frame after a gap or after a rejected evaluate); frame generation active {}{}",
-                       c.evaluated, c.replaced, c.passed, c.heldCounter, c.heldRatio, c.heldFirst,
-                       frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown", inputText);
+                       "{} abandoned steps, {} calibration events",
+                       probeFailures, passThroughs, replacements, abandonedSteps, calibrationEvents);
 }
 } // namespace ext::ffxiv::jitter

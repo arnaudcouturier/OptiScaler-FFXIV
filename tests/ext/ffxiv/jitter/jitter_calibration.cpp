@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 
 using namespace ext::ffxiv;
@@ -17,6 +18,7 @@ namespace
 const RenderSize kHd { 1920, 1080, true, "test" };
 
 bool Close(double a, double b, double tol = 1e-4) { return std::fabs(a - b) <= tol; }
+bool Has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
 
 // An object whose applied/reported ratios are exactly rx and ry (ndcX = 2 rx jx / W, ndcY = -2 ry jy / H, the inverse of Analyse).
 RawObject WithRatios(float jx, float jy, float rx, float ry, int counter)
@@ -562,6 +564,109 @@ void TestTheValuesFromTheRealLogs()
     CHECK(Close(d.x, 0.1969, 1e-4) && Close(d.y, 0.0629, 1e-4));
 }
 
+Context HdContext()
+{
+    Context c;
+    c.subrectW = 3840;
+    c.subrectH = 2160;
+    c.widthParam = 1920;
+    c.heightParam = 1080;
+    c.outW = 3840;
+    c.outH = 2160;
+    c.perfQuality = 0;
+    c.forcedQuality = 7; // informational for this text: not part of it
+    return c;
+}
+
+void TestTheText()
+{
+    // the key text: render size, output size, quality value; no hash
+    CHECK(KeyText(HdContext()) == "render 1920x1080, output 3840x2160, quality 0");
+    Context none;
+    CHECK(KeyText(none) == "render n/a, output n/a, quality n/a");
+    Context subrectOnly = HdContext();
+    subrectOnly.widthParam = subrectOnly.heightParam = 0; // the subrect alone is not a trusted render size
+    CHECK(KeyText(subrectOnly) == "render n/a, output 3840x2160, quality 0");
+    const std::string key = "render 1920x1080, output 3840x2160, quality 0";
+
+    CHECK(FormatLearningStarted(key) ==
+          "Jitter correction: learning the game's jitter ratio for render 1920x1080, output 3840x2160, quality 0; the game's values pass through until 5 agreeing snapshots are seen");
+
+    Feeder scale = Calibrated(0.6f);
+    CHECK(FormatAdopted(scale.cal, key) ==
+          "Jitter correction: calibrated ratio 0.600/0.600 from 5 snapshots for render 1920x1080, output 3840x2160, quality 0; scaling the reported jitter");
+    Feeder axes;
+    for (int i = 0; i < 5; ++i)
+        axes.Feed(0.595f, 0.605f);
+    CHECK(FormatAdopted(axes.cal, "K") == "Jitter correction: calibrated ratio 0.595/0.605 from 5 snapshots for K; scaling the reported jitter");
+    Feeder neutral = Calibrated(1.0f);
+    CHECK(FormatAdopted(neutral.cal, "K") ==
+          "Jitter correction: the game already hands DLSS the jitter it applies (ratio 1.000/1.000 from 5 snapshots for K); nothing is applied");
+    Feeder refused = Calibrated(1.5f);
+    CHECK(FormatAdopted(refused.cal, "K") ==
+          "Jitter correction: ratio 1.500/1.500 from 5 snapshots for K refused (a ratio above 1.02 or below 0.25 is not believed); nothing is applied, the game's values pass through");
+
+    scale.FeedN(0.8f, 5);
+    CHECK(FormatRatioChanged(0.6f, scale.cal, "K") ==
+          "Jitter correction: ratio changed after 5 contradicting snapshots: was 0.600, now 0.800/0.800 for K; scaling the reported jitter");
+    scale.FeedN(1.0f, 5);
+    CHECK(FormatRatioChanged(0.8f, scale.cal, "K") ==
+          "Jitter correction: ratio changed after 5 contradicting snapshots: was 0.800, now 1.000/1.000 for K; the game now hands DLSS what it applies, nothing is applied");
+    scale.FeedN(0.1f, 5);
+    CHECK(FormatRatioChanged(1.0f, scale.cal, "K") ==
+          "Jitter correction: ratio changed after 5 contradicting snapshots: was 1.000, now 0.100/0.100 for K; ratio refused, nothing is applied");
+
+    CHECK(FormatConfigurationChanged(key) ==
+          "Jitter correction: configuration changed to render 1920x1080, output 3840x2160, quality 0; calibration dropped, learning again");
+    CHECK(FormatVerificationStale() == "Jitter correction: verification stale, no usable jitter snapshot for 10 s; keeping the current state");
+    CHECK(FormatSnapshotsAgain() == "Jitter correction: jitter snapshots are arriving again, verification is fresh");
+    CHECK(FormatNotUsable(Guard::NgxJitterUnavailable) ==
+          "Jitter correction: jitter pair not usable, game values passed through unchanged: NGX jitter parameters not readable");
+    CHECK(FormatNotUsable(Guard::ReportedOutOfRange) ==
+          "Jitter correction: jitter pair not usable, game values passed through unchanged: NGX jitter value above 0.55 pixel");
+    CHECK(FormatFirstScaled(0.3f, -0.2f, 0.18f, -0.12f, 0.6f, 0.18f, -0.12f) ==
+          "Jitter correction: first scaled pair of this calibration: reported (0.3000,-0.2000) scaled to (0.1800,-0.1200) by ratio 0.600; parameter block read back: (0.1800,-0.1200)");
+    CHECK(Has(FormatFirstScaled(0.3f, -0.2f, 0.18f, -0.12f, 0.6f, 0.3f, -0.2f), "read back: (0.3000,-0.2000)"));
+    CHECK(Has(FormatFirstScaled(0.3f, -0.2f, 0.18f, -0.12f, 0.6f, std::nullopt, -0.2f), "read back: unavailable"));
+    CHECK(Has(FormatFirstScaled(0.3f, -0.2f, 0.18f, -0.12f, 0.6f, 0.3f, std::nullopt), "read back: unavailable"));
+
+    // the state field: every state, with the key
+    Calibrator learning;
+    CHECK(StateText(learning, "K") == "learning for K");
+    learning.UseKey(1);
+    learning.UseKey(2);
+    CHECK(StateText(learning, "K") == "dropped after a configuration change, learning again for K");
+    CHECK(StateText(Calibrated(0.6f).cal, "K") == "calibrated ratio 0.600 for K");
+    CHECK(StateText(Calibrated(1.0f).cal, "K") == "consistent (ratio 1.000), nothing applied, for K");
+    CHECK(StateText(Calibrated(2.0f).cal, "K") == "refused (ratio 2.000), nothing applied, for K");
+
+    // the status line
+    CorrectionCounts counts;
+    counts.evaluated = 21;
+    counts.scaled = 10;
+    counts.learning = 4;
+    counts.notUsable = 3;
+    counts.alreadyScaled = 2;
+    counts.idle = 1;
+    Calibrator::Counts snapshots;
+    snapshots.accepted = 17;
+    snapshots.disagreed = 5;
+    snapshots.changes = 2;
+    snapshots.restarts = 1;
+    CHECK(FormatStatus(counts, "calibrated ratio 0.600 for K", snapshots, false, true, "Upscaler") ==
+          "Jitter correction: on; totals since the start of the session: 21 evaluates seen, 10 scaled, 4 passed through while learning, 3 passed "
+          "through because the jitter pair was not usable, 2 already scaled (block not refreshed), 1 left alone (game consistent or ratio "
+          "refused); state: calibrated ratio 0.600 for K; snapshots: 17 accepted, 5 disagreed with the ratio, 2 ratio changes, 1 restarts after a "
+          "configuration change; verification fresh; frame generation active yes (input Upscaler)");
+    CHECK(Has(FormatStatus(counts, "K", snapshots, true, false, "NoFG"), "verification stale; frame generation active no (input NoFG)"));
+    CHECK(Has(FormatStatus(counts, "K", snapshots, false, true, "DLSSG"), "frame generation active yes (input DLSSG)"));
+    CHECK(Has(FormatStatus(counts, "K", snapshots, false, std::nullopt, ""), "frame generation active unknown") &&
+          !Has(FormatStatus(counts, "K", snapshots, false, std::nullopt, ""), "(input"));
+
+    CHECK(FormatSuppressed(1, 2, 3, 4, 5) ==
+          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements, 4 abandoned steps, 5 calibration events");
+}
+
 void TestTextOfTheNewGuards()
 {
     CHECK(std::string(GuardName(Guard::JitterTooSmall)).find("too small") != std::string::npos);
@@ -590,5 +695,6 @@ int main()
     TestTheStaleBlockGuard();
     TestTheValuesFromTheRealLogs();
     TestTextOfTheNewGuards();
+    TestTheText();
     return TEST_RESULT("jitter_calibration");
 }

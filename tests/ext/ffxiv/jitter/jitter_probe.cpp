@@ -360,7 +360,7 @@ void TestLimiterAndEpisodes()
     uint32_t lines = 0;
     for (int i = 0; i < 1000; ++i)
     {
-        lines += flicker.ShouldLog(Guard::ObjectNotThisEvaluate) ? 1 : 0;
+        lines += flicker.ShouldLog(Guard::CameraInvalid) ? 1 : 0;
         flicker.ShouldLog(Guard::None);
     }
     CHECK(lines == EpisodeLog::kMaxLines && flicker.Suppressed() == 1000 - EpisodeLog::kMaxLines);
@@ -372,249 +372,17 @@ void TestLimiterAndEpisodes()
         replaceEpisodes.Event(false);
     }
     CHECK(lines == EpisodeLog::kMaxLines);
-}
-
-void TestCorrection()
-{
-    auto decide = [](RawObject o, RenderSize size, NgxMatch ngx, Guard g = Guard::None) { return DecideCorrection(g, Analyse(o, size), ngx); };
-    const RawObject scaled = ObjectFor(0.3f, -0.2f, 1.0f, 1920, 1080); // s = 1: half is applied
-    // a matching, scaled object is replaced by the applied values
-    auto d = decide(scaled, kHd, NgxMatch::Same);
-    CHECK(d.replace && d.guard == Guard::None && !d.consistent && Near(d.ax, 0.15) && Near(d.ay, -0.1));
-    // s = 3 replaces too (the applied jitter is larger)
-    d = decide(ObjectFor(0.3f, 0.2f, 3.0f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(d.replace && Near(d.ax, 0.45) && Near(d.ay, 0.3));
-
-    // every failed guard leaves the game's value alone
-    for (Guard g : { Guard::BuildMismatch, Guard::GlobalUnreadable, Guard::GlobalInvalid, Guard::CameraUnreadable, Guard::CameraInvalid,
-                     Guard::ObjectPointerUnreadable, Guard::ObjectPointerInvalid, Guard::ObjectUnreadable, Guard::ObjectUnstable,
-                     Guard::JitterOutOfRange, Guard::NdcOutOfRange })
-    {
-        d = decide(scaled, kHd, NgxMatch::Same, g);
-        CHECK(!d.replace && d.guard == g);
-    }
-    d = decide(scaled, RenderSize { 1920, 1080, false, "subrect" }, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::RenderSizeUnknown);
-    d = decide(scaled, RenderSize {}, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::RenderSizeUnknown);
-    d = decide(scaled, kHd, NgxMatch::Unavailable);
-    CHECK(!d.replace && d.guard == Guard::NgxJitterUnavailable);
-    d = decide(scaled, kHd, NgxMatch::Different);
-    CHECK(!d.replace && d.guard == Guard::ObjectNotThisEvaluate);
-    // an implausibly large applied jitter (a wrong render size, for instance)
-    d = decide(ObjectFor(0.4f, 0.4f, 8.0f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::AppliedImplausible);
-    d = decide(scaled, RenderSize { 100000, 1080, true, "absurd" }, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::AppliedImplausible);
-
-    // a consistent game (s = 2) is never touched, whatever the float noise
-    for (float s : { 2.0f, 2.0f * 1.001f, 2.0f * 0.999f })
-    {
-        d = decide(ObjectFor(0.3f, -0.2f, s, 1920, 1080), kHd, NgxMatch::Same);
-        CHECK(!d.replace && d.consistent && d.guard == Guard::None);
-    }
-    // ONE criterion for the probe and the correction (the ratio within 2% of 1), whatever the size of the jitter: a game the probe calls
-    // consistent is never rewritten, a game it calls different is rewritten on every frame that can tell (no mix of corrected and
-    // uncorrected frames chosen by the Halton value)
-    for (float jitter : { 0.45f, 0.3f, 0.05f, 0.02f })
-    {
-        for (float factor : { 1.019f, 0.981f, 1.0f })
-        {
-            const RawObject o = ObjectFor(jitter, jitter, 2.0f * factor, 1920, 1080);
-            d = decide(o, kHd, NgxMatch::Same);
-            CHECK(Analyse(o, kHd).verdict == Verdict::Consistent && !d.replace && d.consistent);
-        }
-        for (float factor : { 1.03f, 0.97f, 0.95f, 0.5f })
-        {
-            const RawObject o = ObjectFor(jitter, jitter, 2.0f * factor, 1920, 1080);
-            d = decide(o, kHd, NgxMatch::Same);
-            CHECK(Analyse(o, kHd).verdict == Verdict::Differ && d.replace);
-            CHECK(Near(d.ax, jitter * factor, 1e-4) && Near(d.ay, jitter * factor, 1e-4)); // both axes carry the applied values
-        }
-    }
-    // the cases that used to disagree: s = 2 * 0.981 at a large jitter, s = 1.9 at a small one
-    d = decide(ObjectFor(0.45f, 0.45f, 2.0f * 0.981f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(!d.replace && d.consistent);
-    d = decide(ObjectFor(0.05f, 0.06f, 1.9f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(d.replace);
-    // a frame whose jitter is too small on both axes cannot tell: values left alone, flagged so the glue changes no episode
-    d = decide(ObjectFor(0.01f, -0.01f, 1.0f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(!d.replace && !d.consistent && d.undetermined && d.guard == Guard::None);
-    d = decide(ObjectFor(0.0f, 0.0f, 1.0f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(!d.replace && d.undetermined);
-
-    // sign handling: a flipped axis is not corrected (the convention is not understood), on either axis
-    RawObject flipY = ObjectFor(0.3f, 0.3f, 1.0f, 1920, 1080);
-    flipY.ndcY = -flipY.ndcY;
-    d = decide(flipY, kHd, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::SignMismatch);
-    RawObject flipX = ObjectFor(0.3f, 0.3f, 1.0f, 1920, 1080);
-    flipX.ndcX = -flipX.ndcX;
-    d = decide(flipX, kHd, NgxMatch::Same);
-    CHECK(!d.replace && d.guard == Guard::SignMismatch);
-    // an axis with too little jitter to tell is not a mismatch; the other axis decides
-    d = decide(ObjectFor(0.0f, 0.3f, 1.0f, 1920, 1080), kHd, NgxMatch::Same);
-    CHECK(d.replace && Near(d.ay, 0.15) && Near(d.ax, 0.0));
-
-    // property: a replacement happens only when every precondition holds
-    for (int readFailed = 0; readFailed < 2; ++readFailed)
-        for (int ngx = 0; ngx < 3; ++ngx)
-            for (int trusted = 0; trusted < 2; ++trusted)
-            {
-                const auto r = decide(scaled, RenderSize { 1920, 1080, trusted != 0, "t" }, static_cast<NgxMatch>(ngx),
-                                      readFailed ? Guard::ObjectUnreadable : Guard::None);
-                const bool allGood = readFailed == 0 && ngx == static_cast<int>(NgxMatch::Same) && trusted == 1;
-                CHECK(r.replace == allGood);
-            }
-}
-
-// The analysis of an object whose game applies jitter scaled by s (counter as given), at 1920x1080.
-Analysis AnalysisOf(float jx, float jy, float s, int counter)
-{
-    return Analyse(ObjectFor(jx, jy, s, 1920, 1080, counter), kHd);
-}
-
-void TestFrameRules()
-{
-    // The first evaluate has nothing to compare with; the second, with the counter up by one and the same ratio, passes.
-    {
-        FrameRules r;
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 100)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(-0.25f, 0.1f, 1.0f, 101)) == Guard::None); // another jitter value, the same ratio
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.4f, 0.4f, 1.0f, 105)) == Guard::None);   // the counter may jump (frames not evaluated)
-    }
-    // The counter must INCREASE: equal and lower both hold the value back and re-base; the next increase passes again.
-    {
-        FrameRules r;
-        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 10));
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 11)) == Guard::None);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 11)) == Guard::CounterNotIncreasing); // the same frame evaluated again
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 12)) == Guard::None);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::CounterNotIncreasing);  // camera re-created
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::None);
-    }
-    // The ratio must agree with the previous evaluate's within 2% of it (the probe's criterion), per axis where both have one.
-    {
-        FrameRules r;
-        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1)); // ratio 0.5 on both axes
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f, 2)) == Guard::None);   // +1.9% of the previous ratio
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f, 3)) == Guard::RatioNotSteady); // +3%
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f, 4)) == Guard::None);          // re-based on the held frame
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f * 1.019f * 1.03f * 0.97f, 5)) == Guard::RatioNotSteady); // -3%
-    }
-    // One axis disagreeing is enough; an axis without a ratio (jitter too small) is not compared; no common axis cannot confirm.
-    {
-        FrameRules r;
-        r.Observe(Guard::None, AnalysisOf(0.3f, 0.3f, 1.0f, 1));
-        RawObject o = ObjectFor(0.3f, 0.3f, 1.0f, 1920, 1080, 2);
-        o.ndcY *= 1.1f;
-        CHECK(r.Observe(Guard::None, Analyse(o, kHd)) == Guard::RatioNotSteady);
-        FrameRules t;
-        t.Observe(Guard::None, AnalysisOf(0.3f, 0.3f, 1.0f, 1));
-        CHECK(t.Observe(Guard::None, AnalysisOf(0.005f, 0.3f, 1.0f, 2)) == Guard::None); // X too small this frame: Y alone agrees
-        FrameRules u;
-        u.Observe(Guard::None, AnalysisOf(0.005f, 0.3f, 1.0f, 1)); // only Y has a ratio
-        CHECK(u.Observe(Guard::None, AnalysisOf(0.3f, 0.005f, 1.0f, 2)) == Guard::RatioNotSteady); // only X now: nothing in common
-    }
-    // A failed read forgets everything: the evaluate after the gap is a first frame again.
-    {
-        FrameRules r;
-        r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1));
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 2)) == Guard::None);
-        CHECK(r.Observe(Guard::ObjectUnreadable, Analysis {}) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::None);
-    }
-
-    // An evaluate the PROOF rejected (DecideCorrection's guard, whatever it is) forgets the reference exactly like a failed read: the next
-    // evaluate is a first frame again, and only the one after that can pass.
-    for (Guard rejection : { Guard::RenderSizeUnknown, Guard::NgxJitterUnavailable, Guard::ObjectNotThisEvaluate, Guard::AppliedImplausible,
-                             Guard::SignMismatch, Guard::ObjectUnreadable, Guard::NdcOutOfRange })
-    {
-        FrameRules r;
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 1)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 2)) == Guard::None);
-        CHECK(r.Observe(rejection, AnalysisOf(0.3f, -0.2f, 1.0f, 3)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 4)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 5)) == Guard::None);
-    }
-    // a rejected evaluate is never the reference, whatever its counter and ratio say (it would have agreed with the next one)
-    {
-        FrameRules r;
-        CHECK(r.Observe(Guard::ObjectNotThisEvaluate, AnalysisOf(0.3f, -0.2f, 1.0f, 100)) == Guard::NoPreviousFrame);
-        CHECK(r.Observe(Guard::None, AnalysisOf(0.3f, -0.2f, 1.0f, 101)) == Guard::NoPreviousFrame);
-    }
-
-    // ApplyFrameRules only ever takes a replacement away, and says why; every other decision is untouched.
-    {
-        CorrectionDecision replace;
-        replace.replace = true;
-        replace.ax = 0.15f;
-        replace.ay = -0.1f;
-        auto same = ApplyFrameRules(replace, Guard::None);
-        CHECK(same.replace && Near(same.ax, 0.15) && Near(same.ay, -0.1) && same.guard == Guard::None);
-        for (Guard g : { Guard::CounterNotIncreasing, Guard::RatioNotSteady })
-        {
-            const auto held = ApplyFrameRules(replace, g);
-            CHECK(!held.replace && held.guard == g && !held.undetermined);
-        }
-        const auto first = ApplyFrameRules(replace, Guard::NoPreviousFrame);
-        CHECK(!first.replace && first.guard == Guard::NoPreviousFrame && first.undetermined); // a first frame changes no episode
-        CorrectionDecision consistent;
-        consistent.consistent = true;
-        CorrectionDecision failed;
-        failed.guard = Guard::SignMismatch;
-        for (Guard g : { Guard::None, Guard::CounterNotIncreasing, Guard::RatioNotSteady, Guard::NoPreviousFrame })
-        {
-            CHECK(ApplyFrameRules(consistent, g).consistent && !ApplyFrameRules(consistent, g).replace && ApplyFrameRules(consistent, g).guard == Guard::None);
-            CHECK(ApplyFrameRules(failed, g).guard == Guard::SignMismatch && !ApplyFrameRules(failed, g).replace);
-        }
-    }
-
-    // The case the rule is there for: the game's NDC values belong to the PREVIOUS frame's jitter while the reported value is this
-    // frame's (the object and the block agree with each other, so the equality proof passes). With a jitter sequence whose consecutive
-    // values keep their sign (positive offsets here, so the sign test does not catch it) the ratio changes with every step of the
-    // sequence, and almost nothing is replaced; a game whose NDC matches the frame is replaced on every frame after the first.
-    // (A base-2 Halton x is caught by the sign test alone, because consecutive values alternate in sign.)
-    {
-        auto sequence = [](unsigned n, float& jx, float& jy)
-        {
-            auto fraction = [](double v) { return v - std::floor(v); };
-            jx = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.6180339887498949));
-            jy = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.7548776662466927));
-        };
-        int matchedReplaced = 0, laggedReplaced = 0, laggedWithoutTheRules = 0, frames = 0;
-        FrameRules matched, lagged;
-        float prevX = 0, prevY = 0;
-        for (unsigned n = 1; n <= 64; ++n)
-        {
-            float jx = 0, jy = 0;
-            sequence(n, jx, jy);
-            const Analysis same = Analyse(ObjectFor(jx, jy, 1.0f, 1920, 1080, static_cast<int>(n)), kHd);
-            RawObject lag = ObjectFor(prevX, prevY, 1.0f, 1920, 1080, static_cast<int>(n)); // the NDC of the frame before ...
-            lag.jx = jx;                                                                    // ... beside this frame's reported jitter
-            lag.jy = jy;
-            const Analysis late = Analyse(lag, kHd);
-            auto replaced = [](FrameRules& rules, const Analysis& a)
-            {
-                CorrectionDecision d = DecideCorrection(Guard::None, a, NgxMatch::Same);
-                d = ApplyFrameRules(d, rules.Observe(Guard::None, a));
-                return d.replace;
-            };
-            matchedReplaced += replaced(matched, same) ? 1 : 0;
-            if (n > 1) // the very first frame has no previous NDC to lag behind
-            {
-                laggedReplaced += replaced(lagged, late) ? 1 : 0;
-                laggedWithoutTheRules += DecideCorrection(Guard::None, late, NgxMatch::Same).replace ? 1 : 0;
-                ++frames;
-            }
-            prevX = jx;
-            prevY = jy;
-        }
-        CHECK(matchedReplaced == 63);
-        CHECK(frames == 63 && laggedReplaced == 0);  // a lag of one frame is caught on every frame of this (deterministic) sequence ...
-        CHECK(laggedWithoutTheRules >= 40);          // ... and without the rules most of those frames would have been replaced
-    }
+    // one-off events (a ratio adopted, a configuration changed): every occurrence is its own line while the budget lasts, none is merged
+    // into an episode, and the rest is counted
+    EpisodeLog events;
+    lines = 0;
+    for (int i = 0; i < 1000; ++i)
+        lines += events.Occurrence() ? 1 : 0;
+    CHECK(lines == EpisodeLog::kMaxLines && events.Suppressed() == 1000 - EpisodeLog::kMaxLines);
+    EpisodeLog twice;
+    CHECK(twice.Occurrence() && twice.Occurrence()); // not an episode: the second one is not swallowed
+    EpisodeLog mixed;
+    CHECK(mixed.Event(true) && !mixed.Occurrence()); // inside an open episode an occurrence is part of it
 }
 
 // L1 (fix round 2): the periodic lines are thinned, not cut off.
@@ -683,35 +451,11 @@ void TestText()
     }
 
     CHECK(FormatProbeFailure(Guard::CameraInvalid) == "Game jitter: not read, guard failed: camera object pointer null or not a user address");
-    const auto a = Analyse(ObjectFor(0.3f, -0.2f, 1.0f, 1920, 1080), size);
-    const auto d = DecideCorrection(Guard::None, a, NgxMatch::Same);
-    CHECK(FormatCorrection(a, d, 0.15f, -0.1f) ==
-          "Jitter correction: reported (0.3000,-0.2000) replaced by applied (0.1500,-0.1000), ratio 0.500/0.500; parameter block read back: (0.1500,-0.1000)");
-    // a block that did not take the write shows its old values; a failed read-back says so
-    CHECK(Has(FormatCorrection(a, d, 0.3f, -0.2f), "read back: (0.3000,-0.2000)"));
-    CHECK(Has(FormatCorrection(a, d, std::nullopt, -0.2f), "read back: unavailable") && Has(FormatCorrection(a, d, 0.3f, std::nullopt), "read back: unavailable"));
-    {
-        StatusCounts counts;
-        counts.evaluated = 7;
-        counts.replaced = 3;
-        counts.passed = 4;
-        counts.heldCounter = 1;
-        counts.heldRatio = 2;
-        counts.heldFirst = 1;
-        CHECK(FormatStatus(counts, true, "Upscaler") ==
-              "Jitter correction: on; totals since the start of the session: 7 evaluates seen, 3 replaced by the applied jitter, 4 passed through unchanged "
-              "(held back by the same-frame rules although the values differed: 1 frame counter did not increase, 2 ratio not steady, 1 first frame after a gap or after a rejected evaluate); "
-              "frame generation active yes (input Upscaler)");
-        CHECK(Has(FormatStatus(counts, false, "NoFG"), "frame generation active no (input NoFG)"));
-        CHECK(Has(FormatStatus(counts, true, "DLSSG"), "frame generation active yes (input DLSSG)"));
-        CHECK(Has(FormatStatus(counts, std::nullopt, ""), "frame generation active unknown") && !Has(FormatStatus(counts, std::nullopt, ""), "(input"));
-    }
-    CHECK(Has(FormatPassThrough(Guard::ObjectNotThisEvaluate), "passed through unchanged, guard failed: jitter object does not match this evaluate"));
 
     CHECK(FormatStepException("block exploded") ==
           "Game jitter: step abandoned after an exception: block exploded (the rest of that evaluate is skipped; one line per episode)");
-    CHECK(FormatSuppressed(1, 2, 3, 4) ==
-          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements, 4 abandoned steps");
+    CHECK(FormatSuppressed(1, 2, 3, 4, 5) ==
+          "Game jitter: log line budget used up, episodes not logged so far: 1 probe failures, 2 pass-throughs, 3 replacements, 4 abandoned steps, 5 calibration events");
     CHECK(Has(FormatSampleBudgetUsedUp(360), "sample line budget of 360 lines used up"));
     // the configuration key follows every field that matters: each one, changed alone, changes the key
     Context c2 = ctx;
@@ -754,8 +498,6 @@ int main()
     TestAnalysis();
     TestNgxMatch();
     TestLimiterAndEpisodes();
-    TestCorrection();
-    TestFrameRules();
     TestLineDecimator();
     TestText();
     return TEST_RESULT("jitter_probe");

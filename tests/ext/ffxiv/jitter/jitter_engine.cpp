@@ -43,29 +43,6 @@ void TestStatusLineSaysWhetherFrameGenerationIsActive()
     }
 }
 
-// M2: what the status line says about it, so a session shows whether the correction is inert.
-void TestStatusLineCountsHeldBackFrames()
-{
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    // The first status line comes with the first evaluate (a sample is due); the second one is the last evaluate below. The counts are
-    // TOTALS since the start, not since the previous line.
-    Evaluate(e, engine, At(100, 1.0f, 0), false, true);
-    Evaluate(e, engine, At(101, 1.0f, 100), false, true);   // replaced
-    Evaluate(e, engine, At(101, 1.0f, 200), false, true);   // the counter did not increase
-    Evaluate(e, engine, At(102, 1.5f, 300), false, true);   // the ratio changed
-    // The status line is due 10 s after the first sample; the evaluate comes 9.7 s after the previous one, which is a pause (L3, third
-    // review): a first frame again, passed through.
-    const Outcome last = Evaluate(e, engine, At(103, 1.5f, 10000), false, true);
-    std::string status;
-    for (const std::string& line : last.logs)
-        if (Has(line, "Jitter correction: on;"))
-            status = line;
-    CHECK(!status.empty());
-    CHECK(Has(status, "5 evaluates seen") && Has(status, "1 replaced") && Has(status, "4 passed through unchanged"));
-    CHECK(Has(status, "1 frame counter did not increase") && Has(status, "1 ratio not steady") && Has(status, "2 first frame after a gap"));
-}
-
 // L3: the sample lines are capped per session (an hour of 10-second samples), then one line says so.
 void TestLogLinesAreCappedPerSession()
 {
@@ -104,27 +81,6 @@ void TestSuppressedEpisodesAreReportedFromEveryMode()
                 last = line;
         CHECK(Has(last, "8 probe failures, 0 pass-throughs, 0 replacements"));
     }
-    {
-        // correction: replacement and pass-through episodes alternate (a counter that stalls after every replacement)
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        std::uint64_t t = 0;
-        int counter = 100;
-        for (int n = 0; n < 40; ++n)
-        {
-            t += 10000;
-            Evaluate(e, engine, At(counter, 1, t), false, true);          // the first frame after the pause between two ticks
-            Evaluate(e, engine, At(counter + 1, 1, t + 16), false, true); // replaced
-            Evaluate(e, engine, At(counter + 1, 1, t + 32), false, true); // the same counter again: held back
-            counter += 2;
-        }
-        Evaluate(e, engine, At(counter, 1, t += 10000), false, true); // one more tick: the report of the final totals
-        std::string last;
-        for (const std::string& line : e.logs)
-            if (Has(line, "log line budget used up"))
-                last = line;
-        CHECK(!last.empty() && Has(last, "0 probe failures, 8 pass-throughs, 8 replacements"));
-    }
 }
 // L1 (fix round 2): the status lines are thinned, never silenced. The first 60 come with every sample tick (about every 10 s), then one
 // per 60 s, and every line carries the TOTALS since the start, so the last line of a long session still tells the whole story.
@@ -155,8 +111,7 @@ void TestStatusLinesAreThinnedAndCarryTotals()
         CHECK(statusAtTick[k] == 65 + 6 * static_cast<int>(k - 60)); // then one per 60 s: the first tick a minute after line 60 (tick 59)
     CHECK(!statusAtTick.empty() && statusAtTick.back() == 419);
     // nothing was zeroed after line 60: the last line says everything since the start
-    CHECK(Has(last, "839 evaluates seen") && Has(last, "419 replaced") && Has(last, "420 passed through unchanged"));
-    CHECK(Has(last, "420 first frame after a gap"));
+    CHECK(Has(last, "839 evaluates seen, 835 scaled, 4 passed through while learning"));
     CHECK(CountLines(e.logs, "budget") == 0); // thinned, not cut off: no budget line any more
     CHECK(e.fgQueries == 120);                 // frame generation is asked only when a line is written
 }
@@ -217,6 +172,9 @@ void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
         e.fault = nullptr;
         Evaluate(e, engine, At(110, 1, 200), false, true);
         Evaluate(e, engine, At(111, 1, 216), false, true);
+        Evaluate(e, engine, At(112, 1, 232), false, true);
+        Evaluate(e, engine, At(113, 1, 248), false, true);
+        Evaluate(e, engine, At(114, 1, 264), false, true); // the fifth snapshot after the exceptions: the first scaled pair
         CHECK(e.setsEver == 2);
         e.fault = [](const char* where)
         {
@@ -226,23 +184,6 @@ void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
         Evaluate(e, engine, At(112, 1, 232), false, true);
         Evaluate(e, engine, At(113, 1, 248), false, true);
         CHECK(exceptionLines(e.logs) == 2 && CountLines(e.logs, "second failure") == 1);
-    }
-    {
-        // a thrown step forgets the same-frame reference like a failed read: proven, proven, THROWS, proven is not "two consecutive"
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        auto replaced = [&](const Frame& f) { return !Evaluate(e, engine, f, false, true).sets.empty(); };
-        CHECK(!replaced(At(100, 1, 0)));  // a first frame
-        CHECK(replaced(At(101, 1, 16)));  // the second proven evaluate
-        e.fault = [](const char* where)
-        {
-            if (std::string(where) == "GetFloat")
-                throw std::runtime_error("one bad step");
-        };
-        CHECK(!replaced(At(102, 1, 32))); // the step that throws
-        e.fault = nullptr;
-        CHECK(!replaced(At(103, 1, 48))); // a first frame again, NOT compared with 101
-        CHECK(replaced(At(104, 1, 64)));
     }
     {
         // not a std::exception
@@ -256,14 +197,15 @@ void TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode()
         // a write that throws half way (X stored, Y throws) is abandoned too, and the next good step is untouched by it
         FakeEnv e = MakeEnv();
         Engine engine;
-        Evaluate(e, engine, At(100, 1, 0), false, true);
+        for (int k = 0; k < 4; ++k)
+            Evaluate(e, engine, At(100 + k, 1, k * 16), false, true); // four snapshots: the fifth is the first scaled pair
         int sets = 0;
         e.fault = [&sets](const char* where)
         {
             if (std::string(where) == "SetFloat" && ++sets == 2)
                 throw std::runtime_error("Y refused");
         };
-        Evaluate(e, engine, At(101, 1, 16), false, true);
+        Evaluate(e, engine, At(104, 1, 64), false, true);
         CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "Y refused") == 1 && e.lockDepth == 0);
     }
     {
@@ -318,10 +260,10 @@ void TestAnExceptionAfterTheLimiterArmedIsOneEpisode()
     Engine engine;
     e.fgThrows = true;
     int counter = 100;
-    for (int tick = 0; tick < 100; ++tick) // 100 sample ticks, 10 s apart, with two more evaluates in between that complete
+    for (int tick = 0; tick < 100; ++tick) // 100 sample ticks, 10 s apart, with seven more evaluates in between that complete (the exception at a tick drops a learning run, so there are enough of them to adopt)
     {
         const std::uint64_t t0 = static_cast<std::uint64_t>(tick) * 10000;
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < 8; ++k)
             Evaluate(e, engine, At(counter++, 1, t0 + static_cast<std::uint64_t>(k) * 16), false, true);
     }
     CHECK_MSG(exceptionLines(e.logs) == 1 && CountLines(e.logs, "fg state") == 1, "%d exception lines in 100 ticks of the same failure",
@@ -372,156 +314,15 @@ void TestExceptionEpisodesBeyondTheBudgetAreCounted()
     CHECK_MSG(Has(last, "0 probe failures, 0 pass-throughs, 0 replacements, 18 abandoned steps"), "report: \"%s\"", last.c_str());
 }
 
-// L5 (third review): a write that throws between the two Sets puts the first value back (best effort), so the upscaler is not handed
-// a corrected X beside the game's own Y for that evaluate.
-void TestAHalfWrittenPairIsPutBack()
-{
-    auto exceptionLines = [](const std::vector<std::string>& logs) { return CountLines(logs, "step abandoned after an exception"); };
-    auto prime = [](FakeEnv& e, Engine& engine) { Evaluate(e, engine, At(100, 1.5f, 0), false, true); };
-    float correctedX = 0.0f;
-    {
-        // what a complete replacement writes (with a jitter scaled by 1.5 the corrected pair is not the game's)
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        prime(e, engine);
-        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
-        CHECK(o.sets.size() == 2);
-        correctedX = o.sets.empty() ? 0.0f : o.sets[0].value;
-        CHECK_MSG(!Near(correctedX, 0.3), "the corrected X (%f) equals the game's: the case cannot tell", correctedX);
-    }
-    {
-        // the second Set throws: X goes back to what the game set; the step is abandoned and logged once
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        prime(e, engine);
-        int sets = 0;
-        e.fault = [&sets](const char* where)
-        {
-            if (std::string(where) == "SetFloat" && ++sets == 2)
-                throw std::runtime_error("Y refused");
-        };
-        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
-        CHECK(exceptionLines(e.logs) == 1 && e.lockDepth == 0);
-        CHECK_MSG(o.sets.size() == 2 && Near(o.sets[0].value, correctedX) && o.sets[1].param == Param::JitterX && Near(o.sets[1].value, 0.3),
-                  "sets: %zu", o.sets.size());
-        CHECK_MSG(Near(e.floats[Param::JitterX], 0.3) && Near(e.floats[Param::JitterY], -0.2),
-                  "the block ends with (%f, %f), not the game's pair", e.floats[Param::JitterX], e.floats[Param::JitterY]);
-    }
-    {
-        // putting X back fails too: nothing escapes, one line, the lock is free (best effort)
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        prime(e, engine);
-        int sets = 0;
-        e.fault = [&sets](const char* where)
-        {
-            if (std::string(where) == "SetFloat" && ++sets >= 2)
-                throw std::runtime_error("Y refused");
-        };
-        Evaluate(e, engine, At(101, 1.5f, 16), false, true);
-        CHECK(exceptionLines(e.logs) == 1 && CountLines(e.logs, "Y refused") == 1 && e.lockDepth == 0);
-    }
-    {
-        // the first Set throws: nothing was written, so nothing is put back
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        prime(e, engine);
-        e.fault = [](const char* where)
-        {
-            if (std::string(where) == "SetFloat")
-                throw std::runtime_error("X refused");
-        };
-        const Outcome o = Evaluate(e, engine, At(101, 1.5f, 16), false, true);
-        CHECK(o.sets.empty() && exceptionLines(e.logs) == 1);
-        CHECK(Near(e.floats[Param::JitterX], 0.3) && Near(e.floats[Param::JitterY], -0.2));
-    }
-}
-
-// L3 (third review): a long pause between two evaluates makes the next one a first frame again (the same-frame rules compare
-// consecutive evaluates; one from before a pause is not "the previous one"). The bound is Engine::kFrameGapMs.
-void TestALongPauseForgetsTheReference()
-{
-    static_assert(Engine::kFrameGapMs == 1000);
-    const std::uint64_t gap = Engine::kFrameGapMs;
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    auto replaced = [&](const Frame& f) { return !Evaluate(e, engine, f, false, true).sets.empty(); };
-    CHECK(!replaced(At(100, 1, 0)));                // a first frame
-    CHECK(replaced(At(101, 1, 16)));                // two consecutive proven evaluates
-    CHECK(replaced(At(102, 1, 16 + gap)));          // exactly the bound is still "the next frame" (a slow moment, not a pause)
-    CHECK(!replaced(At(103, 1, 16 + 2 * gap + 1))); // one millisecond more is a gap: a first frame again, passed through
-    CHECK(replaced(At(104, 1, 16 + 2 * gap + 17))); // and the next one is proven against it
-    // a clock that goes backwards is "no time passed", not a gap
-    CHECK(replaced(At(105, 1, 5)));
-    // the status line (due at 10 s of sample time) names the two first frames: the very first evaluate and the one after the gap
-    Outcome last;
-    int counter = 106;
-    for (std::uint64_t t = 505; t <= 10005; t += 500) // every 500 ms: no gap
-        last = Evaluate(e, engine, At(counter++, 1, t), false, true);
-    std::string line;
-    for (const std::string& l : last.logs)
-        if (Has(l, "Jitter correction: on;"))
-            line = l;
-    CHECK_MSG(Has(line, "2 first frame after a gap or after a rejected evaluate"), "%s", line.c_str());
-}
-
-// L7 (third review): the first-frame count is the evaluate AFTER a rejected evaluate (the rejected one itself is in "passed through"),
-// so the label says "after a rejected evaluate".
-void TestFirstFrameCountsTheEvaluateAfterARejectedOne()
-{
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    Evaluate(e, engine, At(100, 1, 0), false, true);   // first frame
-    Evaluate(e, engine, At(101, 1, 100), false, true); // replaced
-    Frame rejected = At(102, 1, 200);
-    rejected.ngxJx = 0.31f; // the block carries another frame's jitter: the proof rejects this evaluate
-    CHECK(Evaluate(e, engine, rejected, false, true).sets.empty());
-    CHECK(Evaluate(e, engine, At(103, 1, 300), false, true).sets.empty()); // the first frame after the rejected one
-    Outcome last;
-    int counter = 104;
-    for (std::uint64_t t = 800; t <= 10300; t += 500) // 20 more evaluates, every 500 ms: replaced; the last carries the status line
-        last = Evaluate(e, engine, At(counter++, 1, t), false, true);
-    std::string status;
-    for (const std::string& line : last.logs)
-        if (Has(line, "Jitter correction: on;"))
-            status = line;
-    CHECK_MSG(Has(status, "24 evaluates seen") && Has(status, "21 replaced") && Has(status, "3 passed through unchanged"), "%s", status.c_str());
-    CHECK_MSG(Has(status, "2 first frame after a gap or after a rejected evaluate"), "%s", status.c_str());
-}
-// L4 (fix round 2): switching the correction off (a step with the key off, the probe still on) forgets the same-frame reference, so the
-// first evaluate after it is a first frame again instead of being compared with one from before the pause.
-void TestSwitchingTheCorrectionOffForgetsTheReference()
-{
-    auto replacementLines = [](const Outcome& o) { return CountLines(o.logs, "replaced by applied"); };
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    Evaluate(e, engine, At(100, 1, 0), false, true);
-    const Outcome on = Evaluate(e, engine, At(101, 1, 16), false, true);
-    CHECK(on.sets.size() == 2 && replacementLines(on) == 1);
-    CHECK(Evaluate(e, engine, At(102, 1, 32), false, true).sets.size() == 2); // the same episode, no new line
-    // the key is off for a while (probe only), then back on: the counter went up and the ratio is the same, and still it must not replace
-    Evaluate(e, engine, At(103, 1, 48), true, false);
-    const Outcome back = Evaluate(e, engine, At(104, 1, 64), false, true);
-    CHECK(back.sets.empty());
-    const Outcome again = Evaluate(e, engine, At(105, 1, 80), false, true);
-    CHECK(again.sets.size() == 2);
-    CHECK(replacementLines(again) == 1); // a new episode: the read-back line is written again
-}
-
 } // namespace
 
 int main()
 {
-    TestStatusLineCountsHeldBackFrames();
     TestStatusLineSaysWhetherFrameGenerationIsActive();
     TestLogLinesAreCappedPerSession();
     TestAnExceptionAbandonsTheStepAndIsLoggedOncePerEpisode();
     TestAnExceptionAfterTheLimiterArmedIsOneEpisode();
     TestExceptionEpisodesBeyondTheBudgetAreCounted();
-    TestAHalfWrittenPairIsPutBack();
-    TestALongPauseForgetsTheReference();
-    TestFirstFrameCountsTheEvaluateAfterARejectedOne();
-    TestSwitchingTheCorrectionOffForgetsTheReference();
     TestStatusLinesAreThinnedAndCarryTotals();
     TestSuppressedReportIsThinnedAndKeepsTheFinalTotal();
     TestSuppressedEpisodesAreReportedFromEveryMode();

@@ -19,7 +19,9 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <optional>
+#include <string>
 
 namespace ext::ffxiv::jitter
 {
@@ -344,5 +346,118 @@ inline ScaleDecision DecideScale(const std::optional<float>& ngxX, const std::op
     d.x = CapApplied(*ngxX * ratio);
     d.y = CapApplied(*ngxY * ratio);
     return d;
+}
+
+// ---- text ----------------------------------------------------------------------------------------------------------------------
+
+// A short readable form of the configuration the calibration belongs to (no hash): the render size, the output size and the quality value.
+inline std::string KeyText(const Context& c)
+{
+    auto size = [](std::uint32_t w, std::uint32_t h) { return w != 0 && h != 0 ? std::format("{}x{}", w, h) : std::string("n/a"); };
+    const RenderSize render = ResolveRenderSize(c.subrectW, c.subrectH, c.widthParam, c.heightParam);
+    return std::format("render {}, output {}, quality {}", render.trusted ? size(render.width, render.height) : std::string("n/a"),
+                       size(c.outW, c.outH), c.perfQuality ? std::to_string(*c.perfQuality) : std::string("n/a"));
+}
+
+inline std::string FormatLearningStarted(const std::string& key)
+{
+    return std::format("Jitter correction: learning the game's jitter ratio for {}; the game's values pass through until {} agreeing snapshots are seen",
+                       key, kAdoptSnapshots);
+}
+
+// The line of a ratio that was adopted (Calibrator::mode() is the class of the adopted ratio).
+inline std::string FormatAdopted(const Calibrator& c, const std::string& key)
+{
+    switch (c.mode())
+    {
+    case Mode::Scale:
+        return std::format("Jitter correction: calibrated ratio {:.3f}/{:.3f} from {} snapshots for {}; scaling the reported jitter", c.ratioX(),
+                           c.ratioY(), c.adoptedFrom(), key);
+    case Mode::Neutral:
+        return std::format("Jitter correction: the game already hands DLSS the jitter it applies (ratio {:.3f}/{:.3f} from {} snapshots for {}); "
+                           "nothing is applied",
+                           c.ratioX(), c.ratioY(), c.adoptedFrom(), key);
+    default:
+        return std::format("Jitter correction: ratio {:.3f}/{:.3f} from {} snapshots for {} refused (a ratio above 1.02 or below 0.25 is not believed); "
+                           "nothing is applied, the game's values pass through",
+                           c.ratioX(), c.ratioY(), c.adoptedFrom(), key);
+    }
+}
+
+// A contradiction held and replaced the adopted ratio.
+inline std::string FormatRatioChanged(float oldRatio, const Calibrator& c, const std::string& key)
+{
+    const char* tail = c.mode() == Mode::Scale     ? "scaling the reported jitter"
+                       : c.mode() == Mode::Neutral ? "the game now hands DLSS what it applies, nothing is applied"
+                                                   : "ratio refused, nothing is applied";
+    return std::format("Jitter correction: ratio changed after {} contradicting snapshots: was {:.3f}, now {:.3f}/{:.3f} for {}; {}", c.adoptedFrom(),
+                       oldRatio, c.ratioX(), c.ratioY(), key, tail);
+}
+
+inline std::string FormatConfigurationChanged(const std::string& key)
+{
+    return std::format("Jitter correction: configuration changed to {}; calibration dropped, learning again", key);
+}
+
+inline std::string FormatVerificationStale()
+{
+    return std::format("Jitter correction: verification stale, no usable jitter snapshot for {} s; keeping the current state", kStaleMs / 1000);
+}
+
+inline std::string FormatSnapshotsAgain() { return "Jitter correction: jitter snapshots are arriving again, verification is fresh"; }
+
+inline std::string FormatNotUsable(Guard g)
+{
+    return std::format("Jitter correction: jitter pair not usable, game values passed through unchanged: {}", GuardName(g));
+}
+
+// The first pair a calibration scaled. `readX/readY` are what the parameter block returned when it was asked again after the write (nullopt =
+// the read failed): the line shows the intended values and the stored ones side by side, so a block that did not take the write is visible.
+inline std::string FormatFirstScaled(float reportedX, float reportedY, float scaledX, float scaledY, float ratio, const std::optional<float>& readX,
+                                     const std::optional<float>& readY)
+{
+    const std::string stored = readX && readY ? std::format("({:.4f},{:.4f})", *readX, *readY) : std::string("unavailable");
+    return std::format("Jitter correction: first scaled pair of this calibration: reported ({:.4f},{:.4f}) scaled to ({:.4f},{:.4f}) by ratio {:.3f}; "
+                       "parameter block read back: {}",
+                       reportedX, reportedY, scaledX, scaledY, ratio, stored);
+}
+
+// What happened to the evaluates since the correction started (totals for the whole session, never reset: the status lines are thinned, so each
+// one has to carry everything).
+struct CorrectionCounts
+{
+    std::uint64_t evaluated = 0, scaled = 0;
+    std::uint64_t learning = 0;      // passed through while no ratio was adopted
+    std::uint64_t notUsable = 0;     // passed through because the NGX pair was missing, not finite or too large
+    std::uint64_t alreadyScaled = 0; // not scaled because the block still held our last result (the game did not refresh it)
+    std::uint64_t idle = 0;          // nothing to apply: the game is consistent, or the ratio was refused
+};
+
+// The state field of the status line, with the configuration it belongs to ("n/a" before any evaluate).
+inline std::string StateText(const Calibrator& c, const std::string& key)
+{
+    switch (c.mode())
+    {
+    case Mode::Scale: return std::format("calibrated ratio {:.3f} for {}", c.ratio(), key);
+    case Mode::Neutral: return std::format("consistent (ratio {:.3f}), nothing applied, for {}", c.ratio(), key);
+    case Mode::Refused: return std::format("refused (ratio {:.3f}), nothing applied, for {}", c.ratio(), key);
+    default:
+        return c.relearning() ? std::format("dropped after a configuration change, learning again for {}", key) : std::format("learning for {}", key);
+    }
+}
+
+// `frameGeneration`: whether the fork's frame generation is running (nullopt = could not be told). The scaled pair feeds it too, but only
+// through the Upscaler input (the others get their jitter elsewhere), so `input` (State::activeFgInput as text, empty = not known) is printed
+// next to it.
+inline std::string FormatStatus(const CorrectionCounts& n, const std::string& state, const Calibrator::Counts& s, bool stale,
+                                const std::optional<bool>& frameGeneration, const std::string& input)
+{
+    const std::string inputText = input.empty() ? std::string() : std::format(" (input {})", input);
+    return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} scaled, {} passed through while learning, "
+                       "{} passed through because the jitter pair was not usable, {} already scaled (block not refreshed), {} left alone (game "
+                       "consistent or ratio refused); state: {}; snapshots: {} accepted, {} disagreed with the ratio, {} ratio changes, {} restarts "
+                       "after a configuration change; verification {}; frame generation active {}{}",
+                       n.evaluated, n.scaled, n.learning, n.notUsable, n.alreadyScaled, n.idle, state, s.accepted, s.disagreed, s.changes, s.restarts,
+                       stale ? "stale" : "fresh", frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown", inputText);
 }
 } // namespace ext::ffxiv::jitter

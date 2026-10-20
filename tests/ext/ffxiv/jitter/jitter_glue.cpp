@@ -72,185 +72,33 @@ void TestKeysOff()
     CHECK(e.locks == 0 && e.buildLookups == 0 && e.clockReads == 0 && e.qualityQueries == 0 && e.fgQueries == 0);
 }
 
-// (b) The correction on with a game whose applied jitter differs: every read of Jitter.Offset precedes the first write, exactly two
-// writes, X then Y, with the applied values; the write happens at least once.
+// (b) The correction on with a game whose applied jitter differs (ratio 0.6): once the ratio is calibrated (the fifth snapshot) every
+// read of Jitter.Offset precedes the first write, exactly two writes, X then Y, with the scaled values; the read-back after the write
+// belongs to the first pair of the calibration only.
 void TestCorrectionReadsBeforeItWrites()
 {
     FakeEnv e = MakeEnv();
     Engine engine;
     int written = 0;
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < 10; ++i)
     {
-        Frame f; // s = 1: the game applies half of what it reports
+        Frame f; // s = 1.2: the game applies 60% of what it reports
+        f.s = 1.2f;
         f.counter = 100 + i;
         f.timeMs = static_cast<std::uint64_t>(i) * 16;
         const Outcome o = Evaluate(e, engine, f, false, true);
-        if (i == 0)
-            CHECK(o.sets.empty()); // the first evaluate has no previous one to confirm it
+        if (i < 4)
+            CHECK(o.sets.empty()); // still learning: the game's values pass through
         else
-            CHECK(o.sets.size() == 2);
-        if (!o.sets.empty())
         {
             ++written;
-            CheckReadsThenWrite(o, 0.15, -0.1, i == 1); // the read-back belongs to the first replacement of the episode
+            CheckReadsThenWrite(o, 0.18, -0.12, i == 4);
         }
     }
-    CHECK(written == 5);
-    CHECK(e.locks == 6 && e.buildLookups == 6);
+    CHECK(written == 6);
+    CHECK(e.locks == 10 && e.buildLookups == 10);
 }
 
-// M2: the pair is replaced only when the object's counter increased since the previous evaluate AND its ratio is the previous one's.
-void TestSameFrameRules()
-{
-    using Flags = std::vector<bool>;
-    {
-        // a counter that stalls or goes back holds the value back; the first increase afterwards passes again
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        const Flags got = Replaced(e, engine, { At(100, 1, 0), At(101, 1, 16), At(101, 1, 32), At(102, 1, 48), At(100, 1, 64), At(101, 1, 80), At(102, 1, 96) });
-        CHECK(got == (Flags { false, true, false, true, false, true, true }));
-    }
-    {
-        // a ratio that changes between evaluates holds the value back; two evaluates with the same new ratio pass
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        const Flags got = Replaced(e, engine, { At(100, 1.0f, 0), At(101, 1.0f, 16), At(102, 1.5f, 32), At(103, 1.5f, 48), At(104, 1.0f, 64), At(105, 1.0f, 80) });
-        CHECK(got == (Flags { false, true, false, true, false, true }));
-    }
-    {
-        // a held-back evaluate leaves the game's values in the block (fail open) and does not touch anything else
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        Evaluate(e, engine, At(100, 1, 0), false, true);
-        const Outcome held = Evaluate(e, engine, At(100, 1, 16), false, true); // the same counter again
-        CHECK(held.sets.empty());
-        CHECK(e.floats[Param::JitterX] == 0.3f && e.floats[Param::JitterY] == -0.2f);
-    }
-    {
-        // a failed read forgets the previous evaluate: the one after the gap is a first frame again
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        Replaced(e, engine, { At(100, 1, 0), At(101, 1, 16) });
-        const std::uint64_t pointer = kBase + kCurrentBuild.jitter.cameraGlobalRva;
-        e.mem.PutU64(pointer, 0); // the camera global is gone for one evaluate
-        Evaluate(e, engine, At(102, 1, 32), false, true);
-        e.mem.PutU64(pointer, kGlobal);
-        const Flags got = Replaced(e, engine, { At(103, 1, 48), At(104, 1, 64) });
-        CHECK(got == (Flags { false, true }));
-    }
-    {
-        // the NDC of the previous frame beside this frame's jitter (the equality proof passes, the ratios do not): nearly never replaced.
-        // The sequence keeps its sign from frame to frame, so the sign guard cannot be what stops it.
-        auto sequence = [](unsigned n, float& jx, float& jy)
-        {
-            auto fraction = [](double v) { return v - std::floor(v); };
-            jx = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.6180339887498949));
-            jy = 0.05f + 0.4f * static_cast<float>(fraction(n * 0.7548776662466927));
-        };
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        FakeEnv control = MakeEnv();
-        Engine controlEngine;
-        int lagged = 0, matched = 0;
-        float px = 0, py = 0;
-        for (unsigned n = 1; n <= 64; ++n)
-        {
-            float jx = 0, jy = 0;
-            sequence(n, jx, jy);
-            Frame f = At(static_cast<int>(n), 1.0f, n * 16ull, jx, jy);
-            matched += Evaluate(control, controlEngine, f, false, true).sets.empty() ? 0 : 1;
-            if (n > 1)
-                f.ndcFrom = std::make_pair(px, py);
-            lagged += Evaluate(e, engine, f, false, true).sets.empty() ? 0 : 1;
-            px = jx;
-            py = jy;
-        }
-        CHECK(matched == 63);
-        CHECK(lagged == 0); // the sequence is deterministic: a lag of one frame is always caught, not "almost" always
-    }
-}
-// L1: the first replacement of an episode asks the block what it holds and logs that next to the intended values.
-void TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds()
-{
-    auto correctionLines = [](const Outcome& o)
-    {
-        std::vector<std::string> out;
-        for (const std::string& line : o.logs)
-            if (Has(line, "replaced by applied"))
-                out.push_back(line);
-        return out;
-    };
-    {
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        Evaluate(e, engine, At(100, 1, 0), false, true);
-        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
-        CHECK(correctionLines(start).size() == 1 && Has(correctionLines(start)[0], "parameter block read back: (0.1500,-0.1000)"));
-        const Outcome later = Evaluate(e, engine, At(102, 1, 200), false, true); // same episode: no line, no extra read
-        CHECK(correctionLines(later).empty() && later.sets.size() == 2);
-        // a pass-through ends the episode; the next replacement starts a new one with a new read-back
-        Evaluate(e, engine, At(102, 1, 300), false, true); // counter did not increase
-        const Outcome again = Evaluate(e, engine, At(103, 1, 400), false, true);
-        CHECK(correctionLines(again).size() == 1 && Has(correctionLines(again)[0], "parameter block read back: (0.1500,-0.1000)"));
-        CHECK(correctionLines(Evaluate(e, engine, At(104, 1, 500), false, true)).empty());
-    }
-    {
-        // a block that does not take the write: the line shows the values it still holds, not the intended ones
-        FakeEnv e = MakeEnv();
-        e.dropWrites = true;
-        Engine engine;
-        Evaluate(e, engine, At(100, 1, 0), false, true);
-        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
-        CHECK(correctionLines(start).size() == 1);
-        CHECK(Has(correctionLines(start)[0], "applied (0.1500,-0.1000)") && Has(correctionLines(start)[0], "parameter block read back: (0.3000,-0.2000)"));
-    }
-    {
-        // a block that returns nothing after the write: the line says so
-        FakeEnv e = MakeEnv();
-        e.eraseOnWrite = true;
-        Engine engine;
-        Evaluate(e, engine, At(100, 1, 0), false, true);
-        const Outcome start = Evaluate(e, engine, At(101, 1, 100), false, true);
-        CHECK(correctionLines(start).size() == 1 && Has(correctionLines(start)[0], "parameter block read back: unavailable"));
-    }
-}
-
-// (e) The probe line says what NGX was told BEFORE the write. With both keys on and a write in the same evaluate, the sample line
-// must still read "NGX saw the same values": a version that read the block after the write would see its own output.
-void TestProbeLineShowsTheValuesBeforeTheWrite()
-{
-    FakeEnv e = MakeEnv();
-    Engine engine;
-    bool sampleSeen = false;
-    for (int i = 0; i < 4; ++i)
-    {
-        if (i > 0)
-        {
-            // The evaluate just before the tick: the pause between two ticks is a gap for the same-frame rules (L3, third review), so
-            // the tick itself must follow an evaluate to be a replacement.
-            Frame before;
-            before.counter = 100 + 2 * i - 1;
-            before.timeMs = static_cast<std::uint64_t>(i) * 10000 - 16;
-            Evaluate(e, engine, before, true, true);
-        }
-        Frame f;
-        f.counter = 100 + 2 * i;
-        f.timeMs = static_cast<std::uint64_t>(i) * 10000; // a sample is due at every tick
-        const Outcome o = Evaluate(e, engine, f, true, true);
-        if (o.sets.empty())
-            continue;
-        for (const std::string& line : o.logs)
-            if (Has(line, "Game jitter: counter"))
-            {
-                sampleSeen = true;
-                CHECK(Has(line, "NGX saw the same values"));
-                CHECK(!Has(line, "NGX saw different values"));
-                CHECK(Has(line, "reported jx/jy 0.3000/-0.2000"));
-                CHECK(Has(line, "applied ax/ay 0.1500/-0.1000"));
-            }
-    }
-    CHECK(sampleSeen);
-}
 
 // (d) The probe alone never writes, whatever the game does.
 void TestProbeOnlyNeverWrites()
@@ -423,174 +271,85 @@ void TestEveryConfigurationFieldIsSampledEarlyAndPrinted()
         CHECK(Evaluate(quiet, engine, At(100 + i, 1, 2000 + static_cast<std::uint64_t>(i) * 10), true, false).logs.empty());
 }
 
-// M1 (fix round 2): an evaluate the proof REJECTED forgets the reference, like a failed read. The first replacement of a run needs two
-// consecutive evaluates that PASSED the proof (read ok, trusted size, NGX equal, plausible, signs ok), not two that merely read the object.
-void TestRejectedEvaluatesForgetTheReference()
-{
-    using Flags = std::vector<bool>;
-    struct Case
-    {
-        const char* name;
-        Guard guard; // what the rejected evaluate must be rejected for
-        std::function<void(FakeEnv&, Frame&)> spoil;
-        std::function<void(FakeEnv&)> restore;
-    };
-    const std::vector<Case> cases = {
-        { "NGX jitter of another frame", Guard::ObjectNotThisEvaluate, [](FakeEnv&, Frame& f) { f.ngxJx = 0.29f; }, nullptr },
-        { "NGX jitter missing", Guard::NgxJitterUnavailable, [](FakeEnv&, Frame& f) { f.ngxMissing = true; }, nullptr },
-        { "untrusted render size", Guard::RenderSizeUnknown,
-          [](FakeEnv& e, Frame&)
-          {
-              e.uints.erase(Param::Width);
-              e.uints.erase(Param::Height);
-          },
-          [](FakeEnv& e)
-          {
-              e.uints[Param::Width] = 1920;
-              e.uints[Param::Height] = 1080;
-          } },
-        { "applied jitter implausible", Guard::AppliedImplausible,
-          [](FakeEnv&, Frame& f)
-          {
-              f.jx = 0.4f;
-              f.jy = 0.4f;
-              f.s = 8.0f;
-          },
-          nullptr },
-        { "sign mismatch", Guard::SignMismatch, [](FakeEnv&, Frame& f) { f.flipNdcY = true; }, nullptr },
-    };
-    for (const Case& c : cases)
-    {
-        // good, REJECTED, good, good, good: the evaluate right after the rejection is a first frame again (held), the next ones pass
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        Flags got;
-        got.push_back(!Evaluate(e, engine, At(100, 1, 0), false, true).sets.empty());
-        Frame bad = At(101, 1, 16);
-        c.spoil(e, bad);
-        const Outcome rejected = Evaluate(e, engine, bad, false, true);
-        got.push_back(!rejected.sets.empty());
-        CHECK(CountLines(rejected.logs, GuardName(c.guard)) == 1); // rejected for the guard the case names
-        if (c.restore)
-            c.restore(e);
-        got.push_back(!Evaluate(e, engine, At(102, 1, 32), false, true).sets.empty());
-        got.push_back(!Evaluate(e, engine, At(103, 1, 48), false, true).sets.empty());
-        got.push_back(!Evaluate(e, engine, At(104, 1, 64), false, true).sets.empty());
-        if (got != (Flags { false, false, false, true, true }))
-            std::printf("  case: %s\n", c.name);
-        CHECK(got == (Flags { false, false, false, true, true }));
-    }
-    {
-        // the review's reproduction: the very first evaluate carries the NGX jitter of another frame; the next one must pass through
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        Frame first = At(100, 1, 0);
-        first.ngxJx = 0.29f;
-        const Flags got = Replaced(e, engine, { first, At(101, 1, 16), At(102, 1, 32) });
-        CHECK(got == (Flags { false, false, true }));
-    }
-    {
-        // a second, differently sized DLSS evaluate in every game frame: it is rejected (its NGX jitter is not the object's) and
-        // forgets, so the main feature is never replaced. That is the safe side (inert), shown in the status counts as first frames.
-        FakeEnv e = MakeEnv();
-        Engine engine;
-        int replaced = 0, interferingLines = 0;
-        for (int k = 0; k < 20; ++k)
-        {
-            replaced += Evaluate(e, engine, At(100 + k, 1, k * 32ull), false, true).sets.empty() ? 0 : 1; // the main feature
-            e.uints[Param::Width] = e.uints[Param::SubrectWidth] = 1280;
-            e.uints[Param::Height] = e.uints[Param::SubrectHeight] = 720;
-            Frame second = At(100 + k, 1, k * 32ull + 16);
-            second.ngxJx = 0.11f;
-            second.ngxJy = 0.07f;
-            const Outcome o = Evaluate(e, engine, second, false, true);
-            replaced += o.sets.empty() ? 0 : 1;
-            interferingLines += CountLines(o.logs, GuardName(Guard::ObjectNotThisEvaluate));
-            e.uints[Param::Width] = e.uints[Param::SubrectWidth] = 1920;
-            e.uints[Param::Height] = e.uints[Param::SubrectHeight] = 1080;
-        }
-        CHECK(replaced == 0);
-        CHECK(interferingLines == 1); // one episode, one line
-    }
-}
-
-// Every failed guard: no write, whatever else is true, and the evaluate is turned away for the guard the case NAMES (not merely by some
-// rule: the first evaluate of every run is held by the frame rules anyway, so "no write" alone would pass for a wrong reason). Each case
-// spoils exactly one thing; the same rig without the spoiler writes.
+// Every spoiled input: no write, whatever else is true. The cases that spoil the SNAPSHOT keep the calibration from ever completing (the
+// log has no "calibrated" line); the cases that spoil the NGX pair of an otherwise calibrated session are passed through and named. Each
+// case spoils exactly one thing; the same rig without the spoiler writes (the control below).
 void TestEveryFailedGuardWritesNothing()
 {
     const JitterBuild& b = kCurrentBuild.jitter;
+    enum class Expect
+    {
+        NeverCalibrated, // the snapshots are unusable: learning never completes
+        NotUsable,       // calibrated, but the NGX pair of every evaluate cannot be scaled
+        Consistent       // calibrated as "the game already hands NGX what it applies": nothing to apply
+    };
     struct Case
     {
         const char* name;
-        Guard expect;      // the guard the evaluate must be turned away for (None = nothing is wrong, nothing to replace)
+        Expect expect;
         bool readFailure;  // the probe also reports it as a failure to read the object
         std::function<void(FakeEnv&, Frame&)> spoil;
     };
     const std::vector<Case> cases = {
-        { "build mismatch", Guard::BuildMismatch, false, [](FakeEnv& e, Frame&) { e.build = nullptr; } },
-        { "global unreadable", Guard::GlobalUnreadable, true, [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kBase + b.cameraGlobalRva); } },
-        { "global null", Guard::GlobalInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0); } },
-        { "camera unreadable", Guard::CameraUnreadable, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0x5000000000ull); } },
-        { "camera null", Guard::CameraInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kGlobal + b.cameraOffset, 0); } },
-        { "object pointer slot unreadable", Guard::ObjectPointerUnreadable, true,
+        { "global unreadable", Expect::NeverCalibrated, true, [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kBase + b.cameraGlobalRva); } },
+        { "global null", Expect::NeverCalibrated, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0); } },
+        { "camera unreadable", Expect::NeverCalibrated, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kBase + b.cameraGlobalRva, 0x5000000000ull); } },
+        { "camera null", Expect::NeverCalibrated, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kGlobal + b.cameraOffset, 0); } },
+        { "object pointer slot unreadable", Expect::NeverCalibrated, true,
           [&](FakeEnv& e, Frame&) { e.mem.regions.erase(kCamera + b.jitterPointerOffset); } },
-        { "object pointer null", Guard::ObjectPointerInvalid, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0); } },
-        { "object unreadable", Guard::ObjectUnreadable, true,
+        { "object pointer null", Expect::NeverCalibrated, true, [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0); } },
+        { "object unreadable", Expect::NeverCalibrated, true,
           [&](FakeEnv& e, Frame&) { e.mem.PutU64(kCamera + b.jitterPointerOffset, 0x5000000000ull); } },
-        { "object unstable", Guard::ObjectUnstable, true,
+        { "object unstable", Expect::NeverCalibrated, true,
           [](FakeEnv& e, Frame&)
           {
               auto n = std::make_shared<int>(0);
               e.mem.beforeRead = [n](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 0.00015f, 0.0001f, 5000 + (*n)++ }); };
           } },
-        { "jitter out of range", Guard::JitterOutOfRange, true, [](FakeEnv&, Frame& f) { f.jx = 0.9f; } },
-        { "ndc out of range", Guard::NdcOutOfRange, true,
-          [](FakeEnv& e, Frame&)
-          {
-              // just above 1; with the 1 pixel cap also in the way, only the guard's NAME can tell which check stopped it
-              e.mem.beforeRead = [](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 1.5f, 0.0001f, 5000 }); };
-          } },
-        { "NGX jitter missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissing = true; } },
-        { "only Jitter.Offset.X missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissingX = true; } },
-        { "only Jitter.Offset.Y missing", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxMissingY = true; } },
-        { "NGX jitter is NaN", Guard::NgxJitterUnavailable, false, [](FakeEnv&, Frame& f) { f.ngxJx = std::nanf(""); } },
-        { "object belongs to another frame", Guard::ObjectNotThisEvaluate, false, [](FakeEnv&, Frame& f) { f.ngxJx = 0.29f; } },
-        { "render size unknown (no Width/Height)", Guard::RenderSizeUnknown, false,
+        { "jitter out of range", Expect::NeverCalibrated, true, [](FakeEnv&, Frame& f) { f.jx = 0.9f; } },
+        { "ndc out of range", Expect::NeverCalibrated, true,
+          [](FakeEnv& e, Frame&) { e.mem.beforeRead = [](FakeMemory& m) { PutObject(m, { 0.3f, -0.2f, 1.5f, 0.0001f, 5000 }); }; } },
+        { "render size unknown (no Width/Height)", Expect::NeverCalibrated, false,
           [](FakeEnv& e, Frame&)
           {
               e.uints.erase(Param::Width);
               e.uints.erase(Param::Height);
           } },
-        { "Width present, Height missing", Guard::RenderSizeUnknown, false, [](FakeEnv& e, Frame&) { e.uints.erase(Param::Height); } },
-        { "applied jitter implausible", Guard::AppliedImplausible, false,
+        { "Width present, Height missing", Expect::NeverCalibrated, false, [](FakeEnv& e, Frame&) { e.uints.erase(Param::Height); } },
+        { "applied jitter implausible", Expect::NeverCalibrated, false,
           [](FakeEnv&, Frame& f)
           {
               f.jx = 0.4f;
               f.jy = 0.4f;
               f.s = 8.0f;
           } },
-        { "sign mismatch", Guard::SignMismatch, false, [](FakeEnv&, Frame& f) { f.flipNdcY = true; } },
-        { "game already consistent", Guard::None, false, [](FakeEnv&, Frame& f) { f.s = 2.0f; } },
-        { "jitter too small to tell", Guard::None, false,
+        { "sign mismatch", Expect::NeverCalibrated, false, [](FakeEnv&, Frame& f) { f.flipNdcY = true; } },
+        { "jitter too small to tell", Expect::NeverCalibrated, false,
           [](FakeEnv&, Frame& f)
           {
               f.jx = 0.01f;
               f.jy = -0.01f;
           } },
+        { "counter never increases", Expect::NeverCalibrated, false, [](FakeEnv&, Frame& f) { f.counter = 100; } },
+        { "NGX jitter missing", Expect::NotUsable, false, [](FakeEnv&, Frame& f) { f.ngxMissing = true; } },
+        { "only Jitter.Offset.X missing", Expect::NotUsable, false, [](FakeEnv&, Frame& f) { f.ngxMissingX = true; } },
+        { "only Jitter.Offset.Y missing", Expect::NotUsable, false, [](FakeEnv&, Frame& f) { f.ngxMissingY = true; } },
+        { "NGX jitter is NaN", Expect::NotUsable, false, [](FakeEnv&, Frame& f) { f.ngxJx = std::nanf(""); } },
+        { "NGX jitter above 0.55", Expect::NotUsable, false, [](FakeEnv&, Frame& f) { f.ngxJy = 0.56f; } },
+        { "game already consistent", Expect::Consistent, false, [](FakeEnv&, Frame& f) { f.s = 2.0f; } },
     };
-    const std::string passThroughMarker = "passed through unchanged, guard failed";
     for (const Case& c : cases)
         for (int probe = 0; probe < 2; ++probe)
         {
             FakeEnv e = MakeEnv();
             Engine engine;
             std::vector<std::string> all;
-            for (int i = 0; i < 5; ++i)
+            for (int i = 0; i < 12; ++i)
             {
                 Frame f;
                 f.counter = 100 + i;
                 f.timeMs = static_cast<std::uint64_t>(i) * 16;
+                f.s = 1.2f; // ratio 0.6
                 c.spoil(e, f); // the spoiler of the memory or the block is applied before each evaluate (Evaluate rewrites the object)
                 const Outcome o = Evaluate(e, engine, f, probe != 0, true);
                 all.insert(all.end(), o.logs.begin(), o.logs.end());
@@ -599,28 +358,18 @@ void TestEveryFailedGuardWritesNothing()
                 std::printf("  case that wrote: %s (probe %d)\n", c.name, probe);
             CHECK(e.setsEver == 0);
 
-            const auto count = [&](const std::string& line) { return static_cast<int>(std::count(all.begin(), all.end(), line)); };
-            int passThroughLines = 0;
-            for (const std::string& line : all)
-                passThroughLines += Has(line, passThroughMarker.c_str()) ? 1 : 0;
             int wrongReason = 0;
-            if (c.expect == Guard::BuildMismatch)
+            const int calibrated = CountLines(all, "calibrated ratio");
+            const int notUsable = CountLines(all, "jitter pair not usable");
+            const int consistent = CountLines(all, "already hands DLSS the jitter it applies");
+            switch (c.expect)
             {
-                // nothing is read at all; the one note names the guard
-                wrongReason += CountLines(all, GuardName(Guard::BuildMismatch)) == 1 && passThroughLines == 0 ? 0 : 1;
+            case Expect::NeverCalibrated: wrongReason += calibrated == 0 && notUsable == 0 && consistent == 0 ? 0 : 1; break;
+            case Expect::NotUsable: wrongReason += calibrated == 1 && notUsable == 1 && consistent == 0 ? 0 : 1; break;
+            case Expect::Consistent: wrongReason += calibrated == 0 && notUsable == 0 && consistent == 1 ? 0 : 1; break;
             }
-            else if (c.expect != Guard::None)
-            {
-                wrongReason += count(FormatPassThrough(c.expect)) == 1 && passThroughLines == 1 ? 0 : 1; // one episode, named for this guard
-                if (probe != 0 && c.readFailure)
-                    wrongReason += count(FormatProbeFailure(c.expect)) == 1 ? 0 : 1;
-            }
-            else
-            {
-                wrongReason += passThroughLines == 0 ? 0 : 1; // nothing was refused, there was simply nothing to replace
-                if (probe != 0)
-                    wrongReason += CountLines(all, std::string(c.name) == "game already consistent" ? "(consistent)" : "undetermined: jitter too small") == 1 ? 0 : 1;
-            }
+            if (probe != 0 && c.readFailure)
+                wrongReason += CountLines(all, "Game jitter: not read, guard failed") == 1 ? 0 : 1;
             if (wrongReason != 0)
             {
                 std::printf("  case stopped for another reason: %s (probe %d)\n", c.name, probe);
@@ -634,14 +383,15 @@ void TestEveryFailedGuardWritesNothing()
     {
         FakeEnv e = MakeEnv();
         Engine engine;
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < 12; ++i)
         {
             Frame f;
             f.counter = 100 + i;
             f.timeMs = static_cast<std::uint64_t>(i) * 16;
+            f.s = 1.2f;
             Evaluate(e, engine, f, false, true);
         }
-        CHECK(e.setsEver >= 2);
+        CHECK(e.setsEver == 2 * 8); // evaluates 5 to 12
     }
 
     // a build mismatch reads nothing from the process, asks nothing of the block, and says so once
@@ -665,15 +415,11 @@ int main()
 {
     TestKeysOff();
     TestCorrectionReadsBeforeItWrites();
-    TestSameFrameRules();
-    TestReadBackIsLoggedOnceAndShowsWhatTheBlockHolds();
-    TestProbeLineShowsTheValuesBeforeTheWrite();
     TestProbeOnlyNeverWrites();
     TestProbeOnlyDoesNoLookupsBetweenSamples();
     TestProbeOnlyStillSamplesAConfigurationChangeEarly();
     TestSampleLineCarriesTheContextOfThisEvaluate();
     TestEveryConfigurationFieldIsSampledEarlyAndPrinted();
-    TestRejectedEvaluatesForgetTheReference();
     TestEveryFailedGuardWritesNothing();
     return TEST_RESULT("jitter_glue");
 }

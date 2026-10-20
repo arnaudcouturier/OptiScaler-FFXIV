@@ -39,6 +39,7 @@ struct FakeEnv
     bool eraseOnWrite = false; // a block that loses the entry when it is written (a later read finds nothing)
 
     std::vector<Op> ops;
+    std::vector<Op> attempted; // the Sets that were tried (ops holds the ones that went through)
     std::vector<std::string> logs;
     std::string frameGenerationInput = "Upscaler"; // State::activeFgInput as text ("" = could not be told)
     int locks = 0, buildLookups = 0, clockReads = 0, qualityQueries = 0, fgQueries = 0, setsEver = 0;
@@ -94,6 +95,7 @@ struct FakeEnv
     }
     void SetFloat(Param p, float v)
     {
+        attempted.push_back({ true, p, v }); // every Set that was tried, including one that throws
         if (fault)
             fault("SetFloat");
         ops.push_back({ true, p, v });
@@ -175,6 +177,7 @@ struct Frame
     bool ngxMissingX = false, ngxMissingY = false; // only one of the two Jitter.Offset entries is absent
     std::optional<std::pair<float, float>> ndcFrom; // the object's NDC values are those of THIS jitter (another frame's) instead of jx/jy
     bool flipNdcY = false;  // the object's ndcY has the opposite sign (a convention the correction does not understand)
+    bool noRefresh = false; // the game does NOT set Jitter.Offset again for this evaluate: the block keeps what it holds (our last write, say)
 };
 
 struct Outcome
@@ -196,8 +199,11 @@ inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, 
     if (f.flipNdcY)
         object.ndcY = -object.ndcY;
     PutObject(e.mem, object);
-    e.floats[Param::JitterX] = f.ngxJx.value_or(f.jx);
-    e.floats[Param::JitterY] = f.ngxJy.value_or(f.jy);
+    if (!f.noRefresh)
+    {
+        e.floats[Param::JitterX] = f.ngxJx.value_or(f.jx);
+        e.floats[Param::JitterY] = f.ngxJy.value_or(f.jy);
+    }
     if (f.ngxMissing)
     {
         e.floats.erase(Param::JitterX);
@@ -216,15 +222,6 @@ inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, 
     o.logs.assign(e.logs.begin() + static_cast<std::ptrdiff_t>(logsBefore), e.logs.end());
     o.sets = e.Sets();
     return o;
-}
-
-// Runs a script of frames with the correction on and says, per frame, whether the values were replaced.
-inline std::vector<bool> Replaced(FakeEnv& e, Engine& engine, const std::vector<Frame>& frames)
-{
-    std::vector<bool> out;
-    for (const Frame& f : frames)
-        out.push_back(!Evaluate(e, engine, f, false, true).sets.empty());
-    return out;
 }
 
 inline Frame At(int counter, float s, std::uint64_t timeMs, float jx = 0.3f, float jy = -0.2f)
