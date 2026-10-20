@@ -228,6 +228,14 @@ void ASequenceOfSwitches()
     CHECK(sw.Generation() == 5 && f.activated == 5);
     CHECK(state.Active() == kPresetB);
 }
+void AMissingStepFailsClosed()
+{
+    Boot bs(kPresetA);
+    Switcher sw(bs.s);
+    SwitchSteps steps; // nothing wired: no step may count as done
+    CHECK(sw.Apply(kPresetB, steps) == SwitchResult::RestartNeeded);
+    CHECK(bs.s.Active() == kPresetA && sw.LastFail() == SwitchFail::Prepare);
+}
 } // namespace
 
 int main()
@@ -241,6 +249,7 @@ int main()
     AutoNeedsAKnownOriginal();
     InvalidRequestIsRejected();
     ASequenceOfSwitches();
+    AMissingStepFailsClosed();
     if (g_failures)
     {
         std::printf("fg_preset_switch: %d check(s) failed\n", g_failures);
