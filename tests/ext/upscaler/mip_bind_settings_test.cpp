@@ -83,7 +83,7 @@ int main()
         Decision confirmed;
         confirmed.kind = Decision::Kind::ReplaceConfirmed;
         confirmed.distinct = 17;
-        CHECK(Has(DecisionLine(confirmed), "confirmed after 17 distinct samplers"));
+        CHECK(Has(DecisionLine(confirmed), "confirmed (after 17 distinct samplers)"));
         Decision amb;
         amb.kind = Decision::Kind::AddAmbiguous;
         amb.candidates = 3;
