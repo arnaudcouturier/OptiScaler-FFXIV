@@ -68,28 +68,28 @@ void CachedReaderAnswers()
     // Live path: the cached reader is asked for the preset id with the active request.
     for (int r : { 1, 2, 3 })
     {
-        const auto a = AnswerCachedRead(kRenderPresetSettingId, r, kMissing);
+        const auto a = AnswerCachedRead(kRenderPresetSettingId, r, kMissing, kPresetA);
         CHECK(a.handled && a.found && a.value == (uint32_t) r);
-        const auto b = AnswerCachedRead(kRenderPresetSettingId, r, Has(2));
+        const auto b = AnswerCachedRead(kRenderPresetSettingId, r, Has(2), kPresetA);
         CHECK(b.handled && b.found && b.value == (uint32_t) r); // the request wins over the driver value
     }
     // Auto gives back what the driver said: a value, or "not found".
     {
-        const auto a = AnswerCachedRead(kRenderPresetSettingId, 0, Has(2));
+        const auto a = AnswerCachedRead(kRenderPresetSettingId, 0, Has(2), kPresetA);
         CHECK(a.handled && a.found && a.value == 2u);
-        const auto b = AnswerCachedRead(kRenderPresetSettingId, 0, Has(0));
+        const auto b = AnswerCachedRead(kRenderPresetSettingId, 0, Has(0), kPresetA);
         CHECK(b.handled && b.found && b.value == 0u);
-        const auto c = AnswerCachedRead(kRenderPresetSettingId, 0, kMissing);
+        const auto c = AnswerCachedRead(kRenderPresetSettingId, 0, kMissing, kPresetA);
         CHECK(c.handled && !c.found); // NOT the stale value of an earlier request
-        const auto d = AnswerCachedRead(kRenderPresetSettingId, 0, kNone);
+        const auto d = AnswerCachedRead(kRenderPresetSettingId, 0, kNone, kPresetA);
         CHECK(!d.handled); // unknown baseline: the reader's own cache decides
     }
     // Invalid request or another id: not handled.
     for (int r : { -1, 4, 77 })
-        CHECK(!AnswerCachedRead(kRenderPresetSettingId, r, Has(1)).handled);
-    CHECK(!AnswerCachedRead(0x10308298u, 2, Has(1)).handled);
+        CHECK(!AnswerCachedRead(kRenderPresetSettingId, r, Has(1), kPresetA).handled);
+    CHECK(!AnswerCachedRead(0x10308298u, 2, Has(1), kPresetA).handled);
     // The override-on id is not read through the cache by the DLL; the reader leaves it alone.
-    CHECK(!AnswerCachedRead(kOverrideSettingId, 2, Has(1)).handled);
+    CHECK(!AnswerCachedRead(kOverrideSettingId, 2, Has(1), kPresetA).handled);
 }
 
 void BaselineFromDriver()
@@ -161,8 +161,6 @@ void StateBasics()
     v.NoteDriverQuery(false, false, 0);
     CHECK(v.QuerySeen());
     CHECK(v.Base().kind == Baseline::Kind::Value && v.Base().value == 2u);
-    v.ClearQuerySeen(); // a live switch recreates the endpoint, which asks again
-    CHECK(!v.QuerySeen());
     CHECK(v.Base().kind == Baseline::Kind::Value);
 }
 void DriverQuerySeam()
@@ -211,6 +209,43 @@ void DriverQuerySeam()
         CHECK(!HandleDriverReply(s, kRenderPresetSettingId, true, true, 0).replace);
     }
 }
+void AutoPassesThroughWhenBootedOnAuto()
+{
+    // M3: a process that booted on Auto never had its cache touched, so Auto must reach the module's own reader, whatever the first
+    // driver reply was (the runtime may have asked several profiles; the first reply is not necessarily what it cached).
+    for (const Baseline& b : { kNone, kMissing, Has(2), Has(0) })
+        CHECK(!AnswerCachedRead(kRenderPresetSettingId, kAuto, b, kAuto).handled);
+    // an explicit request is still answered after a boot on Auto
+    CHECK(AnswerCachedRead(kRenderPresetSettingId, kPresetB, kMissing, kAuto).value == 2u);
+
+    // the same through the state: boot Auto, the first reply was "not found" (app profile), the cache holds a value (base profile)
+    RequestState s;
+    s.InitOnce(kAuto);
+    s.NoteDriverQuery(false, false, 0);
+    s.Commit(kPresetA);
+    CHECK(s.ReadCached(kRenderPresetSettingId).value == 1u);
+    s.Commit(kAuto);
+    CHECK(!s.ReadCached(kRenderPresetSettingId).handled); // passes through to the real reader
+
+    // booted on a request: the recorded reply is the only original there is
+    RequestState t;
+    t.InitOnce(kPresetB);
+    t.NoteDriverQuery(true, true, 1);
+    t.Commit(kAuto);
+    const auto a = t.ReadCached(kRenderPresetSettingId);
+    CHECK(a.handled && a.found && a.value == 1u);
+}
+
+void InitIsAtomicForReaders()
+{
+    // L1: once InitOnce returned, both values are visible together; a second call (another thread) changes nothing
+    RequestState s;
+    s.InitOnce(kPresetC);
+    CHECK(s.Boot() == kPresetC && s.Active() == kPresetC);
+    s.InitOnce(kPresetA);
+    CHECK(s.Boot() == kPresetC && s.Active() == kPresetC);
+}
+
 } // namespace
 
 int main()
@@ -225,6 +260,8 @@ int main()
     ReturnToAutoNeedsBaseline();
     StateBasics();
     DriverQuerySeam();
+    AutoPassesThroughWhenBootedOnAuto();
+    InitIsAtomicForReaders();
     if (g_failures)
     {
         std::printf("%d check(s) failed\n", g_failures);

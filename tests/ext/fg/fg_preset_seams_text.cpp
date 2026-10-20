@@ -115,6 +115,18 @@ void AutoCostsNothing(const std::string& repo)
     CHECK(Count(mod, "g_installFailed = true;") == 1);
 }
 
+void RequestStatePins(const std::string& repo)
+{
+    const std::string req = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetRequest.h"));
+    // L1: the initialised flag is published AFTER both values, and a second caller waits on the lock
+    CHECK(Before(req, "boot_.store(request);", "initialized_.store(true, std::memory_order_release);"));
+    CHECK(Before(req, "active_.store(request, std::memory_order_release); initialized_.store", "initialized_.store(true"));
+    CHECK(req.find("std::lock_guard lock(initMutex_);") != std::string::npos);
+    CHECK(req.find("compare_exchange_strong(expected, true)") == std::string::npos);
+    // M3: Auto reaches the module reader when the process booted on Auto
+    CHECK(req.find("if (bootRequest == kAuto) return {};") != std::string::npos);
+    CHECK(req.find("AnswerCachedRead(settingId, Active(), Base(), Boot())") != std::string::npos);
+}
 void UiRecompositionPause(const std::string& repo)
 {
     const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp"));
@@ -161,6 +173,7 @@ int main(int argc, char** argv)
     UpstreamSeams(repo);
     AutoCostsNothing(repo);
     UiRecompositionPause(repo);
+    RequestStatePins(repo);
     MenuText(repo);
     if (g_failures)
     {

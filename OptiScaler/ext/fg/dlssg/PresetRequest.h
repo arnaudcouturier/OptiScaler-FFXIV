@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 namespace ext::fg::preset
 {
@@ -74,13 +75,19 @@ constexpr Answer AnswerDriverQuery(uint32_t settingId, int request)
     return {};
 }
 
-// Live path: NVIDIA's cached-settings reader is asked for `settingId` and the active request is `request`.
-constexpr Answer AnswerCachedRead(uint32_t settingId, int request, const Baseline& baseline)
+// Live path: NVIDIA's cached-settings reader is asked for `settingId` and the active request is `request`; `bootRequest` is the
+// request the process started with. Auto gives the module's own reader the question when the process booted on Auto (its cache
+// was never touched, so that is exact, whatever profile the first driver reply came from). Only a process that booted on an
+// explicit request needs the recorded driver reply, the only original it has (limit: it is the first reply, which is what the
+// runtime cached unless it queried more than one profile).
+constexpr Answer AnswerCachedRead(uint32_t settingId, int request, const Baseline& baseline, int bootRequest)
 {
     if (settingId != kRenderPresetSettingId || !ValidRequest(request))
         return {};
     if (request != kAuto)
         return { true, true, static_cast<uint32_t>(request) };
+    if (bootRequest == kAuto)
+        return {};
     switch (baseline.kind)
     {
     case Baseline::Kind::Value:
@@ -107,15 +114,19 @@ constexpr Baseline BaselineFromDriverReply(bool ok, bool isNumber, uint32_t valu
 class RequestState
 {
   public:
-    // First call wins; an out-of-range configured value means Auto.
+    // First call wins; an out-of-range configured value means Auto. A caller that arrives while another one is still initialising
+    // waits for it, so nobody reads the default Auto while the configured request is on its way (the flag is set last).
     void InitOnce(int configured)
     {
-        bool expected = false;
-        if (!initialized_.compare_exchange_strong(expected, true))
+        if (initialized_.load(std::memory_order_acquire))
+            return;
+        std::lock_guard lock(initMutex_);
+        if (initialized_.load(std::memory_order_relaxed))
             return;
         const int request = ValidRequest(configured) ? configured : kAuto;
         boot_.store(request);
         active_.store(request, std::memory_order_release);
+        initialized_.store(true, std::memory_order_release);
     }
 
     int Active() const { return active_.load(std::memory_order_acquire); }
@@ -147,16 +158,16 @@ class RequestState
         return { static_cast<Baseline::Kind>(word >> 32), static_cast<uint32_t>(word) };
     }
     bool QuerySeen() const { return querySeen_.load(std::memory_order_relaxed); }
-    void ClearQuerySeen() { querySeen_.store(false, std::memory_order_relaxed); }
 
     // What the cached reader answers for `settingId` with the active request.
-    Answer ReadCached(uint32_t settingId) const { return AnswerCachedRead(settingId, Active(), Base()); }
+    Answer ReadCached(uint32_t settingId) const { return AnswerCachedRead(settingId, Active(), Base(), Boot()); }
 
     // Going back to Auto live is only possible when the original is known: it is the untouched cache when the process
     // booted with Auto, otherwise the baseline the driver query recorded.
     bool CanReturnToAuto() const { return Boot() == kAuto || Base().kind != Baseline::Kind::Unknown; }
 
   private:
+    std::mutex initMutex_;
     std::atomic<bool> initialized_ { false };
     std::atomic<int> boot_ { kAuto };
     std::atomic<int> active_ { kAuto };
