@@ -8,6 +8,8 @@
 // check is a case-insensitive keyword match and anything with "preset" in it that no rule claims is kept as a candidate:
 // shown raw in the menu and logged at a low rate for a parser follow-up.
 
+#include "ext/fg/dlssg/PresetRequest.h"
+
 #include <cctype>
 #include <climits>
 #include <cstdint>
@@ -50,6 +52,23 @@ struct ParsedLine
     char letter = 0; // Selected: 'A'..'Z'
     Uir uir = Uir::Unknown;
 };
+
+// ---- what the runtime CONFIRMED about a request ------------------------------------------------------------------------------
+// The request is what we asked for; the runtime decides what it does with it. 310.9.1.0 acts on 1 (A) and 2 (B) and ignores 3 (C),
+// so the menu and the UI recomposition rule go by what the runtime reported, not by the request.
+enum class Effect : uint8_t
+{
+    Unknown,    // nothing heard that is about this request (log not readable, wording unknown, not yet logged)
+    Applied,    // the runtime reported it applied this preset
+    NotApplied  // the runtime read the preset and did not apply it (ReportOverrideStates: applied=0)
+};
+
+struct Confirmation
+{
+    Effect effect = Effect::Unknown;
+    Uir uir = Uir::Unknown; // what the runtime said about its UI recomposition for the current request
+};
+
 
 namespace detail
 {
@@ -278,6 +297,31 @@ class Readout
         return state_;
     }
 
+    // What the runtime has confirmed about `request` since the last BeginRequest (no copy of the raw line: cheap enough per frame).
+    // ReportOverrideStates logs requested = 1 when the driver cache holds a preset, applied = 1 when the runtime applied one and
+    // value = the preset number; a "Preset X selected" line confirms X. "Preset ID: N" only says the number was read.
+    Confirmation Confirm(int request) const
+    {
+        Confirmation out;
+        if (request == kAuto)
+        {
+            out.effect = Effect::Applied; // nothing to confirm
+            return out;
+        }
+        std::lock_guard lock(mutex_);
+        out.uir = state_.uir;
+        if (state_.hasReport && state_.value == static_cast<uint64_t>(request))
+        {
+            if (state_.applied > 0)
+                out.effect = Effect::Applied;
+            else if (state_.requested > 0)
+                out.effect = Effect::NotApplied;
+        }
+        else if (state_.selected != 0 && state_.selected - 'A' + 1 == request)
+            out.effect = Effect::Applied;
+        return out;
+    }
+
     // One log message. Returns true when the caller should log this line as an unrecognised preset line (rate limited).
     bool Feed(std::string_view line, uint64_t nowMs)
     {
@@ -348,4 +392,35 @@ class Readout
     int candidateLogs_ = 0;
     uint64_t lastCandidateLog_ = 0;
 };
+// Does this request pause the UI recomposition of NVIDIA's runtime (OptiScaler then does not ask for it)? A is documented to turn
+// it off ("Preset A selected, disabling UIR"), so A pauses unless the runtime says it did not apply A or kept the recomposition
+// on. C has no documented effect and 310.9.1.0 ignores it: it pauses only when the runtime confirmed C AND turned it off.
+inline bool PausesUiRecomposition(int request, Effect effect, Uir uir)
+{
+    if (request == kPresetA)
+        return effect != Effect::NotApplied && uir != Uir::Enabled;
+    if (request == kPresetC)
+        return effect == Effect::Applied && uir == Uir::Disabled;
+    return false;
+}
+
+// The status line of the menu. A preset is "in use" only when the runtime confirmed it. `replyReadable`: the runtime's reply could
+// reach us (the log relay is attached and the log level lets info lines through).
+inline std::string StatusSentence(int request, Effect effect, bool replyReadable)
+{
+    if (!ValidRequest(request) || request == kAuto)
+        return "In use: Auto";
+    const std::string name = Name(request);
+    switch (effect)
+    {
+    case Effect::Applied:
+        return "In use: " + name + " (confirmed by the runtime)";
+    case Effect::NotApplied:
+        return name + " was requested, but the runtime did not apply it (applied=0): its own default stays in use.";
+    default:
+        return name + " requested, waiting for the runtime to confirm it." +
+               (replyReadable ? "" : " The runtime's reply cannot be read here (see below), so this stays unconfirmed.");
+    }
+}
+
 } // namespace ext::fg::preset

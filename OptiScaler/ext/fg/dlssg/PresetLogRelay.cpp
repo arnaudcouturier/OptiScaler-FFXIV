@@ -2,9 +2,12 @@
 
 #include "PresetLogRelay.h"
 
+#include <Config.h>
+
 #include <spdlog/sinks/base_sink.h>
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -25,7 +28,20 @@ QueueState& Queue_()
     return *state;
 }
 std::atomic<bool> g_queued { false };
-std::atomic<const void*> g_attachedTo { nullptr };
+// The logger the sink was added to, by a weak reference (never destroyed, see Queue_).
+struct AttachedState
+{
+    std::mutex mutex;
+    std::weak_ptr<spdlog::logger> logger;
+    bool attempted = false;
+    bool asyncSkipped = false;
+    bool attached = false;
+};
+AttachedState& Attached_()
+{
+    static AttachedState* state = new AttachedState;
+    return *state;
+}
 
 void Queue(std::string_view line)
 {
@@ -67,11 +83,23 @@ void AttachLogRelay()
 {
     try
     {
+        auto& holder = Attached_();
+        std::lock_guard lock(holder.mutex);
+        if (holder.attempted)
+            return;
+        holder.attempted = true;
+        // With asynchronous logging a worker thread may be iterating the sinks while we add one: do not touch the logger then.
+        if (Config::Instance()->LogAsync.value_or_default())
+        {
+            holder.asyncSkipped = true;
+            return;
+        }
         auto logger = spdlog::default_logger();
-        if (!logger || g_attachedTo.load() != nullptr)
+        if (!logger)
             return;
         logger->sinks().push_back(std::make_shared<RelaySink>());
-        g_attachedTo.store(logger.get());
+        holder.attached = true;
+        holder.logger = logger; // a weak reference: the control block keeps the address from being reused while we look at it
     }
     catch (...)
     {
@@ -80,11 +108,23 @@ void AttachLogRelay()
 
 RelayState LogRelayState()
 {
-    const void* attached = g_attachedTo.load();
-    if (attached == nullptr)
+    auto& holder = Attached_();
+    std::lock_guard lock(holder.mutex);
+    if (holder.asyncSkipped)
+        return RelayState::AsyncLogging;
+    if (!holder.attached)
         return RelayState::NotAttached;
-    const auto current = spdlog::default_logger_raw();
-    return current == attached ? RelayState::Attached : RelayState::Lost;
+    const auto attached = holder.logger.lock();
+    return attached && attached == spdlog::default_logger() ? RelayState::Attached : RelayState::Lost;
+}
+
+bool UiRecompositionPaused()
+{
+    const int request = Requests().Active();
+    if (request != kPresetA && request != kPresetC)
+        return false; // the common case costs nothing
+    const auto confirmed = ReadoutState().Confirm(request);
+    return PausesUiRecomposition(request, confirmed.effect, confirmed.uir);
 }
 
 void FlushCandidateLines()

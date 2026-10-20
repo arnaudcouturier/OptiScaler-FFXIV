@@ -191,9 +191,6 @@ constexpr const char* UnavailableText(Unavailable why)
     }
 }
 
-// Preset A and C turn the UI recomposition of NVIDIA's runtime off (a creation-time option, recreated by the switch).
-constexpr bool PausesUiRecomposition(int request) { return request == kPresetA || request == kPresetC; }
-
 constexpr const char* FailText(SwitchFail why)
 {
     switch (why)

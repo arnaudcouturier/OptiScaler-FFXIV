@@ -163,6 +163,94 @@ void CandidateLogging()
     const auto b = big.Snapshot();
     CHECK(b.lastLine.size() <= (size_t) kMaxLineChars && b.lastLine.find('\n') == std::string::npos && b.lastLine.find('\r') == std::string::npos);
 }
+// ---- what the runtime CONFIRMED (fix round 1, M1 and M5) -------------------------------------------------------------------
+// ReportOverrideStates logs: requested = 1 when the driver cache holds a preset, applied = 1 when the runtime applied one, value =
+// the preset number. The 310.9.1.0 runtime ignores value 3: "requested=1, applied=0, value=3".
+Effect Confirm(Readout& r, int request) { return r.Confirm(request).effect; }
+
+void ConfirmedEffect()
+{
+    {   // nothing heard: unknown, for every request
+        Readout r;
+        for (int req : { 1, 2, 3 })
+            CHECK(Confirm(r, req) == Effect::Unknown);
+        CHECK(Confirm(r, 0) == Effect::Applied); // Auto has nothing to confirm
+    }
+    {   // A applied
+        Readout r;
+        r.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=1, applied=1, value=1)"), 1);
+        CHECK(Confirm(r, 1) == Effect::Applied);
+        CHECK(Confirm(r, 2) == Effect::Unknown); // a report about another preset says nothing about B
+        CHECK(Confirm(r, 3) == Effect::Unknown);
+    }
+    {   // C ignored by the runtime (the 310.9.1.0 shape)
+        Readout r;
+        r.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=1, applied=0, value=3)"), 1);
+        CHECK(Confirm(r, 3) == Effect::NotApplied);
+        CHECK(Confirm(r, 1) == Effect::Unknown);
+    }
+    {   // the driver cache did not hold a preset at all: the report is not about our request
+        Readout r;
+        r.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=0, applied=0, value=0)"), 1);
+        CHECK(Confirm(r, 3) == Effect::Unknown);
+    }
+    {   // a "Preset B selected" line confirms B, and only B
+        Readout r;
+        r.Feed(Ngx("X:1", "INFO: Preset B selected, enabling UIR."), 1);
+        CHECK(Confirm(r, 2) == Effect::Applied);
+        CHECK(Confirm(r, 1) == Effect::Unknown && Confirm(r, 3) == Effect::Unknown);
+        CHECK(r.Confirm(2).uir == Uir::Enabled);
+    }
+    {   // "Preset ID: 3" only says the runtime read the number
+        Readout r;
+        r.Feed(Ngx("X:1", "INFO: Preset ID: 3"), 1);
+        CHECK(Confirm(r, 3) == Effect::Unknown);
+    }
+    {   // a new request forgets everything the earlier endpoint said
+        Readout r;
+        r.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=1, applied=1, value=1)"), 1);
+        r.BeginRequest();
+        CHECK(Confirm(r, 1) == Effect::Unknown);
+    }
+}
+
+void PauseRule()
+{
+    // A is documented to turn UI recomposition off: paused unless the runtime says otherwise
+    CHECK(PausesUiRecomposition(kPresetA, Effect::Unknown, Uir::Unknown));
+    CHECK(PausesUiRecomposition(kPresetA, Effect::Applied, Uir::Disabled));
+    CHECK(!PausesUiRecomposition(kPresetA, Effect::NotApplied, Uir::Unknown));
+    CHECK(!PausesUiRecomposition(kPresetA, Effect::Applied, Uir::Enabled));
+    // C only when the runtime confirmed that it acts on C AND turned the recomposition off
+    CHECK(!PausesUiRecomposition(kPresetC, Effect::Unknown, Uir::Unknown));
+    CHECK(!PausesUiRecomposition(kPresetC, Effect::NotApplied, Uir::Unknown)); // the 310.9.1.0 case: nothing is paused
+    CHECK(!PausesUiRecomposition(kPresetC, Effect::Applied, Uir::Unknown));
+    CHECK(!PausesUiRecomposition(kPresetC, Effect::Applied, Uir::Enabled));
+    CHECK(PausesUiRecomposition(kPresetC, Effect::Applied, Uir::Disabled));
+    // B and Auto never pause
+    for (auto e : { Effect::Unknown, Effect::Applied, Effect::NotApplied })
+        for (auto u : { Uir::Unknown, Uir::Disabled, Uir::Enabled })
+            CHECK(!PausesUiRecomposition(kPresetB, e, u) && !PausesUiRecomposition(kAuto, e, u) && !PausesUiRecomposition(7, e, u));
+}
+
+void StatusSentences()
+{
+    auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
+    CHECK(StatusSentence(kAuto, Effect::Applied, true) == "In use: Auto");
+    // never "in use" for a preset the runtime did not confirm
+    for (int req : { 1, 2, 3 })
+    {
+        const auto waiting = StatusSentence(req, Effect::Unknown, true);
+        CHECK(!has(waiting, "In use") && has(waiting, "waiting for the runtime to confirm"));
+        const auto blind = StatusSentence(req, Effect::Unknown, false);
+        CHECK(!has(blind, "In use") && has(blind, "cannot be read here"));
+        CHECK(has(StatusSentence(req, Effect::Applied, true), "In use:") && has(StatusSentence(req, Effect::Applied, true), "confirmed"));
+        const auto no = StatusSentence(req, Effect::NotApplied, true);
+        CHECK(!has(no, "In use") && has(no, "did not apply") && has(no, "applied=0"));
+    }
+    CHECK(has(StatusSentence(kPresetC, Effect::Unknown, true), "Preset C"));
+}
+
 } // namespace
 
 int main()
@@ -172,6 +260,9 @@ int main()
     Ignored();
     ReadoutState();
     CandidateLogging();
+    ConfirmedEffect();
+    PauseRule();
+    StatusSentences();
     if (g_failures)
     {
         std::printf("fg_preset_log: %d check(s) failed\n", g_failures);

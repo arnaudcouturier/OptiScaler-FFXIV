@@ -118,23 +118,34 @@ void AutoCostsNothing(const std::string& repo)
 void UiRecompositionPause(const std::string& repo)
 {
     const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp"));
-    CHECK(seams.find("const bool paused = recomposition.enabled && ext::fg::preset::PausesUiRecomposition(ext::fg::preset::Requests().Active());") !=
-          std::string::npos);
+    // the pause follows what the runtime confirmed (UiRecompositionPaused), not the request
+    CHECK(seams.find("const bool paused = recomposition.enabled && ext::fg::preset::UiRecompositionPaused();") != std::string::npos);
+    CHECK(seams.find("PausesUiRecomposition(ext::fg::preset::Requests().Active())") == std::string::npos);
     CHECK(seams.find("if (recomposition.enabled && !paused)") != std::string::npos);
     CHECK(seams.find("options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    // the restart remark is only for a change of the config / hud-less mode, not for a pause by the preset switch
+    CHECK(seams.find("lastEnabled != (int) recomposition.enabled") != std::string::npos);
+    const std::string relay = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.cpp"));
+    CHECK(relay.find("return PausesUiRecomposition(request, confirmed.effect, confirmed.uir);") != std::string::npos);
+    CHECK(relay.find("if (request != kPresetA && request != kPresetC) return false;") != std::string::npos);
 }
 
 void MenuText(const std::string& repo)
 {
     const std::string menu = Flat(ReadFile(repo + "/OptiScaler/ext/fg/MenuFgPreset.cpp"));
-    CHECK(menu.find("\"Auto\\0Preset A\\0Preset B\\0Preset C\\0\"") != std::string::npos);
+    CHECK(menu.find("\"Auto\0Preset A\0Preset B\0Preset C\0\"") != std::string::npos);
     CHECK(menu.find("Driver queried the setting: %s") != std::string::npos);
     CHECK(menu.find("NVIDIA preset line: %s") != std::string::npos);
     CHECK(menu.find("confirmed: the line has a known format") != std::string::npos);
     CHECK(menu.find("Restart needed: %s. %s stays in use until the next start, then the saved choice applies.") != std::string::npos);
-    CHECK(menu.find("Preset A and C turn off NVIDIA's UI recomposition") != std::string::npos);
+    // "in use" is only ever said by StatusSentence, from what the runtime confirmed
+    CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
+    CHECK(menu.find("In use") == std::string::npos);
+    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (it reports applied=0); other builds may differ.") != std::string::npos);
+    CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);
     CHECK(menu.find("Preset B or Auto brings it back.") != std::string::npos);
-    CHECK(menu.find("The runtime did not apply this preset (applied=0)") != std::string::npos);
+    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.") != std::string::npos);
+    CHECK(menu.find("Preset A and C turn off") == std::string::npos);
     CHECK(menu.find("ImGui::BeginDisabled(off);") != std::string::npos);
     CHECK(Count(menu, "ImGui::BeginDisabled(") == Count(menu, "ImGui::EndDisabled();"));
     // drawn from the unlocks card
@@ -142,6 +153,7 @@ void MenuText(const std::string& repo)
     CHECK(unlocks.find("ext::fg::DrawRenderPresetSection(); // WS2") != std::string::npos);
 }
 } // namespace
+
 
 int main(int argc, char** argv)
 {

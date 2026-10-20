@@ -13,7 +13,7 @@
 
 // The DLSS-G render preset section of the card `fg_unlocks` (tab "Frame Gen"): the choice of [DLSSG] RenderPreset, switched live
 // by ext/fg/dlssg/PresetSeams.cpp, and what NVIDIA's runtime says about it. Drawn by DrawFgUnlocks (MenuFgUnlocks.cpp), so no card
-// of its own and no entry in the layout table.
+// of its own and no entry in the layout table. A preset is shown as "in use" only when the runtime confirmed it (PresetLog.h).
 
 namespace
 {
@@ -32,6 +32,12 @@ const char* UirText(Uir uir)
     }
 }
 
+// The runtime's reply can reach us: the log relay is attached and info lines pass the log level.
+bool ReplyReadable()
+{
+    return LogRelayState() == RelayState::Attached && Config::Instance()->LogLevel.value_or_default() <= 2;
+}
+
 void DrawReadout(const Status& status)
 {
     FlushCandidateLines(); // unrecognised preset lines go to the log from here as well as from the dispatch tick
@@ -43,7 +49,10 @@ void DrawReadout(const Status& status)
     ext::menu::Tooltip("Seen by the driver-settings hook: the runtime asked the driver for its preset at start-up. 'no' means it\n"
                        "never did (an old runtime, or the request was never needed); a request then only works as a live change.");
     if (status.switches > 0)
+    {
         ImGui::Text("Runtime read the new request after the last change: %s", view.readSinceRequest ? "yes" : "no");
+        ext::menu::Tooltip("'no' after a change can mean that another copy of the runtime than the one that was hooked is in use.");
+    }
 
     if (view.lastLine.empty())
         ImGui::TextWrapped("NVIDIA preset line: none yet (it appears after the first request other than Auto)");
@@ -53,12 +62,8 @@ void DrawReadout(const Status& status)
         ImGui::TextDisabled("%s", view.confirmed ? "confirmed: the line has a known format" : "not confirmed: the wording is not one this version knows");
 
     if (view.hasReport)
-    {
-        ImGui::Text("Runtime: requested %d, applied %d, value %llu", view.requested, view.applied,
-                    static_cast<unsigned long long>(view.value));
-        if (view.requested > 0 && view.applied == 0)
-            ImGui::TextWrapped("The runtime did not apply this preset (applied=0): this build of NVIDIA's runtime may not act on it.");
-    }
+        ImGui::Text("Runtime report: preset %llu, driver held a preset %d, applied %d", static_cast<unsigned long long>(view.value),
+                    view.requested, view.applied);
     if (const char* uir = UirText(view.uir))
         ImGui::Text("Runtime: %s", uir);
     if (view.blockedByFlags)
@@ -72,6 +77,9 @@ void DrawReadout(const Status& status)
         break;
     case RelayState::NotAttached:
         ImGui::TextWrapped("NVIDIA's preset line cannot be shown: the log is not active.");
+        break;
+    case RelayState::AsyncLogging:
+        ImGui::TextWrapped("NVIDIA's preset line cannot be shown with asynchronous logging (LogAsync).");
         break;
     default:
         if (Config::Instance()->LogLevel.value_or_default() > 2)
@@ -99,7 +107,7 @@ void DrawRenderPresetSection()
         cfg.renderPreset = preset;
     ImGui::EndDisabled();
     ext::menu::Tooltip("Render preset of NVIDIA's frame generation, changed while the game runs: frame generation is switched off for a\n"
-                       "moment, its resources are released and it resumes on the next frame with fresh history.\n"
+                       "moment, its resources are released and it resumes a few frames later with fresh history.\n"
                        "Auto leaves the choice to the driver and the runtime. A, B and C are answered inside this process only;\n"
                        "no NVIDIA profile is written. Not every runtime build acts on all three: the lines below show what it reports.");
 
@@ -108,7 +116,10 @@ void DrawRenderPresetSection()
         ImGui::TextWrapped("%s", UnavailableText(status.unavailable));
         return;
     }
+    if (status.configured == kPresetC || status.active == kPresetC)
+        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (it reports applied=0); other builds may differ.");
 
+    const auto confirmed = ReadoutState().Confirm(status.active);
     if (status.restartNeeded)
     {
         ImGui::TextWrapped("Restart needed: %s. %s stays in use until the next start, then the saved choice applies.",
@@ -117,15 +128,22 @@ void DrawRenderPresetSection()
             ImGui::TextWrapped("%s", status.moduleText.c_str());
     }
     else if (status.configured != status.active)
-        ImGui::TextWrapped("%s is chosen; it applies when frame generation runs next.", Name(status.configured));
+        ImGui::TextWrapped("%s is chosen; the change is made when frame generation runs next.", Name(status.configured));
     else
-        ImGui::Text("In use: %s%s", Name(status.active), status.switches > 0 ? " (changed while the game ran)" : "");
+        ImGui::TextWrapped("%s%s", StatusSentence(status.active, confirmed.effect, ReplyReadable()).c_str(),
+                           status.switches > 0 && status.active == kAuto ? " (changed while the game ran)" : "");
 
-    // HUD-less recomposition and Preset A/C: the runtime's own UI recomposition is paused (ui_free mode is not affected)
-    if (ext::hudless::QueryRecomposition().enabled &&
-        (PausesUiRecomposition(status.configured) || PausesUiRecomposition(status.active)))
-        ImGui::TextWrapped("Preset A and C turn off NVIDIA's UI recomposition: with the HUD-less recomposition mode the interface is "
-                           "no longer kept out of the generated frames. Preset B or Auto brings it back.");
+    // HUD-less recomposition and the presets: A turns the runtime's own UI recomposition off (ui_free mode is not affected)
+    const bool involved =
+        status.configured == kPresetA || status.active == kPresetA || status.configured == kPresetC || status.active == kPresetC;
+    if (ext::hudless::QueryRecomposition().enabled && involved)
+    {
+        if (UiRecompositionPaused())
+            ImGui::TextWrapped("UI recomposition of NVIDIA's runtime is paused by this preset: with the HUD-less recomposition mode the "
+                               "interface is no longer kept out of the generated frames. Preset B or Auto brings it back.");
+        else if (status.active == kPresetC)
+            ImGui::TextWrapped("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.");
+    }
 
     DrawReadout(status);
 }
