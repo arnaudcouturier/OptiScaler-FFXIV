@@ -186,10 +186,15 @@ struct DriverEdit
     uint32_t value = 0;
 };
 
-inline DriverEdit HandleDriverReply(RequestState& state, uint32_t settingId, bool ok, bool isNumber, uint32_t value)
+// eplaceAllowed is false while the live control is off (companion runtime, replacement runtime, other output): the driver reply is
+// still recorded, nothing is forced on the runtime.
+inline DriverEdit HandleDriverReply(RequestState& state, uint32_t settingId, bool ok, bool isNumber, uint32_t value,
+                                    bool replaceAllowed = true)
 {
     if (settingId == kRenderPresetSettingId)
         state.NoteDriverQuery(ok, isNumber, value); // the original answer, before any override
+    if (!replaceAllowed)
+        return {};
     const auto answer = AnswerDriverQuery(settingId, state.Active());
     return { answer.handled && answer.found, answer.value };
 }

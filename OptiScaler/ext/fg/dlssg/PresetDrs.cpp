@@ -2,21 +2,14 @@
 
 #include "PresetDrs.h"
 
-#include "ext/core/ExtConfig.h"
 #include "ext/fg/dlssg/PresetLogRelay.h"
 #include "ext/fg/dlssg/PresetModule.h"
+#include "ext/fg/dlssg/PresetStatus.h"
 
 #include <atomic>
 
 namespace ext::fg::preset
 {
-RequestState& Requests()
-{
-    static RequestState state;
-    state.InitOnce(ext::Cfg().fg.renderPreset.value_or_default()); // first call wins
-    return state;
-}
-
 NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Status status, void* caller)
 {
     if ((settingId != kRenderPresetSettingId && settingId != kOverrideSettingId) || setting == nullptr)
@@ -34,7 +27,8 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
         module::ObserveDriverQuery(caller);   // possible provider of the live path
     }
 
-    const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0);
+    const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0,
+                                       CurrentAvailability() == Unavailable::None);
     if (!edit.replace)
         return status;
 

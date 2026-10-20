@@ -41,6 +41,12 @@ void Publish(const Status& status)
 
 namespace ext::fg::preset
 {
+Unavailable CurrentAvailability()
+{
+    return CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None,
+                          State::Instance().activeFgOutput == FGOutput::DLSSG);
+}
+
 Status GetStatus()
 {
     Status copy;
@@ -54,6 +60,7 @@ Status GetStatus()
     copy.active = state.Active();
     copy.boot = state.Boot();
     copy.moduleText = module::StatusText();
+    copy.unavailable = CurrentAvailability(); // current for the menu even while no frame is dispatched
     return copy;
 }
 } // namespace ext::fg::preset
@@ -69,9 +76,7 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
     auto& cfg = ext::Cfg().fg;
     const int configured = cfg.renderPreset.value_or_default();
 
-    const auto available = CheckAvailable(cfg.ampereMfgUnlock.value_or_default(),
-                                          State::Instance().activeFgNvngx != FGNvngxReplacement::None,
-                                          State::Instance().activeFgOutput == FGOutput::DLSSG);
+    const auto available = CurrentAvailability();
     Status status;
     status.unavailable = available;
     status.switches = switcher.Generation();

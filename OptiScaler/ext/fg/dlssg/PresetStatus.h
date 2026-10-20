@@ -21,4 +21,8 @@ struct Status
 };
 
 Status GetStatus();
+
+// Why the control is off right now (None = on): the companion runtime is configured, a replacement runtime is active or the output is
+// not DLSS-G. Used by the dispatch tick, the menu and the driver-settings seam. Safe from any thread.
+Unavailable CurrentAvailability();
 } // namespace ext::fg::preset
