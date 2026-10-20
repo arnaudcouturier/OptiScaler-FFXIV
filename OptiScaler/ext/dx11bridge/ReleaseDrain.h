@@ -41,6 +41,22 @@ inline bool SkipReleaseSleep(ReleaseDrain drain, bool keyOn, bool shuttingDown)
     return keyOn && !shuttingDown && drain == ReleaseDrain::Drained;
 }
 
+inline const char* Name(Quiescence q)
+{
+    switch (q)
+    {
+    case Quiescence::NotChecked:
+        return "not-checked";
+    case Quiescence::Idle:
+        return "idle";
+    case Quiescence::EvaluateInFlight:
+        return "evaluate-in-flight";
+    case Quiescence::SelfInside:
+        return "self-inside";
+    }
+    return "?";
+}
+
 inline const char* Name(ReleaseDrain d)
 {
     switch (d)

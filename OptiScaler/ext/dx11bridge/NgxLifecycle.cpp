@@ -2,6 +2,7 @@
 
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/dx11bridge/ReleaseSequence.h"
 #include "ext/game/Game.h"
 
 #include <chrono>
@@ -68,45 +69,78 @@ bool ShouldSkipReleaseSleep(ReleaseDrain drain)
     return SkipReleaseSleep(drain, ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default(), false);
 }
 
-ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
+void SetCurrentFeature(IFeature* feature)
+{
+    TableGuard lock; // only the pointer store happens under the lock
+    State::Instance().currentFeature = feature;
+}
+
+void ClearCurrentFeatureIf(IFeature* feature)
+{
+    TableGuard lock;
+    if (State::Instance().currentFeature == feature)
+        State::Instance().currentFeature = nullptr;
+}
+
+namespace
+{
+// Production side of ReleaseSequence.h: the real queues. DrainFg also cancels the FG's pending work first, under its mutex.
+struct ReleaseOps
+{
+    IFGFeature_Dx12* fg = nullptr;
+    bool fgRequired = false;
+    ID3D12CommandQueue* fgQueue = nullptr;
+
+    gpu::QueueDrain DrainFg()
+    {
+        OwnedLockGuard guard(fg->Mutex, 5);
+        ext::Access::CancelPendingUpscalerWork(*fg);
+        fgQueue = fg->GetCommandQueue();
+        return gpu::DrainQueueEx(fgQueue);
+    }
+
+    gpu::QueueDrain DrainUpscale(gpu::QueueDrain fgResult)
+    {
+        auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
+        // One queue serving both roles was waited for once, above.
+        if (fgRequired && upscaleQueue == fgQueue)
+            return fgResult;
+        return gpu::DrainQueueEx(upscaleQueue);
+    }
+};
+} // namespace
+
+ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, bool shuttingDown)
 {
     if (!IsolatesNgx() || !feature.IsWithDx12())
         return ReleaseDrain::NotApplicable;
 
-    using gpu::QueueDrain;
     const auto started = std::chrono::steady_clock::now();
     auto fg = State::Instance().currentFG;
-    ID3D12CommandQueue* fgQueue = nullptr;
-    QueueDrain fgDrain = QueueDrain::Absent;
-    QueueDrain upscaleDrain = QueueDrain::Absent;
-    bool fgRequired = false;
-    try
-    {
-        if (&feature == State::Instance().currentFeature && fg != nullptr &&
-            State::Instance().activeFgInput == FGInput::Upscaler)
-        {
-            fgRequired = true;
-            OwnedLockGuard guard(fg->Mutex, 5);
-            ext::Access::CancelPendingUpscalerWork(*fg);
-            fgQueue = fg->GetCommandQueue();
-            fgDrain = gpu::DrainQueueEx(fgQueue);
-            if (fgDrain == QueueDrain::Failed)
-                return ReleaseDrain::Failed;
-        }
-        auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
-        // One queue serving both roles was waited for once, above.
-        upscaleDrain = (fgRequired && upscaleQueue == fgQueue) ? fgDrain : gpu::DrainQueueEx(upscaleQueue);
-    }
-    catch (...)
-    {
-        LOG_ERROR("FFXIV upscaler release: exception while draining the queues");
-        return ReleaseDrain::Failed;
-    }
 
-    // Nothing here proves an Evaluate is not running on another thread yet (P3), so a GPU drain alone is no proof.
-    const auto result = ClassifyRelease(fgRequired, fgDrain, upscaleDrain, Quiescence::NotChecked);
+    ReleaseOps ops;
+    ops.fg = fg;
+    ops.fgRequired = &feature == State::Instance().currentFeature && fg != nullptr &&
+                     State::Instance().activeFgInput == FGInput::Upscaler;
+
+    ReleasePlan plan;
+    plan.handleId = handleId;
+    plan.fgRequired = ops.fgRequired;
+    // Closing the handle and waiting for the evaluates in flight is what makes skipping the sleep safe; with the key off
+    // (or on shutdown, where nothing is skipped anyway) the flow is the old one.
+    plan.gate = !shuttingDown && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();
+
+    const auto outcome = PrepareRelease(Registry(), plan, ops);
+    if (outcome.threw)
+        LOG_ERROR("FFXIV upscaler release: exception while draining the queues");
+    const auto result = outcome.result;
+    const double waitedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (result == ReleaseDrain::Failed)
+    {
+        LOG_WARN("FFXIV upscaler release: handle {} result=failed, the release is refused", handleId);
         return result;
+    }
 
     // D3: the upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps running straight across that
     // hole: CancelPendingUpscalerWork only switches it off and back on, so the provider's presentation timing history
@@ -127,10 +161,8 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
         fg->DestroyFGContext();
     }
 
-    const double waitedMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    LOG_INFO("FFXIV upscaler release: result={} (fg queue required={}, fg={}, upscale={}), waited {:.2f} ms, sleep {}",
-             Name(result), fgRequired, (int) fgDrain, (int) upscaleDrain, waitedMs,
+    LOG_INFO("FFXIV upscaler release: handle {} result={} (fg queue required={}, fg={}, upscale={}, handle {}), waited {:.2f} ms, sleep {}",
+             handleId, Name(result), plan.fgRequired, (int) outcome.fg, (int) outcome.upscale, Name(outcome.quiet), waitedMs,
              shuttingDown ? "n/a (shutdown)" : (ShouldSkipReleaseSleep(result) ? "skipped" : "kept (500 ms)"));
     return result;
 }

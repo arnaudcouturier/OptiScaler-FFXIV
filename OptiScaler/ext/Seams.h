@@ -8,6 +8,7 @@
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"
 #include "ext/dx11bridge/BridgeState.h"
+#include "ext/dx11bridge/NgxFeatureTable.h"
 #include "ext/dx11bridge/ReleaseDrain.h"
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/FgSeams.h"
@@ -129,11 +130,15 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice);
 // NVSDK_NGX_D3D11_ReleaseFeature, before the feature is reset. Failed -> return FAIL_PlatformError. Drained = the GPU
 // work that could reference the feature is proven finished, so the caller may skip its 500 ms sleep when
 // SkipReleaseSleep(result) says so; NotApplicable = no proof, nothing changes (ext/dx11bridge/ReleaseDrain.h).
-ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
+ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, bool shuttingDown);
 // NVSDK_NGX_D3D11_ReleaseFeature, in the condition of the 500 ms sleep before the reset (non-shutdown path only): true
 // = skip it. Only for ReleaseDrain::Drained with [NgxRelease] SkipReleaseSleep on (default); the sleep after the reset
 // (Dx11DelayedInit) is not part of this.
 bool ShouldSkipReleaseSleep(ReleaseDrain drain);
+// NVSDK_NGX_D3D11_CreateFeature / EvaluateFeature: `State::currentFeature = feature` under the narrow table lock
+// (ext/dx11bridge/NgxFeatureTable.h). ClearCurrentFeatureIf (ReleaseFeature): clears it only when it still is `feature`.
+void SetCurrentFeature(IFeature* feature);
+void ClearCurrentFeatureIf(IFeature* feature);
 
 // IFeature_Dx11wDx12.cpp Evaluate, before binding NVSDK_NGX_Parameter_Color (replaces the unconditional
 // dx11Color.Dx12Resource bind). C4's forced-quality colour scale: Lanczos3-downscales the display-sized colour
