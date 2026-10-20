@@ -153,7 +153,9 @@ void MenuText(const std::string& repo)
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
     CHECK(menu.find("In use") == std::string::npos);
-    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (it reports applied=0); other builds may differ.") != std::string::npos);
+    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).") != std::string::npos);
+    CHECK(menu.find("Runtime report: preset requested %d, in force %d") != std::string::npos);
+    CHECK(menu.find("The runtime does not act on preset id %d.") != std::string::npos);
     CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);
     CHECK(menu.find("Preset B or Auto brings it back.") != std::string::npos);
     CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.") != std::string::npos);

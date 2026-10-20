@@ -217,6 +217,129 @@ void ConfirmedEffect()
     }
 }
 
+// ---- the 310.9.16 runtime (fix round 2, item 4) ----------------------------------------------------------------------------------
+// Strings of the real DLL (Streamline 2.14.16, sha256 8d59d49b...), read with a decompiler:
+//   EndpointConfiguration::ApplyRenderPreset (endpoint_config.cpp:337)  "Applying settings for render preset %u."
+//   EndpointConfiguration::ReadRegkeys (:136)                           "Warning: Ignoring unsupported render preset ID %u."
+//   EndpointCore::ReportOverrideStates (:940)                           "ReportOverrideStates: render preset (requested=%u, effective=%u)"
+// Nothing else with "preset" is left in that build: "Preset ID: %d", "Preset A selected, disabling UIR." and the bUIRecomposition
+// notes of 310.9.1.0 are gone, and the report no longer has applied= / value=. ReadRegkeys handles value 3 (Preset C) there.
+std::string Applying(int n) { return Ngx("EndpointConfiguration::ApplyRenderPreset:337", "Applying settings for render preset " + std::to_string(n) + "."); }
+std::string Report31016(int requested, int effective)
+{
+    return Ngx("EndpointCore::ReportOverrideStates:940",
+               "ReportOverrideStates: render preset (requested=" + std::to_string(requested) + ", effective=" + std::to_string(effective) + ")");
+}
+std::string Unsupported(int id) { return Ngx("EndpointConfiguration::ReadRegkeys:136", "Warning: Ignoring unsupported render preset ID " + std::to_string(id) + "."); }
+
+void Runtime31016Lines()
+{
+    for (int n : { 1, 2, 3 })
+    {
+        const auto p = ParseLine(Applying(n));
+        CHECK_MSG(p.kind == LineKind::Applying && p.recognised && p.hasValue && p.value == static_cast<uint64_t>(n), "applying %d: kind %d", n, static_cast<int>(p.kind));
+        // preset A and C turn the UI recomposition off, B turns it on (ReadRegkeys stores 0x0100 at config+54h for 1 and 3, 0x0101 for 2)
+        CHECK(p.uir == (n == 2 ? Uir::Enabled : Uir::Disabled));
+    }
+    CHECK(!ParseLine(Applying(7)).recognised);
+    {
+        const auto p = ParseLine(Ngx("EndpointConfiguration::ApplyRenderPreset:337", "Applying settings for render preset x."));
+        CHECK(p.kind == LineKind::Applying && !p.recognised);
+    }
+    {
+        const auto p = ParseLine(Unsupported(7));
+        CHECK_MSG(p.kind == LineKind::Unsupported && p.recognised && p.hasValue && p.value == 7, "unsupported: kind %d", static_cast<int>(p.kind));
+    }
+    {   // the report: requested is the preset number the driver cache held, effective the one the endpoint ended up with
+        const auto p = ParseLine(Report31016(3, 3));
+        CHECK_MSG(p.kind == LineKind::Report && p.newFormat && p.recognised && p.requested == 3 && p.effective == 3 && p.hasValue && p.value == 3,
+                  "report: kind %d requested %d effective %d", static_cast<int>(p.kind), p.requested, p.effective);
+        CHECK(p.uir == Uir::Disabled);
+        CHECK(ParseLine(Report31016(2, 2)).uir == Uir::Enabled);
+        CHECK(ParseLine(Report31016(1, 1)).uir == Uir::Disabled);
+        const auto q = ParseLine(Report31016(3, 1));
+        CHECK(q.recognised && q.requested == 3 && q.effective == 1);
+        const auto big = ParseLine(Report31016(16777215, 2)); // the driver sentinel for B
+        CHECK(big.recognised && big.requested == 16777215);
+        const auto broken = ParseLine(Ngx("X:1", "ReportOverrideStates: render preset (requested=3, effective=)"));
+        CHECK(broken.kind == LineKind::Report && !broken.recognised);
+    }
+    // the other reports of the same function are not about the render preset
+    CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:857", "ReportOverrideStates: multi-frame count (requested=1, applied=1, value=3)")).kind == LineKind::None);
+    CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:904", "ReportOverrideStates: FG mode (requested=1, applied=0, value=2)")).kind == LineKind::None);
+    // the private flag lines of ReadRegkeys
+    CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:171", "Disabling UI recomposition due to private flag override.")).kind == LineKind::BlockedByFlags);
+    CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:176", "Disabling FG Lite due to private flag override.")).kind == LineKind::BlockedByFlags);
+}
+
+void Runtime31016Confirmation()
+{
+    {   // C applied: the ApplyRenderPreset line confirms it, the recomposition is off
+        Readout r;
+        r.Feed(Applying(3), 1);
+        CHECK(Confirm(r, 3) == Effect::Applied && r.Confirm(3).uir == Uir::Disabled);
+        CHECK(Confirm(r, 1) == Effect::Unknown && Confirm(r, 2) == Effect::Unknown);
+        const auto s = r.Snapshot();
+        CHECK(s.confirmed && s.appliedLine == 3);
+        r.Feed(Report31016(3, 3), 2);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+        const auto t = r.Snapshot();
+        CHECK(t.hasReport && t.reportNew && t.requested == 3 && t.effective == 3 && t.value == 3);
+    }
+    {   // the report alone is enough
+        Readout r;
+        r.Feed(Report31016(1, 1), 1);
+        CHECK(Confirm(r, 1) == Effect::Applied && r.Confirm(1).uir == Uir::Disabled);
+        Readout b;
+        b.Feed(Report31016(2, 2), 1);
+        CHECK(Confirm(b, 2) == Effect::Applied && b.Confirm(2).uir == Uir::Enabled);
+    }
+    {   // the endpoint ended up with another preset: not applied (the final report wins over the earlier "Applying" line)
+        Readout r;
+        r.Feed(Applying(3), 1);
+        r.Feed(Report31016(3, 1), 2);
+        CHECK(Confirm(r, 3) == Effect::NotApplied);
+        CHECK(Confirm(r, 1) == Effect::Unknown); // requested was 3
+    }
+    {   // an id the runtime ignores
+        Readout r;
+        r.Feed(Unsupported(3), 1);
+        CHECK(Confirm(r, 3) == Effect::NotApplied);
+        CHECK(Confirm(r, 2) == Effect::Unknown);
+        const auto s = r.Snapshot();
+        CHECK(s.unsupportedId == 3 && s.confirmed);
+        CHECK(s.presetId == -1); // not read as "Preset ID: N"
+    }
+    {   // a new request forgets all of it
+        Readout r;
+        r.Feed(Applying(3), 1);
+        r.Feed(Report31016(3, 3), 2);
+        r.Feed(Unsupported(5), 3);
+        r.BeginRequest();
+        const auto s = r.Snapshot();
+        CHECK(Confirm(r, 3) == Effect::Unknown && !s.hasReport && !s.reportNew && s.effective == -1 && s.appliedLine == -1 && s.unsupportedId == -1);
+    }
+    {   // the whole chain for the recomposition rule: C pauses on this runtime, B never, A does
+        Readout c;
+        c.Feed(Applying(3), 1);
+        CHECK(PausesUiRecomposition(kPresetC, c.Confirm(3).effect, c.Confirm(3).uir));
+        Readout a;
+        a.Feed(Applying(1), 1);
+        CHECK(PausesUiRecomposition(kPresetA, a.Confirm(1).effect, a.Confirm(1).uir));
+        Readout b;
+        b.Feed(Applying(2), 1);
+        CHECK(!PausesUiRecomposition(kPresetB, b.Confirm(2).effect, b.Confirm(2).uir));
+        // C requested but the runtime reports another preset: nothing is paused
+        Readout n;
+        n.Feed(Report31016(3, 2), 1);
+        CHECK(!PausesUiRecomposition(kPresetC, n.Confirm(3).effect, n.Confirm(3).uir));
+        // C ignored as unsupported: nothing is paused
+        Readout u;
+        u.Feed(Unsupported(3), 1);
+        CHECK(!PausesUiRecomposition(kPresetC, u.Confirm(3).effect, u.Confirm(3).uir));
+    }
+}
+
 void PauseRule()
 {
     // A is documented to turn UI recomposition off: paused unless the runtime says otherwise
@@ -249,7 +372,7 @@ void StatusSentences()
         CHECK(!has(blind, "In use") && has(blind, "cannot be read here"));
         CHECK(has(StatusSentence(req, Effect::Applied, true), "In use:") && has(StatusSentence(req, Effect::Applied, true), "confirmed"));
         const auto no = StatusSentence(req, Effect::NotApplied, true);
-        CHECK(!has(no, "In use") && has(no, "did not apply") && has(no, "applied=0"));
+        CHECK(!has(no, "In use") && has(no, "did not apply") && !has(no, "applied=0"));
     }
     CHECK(has(StatusSentence(kPresetC, Effect::Unknown, true), "Preset C"));
 }
@@ -264,6 +387,8 @@ int main()
     ReadoutState();
     CandidateLogging();
     ConfirmedEffect();
+    Runtime31016Lines();
+    Runtime31016Confirmation();
     PauseRule();
     StatusSentences();
     if (g_failures)

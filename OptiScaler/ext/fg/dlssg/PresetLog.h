@@ -4,8 +4,12 @@
 //
 // The runtime's own log lines reach OptiScaler through Streamline's log callback, which writes them as
 //   SL Log: [..][streamline][info][tid:N][..]commonEntry.cpp:1369[ngxLog] [FrameGeneration] [date] [tid:N][Function:line] message
-// The wording of the preset messages is known from the runtime's strings (310.9.1.0), not yet from a real run, so every
-// check is a case-insensitive keyword match and anything with "preset" in it that no rule claims is kept as a candidate:
+// The wording of the preset messages is known from the runtime's strings of two builds, not yet from a real run:
+//   310.9.1.0   "Preset ID: N", "Preset A selected, disabling UIR.", "Enabling/Disabling bUIRecompositionSupported due to preset
+//               override.", "ReportOverrideStates: render preset (requested=N, applied=N, value=N)"
+//   310.9.16    "Applying settings for render preset N.", "Warning: Ignoring unsupported render preset ID N.",
+//               "ReportOverrideStates: render preset (requested=N, effective=N)"  (nothing else about presets is left in that build)
+// so every check is a case-insensitive keyword match and anything with "preset" in it that no rule claims is kept as a candidate:
 // shown raw in the menu and logged at a low rate for a parser follow-up.
 
 #include "ext/fg/dlssg/PresetRequest.h"
@@ -26,11 +30,13 @@ inline constexpr uint64_t kCandidateGapMs = 2000;
 enum class LineKind : uint8_t
 {
     None,           // not a preset line (other feature, other topic, not a relayed NVIDIA line, our own text)
-    Report,         // "ReportOverrideStates: render preset (requested=N, applied=N, value=N)"
+    Report,         // "ReportOverrideStates: render preset (requested=N, applied=N, value=N)" or (requested=N, effective=N)
     PresetId,       // "Preset ID: N"
     Selected,       // "Preset A selected, disabling UIR."
     UirNote,        // "Enabling/Disabling bUIRecompositionSupported due to preset override."
     BlockedByFlags, // "Not parsing presets due to private flag overrides."
+    Applying,       // 310.9.16: "Applying settings for render preset N."
+    Unsupported,    // 310.9.16: "Warning: Ignoring unsupported render preset ID N."
     Candidate       // mentions a preset, no rule claims it
 };
 
@@ -51,16 +57,19 @@ struct ParsedLine
     bool hasValue = false;
     char letter = 0; // Selected: 'A'..'Z'
     Uir uir = Uir::Unknown;
+    int effective = -1;     // Report in the 310.9.16 wording: the preset the endpoint ended up with
+    bool newFormat = false; // Report in the 310.9.16 wording (requested = the preset number, effective = the preset in force)
 };
 
 // ---- what the runtime CONFIRMED about a request ------------------------------------------------------------------------------
-// The request is what we asked for; the runtime decides what it does with it. 310.9.1.0 acts on 1 (A) and 2 (B) and ignores 3 (C),
-// so the menu and the UI recomposition rule go by what the runtime reported, not by the request.
+// The request is what we asked for; the runtime decides what it does with it. 310.9.1.0 acts on 1 (A) and 2 (B) and ignores 3 (C);
+// 310.9.16 acts on all three (C = UI recomposition off, FG Lite on). The menu and the UI recomposition rule go by what the runtime
+// reported, not by the request.
 enum class Effect : uint8_t
 {
     Unknown,    // nothing heard that is about this request (log not readable, wording unknown, not yet logged)
     Applied,    // the runtime reported it applied this preset
-    NotApplied  // the runtime read the preset and did not apply it (ReportOverrideStates: applied=0)
+    NotApplied  // the runtime read the preset and did not apply it (applied=0, a different effective preset, or "Ignoring unsupported render preset")
 };
 
 struct Confirmation
@@ -195,13 +204,61 @@ inline ParsedLine ParseLine(std::string_view line)
     if (!Has(low, "preset") && !Has(low, "private flag override"))
         return out;
 
-    if (Has(low, "render preset") && (Has(low, "requested") || Has(low, "applied")))
+    // 310.9.16: "Applying settings for render preset N." (written by ApplyRenderPreset when ReadRegkeys acts on 1, 2 or 3). The
+    // recomposition follows the preset the way ReadRegkeys stores it: 1 (A) and 3 (C) turn it off, 2 (B) turns it on.
+    if (Has(low, "applying settings for render preset"))
+    {
+        out.kind = LineKind::Applying;
+        int64_t n = 0;
+        if (detail::NumberAfter(low, "render preset", n) && n >= 1 && n <= 3)
+        {
+            out.value = static_cast<uint64_t>(n);
+            out.hasValue = true;
+            out.uir = (n == 2) ? Uir::Enabled : Uir::Disabled;
+            out.recognised = true;
+        }
+        return out;
+    }
+    // 310.9.16: "Warning: Ignoring unsupported render preset ID N." - the runtime read the id and does not act on it.
+    if (Has(low, "unsupported render preset"))
+    {
+        out.kind = LineKind::Unsupported;
+        int64_t n = 0;
+        if (detail::NumberAfter(low, "preset id", n) && n >= 0)
+        {
+            out.value = static_cast<uint64_t>(n);
+            out.hasValue = true;
+            out.recognised = true;
+        }
+        return out;
+    }
+
+    if (Has(low, "render preset") && (Has(low, "requested") || Has(low, "applied") || Has(low, "effective")))
     {
         out.kind = LineKind::Report;
         int64_t n = 0;
         const bool requested = detail::NumberAfter(low, "requested", n) && detail::ToInt(n, out.requested);
         if (!requested)
             out.requested = -1;
+        if (Has(low, "effective"))
+        {
+            // 310.9.16: requested = the preset number the driver cache held, effective = the preset the endpoint ended up with
+            // (EndpointCore::ReportOverrideStates derives it from the recomposition and FG Lite settings: 2 when the recomposition
+            // is on, else 3 when FG Lite is on, else 1).
+            out.newFormat = true;
+            const bool effective = detail::NumberAfter(low, "effective", n) && detail::ToInt(n, out.effective);
+            if (!effective)
+                out.effective = -1;
+            if (requested)
+            {
+                out.value = static_cast<uint64_t>(out.requested);
+                out.hasValue = true;
+            }
+            if (effective)
+                out.uir = (out.effective == 2) ? Uir::Enabled : ((out.effective == 1 || out.effective == 3) ? Uir::Disabled : Uir::Unknown);
+            out.recognised = requested && effective;
+            return out;
+        }
         const bool applied = detail::NumberAfter(low, "applied", n) && detail::ToInt(n, out.applied);
         if (!applied)
             out.applied = -1;
@@ -268,6 +325,10 @@ class Readout
         int applied = -1;
         uint64_t value = 0;
         bool blockedByFlags = false; // "Not parsing presets due to private flag overrides"
+        bool reportNew = false;      // the report is in the 310.9.16 wording: `requested` is the preset number, `effective` the one in force
+        int effective = -1;
+        int appliedLine = -1;        // "Applying settings for render preset N."
+        int unsupportedId = -1;      // "Ignoring unsupported render preset ID N."
     };
 
     void NoteDriverQuery(bool queried)
@@ -310,13 +371,19 @@ class Readout
         }
         std::lock_guard lock(mutex_);
         out.uir = state_.uir;
-        if (state_.hasReport && state_.value == static_cast<uint64_t>(request))
+        if (state_.unsupportedId == request)
+            out.effect = Effect::NotApplied; // 310.9.16: "Ignoring unsupported render preset ID N."
+        else if (state_.hasReport && state_.reportNew && state_.requested == request)
+            out.effect = (state_.effective == request) ? Effect::Applied : Effect::NotApplied; // 310.9.16 report: the final word
+        else if (state_.hasReport && !state_.reportNew && state_.value == static_cast<uint64_t>(request))
         {
             if (state_.applied > 0)
                 out.effect = Effect::Applied;
             else if (state_.requested > 0)
                 out.effect = Effect::NotApplied;
         }
+        else if (state_.appliedLine == request)
+            out.effect = Effect::Applied; // 310.9.16: "Applying settings for render preset N."
         else if (state_.selected != 0 && state_.selected - 'A' + 1 == request)
             out.effect = Effect::Applied;
         return out;
@@ -337,10 +404,26 @@ class Readout
             if (p.recognised)
             {
                 state_.hasReport = true;
+                state_.reportNew = p.newFormat;
                 state_.requested = p.requested;
                 state_.applied = p.applied;
+                state_.effective = p.effective;
                 state_.value = p.hasValue ? p.value : 0;
+                if (p.newFormat && p.uir != Uir::Unknown)
+                    state_.uir = p.uir;
             }
+            break;
+        case LineKind::Applying:
+            if (p.recognised)
+            {
+                state_.appliedLine = static_cast<int>(p.value);
+                if (p.uir != Uir::Unknown)
+                    state_.uir = p.uir;
+            }
+            break;
+        case LineKind::Unsupported:
+            if (p.recognised)
+                state_.unsupportedId = static_cast<int>(p.value > INT_MAX ? INT_MAX : p.value);
             break;
         case LineKind::PresetId:
             if (p.recognised)
@@ -394,7 +477,8 @@ class Readout
 };
 // Does this request pause the UI recomposition of NVIDIA's runtime (OptiScaler then does not ask for it)? A is documented to turn
 // it off ("Preset A selected, disabling UIR"), so A pauses unless the runtime says it did not apply A or kept the recomposition
-// on. C has no documented effect and 310.9.1.0 ignores it: it pauses only when the runtime confirmed C AND turned it off.
+// on. C: 310.9.1.0 ignores it (nothing to pause) and 310.9.16 applies it with the recomposition off, so it pauses only when the
+// runtime confirmed C AND turned the recomposition off.
 inline bool PausesUiRecomposition(int request, Effect effect, Uir uir)
 {
     if (request == kPresetA)
@@ -416,7 +500,7 @@ inline std::string StatusSentence(int request, Effect effect, bool replyReadable
     case Effect::Applied:
         return "In use: " + name + " (confirmed by the runtime)";
     case Effect::NotApplied:
-        return name + " was requested, but the runtime did not apply it (applied=0): its own default stays in use.";
+        return name + " was requested, but the runtime did not apply it: its own default stays in use.";
     default:
         return name + " requested, waiting for the runtime to confirm it." +
                (replyReadable ? "" : " The runtime's reply cannot be read here (see below), so this stays unconfirmed.");
