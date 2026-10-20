@@ -74,8 +74,8 @@ int main()
     {
         auto o = Ok();
         o.waitSignaled = true;
-        o.removedAfter = true; // completed first, removed later: the wait did complete
-        CHECK(ClassifyFence(o) == QueueDrain::Drained);
+        o.removedAfter = true; // a removal signals every fence, so "completed" and "removed" look alike: no proof, DeviceLost
+        CHECK(ClassifyFence(o) == QueueDrain::DeviceLost);
     }
     // the bool wrapper keeps today's DrainQueue answers
     CHECK(ext::gpu::DrainedOk(QueueDrain::Drained));

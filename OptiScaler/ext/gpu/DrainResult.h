@@ -28,9 +28,11 @@ inline QueueDrain ClassifyFence(const FenceOutcome& o)
         return QueueDrain::DeviceLost;
     if (!o.setupOk || !o.signalOk)
         return QueueDrain::Failed;
-    if (o.waitSignaled)
-        return QueueDrain::Drained;
-    return o.removedAfter ? QueueDrain::DeviceLost : QueueDrain::Failed;
+    // A device removal signals every fence, so a completed wait on a device that is removed afterwards cannot be told from a
+    // normal completion: it is never a proof (DeviceLost), whichever came first.
+    if (o.removedAfter)
+        return QueueDrain::DeviceLost;
+    return o.waitSignaled ? QueueDrain::Drained : QueueDrain::Failed;
 }
 
 // The answer ext::gpu::DrainQueue (bool) has always given: only a failed drain is false.
