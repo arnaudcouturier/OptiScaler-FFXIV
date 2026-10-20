@@ -47,6 +47,11 @@ enum class Stage : unsigned
     CS
 };
 
+// Vtable slots of the entry points the hooks wrap (pinned against d3d11.h by tests/ext/upscaler/mip_bind_vtable_test.cpp).
+inline constexpr unsigned kDeviceCreateSamplerStateSlot = 23;
+inline constexpr std::array<unsigned, kStages> kContextSetSamplersSlots = { 10, 26, 32, 61, 65, 70 };
+inline constexpr std::array<unsigned, kStages> kContextGetSamplersSlots = { 75, 85, 88, 99, 103, 108 };
+
 inline const char* StageName(unsigned stage)
 {
     static constexpr const char* names[kStages] = { "PS", "VS", "GS", "HS", "DS", "CS" };
@@ -281,10 +286,190 @@ class Engine
         return e->variant.Get();
     }
 
+    // ---- binding (immediate-context timeline) ----------------------------------------------------------------------
+    // The context the hooks serve, and the original SetSamplers / GetSamplers of its six stages. Any other context (a
+    // deferred one, a second device's, a ReShade proxy the game does not bind through) is passed straight to the natives.
+    void Attach(ID3D11DeviceContext* latched, const std::array<SetSamplersFn, kStages>& set,
+                const std::array<GetSamplersFn, kStages>& get)
+    {
+        _set = set;
+        _get = get;
+        _latched.store(latched, std::memory_order_release);
+    }
+
+    ID3D11DeviceContext* Latched() const { return _latched.load(std::memory_order_acquire); }
+
+    // Substitution on or off. Turning it off puts the game's own samplers back on the latched context at once.
+    void SetActive(bool active)
+    {
+        if (_active.load(std::memory_order_relaxed) == active)
+            return;
+
+        _active.store(active, std::memory_order_release);
+        if (!active)
+            Rebind(true);
+    }
+
+    bool Active() const { return _active.load(std::memory_order_relaxed); }
+
+    // Detour body of the six SetSamplers. No lock, no allocation: a pointer compare, a table lookup per changed slot and the
+    // native call. A slot whose sampler and revision are unchanged since the last bind costs two compares.
+    void Set(unsigned stage, ID3D11DeviceContext* c, UINT start, UINT count, ID3D11SamplerState* const* input)
+    {
+        const SetSamplersFn native = _set[stage];
+        if (!_active.load(std::memory_order_relaxed) || c != _latched.load(std::memory_order_relaxed) ||
+            input == nullptr || start >= kSlots || count == 0 || count > kSlots - start)
+        {
+            native(c, start, count, input);
+            return;
+        }
+
+        ID3D11SamplerState* out[kSlots];
+        bool any = false;
+        for (UINT i = 0; i < count; ++i)
+        {
+            ID3D11SamplerState* const ask = input[i];
+            Slot& s = _slots[stage][start + i];
+            if (s.revision != _revision || s.asked.Get() != ask)
+            {
+                ID3D11SamplerState* const v = Resolve(ask);
+                s.asked = ask;
+                if (v != ask)
+                    s.variant = v;
+                else
+                    s.variant.Reset();
+                s.revision = _revision;
+            }
+
+            if (s.variant)
+            {
+                out[i] = s.variant.Get();
+                any = true;
+                ++_substitutedBinds;
+            }
+            else
+            {
+                out[i] = ask;
+            }
+        }
+
+        if (any)
+            _anyRecord.store(true, std::memory_order_relaxed);
+
+        native(c, start, count, out);
+    }
+
+    // Detour body of the six GetSamplers: the game sees the samplers it asked for. A slot is translated only when the native
+    // call returns exactly the variant this slot's record bound, so a sampler the game bound by another route (ClearState,
+    // a restored command list, the very object a variant happens to be) comes back as it is.
+    void Get(unsigned stage, ID3D11DeviceContext* c, UINT start, UINT count, ID3D11SamplerState** output)
+    {
+        _get[stage](c, start, count, output);
+        if (!_anyRecord.load(std::memory_order_relaxed) || c != _latched.load(std::memory_order_relaxed) ||
+            output == nullptr || start >= kSlots || count == 0 || count > kSlots - start)
+            return;
+
+        for (UINT i = 0; i < count; ++i)
+        {
+            const Slot& s = _slots[stage][start + i];
+            if (s.variant && output[i] == s.variant.Get() && s.asked)
+            {
+                output[i]->Release();
+                output[i] = s.asked.Get();
+                output[i]->AddRef();
+            }
+        }
+    }
+
+    // After SetTarget: bind the new variants to what is bound now. Reads the real state from the context, so it also
+    // follows ClearState, restored command lists and state swaps.
+    void Refresh() { Rebind(false); }
+
+    std::uint64_t SubstitutedBinds() const { return _substitutedBinds; }
+    bool AnySubstituted() const { return _anyRecord.load(std::memory_order_relaxed); }
+
   private:
+    // What one slot of the latched context holds: what the game asked for and the variant bound instead (null = the game's
+    // own sampler was bound). Immediate-context timeline only.
+    struct Slot
+    {
+        ComPtr<ID3D11SamplerState> asked;
+        ComPtr<ID3D11SamplerState> variant;
+        std::uint32_t revision = 0;
+    };
+
+    // Every slot of every stage: read what is bound, work out what should be bound, set it when different. `restore`
+    // binds the game's samplers (substitution going off) and forgets the records.
+    void Rebind(bool restore)
+    {
+        ID3D11DeviceContext* const c = _latched.load(std::memory_order_acquire);
+        if (c == nullptr || _set[0] == nullptr)
+            return;
+
+        for (unsigned stage = 0; stage < kStages; ++stage)
+        {
+            ID3D11SamplerState* actual[kSlots] = {};
+            ID3D11SamplerState* desired[kSlots] = {};
+            _get[stage](c, 0, kSlots, actual);
+
+            bool changed = false;
+            for (UINT i = 0; i < kSlots; ++i)
+            {
+                Slot& s = _slots[stage][i];
+                ID3D11SamplerState* const boundByUs = s.variant ? s.variant.Get() : s.asked.Get();
+                // Still what this slot's record bound: the game's request is the record's. Anything else was bound behind
+                // the hooks' back: what is bound is the request.
+                ID3D11SamplerState* const ask = (boundByUs == actual[i] && s.asked) ? s.asked.Get() : actual[i];
+
+                ID3D11SamplerState* want = ask;
+                if (restore)
+                {
+                    s.asked.Reset();
+                    s.variant.Reset();
+                    s.revision = 0;
+                }
+                else
+                {
+                    want = Resolve(ask);
+                    s.asked = ask;
+                    if (want != ask)
+                        {
+                        s.variant = want;
+                        _anyRecord.store(true, std::memory_order_relaxed);
+                    }
+                    else
+                        s.variant.Reset();
+                    s.revision = _revision;
+                }
+
+                desired[i] = want;
+                if (want != actual[i])
+                    changed = true;
+            }
+
+            if (changed)
+                _set[stage](c, 0, kSlots, desired);
+
+            for (UINT i = 0; i < kSlots; ++i)
+                if (actual[i] != nullptr)
+                    actual[i]->Release();
+        }
+
+        if (restore)
+            _anyRecord.store(false, std::memory_order_relaxed);
+    }
+
     SamplerTable _table;
     Counters _counters;
     CreateSamplerFn _create = nullptr;
+
+    std::array<SetSamplersFn, kStages> _set {};
+    std::array<GetSamplersFn, kStages> _get {};
+    std::atomic<ID3D11DeviceContext*> _latched { nullptr };
+    std::atomic<bool> _active { false };
+    std::atomic<bool> _anyRecord { false };
+    std::array<std::array<Slot, kSlots>, kStages> _slots {};
+    std::uint64_t _substitutedBinds = 0; // timeline only: a plain counter keeps the bind path free of atomic increments
 
     bool _hasTarget = false;
     double _target = 0.0;
