@@ -780,6 +780,59 @@ void TestTheRawPairSurvivesAFailedRepairAndAStalePairIsNotMistakenForOurs()
     }
 }
 
+// F1: the remembered pair is always what the block holds, whatever else goes wrong.
+void TestTheRememberedPairFollowsTheBlockThroughNaNAndExceptions()
+{
+    {
+        // the game refreshes the block with a NaN (not usable, nothing written): the old pair is forgotten, so a later refreshed raw pair that
+        // happens to equal it is the game's new value and is scaled from itself
+        Session g;
+        g.sequence = false;
+        for (int i = 1; i <= 6; ++i)
+            g.Next(); // adopted, the game refreshes; we wrote (0.18, -0.12) last
+        const float writtenX = g.e.attempted[g.e.attempted.size() - 2].value, writtenY = g.e.attempted[g.e.attempted.size() - 1].value;
+        Frame bad = g.Make();
+        bad.ngxJx = std::nanf("");
+        CHECK(Evaluate(g.e, g.engine, bad, false, true).sets.empty());
+        Frame f = g.Make();
+        f.ngxJx = writtenX;
+        f.ngxJy = writtenY;
+        CHECK(Wrote(Evaluate(g.e, g.engine, f, false, true), writtenX * 0.6, writtenY * 0.6));
+    }
+    {
+        // an exception in the sample stage after a complete write: the pair stays remembered (the block holds it) and is not scaled again
+        Session g;
+        g.sequence = false;
+        g.refresh = false;
+        for (int i = 1; i <= 4; ++i)
+            g.Next();
+        g.e.fgThrows = true;
+        g.t = 10000; // a tick: the status line asks frame generation after the write
+        CHECK(Wrote(g.Next(), 0.18, -0.12));
+        CHECK(CountLines(g.e.logs, "fg state") == 1);
+        g.e.fgThrows = false;
+        CHECK(g.Next().sets.empty());
+        CHECK(Near(g.e.floats[Param::JitterX], 0.18) && Near(g.e.floats[Param::JitterY], -0.12));
+    }
+    {
+        // an exception in the reads stage keeps the remembered pair too (nothing was changed): the unrefreshed block is not scaled again
+        Session g;
+        g.sequence = false;
+        g.refresh = false;
+        for (int i = 1; i <= 5; ++i)
+            g.Next();
+        g.e.fault = [](const char* where)
+        {
+            if (std::string(where) == "GetFloat")
+                throw std::runtime_error("read");
+        };
+        g.Next();
+        g.e.fault = nullptr;
+        CHECK(g.Next().sets.empty());
+        CHECK(Near(g.e.floats[Param::JitterX], 0.18) && Near(g.e.floats[Param::JitterY], -0.12));
+    }
+}
+
 // ---- pairs that are not usable --------------------------------------------------------------------------------------------------------
 
 void TestAPairThatIsNotUsableIsPassedThroughAndLoggedPerEpisode()
@@ -964,6 +1017,7 @@ int main()
     TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered();
     TestARatioChangeIsAppliedToTheRawPairNotTheHeldResult();
     TestTheRawPairSurvivesAFailedRepairAndAStalePairIsNotMistakenForOurs();
+    TestTheRememberedPairFollowsTheBlockThroughNaNAndExceptions();
     TestReadsComeBeforeTheWriteAndTheReadBackIsOnceAndShowsTheBlock();
     TestAGameThatNeverRefreshesTheBlockIsScaledOnce();
     TestAGameThatRefreshesEveryEvaluateIsScaledEveryTime();
