@@ -66,10 +66,12 @@ int main()
     }
 
     // ---- size picks --------------------------------------------------------------------------------------------------
-    CHECK(PickRenderWidth(1920, 3840, 2560) == 1920); // the geometry answer wins
-    CHECK(PickRenderWidth(0, 3840, 2560) == 3840);
-    CHECK(PickRenderWidth(0, 0, 2560) == 2560);
-    CHECK(PickRenderWidth(0, 0, 0) == 0);
+    CHECK(PickRenderWidth(3840, 2258) == 2258); // FFXIV: the subrect is the buffer, Width is the render
+    CHECK(PickRenderWidth(1920, 3840) == 1920);
+    CHECK(PickRenderWidth(2560, 2560) == 2560);
+    CHECK(PickRenderWidth(0, 2560) == 2560);
+    CHECK(PickRenderWidth(3840, 0) == 3840);
+    CHECK(PickRenderWidth(0, 0) == 0);
     CHECK(PickOutputWidth(3840, 1920, 2560) == 3840);
     CHECK(PickOutputWidth(0, 1920, 2560) == 1920);
     CHECK(PickOutputWidth(0, 0, 2560) == 2560);

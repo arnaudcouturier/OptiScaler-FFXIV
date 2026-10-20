@@ -17,7 +17,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <optional>
+#include <string>
 
 namespace ext::upscaler::mipbind
 {
@@ -44,13 +46,17 @@ inline std::optional<double> BaseFromEvaluate(unsigned renderW, unsigned display
 // What the variants carry: the base plus the user's offset, kept inside +-15 (never -0).
 inline double Target(double base, double offset) { return mipbias::FinalBias(base, mipbias::ClampOffset(offset)); }
 
-// The render width of an evaluate: the game's geometry answer when there is one (the width after the fork's render
-// subrect correction), else the subrect the game reported, else the NGX Width parameter. Zero = unknown.
-inline unsigned PickRenderWidth(unsigned resolvedW, unsigned subrectW, unsigned paramW)
+// The render width of an evaluate: the smaller of the render subrect the game reports and the NGX Width parameter (zero
+// values do not count). FFXIV reports the buffer's own size as the subrect, which can be larger than what it rendered;
+// Width never is larger than the render (ext/upscaler/RenderGeometry.h), so the smaller one is the render size whatever
+// the geometry correction flag says. Zero = unknown.
+inline unsigned PickRenderWidth(unsigned subrectW, unsigned paramW)
 {
-    if (resolvedW != 0)
-        return resolvedW;
-    return subrectW != 0 ? subrectW : paramW;
+    if (subrectW == 0)
+        return paramW;
+    if (paramW == 0)
+        return subrectW;
+    return std::min(subrectW, paramW);
 }
 
 // The output width of an evaluate: the NGX OutWidth parameter, else the width of the output texture, else the display
@@ -251,4 +257,129 @@ class ModeDetector
     ValueSet _before;
     ValueSet _after;
 };
+
+// ---- settings ------------------------------------------------------------------------------------------------------
+// [Mipmap] MipmapBiasAuto, its alias AutomaticFFXIV, and the game default: an explicit MipmapBiasAuto wins, then the alias,
+// then the default of the game (on for FFXIV, off for every other game).
+inline bool EffectiveAuto(std::optional<bool> primary, std::optional<bool> alias, bool gameDefaultOn)
+{
+    if (primary)
+        return *primary;
+    if (alias)
+        return *alias;
+    return gameDefaultOn;
+}
+
+// Bind-time substitution runs only when the setting is on and no manual MipmapBiasOverride is set: the manual value always
+// wins. (In the override mode of the older module, which writes the volatile override itself, this is not asked.)
+inline bool BindShouldRun(bool autoEnabled, bool manualOverrideSet) { return autoEnabled && !manualOverrideSet; }
+
+// ---- text ----------------------------------------------------------------------------------------------------------
+namespace detail
+{
+inline std::string Num4(double v) { return std::format("{:.4f}", std::fabs(v) < 0.00005 ? 0.0 : v); }
+inline std::string Off2(double v) { return std::format("{:+.2f}", std::fabs(v) < 0.005 ? 0.0 : v); }
+} // namespace detail
+
+// One INFO line per change of the target.
+inline std::string TargetLine(unsigned renderW, unsigned displayW, double base, double offset, double target, Mode mode,
+                              bool first)
+{
+    using namespace detail;
+    return std::format("Bind-time mip bias: render width {}, output width {}, ratio bias {}, offset {} -> target {} ({} mode{}); "
+                       "applies to the samplers bound from now on and to the ones bound now",
+                       renderW, displayW, Num4(base), Off2(offset), Num4(target), ModeText(mode),
+                       first ? ", first measurement" : "");
+}
+
+// The one line when the detector decides.
+inline std::string DecisionLine(const Decision& d)
+{
+    using namespace detail;
+    if (d.mode == Mode::Replace)
+        return std::format("Bind-time mip bias: the game already follows the quality mode (its bias {} became {} for a ratio "
+                           "change of {}), so the target REPLACES the game's own bias",
+                           Num4(d.seenBefore), Num4(d.seenAfter), Num4(d.delta));
+
+    return std::format("Bind-time mip bias: the game's biases did not follow the quality change of {} (looked at {} new "
+                       "samplers), they are art values, so the target is ADDED to the game's own bias",
+                       Num4(d.delta), d.created);
+}
+
+// Debug line of MipmapBiasObserve: a distinct original bias seen at a ratio.
+inline std::string ObserveLine(double base, float original, size_t distinctAtRatio)
+{
+    return std::format("Bind-time mip bias observe: ratio bias {} original sampler bias {} ({} distinct at this ratio)",
+                       detail::Num4(base), detail::Num4(original), distinctAtRatio);
+}
+
+// MipmapBiasObserve: the distinct originals per ratio. Returns a line the first time a value is seen at a ratio.
+class Observer
+{
+  public:
+    std::optional<std::string> Note(double base, float original)
+    {
+        if (!std::isfinite(base) || !std::isfinite(original))
+            return std::nullopt;
+
+        Group* g = nullptr;
+        for (size_t i = 0; i < _used; ++i)
+            if (std::fabs(_groups[i].base - base) < kMinRatioChange)
+                g = &_groups[i];
+        if (g == nullptr)
+        {
+            if (_used >= _groups.size())
+                return std::nullopt;
+            g = &_groups[_used++];
+            g->base = base;
+        }
+
+        if (!g->values.Add(original))
+            return std::nullopt;
+        return ObserveLine(base, original, g->values.size());
+    }
+
+    void Reset() { *this = Observer(); }
+
+  private:
+    struct Group
+    {
+        double base = 0.0;
+        ValueSet values;
+    };
+    std::array<Group, 8> _groups {};
+    size_t _used = 0;
+};
+
+// What the menu card shows.
+struct BindStatus
+{
+    bool installed = false;  // the hooks are in place on the game's context
+    bool running = false;    // substitution is on (setting on, no manual value, a target exists)
+    bool manualWins = false; // a manual MipmapBiasOverride is set
+    bool hasTarget = false;
+    double target = 0.0;
+    Mode mode = Mode::Add;
+    bool decided = false;
+    unsigned long long substitutedBinds = 0;
+    unsigned long long variants = 0;
+    unsigned long long tableFull = 0;
+    unsigned long long failures = 0;
+    size_t samplers = 0; // eligible samplers known
+};
+
+inline std::string BindStatusLine(const BindStatus& s)
+{
+    using namespace detail;
+    if (!s.installed)
+        return "Bind-time mode is not active: the value is applied when samplers are created.";
+    if (s.manualWins)
+        return "A manual Mipmap Bias value is set: it wins, nothing is applied automatically.";
+    if (!s.hasTarget)
+        return "Waiting for the first upscaler evaluation.";
+    return std::format("Target {} ({} mode{}), {} samplers known, {} binds substituted, {} variants made{}{}.", Num4(s.target),
+                       ModeText(s.mode), s.decided ? "" : ", not decided yet", s.samplers, s.substitutedBinds, s.variants,
+                       s.tableFull != 0 ? std::format(", table full {} times", s.tableFull) : std::string(),
+                       s.failures != 0 ? std::format(", {} variant failures", s.failures) : std::string());
+}
 } // namespace ext::upscaler::mipbind
