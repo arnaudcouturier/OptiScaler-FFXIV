@@ -119,12 +119,24 @@ int main(int argc, char** argv)
         // variants are made inside a bypass scope, through the trampoline
         CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE CreateVariant(").find("ext::core::BypassScope scope;") != std::string::npos);
         // the fork's own samplers (made in a bypass scope) are not classified
-        CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(").find("!ext::core::HooksBypassed()") !=
+        CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(").find("ext::core::HooksBypassed()") !=
               std::string::npos);
+        CHECK(Body(hooks, "void OnSamplerCreated(").find("!bypassed &&") != std::string::npos);
         // a manual value makes the sampler not eligible
         CHECK(Body(hooks, "void OnSamplerCreated(").find("!ManualOverrideSet() &&") != std::string::npos);
-        // thirteen detours: CreateSamplerState plus the six pairs
+        // thirteen detours: CreateSamplerState plus the six pairs; the CreateSamplerState one is attached LAST (at the first
+        // upscaler create, after upstream's hook on the same function) and detached FIRST, each in its own transaction
         CHECK(Count(hooks, "DetourAttach(") == 3 && Count(hooks, "DetourDetach(") == 3);
+        CHECK(Body(hooks, "bool InstallCreateHook()").find("DetourAttach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState)") !=
+              std::string::npos);
+        const std::string uninstall = Body(hooks, "void Uninstall()");
+        const size_t detachCreate = uninstall.find("DetourDetach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState)");
+        const size_t detachBind = uninstall.find("DetourDetach(reinterpret_cast<PVOID*>(&g_set[s])");
+        CHECK(detachCreate != std::string::npos && detachBind != std::string::npos && detachCreate < detachBind);
+        CHECK(Count(uninstall, "DetourTransactionBegin()") == 2);
+        CHECK(Body(hooks, "void OnFeatureCreate()").find("InstallCreateHook();") != std::string::npos);
+        // variants are made from the description the device really created (it keeps upstream's changes, e.g. anisotropy)
+        CHECK(Body(hooks, "void OnSamplerCreated(").find("sampler->GetDesc(&created);") != std::string::npos);
         CHECK(hooks.find("kContextSetSamplersSlots[s]") != std::string::npos && hooks.find("kContextGetSamplersSlots[s]") != std::string::npos);
         CHECK(hooks.find("kDeviceCreateSamplerStateSlot") != std::string::npos);
     }
@@ -157,6 +169,8 @@ int main(int argc, char** argv)
         CHECK(Body(glue, "void EnsureConfigured()").find("mipbind::AutoEnabled() && !mipbind::Owns()") != std::string::npos);
         CHECK(Body(glue, "void OnConfigLoaded(float offset)").find("mipbind::AutoEnabled() && !mipbind::Owns()") != std::string::npos);
         CHECK(Body(glue, "void OnSettingChanged()").find("mipbind::AutoEnabled() && !mipbind::Owns()") != std::string::npos);
+        // the first feature create attaches the CreateSamplerState hook of the bind-time module
+        CHECK(Body(glue, "void OnFeatureCreate(").find("mipbind::OnFeatureCreate();") != std::string::npos);
         // and the "manual setting is back" line is not logged then
         CHECK(Body(glue, "void LogSetting(").find("if (mipbind::Owns())\n        return;") != std::string::npos);
     }

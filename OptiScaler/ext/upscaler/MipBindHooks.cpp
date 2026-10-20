@@ -28,7 +28,13 @@ std::atomic<bool> g_failed { false };    // installing failed once: not tried ag
 ComPtr<ID3D11Device> g_device; // kept so that the menu can attach the hooks later when the setting comes on
 ComPtr<ID3D11DeviceContext> g_context;
 
-CreateSamplerFn g_create = nullptr; // the detour trampolines once attached
+CreateSamplerFn g_createPlain = nullptr;                // the device's own CreateSamplerState, as its vtable gives it
+CreateSamplerFn g_createTramp = nullptr;                // the trampoline of the create hook once attached
+std::atomic<CreateSamplerFn> g_createCall { nullptr };  // what the engine makes variants with
+std::atomic<bool> g_createHooked { false };
+std::atomic<bool> g_createFailed { false };
+std::atomic<bool> g_featureSeen { false };              // an upscaler feature was created: the create hook may be attached now
+std::mutex g_installMutex;                              // install and uninstall only; never taken by a hook
 std::array<SetSamplersFn, kStages> g_set {};
 std::array<GetSamplersFn, kStages> g_get {};
 
@@ -94,13 +100,20 @@ void STDMETHODCALLTYPE HkGet(ID3D11DeviceContext* c, UINT start, UINT count, ID3
     g_engine.Get(S, c, start, count, output);
 }
 
-void OnSamplerCreated(const D3D11_SAMPLER_DESC& desc, ID3D11SamplerState* sampler)
+void OnSamplerCreated(const D3D11_SAMPLER_DESC& desc, ID3D11SamplerState* sampler, bool bypassed)
 {
-    // A sampler made while a manual value is set carries that value, not the game's: it is not ours to change.
-    const bool eligible =
-        !ManualOverrideSet() && IsEligible(desc.MipLODBias, desc.MinLOD, desc.MaxLOD, static_cast<unsigned>(desc.Filter));
+    // A sampler made while a manual value is set carries that value, not the game's: it is not ours to change. A sampler the
+    // fork made itself (inside a bypass scope) never takes part, but it still goes through the table: its address may be one
+    // a released game sampler had, and that entry must not live on for it.
+    const bool eligible = !bypassed && !ManualOverrideSet() &&
+                          IsEligible(desc.MipLODBias, desc.MinLOD, desc.MaxLOD, static_cast<unsigned>(desc.Filter));
 
-    const auto result = g_engine.table().OnCreated(sampler, desc, desc.MipLODBias, eligible);
+    // The bias and the eligibility come from the description the game asked for (this hook sits above upstream's, so it is
+    // the game's own); the entry keeps the description the device really created, with whatever upstream changed (for
+    // example the anisotropy override), because variants are made from it.
+    D3D11_SAMPLER_DESC created = desc;
+    sampler->GetDesc(&created);
+    const auto result = g_engine.table().OnCreated(sampler, created, desc.MipLODBias, eligible);
 
     if (result == SamplerTable::Result::Full)
     {
@@ -132,24 +145,67 @@ void OnSamplerCreated(const D3D11_SAMPLER_DESC& desc, ID3D11SamplerState* sample
 HRESULT STDMETHODCALLTYPE HkCreateSamplerState(ID3D11Device* device, const D3D11_SAMPLER_DESC* desc,
                                                ID3D11SamplerState** out)
 {
-    const HRESULT hr = g_create(device, desc, out);
-    // The fork's own samplers are made inside a bypass scope (or have a bias of zero) and never take part.
-    if (SUCCEEDED(hr) && desc != nullptr && out != nullptr && *out != nullptr && !ext::core::HooksBypassed())
-        OnSamplerCreated(*desc, *out);
+    const HRESULT hr = g_createTramp(device, desc, out);
+    if (SUCCEEDED(hr) && desc != nullptr && out != nullptr && *out != nullptr)
+        OnSamplerCreated(*desc, *out, ext::core::HooksBypassed());
     return hr;
 }
 
-// The engine makes variants through the trampoline, below every hook, inside a bypass scope.
+// The engine makes variants inside a bypass scope: through the trampoline (below every hook) once the create hook exists, else
+// through the device's own function, where upstream's hook only passes the call on because of the scope.
 HRESULT STDMETHODCALLTYPE CreateVariant(ID3D11Device* device, const D3D11_SAMPLER_DESC* desc, ID3D11SamplerState** out)
 {
     ext::core::BypassScope scope;
-    return g_create(device, desc, out);
+    return g_createCall.load(std::memory_order_acquire)(device, desc, out);
 }
 
-bool Install(ID3D11Device* device)
+constexpr std::array<SetSamplersFn, kStages> kSetHooks = { &HkSet<0>, &HkSet<1>, &HkSet<2>, &HkSet<3>, &HkSet<4>, &HkSet<5> };
+constexpr std::array<GetSamplersFn, kStages> kGetHooks = { &HkGet<0>, &HkGet<1>, &HkGet<2>, &HkGet<3>, &HkGet<4>, &HkGet<5> };
+
+// The hook on the device's CreateSamplerState is attached LAST and detached FIRST: upstream's own hook on the same function is
+// attached when the first device is hooked and detached at the end (D3D11Hooks::Unhook), and Detours transactions on one target
+// must be undone in the reverse order of their attaches. Attaching at the first upscaler create (long after upstream's hook)
+// and detaching in OnUnhook (before upstream's) keeps that order.
+bool InstallCreateHook()
 {
-    if (device == nullptr)
+    if (!g_installed || g_createHooked || g_createFailed || !g_device)
         return false;
+
+    void** const deviceTable = *reinterpret_cast<void***>(g_device.Get());
+    g_createTramp = reinterpret_cast<CreateSamplerFn>(deviceTable[kDeviceCreateSamplerStateSlot]);
+
+    // Single-thread enlistment (see InstallBindHooks).
+    LONG result = ERROR_INVALID_FUNCTION;
+    if (DetourTransactionBegin() == NO_ERROR)
+    {
+        bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
+        ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState) == NO_ERROR;
+        if (ok)
+            result = DetourTransactionCommit();
+        else
+            DetourTransactionAbort();
+    }
+
+    if (result != NO_ERROR)
+    {
+        LOG_ERROR("Bind-time mip bias: the CreateSamplerState hook was not installed ({}); samplers made from now on are not "
+                  "seen, the ones already known keep working",
+                  result);
+        g_createFailed = true;
+        return false;
+    }
+
+    g_createCall.store(g_createTramp, std::memory_order_release);
+    g_createHooked = true;
+    LOG_INFO("Bind-time mip bias: CreateSamplerState hook installed (after the upstream one)");
+    return true;
+}
+
+bool InstallBindHooks(ID3D11Device* device)
+{
+    std::scoped_lock install(g_installMutex);
+    if (device == nullptr || g_installed || g_failed)
+        return g_installed;
 
     ComPtr<ID3D11DeviceContext> context;
     device->GetImmediateContext(&context);
@@ -162,32 +218,24 @@ bool Install(ID3D11Device* device)
 
     void** const deviceTable = *reinterpret_cast<void***>(device);
     void** const contextTable = *reinterpret_cast<void***>(context.Get());
-    g_create = reinterpret_cast<CreateSamplerFn>(deviceTable[kDeviceCreateSamplerStateSlot]);
+    g_createPlain = reinterpret_cast<CreateSamplerFn>(deviceTable[kDeviceCreateSamplerStateSlot]);
     for (unsigned s = 0; s < kStages; ++s)
     {
         g_set[s] = reinterpret_cast<SetSamplersFn>(contextTable[kContextSetSamplersSlots[s]]);
         g_get[s] = reinterpret_cast<GetSamplersFn>(contextTable[kContextGetSamplersSlots[s]]);
     }
 
-    static constexpr std::array<SetSamplersFn, kStages> setHooks = { &HkSet<0>, &HkSet<1>, &HkSet<2>,
-                                                                      &HkSet<3>, &HkSet<4>, &HkSet<5> };
-    static constexpr std::array<GetSamplersFn, kStages> getHooks = { &HkGet<0>, &HkGet<1>, &HkGet<2>,
-                                                                      &HkGet<3>, &HkGet<4>, &HkGet<5> };
-
     // Single-thread enlistment, like the other device hooks of the fork (ext/ffxiv/lighting/FfxivLightingCapture.h): the
     // install happens once, early, and enlisting every thread would spread Detours' allocation-while-suspended hazard to a
     // path that runs every session.
-    bool began = false;
     LONG result = ERROR_INVALID_FUNCTION;
     if (DetourTransactionBegin() == NO_ERROR)
     {
-        began = true;
         bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
-        ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_create), HkCreateSamplerState) == NO_ERROR;
         for (unsigned s = 0; s < kStages; ++s)
         {
-            ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_set[s]), setHooks[s]) == NO_ERROR;
-            ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_get[s]), getHooks[s]) == NO_ERROR;
+            ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_set[s]), kSetHooks[s]) == NO_ERROR;
+            ok &= DetourAttach(reinterpret_cast<PVOID*>(&g_get[s]), kGetHooks[s]) == NO_ERROR;
         }
         if (ok)
             result = DetourTransactionCommit();
@@ -195,21 +243,26 @@ bool Install(ID3D11Device* device)
             DetourTransactionAbort();
     }
 
-    if (!began || result != NO_ERROR)
+    if (result != NO_ERROR)
     {
         LOG_ERROR("Bind-time mip bias: hooks not installed ({}); the create-time module stays in charge", result);
         g_failed = true;
         return false;
     }
 
+    g_createCall.store(g_createPlain, std::memory_order_release);
     g_engine.SetCreateFn(&CreateVariant);
     g_engine.Attach(context.Get(), g_set, g_get);
     g_context = context;
+    g_device = device;
     g_stamp = StampContext(context.Get());
     g_installed = true;
     g_ready.store(true, std::memory_order_release);
     LOG_INFO("Bind-time mip bias: sampler hooks installed on device {:#x}, immediate context {:#x}", (size_t) device,
              (size_t) context.Get());
+
+    if (g_featureSeen)
+        InstallCreateHook();
 
     // The older module may already hold the override: it stands down now (restores the user's own value).
     mipbias::OnSettingChanged();
@@ -218,11 +271,36 @@ bool Install(ID3D11Device* device)
 
 void Uninstall()
 {
+    std::scoped_lock install(g_installMutex);
     if (!g_installed.load())
         return;
 
     g_ready.store(false, std::memory_order_release);
     g_engine.SetActive(false); // the game's own samplers go back on the context
+
+    // Two transactions, in the reverse order of the attaches: the create hook first (it sits on top of upstream's).
+    if (g_createHooked)
+    {
+        ext::core::DetourThreadScope threads;
+        bool done = false;
+        if (threads.Ok() && DetourTransactionBegin() == NO_ERROR)
+        {
+            bool ok = threads.Update() == NO_ERROR;
+            ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState) == NO_ERROR;
+            if (ok && DetourTransactionCommit() == NO_ERROR)
+                done = true;
+            else if (!ok)
+                DetourTransactionAbort();
+        }
+        if (!done)
+        {
+            LOG_WARN("Bind-time mip bias: the CreateSamplerState hook was left attached (inactive)");
+            g_ready.store(true, std::memory_order_release);
+            return;
+        }
+        g_createHooked = false;
+        g_createCall.store(g_createPlain, std::memory_order_release);
+    }
 
     ext::core::DetourThreadScope threads;
     if (!threads.Ok())
@@ -232,18 +310,13 @@ void Uninstall()
         return;
     }
 
-    static constexpr std::array<SetSamplersFn, kStages> setHooks = { &HkSet<0>, &HkSet<1>, &HkSet<2>,
-                                                                      &HkSet<3>, &HkSet<4>, &HkSet<5> };
-    static constexpr std::array<GetSamplersFn, kStages> getHooks = { &HkGet<0>, &HkGet<1>, &HkGet<2>,
-                                                                      &HkGet<3>, &HkGet<4>, &HkGet<5> };
     if (DetourTransactionBegin() != NO_ERROR)
         return;
     bool ok = threads.Update() == NO_ERROR;
-    ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_create), HkCreateSamplerState) == NO_ERROR;
     for (unsigned s = 0; s < kStages; ++s)
     {
-        ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_set[s]), setHooks[s]) == NO_ERROR;
-        ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_get[s]), getHooks[s]) == NO_ERROR;
+        ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_set[s]), kSetHooks[s]) == NO_ERROR;
+        ok &= DetourDetach(reinterpret_cast<PVOID*>(&g_get[s]), kGetHooks[s]) == NO_ERROR;
     }
     if (ok && DetourTransactionCommit() == NO_ERROR)
     {
@@ -255,7 +328,6 @@ void Uninstall()
         DetourTransactionAbort();
     }
 }
-
 // Where the width the target is made from comes from: the render width of this evaluate is the smaller of the render subrect
 // and Width, the output width is OutWidth, else the output texture, else the display width the feature was created with.
 bool ReadSizes(NVSDK_NGX_Parameter* parameters, unsigned& renderW, unsigned& outputW)
@@ -314,9 +386,19 @@ void OnDeviceHooked(ID3D11Device* device)
 
     // The older module's view of the setting depends on the game default: tell it now that the game is known.
     if (!g_installed && !g_failed && AutoEnabled())
-        Install(g_device.Get());
+        InstallBindHooks(g_device.Get());
     else
         mipbias::OnSettingChanged();
+}
+
+void OnFeatureCreate()
+{
+    g_featureSeen = true;
+    if (g_installed.load() && !g_createHooked && !g_createFailed)
+    {
+        std::scoped_lock install(g_installMutex);
+        InstallCreateHook();
+    }
 }
 
 void OnUnhook()
@@ -328,7 +410,7 @@ void OnUnhook()
 void OnSettingChanged()
 {
     if (!g_installed && !g_failed && g_ffxiv && g_device && AutoEnabled())
-        Install(g_device.Get());
+        InstallBindHooks(g_device.Get());
 }
 
 void OnEvaluate(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters)

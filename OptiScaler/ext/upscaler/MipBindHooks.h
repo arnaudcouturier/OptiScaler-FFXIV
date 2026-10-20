@@ -20,6 +20,11 @@ namespace ext::upscaler::mipbind
 // A matched FFXIV build's device reached the hook seam: remember it, and attach the hooks when the setting is on.
 void OnDeviceHooked(ID3D11Device* device);
 
+// An upscaler feature is being created (mipbias::OnFeatureCreate, every create). The first one attaches the hook on the
+// device's CreateSamplerState: late on purpose, after upstream's own hook on that function, so that detaching it first in
+// OnUnhook keeps the reverse order Detours needs.
+void OnFeatureCreate();
+
 // The device is going away: put the game's samplers back, detach, forget.
 void OnUnhook();
 

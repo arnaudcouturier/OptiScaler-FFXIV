@@ -102,6 +102,8 @@ void OnConfigLoaded(float offset)
 
 void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag)
 {
+    mipbind::OnFeatureCreate(); // the bind-time module attaches its CreateSamplerState hook at the first create
+
     const auto* config = Config::Instance();
 
     RawCreate create;
