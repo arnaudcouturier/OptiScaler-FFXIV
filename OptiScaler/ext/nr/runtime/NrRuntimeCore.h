@@ -40,6 +40,8 @@ struct Env
     std::function<uint64_t()> nowMs;
     std::function<void(bool warning, const std::string&)> log;
     std::function<void()> onScan; // test hook, called inside every catalog scan (may block or throw); empty in production
+    std::function<bool()> injectIncomplete; // test hook: true = pretend a listing broke off half way; empty in production
+    std::function<bool()> shuttingDown;     // the process is unloading the fork (the hash worker stops reading)
 };
 
 class Runtime
@@ -120,6 +122,13 @@ class Runtime
         return copy;
     }
 
+    // Non-empty when the last scan failed or was incomplete (the card shows it).
+    std::string ScanNote()
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _scanNote;
+    }
+
     const char* SwitchLockReason() { return _lock.Reason(_env.hybridPrecisionNow(), _env.amdBridgeActive()); }
 
     void NoteNgxSearchFolder(const fs::path& folder)
@@ -154,6 +163,9 @@ class Runtime
         if (worker.joinable())
             worker.join();
     }
+
+    // The bridge comes back: hashing may start again.
+    void Resume() { _stop = false; }
 
     // For tests: how many files the worker has started to read.
     int HashAttempts() const { return _hashAttempts; }
@@ -210,10 +222,13 @@ class Runtime
         return Key(e.path) + L"|" + std::to_wstring(e.sizeBytes) + L"|" + std::to_wstring(e.stamp);
     }
 
-    // The candidates on disk now. No state of this object is touched: it runs without the mutex.
-    std::vector<Entry> ScanCatalog()
+    // The candidates on disk now. No state of this object is touched: it runs without the mutex. `complete` is false when the scan threw
+    // or a listing broke off: the list may then be short.
+    std::vector<Entry> ScanCatalog(bool& complete, std::string& why)
     {
         std::vector<Entry> entries;
+        bool incomplete = false;
+        complete = true;
         try
         {
             if (_env.onScan)
@@ -229,9 +244,9 @@ class Runtime
             { return !allowAll && !streamline.empty() && IsUnder(p, streamline); };
 
             // Legacy file: beside OptiScaler first, then beside the executable, as the model search always did.
-            auto legacy = FindLegacy(dllDir, L"nvngx_dlssnr.dll", excluded);
+            auto legacy = FindLegacy(dllDir, L"nvngx_dlssnr.dll", excluded, &incomplete);
             if (!legacy)
-                legacy = FindLegacy(exeDir, L"nvngx_dlssnr.dll", excluded);
+                legacy = FindLegacy(exeDir, L"nvngx_dlssnr.dll", excluded, &incomplete);
             if (legacy)
             {
                 Entry e;
@@ -248,7 +263,7 @@ class Runtime
                 roots.push_back(*mainDll);
             roots.push_back(dllDir / L"OptiScaler");
             roots.push_back(exeDir / L"OptiScaler");
-            for (auto& e : ScanFolders(roots, L"nvngx_dlssnr.dll"))
+            for (auto& e : ScanFolders(roots, L"nvngx_dlssnr.dll", &incomplete))
             {
                 // A folder entry that is the very file the legacy search found is the legacy file, not a second candidate.
                 bool same = false;
@@ -263,15 +278,24 @@ class Runtime
                 e.sizeBytes = FileSize(e.path);
                 e.stamp = FileStamp(e.path);
             }
+            if (_env.injectIncomplete && _env.injectIncomplete())
+                incomplete = true;
+            if (incomplete)
+            {
+                complete = false;
+                why = "a folder could not be listed completely";
+            }
         }
         catch (const std::exception& ex)
         {
-            _env.log(true, std::string("DLSS-NR runtime: the catalog scan failed (") + ex.what() + "); no model is offered");
+            complete = false;
+            why = std::string("the scan failed (") + ex.what() + ")";
             entries.clear();
         }
         catch (...)
         {
-            _env.log(true, "DLSS-NR runtime: the catalog scan failed; no model is offered");
+            complete = false;
+            why = "the scan failed";
             entries.clear();
         }
         return entries;
@@ -283,7 +307,21 @@ class Runtime
         std::lock_guard<std::mutex> scanLock(_scanMutex);
         if (!again && _catalogBuilt)
             return; // another thread did the first scan while this one waited
-        std::vector<Entry> entries = ScanCatalog();
+        bool complete = true;
+        std::string why;
+        std::vector<Entry> entries = ScanCatalog(complete, why);
+        if (!complete && _catalogBuilt)
+        {
+            // A rescan that broke off must not take a working model offline: the previous list stays, the card says so.
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _scanNote = "the last rescan failed (" + why + "); the previous list is kept";
+            }
+            _env.log(true, "DLSS-NR runtime: the rescan failed (" + why + "); the previous catalog is kept");
+            return;
+        }
+        if (!complete)
+            _env.log(true, "DLSS-NR runtime: the first catalog scan was incomplete (" + why + "); the candidates found are offered");
         const size_t count = entries.size();
         std::string listing;
         for (const auto& e : entries)
@@ -305,6 +343,7 @@ class Runtime
             if (_selector)
                 _selector->Rescan();
             _catalogBuilt = true;
+            _scanNote = complete ? std::string() : "the catalog scan was incomplete (" + why + ")";
         }
         _env.log(false, "DLSS-NR runtime catalog: " + std::to_string(count) + " candidate(s)" + listing);
     }
@@ -363,7 +402,7 @@ class Runtime
             if (_stop)
                 break;
             ++_hashAttempts;
-            const std::string sha = Sha256File(path, &_stop);
+            const std::string sha = Sha256File(path, [this] { return _stop.load() || (_env.shuttingDown && _env.shuttingDown()); });
             if (_stop)
                 break;
             std::lock_guard<std::mutex> lock(_mutex);
@@ -388,6 +427,7 @@ class Runtime
     std::map<std::wstring, std::string> _hashes;
     std::set<std::wstring> _failedHashes;
     std::vector<std::string> _hashLog;
+    std::string _scanNote;
     std::unique_ptr<Selector> _selector;
     std::shared_ptr<const Snapshot> _startup;
     fs::path _ngxFolder;

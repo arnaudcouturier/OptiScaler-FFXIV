@@ -34,6 +34,12 @@ using ExcludeFn = std::function<bool(const fs::path&)>;
 
 namespace detail
 {
+// A folder that simply is not there (or is not a folder) is an ordinary answer; any other error means the listing may be incomplete.
+inline bool BenignDirectoryError(const std::error_code& ec)
+{
+    return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
+}
+
 // An NR.* folder is a candidate of the picker, never "the" legacy file.
 inline bool SkipDirectory(const fs::path& dir) { return HasRuntimePrefix(dir.filename().wstring()); }
 } // namespace detail
@@ -41,7 +47,10 @@ inline bool SkipDirectory(const fs::path& dir) { return HasRuntimePrefix(dir.fil
 // Same order as Util::FindFilePath (a direct hit in startDir, then a breadth-first search under it, then the same search under the
 // game root found through the Unreal Engine folder layout), except that no NR.* folder is entered. With no NR.* folder present the
 // answer is the one FindFilePath gives.
-inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::path& fileName, const ExcludeFn& excluded = {})
+// `incomplete` (when given) is set when a folder could not be listed or a listing broke off half way: "not found" is then only "not found
+// in what could be read", and the caller must not treat it as a fact.
+inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::path& fileName, const ExcludeFn& excluded = {},
+                                          bool* incomplete = nullptr)
 {
     std::error_code ec;
     const fs::path direct = startDir / fileName;
@@ -59,7 +68,11 @@ inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::pa
             std::error_code iterEc;
             fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, iterEc);
             if (iterEc)
+            {
+                if (incomplete != nullptr && !detail::BenignDirectoryError(iterEc))
+                    *incomplete = true;
                 continue;
+            }
             // increment(ec) rather than a range-for: operator++ throws on an error in the middle of a folder.
             for (; !iterEc && it != fs::directory_iterator(); it.increment(iterEc))
             {
@@ -76,6 +89,8 @@ inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::pa
                         return entry.path();
                 }
             }
+            if (iterEc && incomplete != nullptr)
+                *incomplete = true; // the listing broke off half way
         }
         return std::nullopt;
     };
@@ -133,7 +148,7 @@ inline bool IsUnder(const fs::path& path, const fs::path& root)
 
 // Every NR.<version> folder directly inside one of the roots that holds the model file, one entry per folder name (the first root
 // wins). Paths are made canonical so one file can never be two entries of the forwarder's module cache.
-inline std::vector<Entry> ScanFolders(const std::vector<fs::path>& roots, const fs::path& fileName)
+inline std::vector<Entry> ScanFolders(const std::vector<fs::path>& roots, const fs::path& fileName, bool* incomplete = nullptr)
 {
     std::vector<Entry> found;
     for (const auto& root : roots)
@@ -141,7 +156,11 @@ inline std::vector<Entry> ScanFolders(const std::vector<fs::path>& roots, const 
         std::error_code ec;
         fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
         if (ec)
+        {
+            if (incomplete != nullptr && !detail::BenignDirectoryError(ec))
+                *incomplete = true;
             continue;
+        }
         for (; !ec && it != fs::directory_iterator(); it.increment(ec))
         {
             const auto& dirEntry = *it;
@@ -166,6 +185,8 @@ inline std::vector<Entry> ScanFolders(const std::vector<fs::path>& roots, const 
             e.path = canonEc ? file.lexically_normal() : canon;
             found.push_back(std::move(e));
         }
+        if (ec && incomplete != nullptr)
+            *incomplete = true; // the listing broke off half way
     }
     std::sort(found.begin(), found.end(), [](const Entry& a, const Entry& b) { return detail::LessNoCase(a.id, b.id); });
     return found;
@@ -264,7 +285,7 @@ inline std::string Sha256Hex(const void* data, size_t size)
 }
 
 // SHA-256 of a file, read in 1 MiB pieces; empty on any read error. Meant for a worker thread: the model is hundreds of MB.
-inline std::string Sha256File(const fs::path& file, const std::atomic<bool>* cancel = nullptr)
+inline std::string Sha256File(const fs::path& file, const std::function<bool()>& cancel = {})
 {
     HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -276,7 +297,7 @@ inline std::string Sha256File(const fs::path& file, const std::atomic<bool>* can
     bool ok = true;
     for (;;)
     {
-        if (cancel != nullptr && cancel->load(std::memory_order_relaxed))
+        if (cancel && cancel())
         {
             ok = false; // asked to stop (the process is shutting down)
             break;

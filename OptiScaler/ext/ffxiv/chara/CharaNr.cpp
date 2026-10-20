@@ -4,6 +4,7 @@
 #include "ext/core/PathText.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/nr/runtime/NrPreviewRuntime.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/nr/DlssNr.h"
@@ -118,6 +119,7 @@ struct Module
     // A failure the MODEL caused (it would not initialise, or the run failed in the model's recording step). Unlike the session latch of
     // `latches` it ends when another NR runtime is selected (SyncRuntime), so a bad model file does not switch previews off until restart.
     std::atomic<bool> modelLatched { false };
+    uint64_t latchedRuntime = 0; // the NR runtime revision that was current when the model latch was set
     uint64_t probedRuntime = 0; // the NR runtime revision the model probe was made for (a later revision probes again)
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
@@ -171,7 +173,10 @@ void Latch(const char* why)
 void LatchModel(const char* why)
 {
     if (!M().modelLatched.exchange(true))
+    {
+        M().latchedRuntime = DlssNr::PreviewRuntimeRevision();
         LOG_WARN("CharaView NR: {}; switched off until another NR runtime is selected, native previews retained", why);
+    }
 }
 
 bool Late() { return ext::Cfg().ffxiv.chara.previewNrLate.value_or_default(); }
@@ -1008,7 +1013,6 @@ static void SyncRuntime()
     const uint64_t revision = DlssNr::PreviewRuntimeRevision();
     if (revision == m.backend.revision)
         return;
-    m.modelLatched = false; // another model gets its own chance
     DlssNr::PreviewBackend next;
     const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(m.dev12, next);
     switch (status)
@@ -1034,6 +1038,35 @@ static void SyncRuntime()
     Refresh();
 }
 
+// Looks at the NR runtime selection and does what ObservePreviewRuntime says. Called from the maintenance call (which runs whatever the
+// availability is) AND at the top of every draw: a model failure latch and a missing model both CLOSE the gate in front of the draw
+// entry points, so the draws alone could never see the selection change that is supposed to open it again (review N1).
+// Caller holds the module mutex.
+static void ObserveRuntime()
+{
+    Module& m = M();
+    ext::nr::runtime::PreviewRuntimeView view;
+    view.inited = m.inited;
+    view.modelMissing = m.model == Probe::Missing;
+    view.modelLatched = m.modelLatched;
+    view.backendRevision = m.backend.revision;
+    view.probedRevision = m.probedRuntime;
+    view.latchedRevision = m.latchedRuntime;
+    const uint64_t revision = DlssNr::PreviewRuntimeRevision();
+    const ext::nr::runtime::PreviewRuntimeActions action = ext::nr::runtime::ObservePreviewRuntime(view, revision);
+    if (action.clearModelLatch)
+    {
+        m.modelLatched = false; // another model gets its own chance
+        LOG_INFO("CharaView NR: NR runtime revision {}; the model failure of the previous runtime is forgotten", revision);
+    }
+    if (action.resync && m.inited)
+        SyncRuntime();
+    else if (action.reprobe)
+        m.forwarder = m.model = Probe::Unknown; // started without a model, or one that was not installed: EnsureInit probes again
+    if (action.clearModelLatch || action.resync || action.reprobe)
+        Refresh();
+}
+
 // All three placements run through this one function; `production` is null for the bring-up (and set for the other two, whose requests carry
 // the copied images). The stream table, the availability and creation steps, the settle-and-rebuild rule, the model creation and the readiness
 // wait are common; the placement decides the shape the stream is built for and what the hand-off copies (see Stream).
@@ -1054,10 +1087,7 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     if (const int known = m.table.Find(key); known != kNoStream)
         ++m.table.At(known).attempts;
 
-    if (m.inited)
-        SyncRuntime(); // before the availability is read: a selection without a model must show at once
-    else if (m.model == Probe::Missing && DlssNr::PreviewRuntimeRevision() != m.probedRuntime)
-        m.forwarder = m.model = Probe::Unknown; // started without a model and one was selected since: EnsureInit probes again
+    ObserveRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return RunOutcome::NotAvailable;
 
@@ -1306,6 +1336,7 @@ static void MaintainImpl(uint64_t now)
     if (m.releasePending && ReleaseAll(false))
         LOG_INFO("CharaView NR: the objects of the previous graphics device were released");
 
+    ObserveRuntime(); // the draws are not reached while a model failure or a missing model closes the gate: look at the selection here
     const Availability a = Refresh(); // also with nothing created: the dispatcher reads the cached result (Available())
     if (!m.inited && m.table.UsedCount() == 0)
         return;

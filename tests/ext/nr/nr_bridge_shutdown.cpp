@@ -47,6 +47,13 @@ static std::recursive_mutex g_nrMutex;
 static std::atomic_bool g_bridgeSuspended {false};
 static struct { bool reset = false, passNeedsReset[30] {}; } g_nr;
 static std::optional<double> g_lastGpuTime, g_lastNgxTime;
+// the picker's hash worker is stopped with the bridge and may hash again when it comes back (ext/nr/runtime, review N2)
+namespace ext::nr::runtime
+{
+static int shutdowns = 0, resumes = 0;
+inline void Shutdown() { ++shutdowns; }
+inline void Resume() { ++resumes; }
+}
 namespace DlssNr
 {
 #include "nr_shutdown_production.inl"
@@ -88,10 +95,12 @@ int main(int argc, char**)
     assert(g_nr.reset && std::all_of(std::begin(g_nr.passNeedsReset), std::end(g_nr.passNeedsReset),
                                    [](bool reset) { return reset; }));
     assert(!g_lastGpuTime && !g_lastNgxTime);
+    assert(ext::nr::runtime::shutdowns == 1 && ext::nr::runtime::resumes == 0);
     DlssNr::SuspendForBridgeShutdown(); // Repeated shutdown cannot double-release.
     assert(released == 2 && destroyed == 2);
     DlssNr::ResumeAfterBridgeInit();
     assert(!g_bridgeSuspended);
+    assert(ext::nr::runtime::resumes == 1);
     D::current = Make(true, &pending);
     DlssNr::SuspendForBridgeShutdown(); // Pending/unsubmitted work must survive.
     assert(released == 2 && destroyed == 2);

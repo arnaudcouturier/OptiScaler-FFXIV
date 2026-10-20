@@ -241,6 +241,28 @@ static void HashWorker()
     rt.Rescan();
     rt.Catalog();
     CHECK(rt.HashAttempts() == 3); // no worker after Shutdown
+    // the bridge comes back (review N2): hashing is allowed again, nothing stays dead for the rest of the session
+    rt.Resume();
+    rt.Catalog();
+    rt.WaitForHashing();
+    CHECK(rt.HashAttempts() == 4);
+    rt.Shutdown();
+}
+
+static void HashStopsWhenTheProcessIsUnloading()
+{
+    World w;
+    Put(w.optiscaler / kFile, std::string(3u * 1024 * 1024, 'y'));
+    std::atomic<bool> unloading { true };
+    Env env = w.MakeEnv();
+    env.shuttingDown = [&] { return unloading.load(); };
+    Runtime rt(env);
+    rt.Current();
+    rt.Catalog();
+    rt.WaitForHashing();
+    const auto catalog = rt.Catalog();
+    CHECK(catalog.size() == 1u && catalog[0].sha256.empty()); // the worker gave up at the first piece instead of reading 3 MiB
+    rt.Shutdown();
 }
 
 static void UnhashableFileIsNotReadAgain()
@@ -282,11 +304,40 @@ static void ScanFailsOpen()
     Runtime rt(w.MakeEnv());
     const auto s = rt.Current(); // must not throw
     CHECK(!s->Available() && s->status == Status::NothingInstalled);
-    CHECK(w.Logged("the catalog scan failed (disk exploded)"));
+    CHECK(w.Logged("scan failed (disk exploded)"));
     throwNow = false;
     rt.Rescan();
     CHECK(rt.Current()->Available());
     rt.Shutdown();
+}
+
+static void FailedRescanKeepsThePreviousCatalog()
+{
+    // review N3: a Retry/Rescan that throws or comes back partial must not take a working model offline
+    for (const bool throwing : { true, false })
+    {
+        World w;
+        Put(w.optiscaler / L"NR.310.9" / kFile, "model 9");
+        bool fail = false;
+        w.scanHook = [&] { if (fail && throwing) throw std::runtime_error("antivirus holds the folder"); };
+        Env env = w.MakeEnv();
+        env.injectIncomplete = [&] { return fail && !throwing; }; // a listing that breaks off half way
+        Runtime rt(env);
+        CHECK(Id(rt.Current()) == "NR.310.9" && rt.ScanNote().empty());
+        Put(w.optiscaler / L"NR.310.10" / kFile, "model 10");
+        fail = true;
+        rt.Rescan();
+        const auto kept = rt.Current();
+        CHECK(Id(kept) == "NR.310.9" && kept->revision == 1 && kept->Available()); // still running, nothing parked
+        CHECK(rt.Catalog().size() == 1u);
+        CHECK(!rt.ScanNote().empty() && rt.ScanNote().find("previous list is kept") != std::string::npos);
+        CHECK(w.Logged("the previous catalog is kept"));
+        fail = false;
+        rt.Rescan(); // the next good scan takes over and clears the note
+        const auto next = rt.Current();
+        CHECK(Id(next) == "NR.310.10" && next->revision == 2 && rt.ScanNote().empty() && rt.Catalog().size() == 2u);
+        rt.Shutdown();
+    }
 }
 
 static void SessionLockAndPending()
@@ -351,8 +402,10 @@ int main()
     SwitchingAndRescan();
     RenderThreadNeverWaitsForAScan();
     HashWorker();
+    HashStopsWhenTheProcessIsUnloading();
     UnhashableFileIsNotReadAgain();
     ScanFailsOpen();
+    FailedRescanKeepsThePreviousCatalog();
     SessionLockAndPending();
     NgxSearchFolderRules();
     if (failures == 0)

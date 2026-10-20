@@ -5,6 +5,7 @@
 #include "ext/nr/runtime/NrRuntimeCatalog.h"
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -104,6 +105,7 @@ struct CardFacts
     bool nativeVulkanRunning = false;
     bool ngxPathFollows = true;  // the selected model sits in the folder the NGX core was told to search first
     std::string ngxFolder;       // that folder
+    std::string scanNote;        // a rescan failed or was incomplete (the previous list is kept)
     bool reuseWanted = false;
     std::string reuseStatus;
 };
@@ -113,6 +115,8 @@ inline std::vector<std::string> StatusLines(const CardFacts& f)
     std::vector<std::string> lines;
     if (!f.available)
         lines.push_back("Neural Rendering is unavailable: " + f.reason + ".");
+    if (!f.scanNote.empty())
+        lines.push_back(std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(f.scanNote[0])))) + f.scanNote.substr(1) + ".");
     if (f.pending)
         lines.push_back("Switching as soon as the clicks settle...");
     if (f.available)

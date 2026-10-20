@@ -162,6 +162,7 @@ static void RenderRuntimePicker(ext::NrConfig& nr)
     facts.loadedId = rt::Utf8(snapshot->id);
     facts.loadedVersion = rt::Utf8(rt::VersionText(snapshot->version));
     facts.pending = rt::Pending();
+    facts.scanNote = rt::ScanNote();
     facts.lockReason = lock != nullptr ? lock : "";
     facts.nativeVulkanRunning = IsRunningVk();
     facts.ngxPathFollows = rt::FollowsNgxSearchPath(*snapshot);

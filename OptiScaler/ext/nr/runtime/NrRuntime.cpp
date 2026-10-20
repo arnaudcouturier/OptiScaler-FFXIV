@@ -48,7 +48,9 @@ Runtime& R()
             else
                 LOG_INFO("{}", text);
         },
-        /* onScan */ nullptr }); // never destroyed: the hash worker is stopped by Shutdown(), but the object must outlive static teardown
+        /* onScan */ nullptr,
+        /* injectIncomplete */ nullptr,
+        /* shuttingDown */ [] { return State::Instance().isShuttingDown; } }); // never destroyed: the hash worker is stopped by Shutdown(), but the object must outlive static teardown
     return runtime;
 }
 } // namespace
@@ -57,6 +59,7 @@ std::shared_ptr<const Snapshot> Current() { return R().Current(); }
 std::shared_ptr<const Snapshot> Startup() { return R().Startup(); }
 void RequestRuntime(const std::string& text) { R().RequestRuntime(text); }
 std::string Requested() { return R().Requested(); }
+std::string ScanNote() { return R().ScanNote(); }
 void Rescan() { R().Rescan(); }
 bool Pending() { return R().Pending(); }
 std::vector<Entry> Catalog() { return R().Catalog(); }
@@ -65,4 +68,5 @@ void NoteNgxSearchFolder(const fs::path& folder) { R().NoteNgxSearchFolder(folde
 fs::path NgxSearchFolder() { return R().NgxSearchFolder(); }
 bool FollowsNgxSearchPath(const Snapshot& s) { return R().FollowsNgxSearchPath(s); }
 void Shutdown() { R().Shutdown(); }
+void Resume() { R().Resume(); }
 } // namespace ext::nr::runtime

@@ -49,11 +49,15 @@ Check ($vk.Contains('ext::nr::runtime::Startup()')) 'Vulkan FindSnippet must use
 # 5b. The character previews follow the selection: the backend is re-acquired before the availability is read, and a stream built from
 #     another revision is released (after the GPU is done with it) and rebuilt; the revision of a stream is recorded when its model is made.
 $chara = [IO.File]::ReadAllText((Join-Path $Repo 'OptiScaler\ext\ffxiv\chara\CharaNr.cpp'))
-$sync = $chara.IndexOf('SyncRuntime(); //')
+$sync = $chara.IndexOf('ObserveRuntime(); // before the availability is read')
 $avail = $chara.IndexOf('if (Refresh() != Availability::Available || !EnsureInit(req.context))')
-Check ($sync -ge 0 -and $avail -ge 0 -and $sync -lt $avail) 'RunCoreSteps must call SyncRuntime() before it reads the availability'
-$reprobe = $chara.IndexOf('m.model == Probe::Missing && DlssNr::PreviewRuntimeRevision() != m.probedRuntime')
-Check ($reprobe -ge 0 -and $chara.Substring($reprobe, 220).Contains('m.forwarder = m.model = Probe::Unknown;')) 'a preview module that started without a model must probe again when the selection moves'
+Check ($sync -ge 0 -and $avail -ge 0 -and $sync -lt $avail) 'RunCoreSteps must observe the runtime selection before it reads the availability'
+$reprobe = $chara.IndexOf('view.probedRevision = m.probedRuntime;')
+Check ($reprobe -ge 0 -and $chara.Contains('m.forwarder = m.model = Probe::Unknown; // started without a model')) 'a preview module that started without a model must probe again when the selection moves'
+$maint = $chara.IndexOf('ObserveRuntime(); // the draws are not reached')
+$maintRefresh = $chara.IndexOf('const Availability a = Refresh(); // also with nothing created')
+Check ($maint -ge 0 -and $maintRefresh -gt $maint) 'the maintenance call must observe the runtime selection (the draws are not reached while the gate is closed, review N1)'
+Check ($chara.Contains('M().latchedRuntime = DlssNr::PreviewRuntimeRevision();')) 'the model latch must record the revision it was set at'
 Check ($chara.Contains('m.probedRuntime = m.backend.revision;')) 'EnsureInit must record the revision it probed'
 $stale = $chara.IndexOf('m.streamRuntime[index] != m.backend.revision')
 Check ($stale -ge 0) 'RunCoreSteps must compare the stream revision with the backend revision'
@@ -81,7 +85,11 @@ Check ($glue.Contains('runtime = *new Runtime(Env {') -and -not $glue.Contains('
 Check (-not $core.Contains('LOG_')) 'the tested glue logs only through the environment'
 $workerAt = $core.IndexOf('void HashWorker('); $workerEnd = $core.IndexOf('Env _env;')
 Check ($workerAt -ge 0 -and $workerEnd -gt $workerAt -and -not $core.Substring($workerAt, $workerEnd - $workerAt).Contains('_env.log')) 'the hash worker must not log'
-Check ($dx12.Contains('ext::nr::runtime::Shutdown();')) 'DlssNr::Shutdown must stop the hash worker'
+$suspend = $dx12.IndexOf('void SuspendForBridgeShutdown()')
+$resume = $dx12.IndexOf('void ResumeAfterBridgeInit()')
+Check ($suspend -ge 0 -and $dx12.Substring($suspend, 700).Contains('ext::nr::runtime::Shutdown();')) 'the bridge shutdown (the real NR teardown) must stop the hash worker'
+Check ($resume -ge 0 -and $dx12.Substring($resume, 400).Contains('ext::nr::runtime::Resume();')) 'the bridge resume must allow hashing again'
+Check ($dx12.Contains('ClearFailuresAfterPrecisionChange();') -and -not [regex]::IsMatch($dx12, 'lastPrecision!=precision\s*\)\s*\{\s*RetryAfterFailure')) 'the Precision hook inside Dispatch must not rescan the disk under the pass mutex (review N6)'
 
 # 5e. Fix round 1 (review H1, M1, M2, M5, M6, M7). EVERY place that gives up goes through FailModel / FailGlobal (ext/nr/runtime/NrRuntimeSwitch.h);
 #     nothing sets the latch by hand, and the set of sites is a reviewed table: adding a site means classifying it HERE as model-caused (a
@@ -114,9 +122,11 @@ Check ($dx12.Contains('std::string FailureReason()') -and $dx12.IndexOf('std::lo
 Check ($menu.Contains('const std::string reasonCopy')) 'the card must hold a copy of the failure reason'
 Check (([regex]::Matches($dx12, 'EnsureCapabilityBound\(')).Count -ge 4) 'both creates and the evaluate must run EnsureCapabilityBound (plus its definition)'
 $eval = $dx12.IndexOf('g_nr.evaluate(')
-Check ($eval -gt 0 -and $dx12.Substring([Math]::Max(0, $eval - 900), 900).Contains('EnsureCapabilityBound(g_nr.runtime->path)')) 'the scene evaluate must be preceded by the capability block rebind'
+$bindAt = $dx12.IndexOf('EnsureCapabilityBound(g_nr.runtime->path);')
+$extrasAt = $dx12.IndexOf('SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);', [Math]::Max(0, $bindAt))
+Check ($eval -gt 0 -and $bindAt -gt 0 -and $bindAt -lt $extrasAt -and $extrasAt -lt $eval) 'the scene evaluate must be preceded by the capability block rebind, and the rebind by nothing that publishes extras after it (review N4)'
 $createAt = $dx12.IndexOf('g_nr.feature =', $dx12.IndexOf('auto snippet = FindSelectedModel();', $dx12.IndexOf('PollRuntime();')))
-Check ($createAt -gt 0 -and $dx12.Substring([Math]::Max(0, $createAt - 400), 400).Contains('EnsureCapabilityBound(*snippet)')) 'the scene create must be preceded by the capability block rebind'
+Check ($createAt -gt 0 -and $dx12.Substring([Math]::Max(0, $createAt - 500), 500).Contains('EnsureCapabilityBound(*snippet);') -and $dx12.Substring([Math]::Max(0, $createAt - 500), 500).IndexOf('EnsureCapabilityBound(*snippet);') -lt $dx12.Substring([Math]::Max(0, $createAt - 500), 500).IndexOf('SetExtras(nr,')) 'the scene create must rebind the capability block BEFORE SetExtras (review N4)'
 Check (([regex]::Matches($chara, 'DlssNr::PreviewBindModel\(b\.modelPath\)')).Count -eq 2) 'a preview create and a preview evaluate must both rebind the capability block'
 Check ($chara.Contains('LatchModel("the model would not initialise")') -and $chara.Contains('if (out.failedAt == HandoffStep::Record)') -and $chara.Contains('m.modelLatched = false; // another model gets its own chance')) 'preview model failures must use the recoverable model latch, cleared when the runtime changes'
 Check ($chara.Contains('f.latched = m.latches.NrLatched() || m.modelLatched;')) 'the availability must include the model latch'

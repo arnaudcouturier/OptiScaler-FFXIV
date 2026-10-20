@@ -85,6 +85,11 @@ static void CardStatus()
         const auto lines = txt::StatusLines(f);
         CHECK(lines.size() == 1u);
         CHECK_EQ(lines[0], "Selected model: NR.310.9, file version 310.9.16.0.");
+        f.scanNote = "the last rescan failed (the scan failed (disk exploded)); the previous list is kept";
+        const auto withNote = txt::StatusLines(f);
+        CHECK(withNote.size() == 2u);
+        CHECK_EQ(withNote[0], "The last rescan failed (the scan failed (disk exploded)); the previous list is kept.");
+        f.scanNote.clear();
     }
     f.pending = true;
     CHECK_EQ(txt::StatusLines(f)[0], "Switching as soon as the clicks settle...");

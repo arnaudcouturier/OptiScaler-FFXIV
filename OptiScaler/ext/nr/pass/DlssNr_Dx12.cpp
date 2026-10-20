@@ -2095,8 +2095,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             return;
         }
 
+        EnsureCapabilityBound(*snippet); // before SetExtras: the populate must not be able to undo what the extras publish
         SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
-        EnsureCapabilityBound(*snippet);
         const auto tuning = PassTuning(nr, 0);
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
@@ -2238,8 +2238,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             else
             {
-                SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
                 EnsureCapabilityBound(*snippet);
+                SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
                 const auto tuning = PassTuning(nr, pass);
                 g_nr.passFeature[pass] = g_nr.create(
                     snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
@@ -2707,6 +2707,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  spatial ? 1.0f : frame.MvScaleY * mvToWorkY, refW, refH);
     }
 
+    // The capability block must hold this module's callbacks before the extras are published (a preview may have bound another module's
+    // since the create); scene and previews cannot interleave inside this call, both hold the pass mutex.
+    if (g_nr.runtime && g_nr.runtime->Available())
+        EnsureCapabilityBound(g_nr.runtime->path);
     SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
 
     if (g_ngxTime != nullptr)
@@ -2798,8 +2802,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const auto tuning = PassTuning(nr, pass);
 
         MakeModelWritable(passOutput);
-        if (g_nr.runtime && g_nr.runtime->Available())
-            EnsureCapabilityBound(g_nr.runtime->path); // a preview may have bound another module's callbacks since the create
         // ViT reuse of the NVIDIA model: tell the NvAPI wrapper which feature this is, whether it starts over, and how often to compute the bottleneck
         DlssNrNative::BeginEvaluate(passFeature, passReset,
             DlssNrNative::ReuseEveryForPass(pass, reuseEvery, reuseFirstPassOnly), reuseOverride);
@@ -3277,6 +3279,7 @@ void SuspendForBridgeShutdown()
     // additionally owns a private SR feature in the driver's NGX runtime.
     LOG_INFO("DLSS-NR bridge shutdown: new NR/PreSR work suspended before NGX shutdown");
     DeferredSr::Shutdown();
+    ext::nr::runtime::Shutdown(); // stop and join the SHA-256 worker of the model files; Resume() below lets it start again
     g_nr.reset = true;
     for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
     g_lastGpuTime.reset();
@@ -3287,6 +3290,7 @@ void ResumeAfterBridgeInit()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (!g_bridgeSuspended.exchange(false)) return;
+    ext::nr::runtime::Resume();
     // A device reinitialization is allowed to resume. Never persist this stop in
     // the user's NR setting, nor mistake an ordinary NR/quality toggle for exit.
     g_nr.reset = true;
@@ -3295,6 +3299,13 @@ void ResumeAfterBridgeInit()
 }
 std::string DeferredDlssStatus() { return SynchronousDeferredDlssStatus(); }
 bool PausedByFocus() { return g_focusPaused.load(); }
+
+// The Precision hook inside Dispatch runs under the pass mutex on the render thread: it forgets the failures and nothing else.
+void ClearFailuresAfterPrecisionChange()
+{
+    ext::nr::runtime::ClearAllFailures(g_nr.fail);
+    g_nr.reset = true;
+}
 
 void RetryAfterFailure()
 {
@@ -3357,7 +3368,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     const unsigned precision=nr.precision.value_or_default();
     if(lastPrecision!=precision)
     {
-        RetryAfterFailure();
+        ClearFailuresAfterPrecisionChange();
         DeferredSr::Cancel();
         lastPrecision = precision;
     }
