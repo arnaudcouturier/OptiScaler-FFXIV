@@ -61,6 +61,12 @@ if ($stale -ge 0) {
 }
 Check ($chara.Contains('m.streamRuntime[index] = b.revision;')) 'CreateFeatureStep must record the revision the model was built for'
 
+# 5c. The card draws its combo and status lines from the pinned text module, and the combo is disabled while switching is locked.
+$menu = [IO.File]::ReadAllText((Join-Path $nr 'menu\DlssNr_Menu.cpp'))
+Check ($menu.Contains('rt::text::BuildChoices(') -and $menu.Contains('rt::text::StatusLines(')) 'the card must use NrRuntimeText.h for its entries and status lines'
+Check ($menu.Contains('ImGui::BeginDisabled(lock != nullptr);')) 'the combo must be disabled while live switching is locked'
+Check ($menu.Contains('rt::RequestRuntime(choices.values[(size_t) selected]);')) 'a pick must go through RequestRuntime (the coalescing rule)'
+
 # 6. The runtime choice is not part of the saved NR presets (the allowlist in NrUserPresets.h), and the config key is bound.
 $presets = [IO.File]::ReadAllText((Join-Path $nr 'presets\NrUserPresets.h'))
 Check ($presets -notmatch '(?i)NR_FIELD\(\s*Runtime\b|\.runtime\b') 'the saved NR presets must not carry the runtime choice'

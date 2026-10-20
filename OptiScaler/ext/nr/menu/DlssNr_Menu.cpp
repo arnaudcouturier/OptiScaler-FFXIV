@@ -2,6 +2,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuWidgets.h"
+#include "ext/core/PathText.h"
 #include "ext/game/Game.h"
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/NrHooks.h"
@@ -10,6 +11,7 @@
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/presets/NrUserPresets.h"
 #include "ext/nr/runtime/NrRuntime.h"
+#include "ext/nr/runtime/NrRuntimeText.h"
 #include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 
@@ -130,34 +132,40 @@ static void RenderRuntimePicker(ext::NrConfig& nr)
 {
     namespace rt = ext::nr::runtime;
     const auto catalog = rt::Catalog();
-    const std::string requested = nr.runtime.value_or_default();
-    const rt::Request parsed = rt::ParseRequest(rt::Wide(requested));
-
-    std::vector<std::string> labels { "Automatic (newest installed)" };
-    std::vector<std::string> values { std::string() };
-    int selected = 0;
-    for (const auto& entry : catalog)
-    {
-        labels.push_back(rt::Utf8(entry.id));
-        values.push_back(entry.legacy ? std::string("legacy") : rt::Utf8(entry.id));
-        const bool match = entry.legacy ? parsed.kind == rt::RequestKind::Legacy
-                                        : parsed.kind == rt::RequestKind::Folder && _wcsicmp(parsed.folder.c_str(), entry.id.c_str()) == 0;
-        if (match)
-            selected = (int) labels.size() - 1;
-    }
-    if (parsed.kind != rt::RequestKind::Automatic && selected == 0)
-    {
-        labels.push_back(requested + " (not installed)");
-        values.push_back(requested);
-        selected = (int) labels.size() - 1;
-    }
+    const auto choices = rt::text::BuildChoices(catalog, nr.runtime.value_or_default());
 
     std::vector<const char*> items;
-    for (const auto& l : labels)
-        items.push_back(l.c_str());
-    if (ImGui::Combo("NR model version", &selected, items.data(), (int) items.size()))
-        rt::RequestRuntime(values[(size_t) selected]);
-    HelpMarker("Which nvngx_dlssnr.dll the Neural Rendering pass runs. Drop several into folders named OptiScaler/NR.<version> and switch between them while playing.");
+    for (const auto& label : choices.labels)
+        items.push_back(label.c_str());
+
+    int selected = choices.selected;
+    const char* lock = rt::SwitchLockReason();
+    ImGui::BeginDisabled(lock != nullptr);
+    if (ImGui::Combo("NR model version", &selected, items.data(), (int) items.size()) && selected != choices.selected)
+        rt::RequestRuntime(choices.values[(size_t) selected]);
+    ImGui::EndDisabled();
+    HelpMarker("Which nvngx_dlssnr.dll the Neural Rendering pass runs. Put each version in a folder named OptiScaler/NR.<version> (for example NR.310.9) next to the game and switch between them while playing, in the scene and in character previews. Automatic picks the newest installed version.\nThe SHA-256 shown is the start of the file's hash, computed in the background.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rescan"))
+        rt::Rescan();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Look for NR.<version> folders again. Automatic only changes model when you rescan.");
+
+    const auto snapshot = rt::Current();
+    rt::text::CardFacts facts;
+    facts.available = snapshot->Available();
+    facts.reason = rt::UnavailableReason(*snapshot);
+    facts.loadedId = rt::Utf8(snapshot->id);
+    facts.loadedVersion = rt::Utf8(rt::VersionText(snapshot->version));
+    facts.pending = rt::Pending();
+    facts.lockReason = lock != nullptr ? lock : "";
+    facts.nativeVulkanRunning = IsRunningVk();
+    facts.ngxPathFollows = rt::FollowsNgxSearchPath(*snapshot);
+    facts.ngxFolder = ext::PathText(rt::NgxSearchFolder());
+    facts.reuseWanted = nr.vitEvery.value_or_default() > 1 && nr.precision.value_or_default() != 4;
+    facts.reuseStatus = DlssNrNative::VitStatus();
+    for (const auto& line : rt::text::StatusLines(facts))
+        ImGui::TextWrapped("%s", line.c_str());
 }
 
 // Drawn as the body of the ext::menu card `dlss_nr` (ext/nr/menu/NrMenu.cpp), i.e. inside upstream's ScopedCard: the
