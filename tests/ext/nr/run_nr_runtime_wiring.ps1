@@ -31,7 +31,8 @@ $parkBody = $dx12.Substring($park, $parkEnd - $park)
 Check ($parkBody.Contains('ParkNrFeature(g_nr.feature)')) 'ParkFeatures must park the scene feature'
 Check ($parkBody.Contains('ParkNrFeature(g_nr.passFeature[i])')) 'ParkFeatures must park the extra-pass features'
 Check ($parkBody -notmatch 'release\(') 'ParkFeatures must not release a feature directly (the GPU may still use it)'
-Check ($dx12.Contains('void DropReuseCaches() { DlssNrNative::OnModelSwitch(); }')) 'DropReuseCaches must call DlssNrNative::OnModelSwitch()'
+$drop = $dx12.IndexOf('void DropReuseCaches()', $host_)
+Check ($drop -ge 0 -and $dx12.Substring($drop, 140).Contains('DlssNrNative::OnModelSwitch()')) 'DropReuseCaches must call DlssNrNative::OnModelSwitch()'
 
 # 4. The model path comes from the selection: FindSelectedModel and the preview backend read the runtime snapshot.
 Check ($dx12.Contains('return snapshot->path;')) 'FindSelectedModel must return the snapshot path'

@@ -746,6 +746,7 @@ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESO
 struct RuntimeHost
 {
     std::shared_ptr<const ext::nr::runtime::Snapshot> snapshot;
+    bool first = false; // the first revision this state sees: nothing was built from another model yet
 
     void ClearModelFailure()
     {
@@ -780,7 +781,11 @@ struct RuntimeHost
         g_nr.reset = true;
     }
 
-    void DropReuseCaches() { DlssNrNative::OnModelSwitch(); }
+    void DropReuseCaches()
+    {
+        if (!first)
+            DlssNrNative::OnModelSwitch();
+    }
 
     void UseModel(const ext::nr::runtime::Snapshot& s)
     {
@@ -810,6 +815,7 @@ void PollRuntime()
     RuntimeHost host;
     host.snapshot = ext::nr::runtime::Current();
     const bool first = g_nr.runtimeRevision == 0;
+    host.first = first;
     const auto result = ext::nr::runtime::ApplyRuntimeChange(host, *host.snapshot, g_nr.runtimeRevision);
     if (result == ext::nr::runtime::SwitchResult::Switched || (result == ext::nr::runtime::SwitchResult::Unavailable && !first))
         LOG_INFO("DLSS-NR runtime generation change: features parked behind their GPU fences, history cleared, reuse caches dropped");
