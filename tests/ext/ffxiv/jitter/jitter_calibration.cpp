@@ -149,6 +149,23 @@ void TestAxesThatDisagreeAreNotUsedForLearning()
     CHECK(g.cal.runLength() == 0); // 3% apart: not one ratio
 }
 
+// The axes agree when they are within the tolerance relative to the LARGER one: 1.0 against 0.9801 (1.99% of the larger, 2.03% of the smaller)
+// agree in either order; 1.0 against 0.9799 do not.
+void TestTheAxesToleranceIsRelativeToTheLargerAxis()
+{
+    for (int order = 0; order < 2; ++order)
+    {
+        Feeder f;
+        for (int i = 0; i < 5; ++i)
+            order == 0 ? f.Feed(0.6f, 0.6f * 0.9801f) : f.Feed(0.6f * 0.9801f, 0.6f);
+        CHECK_MSG(f.cal.mode() == Mode::Scale, "order %d: axes 1.99%% apart were not accepted", order);
+        Feeder g;
+        for (int i = 0; i < 5; ++i)
+            order == 0 ? g.Feed(0.6f, 0.6f * 0.9799f) : g.Feed(0.6f * 0.9799f, 0.6f);
+        CHECK_MSG(g.cal.mode() == Mode::Learning, "order %d: axes 2.01%% apart were accepted", order);
+    }
+}
+
 // ---- verification and replacement ------------------------------------------------------------------------------------------------
 
 Feeder Calibrated(float r = 0.6f)
@@ -688,6 +705,7 @@ int main()
     TestAdoptedRatioIsTheMeanOfTheRun();
     TestARunRestartsOnADisagreeingSnapshot();
     TestAxesThatDisagreeAreNotUsedForLearning();
+    TestTheAxesToleranceIsRelativeToTheLargerAxis();
     TestOneOutlierIsIgnored();
     TestFourContradictionsDoNotReplaceFiveDo();
     TestContradictionsThatDisagreeWithEachOtherDoNotReplace();

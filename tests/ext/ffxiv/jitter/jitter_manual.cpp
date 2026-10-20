@@ -417,6 +417,60 @@ void TestTheOverrideChangesNothingWhileTheCorrectionKeyIsOff()
     CHECK(Wrote(on, g.reportedX * 0.8, g.reportedY * 0.8));
 }
 
+// Corners of the manual scale's announcements and episodes.
+void TestBaselineToScaleAnnouncesAnIgnoredValueIsReannouncedAndAnEpisodeEndsAtTheBaseline()
+{
+    for (float baseline : { 1.0f, 0.99f })
+    {
+        // baseline -> non-baseline: the first scaled pair is announced with the read-back
+        Session g;
+        g.manual = baseline;
+        g.sequence = false;
+        for (int i = 0; i < 3; ++i)
+            g.Next();
+        CHECK(CountLines(g.e.logs, "first scaled pair") == 0);
+        g.manual = 0.8f;
+        CHECK(CountLines(g.Next().logs, "first scaled pair") == 1);
+    }
+    {
+        // an ignored value that does not change is announced again after a correction off/on cycle
+        Session g;
+        g.manual = 1.5f;
+        for (int i = 0; i < 3; ++i)
+            g.Next();
+        CHECK(CountLines(g.e.logs, "manual scale value 1.500 ignored") == 1);
+        g.correct = false;
+        g.probe = true;
+        g.Next();
+        g.correct = true;
+        g.probe = false;
+        for (int i = 0; i < 3; ++i)
+            g.Next();
+        CHECK(CountLines(g.e.logs, "manual scale value 1.500 ignored") == 2);
+    }
+    {
+        // a not-usable episode ends at a baseline evaluate, so the next not-usable pair logs its line again
+        Session g;
+        g.manual = 0.8f;
+        g.sequence = false;
+        auto notUsable = [&]()
+        {
+            Frame f = g.Make();
+            f.ngxMissing = true;
+            return Evaluate(g.e, g.engine, f, false, true, g.manual);
+        };
+        g.Next();
+        notUsable();
+        notUsable();
+        CHECK(CountLines(g.e.logs, "jitter pair not usable") == 1);
+        g.manual = 1.0f;
+        g.Next();
+        g.manual = 0.8f;
+        notUsable();
+        CHECK(CountLines(g.e.logs, "jitter pair not usable") == 2);
+    }
+}
+
 void TestABuildMismatchStaysIdleWithTheOverride()
 {
     Session g;
@@ -583,6 +637,7 @@ int main()
     TestTheSnapOfTheSlider();
     TestSwitchingTheCorrectionOffAndOnStartsTheManualScaleFresh();
     TestTheOverrideChangesNothingWhileTheCorrectionKeyIsOff();
+    TestBaselineToScaleAnnouncesAnIgnoredValueIsReannouncedAndAnEpisodeEndsAtTheBaseline();
     TestABuildMismatchStaysIdleWithTheOverride();
     TestReadsComeBeforeTheWriteAndTheReadBackIsOnce();
     TestAPairThatIsNotUsableIsNotScaled();

@@ -309,6 +309,54 @@ void TestFailedReadsKeepTheRatioAndStaleVerificationIsLoggedOnce()
     CHECK(Has(StatusOf(g.Next()), "verification fresh"));
 }
 
+// A stale episode that is open when the calibration is dropped (correction off and on, a manual scale, a key change) is ended silently: when
+// the calibration comes back the line "snapshots are arriving again" must not be written for a verification that no longer exists.
+void TestAStaleEpisodeIsEndedByEveryDrop()
+{
+    const std::uint64_t pointer = kBase + kCurrentBuild.jitter.cameraGlobalRva;
+    for (int transition = 0; transition < 3; ++transition)
+    {
+        Session g;
+        g.stepMs = 700;
+        for (int i = 1; i <= 5; ++i)
+            g.Next();
+        g.e.mem.PutU64(pointer, 0);
+        for (int i = 1; i <= 16; ++i)
+            g.Next();
+        CHECK(CountLines(g.e.logs, "verification stale") == 1);
+        std::vector<std::string> logs;
+        auto run = [&](int n)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const Outcome o = g.Next();
+                logs.insert(logs.end(), o.logs.begin(), o.logs.end());
+            }
+        };
+        if (transition == 0)
+        {
+            g.correct = false;
+            g.probe = true;
+            run(2);
+            g.correct = true;
+            g.probe = false;
+        }
+        else if (transition == 1)
+        {
+            // the manual path ends the episode when it takes over; Evaluate cannot pass a manual value here, so use the engine directly
+            for (int i = 0; i < 2; ++i)
+                Evaluate(g.e, g.engine, g.Make(), false, true, 0.8f);
+            Evaluate(g.e, g.engine, g.Make(), false, true, 0.0f);
+        }
+        else
+            g.e.perfQuality = 3;
+        run(3);
+        g.e.mem.PutU64(pointer, kGlobal);
+        run(2);
+        CHECK_MSG(CountLines(g.e.logs, "arriving again") == 0, "transition %d wrote a spurious 'arriving again'", transition);
+    }
+}
+
 void TestABuildMismatchStaysIdle()
 {
     Session g;
@@ -908,6 +956,7 @@ int main()
     TestARatioThatChangesIsReplacedAfterFiveContradictions();
     TestATornSnapshotDoesNotDisturbAnAdoptedRatio();
     TestFailedReadsKeepTheRatioAndStaleVerificationIsLoggedOnce();
+    TestAStaleEpisodeIsEndedByEveryDrop();
     TestABuildMismatchStaysIdle();
     TestSwitchingTheCorrectionOffAndOnStartsLearningAgain();
     TestAnExceptionMidLearningDropsTheRunButAnAdoptedRatioSurvives();
