@@ -5,6 +5,8 @@
 
 #include <d3d11_1.h>
 
+#include <thread>
+
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -77,8 +79,9 @@ struct Rig
         CHECK(SUCCEEDED(device->CreateSamplerState(&d, &s)));
         D3D11_SAMPLER_DESC created {};
         s->GetDesc(&created);
-        engine.table().OnCreated(s.Get(), created, created.MipLODBias,
-                                 IsEligible(created.MipLODBias, created.MinLOD, created.MaxLOD, created.Filter));
+        engine.NoteCreated(s.Get(), device.Get(), created, created,
+                           IsEligible(created.MipLODBias, created.MinLOD, created.MaxLOD, created.Filter));
+        engine.Service(); // the variants of new samplers are made off the bind path, here as the evaluate seam does
         return s;
     }
 
@@ -105,7 +108,7 @@ static void SixStages()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-0.584963, Mode::Add);
+    r.engine.SetTarget(-0.584963, 0.0, Mode::Add);
     r.engine.SetActive(true);
 
     auto art = r.Make(-1.0f);
@@ -132,7 +135,7 @@ static void NullsAndRanges()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
     auto a = r.Make(-1.0f);
     auto b = r.Make(-0.5f);
@@ -189,7 +192,7 @@ static void PassThrough()
     Rig r;
     CHECK(r.Init());
     auto a = r.Make(-1.0f);
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
 
     // foreign context pointers (a deferred context, a second device's context, a proxy object): same pointer in, same array
@@ -199,6 +202,7 @@ static void PassThrough()
     fakeSet.fill(&FakeSet);
     fakeGet.fill(&FakeGet);
     r.engine.Attach(r.context.Get(), fakeSet, fakeGet);
+    r.engine.Refresh(); // the variants of the new revision (the evaluate seam does this)
 
     ID3D11SamplerState* in[2] = { a.Get(), a.Get() };
     auto* foreign = reinterpret_cast<ID3D11DeviceContext*>(0x1234560);
@@ -236,7 +240,7 @@ static void DeferredContext()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
     auto art = r.Make(-1.0f);
 
@@ -255,35 +259,121 @@ static void DeferredContext()
     CHECK(r.engine.SubstitutedBinds() == 0);
 }
 
-static void SharedVariantsUnderReplace()
+// M3/M4: a sampler the create hook never saw is classified at its first bind; its variant is made at the next Service (off the
+// bind path) and the slot that holds it is rebound by that Service, with no new Set from the game.
+static void LazyClassificationThroughSet()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-0.75, Mode::Replace);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
 
-    auto art1 = r.Make(-1.0f);
+    D3D11_SAMPLER_DESC d = Desc(-1.0f);
+    ComPtr<ID3D11SamplerState> unseen;
+    CHECK(SUCCEEDED(r.device->CreateSamplerState(&d, &unseen))); // not passed to NoteCreated
+    d = Desc(0.0f);
+    ComPtr<ID3D11SamplerState> flat;
+    CHECK(SUCCEEDED(r.device->CreateSamplerState(&d, &flat)));
+
+    r.Bind(2, 3, unseen.Get());
+    r.Bind(2, 4, flat.Get());
+    CHECK(r.Bound(2, 3).Get() == unseen.Get()); // not ready yet: the game''s own sampler, never a stale or half-made one
+    CHECK(r.engine.counters().lazyClassified.load() == 1 && r.engine.counters().variantsCreated.load() == 0);
+    CHECK(r.engine.table().Count() == 1);
+
+    r.engine.Service();
+    CHECK(r.Bound(2, 3).Get() != unseen.Get() && Near(BiasOf(r.Bound(2, 3).Get()), -2.0));
+    CHECK(r.Bound(2, 4).Get() == flat.Get());
+    CHECK(r.Read(2, 3).Get() == unseen.Get());
+}
+
+// The bind path while samplers are being created on other threads: no lock is taken anywhere (the test finishes), no bind ever
+// sees a half-made entry, and once the creators are done and the evaluate seam has run, every eligible sampler is substituted.
+static void BindsWhileOthersCreate()
+{
+    Rig r;
+    CHECK(r.Init());
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
+    r.engine.SetActive(true);
+
+    constexpr int kThreads = 4, kPer = 20;
+    std::vector<std::vector<ComPtr<ID3D11SamplerState>>> made(kThreads);
+    for (int k = 0; k < kThreads; ++k)
+        for (int i = 0; i < kPer; ++i)
+        {
+            auto& v = made[k];
+            D3D11_SAMPLER_DESC d = Desc(-0.1f - 0.01f * static_cast<float>(k * kPer + i));
+            d.MaxAnisotropy = 1;
+            ComPtr<ID3D11SamplerState> s;
+            r.device->CreateSamplerState(&d, &s);
+            v.push_back(s);
+        }
+
+    std::atomic<bool> go { false };
+    std::vector<std::thread> pool;
+    for (int k = 0; k < kThreads; ++k)
+        pool.emplace_back(
+            [&, k]
+            {
+                while (!go.load())
+                    std::this_thread::yield();
+                for (auto& s : made[k])
+                {
+                    D3D11_SAMPLER_DESC d {};
+                    s->GetDesc(&d);
+                    r.engine.NoteCreated(s.Get(), r.device.Get(), d, d, IsEligible(d.MipLODBias, d.MinLOD, d.MaxLOD, d.Filter));
+                }
+            });
+
+    go = true;
+    for (int round = 0; round < 200; ++round) // the game binds the same samplers while they are being created
+        for (int k = 0; k < kThreads; ++k)
+            r.Bind(0, static_cast<UINT>(k), made[k][round % kPer].Get());
+    for (auto& th : pool)
+        th.join();
+
+    r.engine.Service();
+    for (int k = 0; k < kThreads; ++k)
+        for (int i = 0; i < kPer; ++i)
+        {
+            auto* v = r.engine.VariantFor(made[k][i].Get());
+            CHECK(v != nullptr && v != made[k][i].Get());
+        }
+    CHECK(r.engine.table().Count() <= kTableCapacity);
+}
+static void SharedVariantsUnderReplace()
+{
+    // REPLACE applies only the change since the sampler was made. A sampler made at DLAA with -1.0 and the game's own sampler
+    // made at Quality with exactly the value REPLACE gives it (-1.0 + the Quality base) are the same description: the runtime
+    // hands back one object for both.
+    Rig r;
+    CHECK(r.Init());
+    constexpr double kQ = -0.584963;
+    auto art1 = r.Make(-1.0f);  // made at DLAA (no target yet: native resolution)
     auto art2 = r.Make(-2.0f);
-    auto game = r.Make(-0.75f); // the game's own sampler happens to be the variant object (the runtime deduplicates)
+    r.engine.SetTarget(kQ, 0.0, Mode::Replace);
+    r.engine.SetActive(true);
+    auto game = r.Make(static_cast<float>(-1.0 + kQ)); // the game''s own value at Quality, made at Quality
+    r.engine.Refresh();
     r.Bind(0, 0, art1.Get());
     r.Bind(0, 1, art2.Get());
     r.Bind(0, 2, game.Get());
 
-    // art1 and art2 are bound as the same object, which is also the game's own sampler in slot 2
-    CHECK(r.Bound(0, 0).Get() == r.Bound(0, 1).Get());
+    // art1''s variant is the game''s own Quality sampler; art2 gets its own; the game''s sampler is bound as it is
     CHECK(r.Bound(0, 0).Get() == game.Get());
-    // each slot still reads back its own sampler
+    CHECK(r.Bound(0, 1).Get() != art2.Get() && Near(BiasOf(r.Bound(0, 1).Get()), -2.584963));
+    CHECK(r.Bound(0, 2).Get() == game.Get());
+    // each slot still reads back its own sampler (a variant-to-source map could not do this)
     CHECK(r.Read(0, 0).Get() == art1.Get());
     CHECK(r.Read(0, 1).Get() == art2.Get());
     CHECK(r.Read(0, 2).Get() == game.Get()); // bound directly by the game: not translated
     CHECK(r.engine.SubstitutedBinds() == 2);
 }
-
 static void NewTargetAndRefresh()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-0.5, Mode::Add);
+    r.engine.SetTarget(-0.5, 0.0, Mode::Add);
     r.engine.SetActive(true);
     auto art = r.Make(-1.0f);
     auto flat = r.Make(0.0f);
@@ -293,25 +383,26 @@ static void NewTargetAndRefresh()
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -1.5));
 
     // the target moves: the old variant stays bound until Refresh, then the new one replaces it in every stage
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -1.5));
-    // a bind of the same sampler after the move, before any Refresh, already gets the new variant (the record is per revision)
+    // a bind of the same sampler after the move, before any Refresh, gets the game's sampler: variants are made off the bind path,
+    // and a stale one (-1.5) is never bound again
     r.Bind(0, 0, art.Get());
-    CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -2.0));
+    CHECK(r.Bound(0, 0).Get() == art.Get());
     r.engine.Refresh();
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -2.0));
     CHECK(Near(BiasOf(r.Bound(4, 7).Get()), -2.0));
     CHECK(r.Bound(0, 1).Get() == flat.Get());
     CHECK(r.Read(0, 0).Get() == art.Get() && r.Read(4, 7).Get() == art.Get());
 
-    // a mode change is a new revision too
-    r.engine.SetTarget(-1.0, Mode::Replace);
+    // a mode change is a new revision too: the sampler was made at base -0.5, so REPLACE applies the change since (-1.0 - -0.5)
+    r.engine.SetTarget(-1.0, 0.0, Mode::Replace);
     r.engine.Refresh();
-    CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -1.0));
+    CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -1.5));
     CHECK(r.Read(0, 0).Get() == art.Get());
 
     // DLAA under add: the variant would equal the game's bias, so the game's sampler is bound again
-    r.engine.SetTarget(0.0, Mode::Add);
+    r.engine.SetTarget(0.0, 0.0, Mode::Add);
     r.engine.Refresh();
     CHECK(r.Bound(0, 0).Get() == art.Get() && r.Bound(4, 7).Get() == art.Get());
     CHECK(r.Read(0, 0).Get() == art.Get());
@@ -322,7 +413,7 @@ static void NewTargetAndRefresh()
     auto early = q.Make(-1.0f);
     ID3D11SamplerState* e = early.Get();
     q.set[1](q.context.Get(), 5, 1, &e); // bound natively, before the engine is active
-    q.engine.SetTarget(-1.0, Mode::Add);
+    q.engine.SetTarget(-1.0, 0.0, Mode::Add);
     q.engine.SetActive(true);
     q.engine.Refresh();
     CHECK(q.Bound(1, 5).Get() != early.Get() && Near(BiasOf(q.Bound(1, 5).Get()), -2.0));
@@ -333,7 +424,7 @@ static void ClearStateAndForeignBinds()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
     auto art = r.Make(-1.0f);
     auto other = r.Make(-3.0f);
@@ -351,7 +442,7 @@ static void ClearStateAndForeignBinds()
     ID3D11SamplerState* o = other.Get();
     r.set[0](r.context.Get(), 0, 1, &o);
     CHECK(r.Read(0, 0).Get() == other.Get());
-    r.engine.SetTarget(-1.5, Mode::Add);
+    r.engine.SetTarget(-1.5, 0.0, Mode::Add);
     r.engine.Refresh();
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -4.5)); // the foreign bind is now treated as the game's request
     CHECK(r.Read(0, 0).Get() == other.Get());
@@ -361,7 +452,7 @@ static void SwitchingOff()
 {
     Rig r;
     CHECK(r.Init());
-    r.engine.SetTarget(-1.0, Mode::Add);
+    r.engine.SetTarget(-1.0, 0.0, Mode::Add);
     r.engine.SetActive(true);
     auto art = r.Make(-1.0f);
     auto flat = r.Make(0.0f);
@@ -421,6 +512,8 @@ int main()
     PassThrough();
     DeferredContext();
     SharedVariantsUnderReplace();
+    LazyClassificationThroughSet();
+    BindsWhileOthersCreate();
     NewTargetAndRefresh();
     ClearStateAndForeignBinds();
     SwitchingOff();

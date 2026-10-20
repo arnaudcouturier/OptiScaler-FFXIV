@@ -56,8 +56,7 @@ static HRESULT STDMETHODCALLTYPE HkCreate(ID3D11Device* d, const D3D11_SAMPLER_D
 {
     const HRESULT hr = g_createTramp(d, desc, out);
     if (SUCCEEDED(hr) && desc && out && *out && !g_inVariant)
-        g_engine.table().OnCreated(*out, *desc, desc->MipLODBias,
-                                   IsEligible(desc->MipLODBias, desc->MinLOD, desc->MaxLOD, desc->Filter));
+        g_engine.NoteCreated(*out, d, *desc, *desc, IsEligible(desc->MipLODBias, desc->MinLOD, desc->MaxLOD, desc->Filter));
     return hr;
 }
 
@@ -166,7 +165,7 @@ int main()
     CHECK(g_engine.table().Find(artSampler.Get()) != nullptr);
     CHECK(g_engine.table().Find(flatSampler.Get()) == nullptr);
 
-    g_engine.SetTarget(-0.584963, Mode::Add);
+    g_engine.SetTarget(-0.584963, 0.0, Mode::Add);
     g_engine.SetActive(true);
     g_engine.Refresh();
 
@@ -205,11 +204,11 @@ int main()
     CHECK(g_engine.table().Count() == 1);
 
     // a new target reaches the bound samplers of every stage at once
-    g_engine.SetTarget(-2.0, Mode::Replace);
+    g_engine.SetTarget(-2.0, 0.0, Mode::Replace);
     g_engine.Refresh();
     ComPtr<ID3D11SamplerState> after;
     nativeGet[5](context.Get(), 1, 1, after.GetAddressOf());
-    CHECK(after && Near(BiasOf(after.Get()), -2.0));
+    CHECK(after && Near(BiasOf(after.Get()), -3.0)); // replace: -1.0 + (-2.0 - 0), the sampler was made at base 0
     ComPtr<ID3D11SamplerState> game;
     context->CSGetSamplers(1, 1, game.GetAddressOf());
     CHECK(game.Get() == artSampler.Get());

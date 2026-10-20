@@ -72,21 +72,29 @@ int main()
         CHECK(!Has(later, "-0.0000"));
 
         Decision rep;
-        rep.decided = true;
+        rep.kind = Decision::Kind::ReplaceProvisional;
         rep.mode = Mode::Replace;
         rep.delta = -0.584963;
         rep.seenBefore = -1.0f;
         rep.seenAfter = -1.5625f;
         const auto r = DecisionLine(rep);
-        CHECK(Has(r, "REPLACES") && Has(r, "-1.0000") && Has(r, "-1.5625") && Has(r, "-0.5850"));
-        Decision add;
-        add.decided = true;
-        add.mode = Mode::Add;
-        add.delta = -0.584963;
-        add.created = 40;
-        const auto a = DecisionLine(add);
-        CHECK(Has(a, "ADDED") && Has(a, "40 new samplers") && Has(a, "art values"));
-    }
+        CHECK(Has(r, "REPLACE mode") && Has(r, "provisional") && Has(r, "-1.0000") && Has(r, "-1.5625") && Has(r, "-0.5850") &&
+              Has(r, "CHANGE of the ratio"));
+        Decision confirmed;
+        confirmed.kind = Decision::Kind::ReplaceConfirmed;
+        confirmed.distinct = 17;
+        CHECK(Has(DecisionLine(confirmed), "confirmed after 17 distinct samplers"));
+        Decision amb;
+        amb.kind = Decision::Kind::AddAmbiguous;
+        amb.candidates = 3;
+        const auto am = DecisionLine(amb);
+        CHECK(Has(am, "3 different sampler pairs") && Has(am, "ADD mode") && Has(am, "looking again"));
+        Decision none;
+        none.kind = Decision::Kind::AddNoPair;
+        none.distinct = 41;
+        const auto np = DecisionLine(none);
+        CHECK(Has(np, "41 samplers") && Has(np, "ADD mode") && Has(np, "still watching"));
+        CHECK(DecisionLine(Decision {}).empty());    }
     {
         BindStatus s;
         CHECK(Has(BindStatusLine(s), "not active"));
@@ -101,14 +109,14 @@ int main()
         s.substitutedBinds = 1234;
         s.variants = 9;
         const auto line = BindStatusLine(s);
-        CHECK(Has(line, "Target -0.5850") && Has(line, "add mode") && Has(line, "not decided yet") && Has(line, "27 samplers") &&
+        CHECK(Has(line, "Target -0.5850") && Has(line, "add mode") && !Has(line, "confirmed") && Has(line, "27 samplers") &&
               Has(line, "1234 binds") && Has(line, "9 variants") && !Has(line, "table full") && !Has(line, "failures"));
         s.decided = true;
         s.mode = Mode::Replace;
         s.tableFull = 3;
         s.failures = 2;
         const auto line2 = BindStatusLine(s);
-        CHECK(Has(line2, "replace mode") && !Has(line2, "not decided") && Has(line2, "table full 3 times") &&
+        CHECK(Has(line2, "replace mode") && Has(line2, "confirmed") && Has(line2, "table full 3 times") &&
               Has(line2, "2 variant failures"));
     }
 

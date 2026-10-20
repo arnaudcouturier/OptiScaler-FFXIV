@@ -17,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <optional>
 #include <string>
@@ -89,9 +90,20 @@ enum class Mode
 inline const char* ModeText(Mode m) { return m == Mode::Replace ? "replace" : "add"; }
 
 // The bias an eligible sampler is bound with, inside D3D11's range.
-inline float VariantBias(Mode mode, float original, double target)
+//   ADD:     the game's bias plus the target now (`baseNow` plus the offset): what the manual setting does.
+//   REPLACE: the game already puts the quality mode into its own bias (for FFXIV `-1 + log2(ratio)`), so only the CHANGE of the
+//            ratio since the sampler was made is applied (`baseNow - baseCreate`), plus the offset. A sampler made at the
+//            current mode is bound as the game made it (plus the offset), a stale one gets exactly the game's new value, and
+//            nothing of the game's own constant part (the -1) is dropped.
+// `baseCreate` is the base target (log2 ratio, no offset) in force when the sampler was made, 0 (native resolution) when
+// that was not known.
+inline float VariantBias(Mode mode, float original, double baseNow, double baseCreate, double offset)
 {
-    const double raw = mode == Mode::Replace ? target : static_cast<double>(original) + target;
+    if (!std::isfinite(baseNow) || !std::isfinite(baseCreate))
+        return original;
+
+    const double change = mode == Mode::Replace ? baseNow - baseCreate : baseNow;
+    const double raw = static_cast<double>(original) + Target(change, offset);
     if (!std::isfinite(raw))
         return original;
 
@@ -101,18 +113,162 @@ inline float VariantBias(Mode mode, float original, double target)
 // A variant is only worth making when the bias really changes (two floats the driver would treat as the same).
 inline bool NeedsVariant(float original, float variant) { return std::fabs(variant - original) >= 1e-6f; }
 
+// ---- a steady target -----------------------------------------------------------------------------------------------
+// Size noise, a second upscaler feature at another size, or a window being dragged must not rebuild the variants at every
+// evaluate. The gate (1) follows one anchor, the output width of the first evaluate: an evaluate whose output differs from it
+// by more than 10 % belongs to another feature and is ignored until it has been the only one for two seconds or 120 evaluates
+// in a row (then the anchor moves: a resolution or window change); (2) takes a new base only when it moved by at least one
+// step of 1/64 in log2 (about 1 % of the width); (3) takes at most four new bases per second.
+inline constexpr double kBaseStep = 1.0 / 64.0;
+inline constexpr double kAnchorTolerance = 0.10;
+inline constexpr unsigned kReanchorAfterMs = 2000;
+inline constexpr unsigned kReanchorEvaluates = 120;
+inline constexpr unsigned kMinApplyIntervalMs = 250;
+
+struct GateResult
+{
+    enum class Kind
+    {
+        Ignored,   // another feature's evaluate
+        Unchanged, // inside the dead band
+        Deferred,  // moved, but the last change was less than 250 ms ago: the next evaluate asks again
+        Applied,   // take `base`
+    };
+    Kind kind = Kind::Ignored;
+    double base = 0.0;
+    bool first = false;       // the first base ever taken
+    bool anchorMoved = false; // the output size changed for good
+};
+
+class TargetGate
+{
+  public:
+    GateResult OnEvaluate(unsigned outputW, double base, std::uint64_t nowMs)
+    {
+        GateResult r;
+        r.base = base;
+        if (outputW == 0 || !std::isfinite(base))
+            return r;
+
+        if (!_haveAnchor)
+        {
+            _haveAnchor = true;
+            _anchor = outputW;
+            _lastMatchMs = nowMs;
+            return Apply(r, nowMs);
+        }
+
+        const double relative = std::fabs(static_cast<double>(outputW) - static_cast<double>(_anchor)) / static_cast<double>(_anchor);
+        if (relative > kAnchorTolerance)
+        {
+            ++_deviant;
+            if (_deviant < kReanchorEvaluates && nowMs - _lastMatchMs < kReanchorAfterMs)
+                return r; // Ignored
+
+            _anchor = outputW; // the output really changed
+            _deviant = 0;
+            _lastMatchMs = nowMs;
+            r.anchorMoved = true;
+            r.kind = GateResult::Kind::Unchanged;
+            if (!_haveApplied || std::fabs(base - _applied) >= kBaseStep)
+                return Apply(r, nowMs, true);
+            return r;
+        }
+
+        _deviant = 0;
+        _lastMatchMs = nowMs;
+        _anchor = outputW; // a slow resize is followed
+        r.kind = GateResult::Kind::Unchanged;
+        if (_haveApplied && std::fabs(base - _applied) < kBaseStep)
+            return r;
+        return Apply(r, nowMs);
+    }
+
+    bool haveApplied() const { return _haveApplied; }
+    double applied() const { return _applied; }
+    unsigned anchor() const { return _anchor; }
+    void Reset() { *this = TargetGate(); }
+
+  private:
+    GateResult Apply(GateResult r, std::uint64_t nowMs, bool force = false)
+    {
+        if (_haveApplied && !force && nowMs - _lastApplyMs < kMinApplyIntervalMs)
+        {
+            r.kind = GateResult::Kind::Deferred;
+            return r;
+        }
+        r.first = !_haveApplied;
+        r.kind = GateResult::Kind::Applied;
+        _haveApplied = true;
+        _applied = r.base;
+        _lastApplyMs = nowMs;
+        return r;
+    }
+
+    bool _haveAnchor = false;
+    bool _haveApplied = false;
+    unsigned _anchor = 0;
+    unsigned _deviant = 0;
+    double _applied = 0.0;
+    std::uint64_t _lastMatchMs = 0;
+    std::uint64_t _lastApplyMs = 0;
+};
+
 // ---- add or replace ------------------------------------------------------------------------------------------------
-// Many games apply their own DLSS bias (for example -1 + log2(render / output) in steps of 1/16), others keep a constant
-// art bias per material. The first one has to be REPLACED by the target (adding would count the ratio twice), the second
-// one ADDED to. The detector looks at the originals the game uses: a quality change moves the ratio by `delta`
-// (log2 units); if samplers created after it carry a value that is `delta` away from a value the game used before AND was
-// not used before, the game scales its bias with the mode, so REPLACE. If enough new samplers appear without such a pair,
-// the biases are art values: ADD. Until a decision exists the mode is ADD.
-inline constexpr double kMinRatioChange = 0.01;  // a smaller move of the log2 ratio is size rounding, not a mode change
+// Many games apply their own DLSS bias (FFXIV appears to add -1 + log2(render / output) in steps of 1/16 to one family of
+// samplers), others keep a constant art bias per material. For the first the quality mode is already in the game's bias, so only
+// the change since the sampler was made is applied (REPLACE, MipBind.h VariantBias); for the second the target is ADDED. The
+// detector tells them apart from what the game creates, each observation being (family, bias, base target in force):
+//   - a FAMILY is everything of a sampler description except the bias (filter, address modes, anisotropy, comparison, border,
+//     LOD range): only samplers of one family can be a tracking pair;
+//   - a PAIR is two distinct samplers of one family made at base targets at least 0.25 apart, whose biases differ by the same
+//     amount as the targets (within 0.08: one step of the game's 1/16 quantisation plus rounding). One pair makes the mode
+//     REPLACE provisionally; if 12 more distinct samplers arrive without a second, different pair it is confirmed and final;
+//     a second pair (or one observation pairing with two older ones) is ambiguous: ADD, and the detection is re-opened by the
+//     next observation made at a base target 0.25 or more away from that one;
+//   - re-creates of a sampler that is already known (the runtime returns the existing object) are not observations;
+//   - ADD is never final: 40 distinct samplers made at other ratios without a pair log "no pair seen" once, and a pair that
+//     arrives later still makes the mode REPLACE. Only a confirmed REPLACE is final.
+inline constexpr double kMinRatioChange = 0.01;  // grouping of the observe log: ratios closer than this are one ratio
+inline constexpr double kMinPairDelta = 0.25;    // a pair needs a change of the target at least this large (log2 units)
 inline constexpr double kPairTolerance = 0.08;   // one 1/16 step of the game's own quantisation plus rounding
 inline constexpr double kSameValue = 0.02;       // two originals this close are the same value
-inline constexpr unsigned kDecideAfter = 40;     // eligible creations after a change without a pair: constant art biases
-inline constexpr size_t kMaxValues = 64;         // distinct original values remembered per set
+inline constexpr unsigned kConfirmAfter = 12;    // distinct samplers after a pair, without a second pair, that make it final
+inline constexpr unsigned kNoPairAfter = 40;     // distinct samplers made at other ratios without a pair: "no pair seen"
+inline constexpr size_t kMaxValues = 64;         // distinct original values remembered per observe-log ratio
+inline constexpr size_t kMaxObservations = 128;  // distinct samplers the detector remembers
+
+// FNV-1a over the description fields that are not the bias.
+inline std::uint32_t FamilyHash(unsigned filter, unsigned addressU, unsigned addressV, unsigned addressW, unsigned anisotropy,
+                                unsigned comparison, const float border[4], float minLod, float maxLod)
+{
+    std::uint32_t h = 2166136261u;
+    const auto mix = [&h](std::uint32_t v)
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            h ^= (v >> (8 * i)) & 0xFFu;
+            h *= 16777619u;
+        }
+    };
+    const auto bits = [](float f)
+    {
+        std::uint32_t v = 0;
+        std::memcpy(&v, &f, sizeof(v));
+        return v;
+    };
+    mix(filter);
+    mix(addressU);
+    mix(addressV);
+    mix(addressW);
+    mix(anisotropy);
+    mix(comparison);
+    for (int i = 0; i < 4; ++i)
+        mix(bits(border[i]));
+    mix(bits(minLod));
+    mix(bits(maxLod));
+    return h;
+}
 
 class ValueSet
 {
@@ -145,117 +301,190 @@ class ValueSet
 
 struct Decision
 {
-    bool decided = false; // true only on the call that made the decision (the glue logs it once)
-    Mode mode = Mode::Add;
-    double delta = 0.0;       // log2 ratio change the decision is based on
-    float seenBefore = 0.0f;  // Replace: the value the game used before the change
-    float seenAfter = 0.0f;   // Replace: the value that follows it
-    unsigned created = 0;     // eligible creations looked at after the change
+    enum class Kind
+    {
+        None,
+        ReplaceProvisional, // a pair was seen: REPLACE until confirmed
+        ReplaceConfirmed,   // final
+        AddAmbiguous,       // two different pairs: ADD (re-opened later)
+        AddNoPair,          // informational: many samplers at other ratios, no pair; ADD stays, nothing is locked
+    };
+    Kind kind = Kind::None;
+    Mode mode = Mode::Add;    // the mode after this call
+    double delta = 0.0;       // the change of the base target the pair spans
+    float seenBefore = 0.0f;  // the older bias of the pair
+    float seenAfter = 0.0f;   // the newer bias of the pair
+    unsigned distinct = 0;    // distinct samplers looked at so far
+    unsigned candidates = 0;  // pairs the observation formed
+
+    bool any() const { return kind != Kind::None; }
 };
 
 class ModeDetector
 {
   public:
-    enum class Phase
+    enum class State
     {
-        Baseline, // collecting the originals used at the first ratio
-        Watching, // the ratio changed once: comparing what the game creates now
-        Decided,
+        Default,     // ADD, no pair yet
+        Provisional, // REPLACE after one pair
+        Final,       // REPLACE confirmed
+        Ambiguous,   // ADD after two pairs; re-opened by an observation at another ratio
     };
 
     Mode mode() const { return _mode; }
-    Phase phase() const { return _phase; }
-    bool decided() const { return _phase == Phase::Decided; }
-    bool haveRatio() const { return _haveRatio; }
-    double ratio() const { return _ratio; }
+    State state() const { return _state; }
+    bool final() const { return _state == State::Final; }
+    size_t observations() const { return _n; }
 
-    // The base target (log2 ratio, without the offset) of an evaluate. The first call sets the starting ratio; a later
-    // move of kMinRatioChange or more is the first mode change, which starts the comparison. A further move while the
-    // comparison runs restarts it from the newer ratio, keeping everything seen so far as "before".
-    Decision OnRatio(double base)
+    // One distinct sampler: its family, the bias the game gave it and the base target in force when it was made.
+    Decision OnObserved(std::uint32_t family, float bias, double base)
     {
-        if (!std::isfinite(base))
+        if (!std::isfinite(bias) || !std::isfinite(base))
             return {};
-        if (!_haveRatio)
+
+        for (size_t i = 0; i < _n; ++i)
+            if (_obs[i].family == family && std::fabs(_obs[i].bias - bias) <= kSameValue)
+                return {}; // already known
+
+        if (_n >= _obs.size())
+            return {}; // full: later samplers are not looked at
+
+        unsigned candidates = 0;
+        bool otherRatio = false;
+        float pairedWith = 0.0f;
+        double pairedDelta = 0.0;
+        for (size_t i = 0; i < _n; ++i)
         {
-            _haveRatio = true;
-            _ratio = base;
-            return {};
-        }
-        if (_phase == Phase::Decided || std::fabs(base - _ratio) < kMinRatioChange)
-            return {};
-
-        if (_phase == Phase::Watching)
-        {
-            for (size_t i = 0; i < _after.size(); ++i)
-                _before.Add(_after.at(i));
-            _after.Clear();
-        }
-
-        _delta = base - _ratio;
-        _ratio = base;
-        _created = 0;
-        _phase = Phase::Watching;
-        return {};
-    }
-
-    // An eligible sampler was created with this original bias (the game's own value).
-    Decision OnEligibleCreated(float original)
-    {
-        if (!std::isfinite(original) || _phase == Phase::Decided)
-            return {};
-
-        if (_phase == Phase::Baseline)
-        {
-            _before.Add(original);
-            return {};
-        }
-
-        ++_created;
-        const bool known = _before.Contains(original);
-        _after.Add(original);
-
-        if (!known)
-        {
-            for (size_t i = 0; i < _before.size(); ++i)
+            const double dBase = base - _obs[i].base;
+            if (std::fabs(dBase) < kMinPairDelta)
+                continue;
+            otherRatio = true;
+            if (_obs[i].family == family && std::fabs((static_cast<double>(bias) - _obs[i].bias) - dBase) <= kPairTolerance)
             {
-                if (std::fabs(static_cast<double>(original) - (static_cast<double>(_before.at(i)) + _delta)) <=
-                    kPairTolerance)
-                    return Decide(Mode::Replace, _before.at(i), original);
+                if (candidates == 0)
+                {
+                    pairedWith = _obs[i].bias;
+                    pairedDelta = dBase;
+                }
+                ++candidates;
             }
         }
+        _obs[_n++] = { family, bias, base };
+        if (otherRatio)
+            ++_otherRatio;
 
-        if (_created >= kDecideAfter)
-            return Decide(Mode::Add, 0.0f, 0.0f);
+        Decision d;
+        d.distinct = static_cast<unsigned>(_n);
+        d.candidates = candidates;
+        d.mode = _mode;
+        d.delta = pairedDelta;
+        d.seenBefore = pairedWith;
+        d.seenAfter = bias;
 
+        if (_state == State::Final)
+            return {};
+
+        if (_state == State::Ambiguous)
+        {
+            if (std::fabs(base - _ambiguousBase) < kMinPairDelta)
+                return {};
+            _state = State::Default; // another ratio: look again
+        }
+
+        if (candidates >= 2)
+            return Ambiguous(d, base);
+
+        if (candidates == 1)
+        {
+            if (_state == State::Default)
+            {
+                _state = State::Provisional;
+                _mode = Mode::Replace;
+                _since = 0;
+                d.kind = Decision::Kind::ReplaceProvisional;
+                d.mode = _mode;
+                return d;
+            }
+            // a second, different pair while the first one is waiting for its confirmation
+            return Ambiguous(d, base);
+        }
+
+        if (_state == State::Provisional && ++_since >= kConfirmAfter)
+        {
+            _state = State::Final;
+            d.kind = Decision::Kind::ReplaceConfirmed;
+            return d;
+        }
+
+        if (_state == State::Default && !_noPairLogged && _otherRatio >= kNoPairAfter)
+        {
+            _noPairLogged = true;
+            d.kind = Decision::Kind::AddNoPair;
+            return d;
+        }
         return {};
     }
 
     void Reset() { *this = ModeDetector(); }
 
   private:
-    Decision Decide(Mode mode, float before, float after)
+    struct Observation
     {
-        _phase = Phase::Decided;
-        _mode = mode;
-        Decision d;
-        d.decided = true;
-        d.mode = mode;
-        d.delta = _delta;
-        d.seenBefore = before;
-        d.seenAfter = after;
-        d.created = _created;
+        std::uint32_t family = 0;
+        float bias = 0.0f;
+        double base = 0.0;
+    };
+
+    Decision Ambiguous(Decision d, double base)
+    {
+        _state = State::Ambiguous;
+        _mode = Mode::Add;
+        _ambiguousBase = base;
+        d.kind = Decision::Kind::AddAmbiguous;
+        d.mode = _mode;
         return d;
     }
 
-    Phase _phase = Phase::Baseline;
+    State _state = State::Default;
     Mode _mode = Mode::Add;
-    bool _haveRatio = false;
-    double _ratio = 0.0;
-    double _delta = 0.0;
-    unsigned _created = 0;
-    ValueSet _before;
-    ValueSet _after;
+    std::array<Observation, kMaxObservations> _obs {};
+    size_t _n = 0;
+    unsigned _since = 0;
+    unsigned _otherRatio = 0;
+    bool _noPairLogged = false;
+    double _ambiguousBase = 0.0;
+};
+
+// Warns once when the hooks look to sit on the wrong context: the substitution is on and samplers are known, but after many
+// evaluates not one bind was substituted.
+class LatchWatch
+{
+  public:
+    static constexpr unsigned kEvaluates = 600;
+
+    bool OnEvaluate(bool active, size_t samplers, std::uint64_t substitutedBinds)
+    {
+        if (_warned || _satisfied)
+            return false;
+        if (substitutedBinds > 0)
+        {
+            _satisfied = true;
+            return false;
+        }
+        if (!active || samplers == 0)
+            return false;
+        if (++_count < kEvaluates)
+            return false;
+        _warned = true;
+        return true;
+    }
+
+    void Reset() { *this = LatchWatch(); }
+
+  private:
+    unsigned _count = 0;
+    bool _warned = false;
+    bool _satisfied = false;
 };
 
 // ---- settings ------------------------------------------------------------------------------------------------------
@@ -292,20 +521,32 @@ inline std::string TargetLine(unsigned renderW, unsigned displayW, double base, 
                        first ? ", first measurement" : "");
 }
 
-// The one line when the detector decides.
+// The line when the detector decides (or declines to).
 inline std::string DecisionLine(const Decision& d)
 {
     using namespace detail;
-    if (d.mode == Mode::Replace)
-        return std::format("Bind-time mip bias: the game already follows the quality mode (its bias {} became {} for a ratio "
-                           "change of {}), so the target REPLACES the game's own bias",
-                           Num4(d.seenBefore), Num4(d.seenAfter), Num4(d.delta));
-
-    return std::format("Bind-time mip bias: the game's biases did not follow the quality change of {} (looked at {} new "
-                       "samplers), they are art values, so the target is ADDED to the game's own bias",
-                       Num4(d.delta), d.created);
+    switch (d.kind)
+    {
+    case Decision::Kind::ReplaceProvisional:
+        return std::format("Bind-time mip bias: the game already follows the quality mode (one sampler family went from bias {} to "
+                           "{} while the ratio target moved by {}), so only the CHANGE of the ratio since a sampler was made is "
+                           "applied (REPLACE mode, provisional until {} more samplers confirm it)",
+                           Num4(d.seenBefore), Num4(d.seenAfter), Num4(d.delta), kConfirmAfter);
+    case Decision::Kind::ReplaceConfirmed:
+        return std::format("Bind-time mip bias: REPLACE mode confirmed after {} distinct samplers", d.distinct);
+    case Decision::Kind::AddAmbiguous:
+        return std::format("Bind-time mip bias: {} different sampler pairs fit a change of the ratio, so the game's bias cannot be "
+                           "told from art values; staying in ADD mode (the target is added to the game's own bias) and looking "
+                           "again at the next change of the ratio",
+                           d.candidates >= 2 ? d.candidates : 2u);
+    case Decision::Kind::AddNoPair:
+        return std::format("Bind-time mip bias: {} samplers made at other ratios and none follows the quality mode, they look like "
+                           "art values; ADD mode (the target is added to the game's own bias), still watching",
+                           d.distinct);
+    default:
+        return {};
+    }
 }
-
 // Debug line of MipmapBiasObserve: a distinct original bias seen at a ratio.
 inline std::string ObserveLine(double base, float original, size_t distinctAtRatio)
 {
@@ -355,9 +596,9 @@ class Observer
 inline std::string BindCardNote()
 {
     return "Bind-time mode: the sharpening is applied when the game uses a sampler, so a quality change reaches the textures "
-           "at once, also on samplers the game made earlier. Add or replace is decided from the game's own sampler biases at "
-           "the first quality change (see the log); a Mipmap Bias value set by hand always wins. Only samplers the game made "
-           "after the hooks were attached take part, so turn this on at the start for a full effect.";
+           "at once, also on samplers the game made earlier. Add or replace is decided from the game's own sampler biases when the "
+           "quality changes (see the log); a Mipmap Bias value set by hand always wins, and takes over again as soon as it is "
+           "cleared.";
 }
 
 // What the menu card shows.
@@ -369,8 +610,10 @@ struct BindStatus
     bool hasTarget = false;
     double target = 0.0;
     Mode mode = Mode::Add;
-    bool decided = false;
+    bool decided = false; // REPLACE confirmed
     unsigned long long substitutedBinds = 0;
+    unsigned long long lazy = 0;     // samplers first seen at a bind
+    unsigned long long notReady = 0; // binds of a sampler whose variant was not ready
     unsigned long long variants = 0;
     unsigned long long tableFull = 0;
     unsigned long long failures = 0;
@@ -387,7 +630,7 @@ inline std::string BindStatusLine(const BindStatus& s)
     if (!s.hasTarget)
         return "Waiting for the first upscaler evaluation.";
     return std::format("Target {} ({} mode{}), {} samplers known, {} binds substituted, {} variants made{}{}.", Num4(s.target),
-                       ModeText(s.mode), s.decided ? "" : ", not decided yet", s.samplers, s.substitutedBinds, s.variants,
+                       ModeText(s.mode), s.decided ? ", confirmed" : "", s.samplers, s.substitutedBinds, s.variants,
                        s.tableFull != 0 ? std::format(", table full {} times", s.tableFull) : std::string(),
                        s.failures != 0 ? std::format(", {} variant failures", s.failures) : std::string());
 }

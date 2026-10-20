@@ -74,7 +74,7 @@ int main()
         d.MaxLOD = D3D11_FLOAT32_MAX;
         ComPtr<ID3D11SamplerState> s;
         device->CreateSamplerState(&d, &s);
-        engine.table().OnCreated(s.Get(), d, d.MipLODBias, true);
+        engine.NoteCreated(s.Get(), device.Get(), d, d, true);
         samplers.push_back(s);
     }
     ID3D11SamplerState* sets[4][8];
@@ -82,7 +82,8 @@ int main()
         for (int i = 0; i < 8; ++i)
             sets[k][i] = samplers[k * 8 + i].Get();
 
-    engine.SetTarget(-0.584963, Mode::Add);
+    engine.SetTarget(-0.584963, 0.0, Mode::Add);
+    engine.Refresh();
     // make every variant for this revision once
     engine.SetActive(true);
     for (int k = 0; k < 4; ++k)

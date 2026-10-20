@@ -89,62 +89,72 @@ int main(int argc, char** argv)
               std::string::npos);
     }
 
-    // ---- 2. the engine's bind path ------------------------------------------------------------------------------
+    // ---- 2. the glue: wiring only (the behaviour is tested in mip_bind_control / _bind / _table / _detours) -----------
     {
         const std::string engine = ReadAll(ext + "upscaler/MipBindEngine.h");
         CHECK(!engine.empty());
-        // no lock of any kind in the file that holds the bind path
-        CHECK(engine.find("mutex") == std::string::npos);
-        CHECK(engine.find("lock_guard") == std::string::npos);
-        CHECK(engine.find("scoped_lock") == std::string::npos);
-        CHECK(engine.find("unique_lock") == std::string::npos);
-        CHECK(engine.find("SRWLOCK") == std::string::npos);
-        CHECK(engine.find("CRITICAL_SECTION") == std::string::npos);
-        // pure D3D11 + standard library: no config, no state, no logger
+        // The bind path is lock-free by construction and by test (BindsWhileOthersCreate); this is only the mechanical guard that
+        // nobody pulls a lock header into the engine, and that it stays free of config, state and logging.
+        CHECK(engine.find("#include <mutex>") == std::string::npos);
+        CHECK(engine.find("#include <shared_mutex>") == std::string::npos);
         CHECK(engine.find("#include <Config.h>") == std::string::npos);
         CHECK(engine.find("#include <State.h>") == std::string::npos);
         CHECK(engine.find("LOG_") == std::string::npos);
         CHECK(engine.find("#include \"pch.h\"") == std::string::npos);
+        const std::string control = ReadAll(ext + "upscaler/MipBindControl.h");
+        CHECK(control.find("#include <mutex>") == std::string::npos && control.find("#include <Config.h>") == std::string::npos);
 
         const std::string hooks = ReadAll(ext + "upscaler/MipBindHooks.cpp");
-        // the thunks go straight to the engine; the mutex is for the create path and the evaluate only
+        // the thunks go straight to the engine, never through a lock
         const std::string setThunk = Body(hooks, "void STDMETHODCALLTYPE HkSet(");
         const std::string getThunk = Body(hooks, "void STDMETHODCALLTYPE HkGet(");
         CHECK(!setThunk.empty() && !getThunk.empty());
-        CHECK(setThunk.find("g_mutex") == std::string::npos && getThunk.find("g_mutex") == std::string::npos);
+        CHECK(setThunk.find("g_installMutex") == std::string::npos && getThunk.find("g_installMutex") == std::string::npos);
         CHECK(setThunk.find("g_engine.Set(S, c, start, count, input);") != std::string::npos);
         CHECK(getThunk.find("g_engine.Get(S, c, start, count, output);") != std::string::npos);
         CHECK(setThunk.find("g_ready") != std::string::npos && getThunk.find("g_ready") != std::string::npos);
 
-        // variants are made inside a bypass scope, through the trampoline
+        // creates and evaluates go to the controller, with the bypass state and the settings of the moment
+        CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(")
+                  .find("g_controller.OnSamplerCreated(*out, device, *desc, ext::core::HooksBypassed());") != std::string::npos);
+        CHECK(Body(hooks, "void OnEvaluate(").find("g_controller.OnEvaluate(settings, input);") != std::string::npos);
+        CHECK(Body(hooks, "void OnEvaluate(").find("settings.manualOverride = ManualOverrideSet();") != std::string::npos);
         CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE CreateVariant(").find("ext::core::BypassScope scope;") != std::string::npos);
-        // the fork's own samplers (made in a bypass scope) are not classified
-        CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(").find("ext::core::HooksBypassed()") !=
-              std::string::npos);
-        CHECK(Body(hooks, "void OnSamplerCreated(").find("!bypassed &&") != std::string::npos);
-        // the identity marker is the tested one of the engine header; a hand-set value that blocks the feature is said once
-        CHECK(hooks.find("ContextMarker::Stamp(context.Get())") != std::string::npos);
-        CHECK(hooks.find("ContextMarker::Matches(context, g_stamp)") != std::string::npos);
-        CHECK(Body(hooks, "void OnEvaluate(").find("MipmapBiasOverride is set by hand (it always wins)") != std::string::npos);
-        // a manual value makes the sampler not eligible
-        CHECK(Body(hooks, "void OnSamplerCreated(").find("!ManualOverrideSet() &&") != std::string::npos);
-        // thirteen detours: CreateSamplerState plus the six pairs; the CreateSamplerState one is attached LAST (at the first
-        // upscaler create, after upstream's hook on the same function) and detached FIRST, each in its own transaction
+        // the manual-override condition is NOT part of the classification any more (M2): the controller has no such parameter
+        CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(").find("ManualOverrideSet") == std::string::npos);
+        CHECK(control.find("manualOverride") != std::string::npos);
+        const size_t created = control.find("SamplerTable::Result OnSamplerCreated(");
+        const size_t evaluate = control.find("void OnEvaluate(");
+        CHECK(created != std::string::npos && evaluate != std::string::npos);
+        CHECK(control.substr(created, evaluate - created).find("manualOverride") == std::string::npos);
+
+        // Detours: the current thread only for the attaches AND the detaches (no DetourThreadScope: all-thread suspension on a
+        // live path is the heap-lock hazard of ext/core/DetourThreads.h); the CreateSamplerState hook is attached LAST (at the
+        // first upscaler create, after upstream's hook on that function) and detached FIRST, each in its own transaction.
+        CHECK(hooks.find("ext::core::DetourThreadScope") == std::string::npos && hooks.find("#include \"ext/core/DetourThreads.h\"") == std::string::npos);
+        CHECK(Count(hooks, "DetourUpdateThread(GetCurrentThread())") == 3);
         CHECK(Count(hooks, "DetourAttach(") == 3 && Count(hooks, "DetourDetach(") == 3);
-        CHECK(Body(hooks, "bool InstallCreateHook()").find("DetourAttach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState)") !=
-              std::string::npos);
+        CHECK(Body(hooks, "void InstallCreateHook()").find("RunTransaction(true,") != std::string::npos);
         const std::string uninstall = Body(hooks, "void Uninstall()");
-        const size_t detachCreate = uninstall.find("DetourDetach(reinterpret_cast<PVOID*>(&g_createTramp), HkCreateSamplerState)");
+        const size_t detachCreate = uninstall.find("RunTransaction(false,");
         const size_t detachBind = uninstall.find("DetourDetach(reinterpret_cast<PVOID*>(&g_set[s])");
         CHECK(detachCreate != std::string::npos && detachBind != std::string::npos && detachCreate < detachBind);
-        CHECK(Count(uninstall, "DetourTransactionBegin()") == 2);
-        CHECK(Body(hooks, "void OnFeatureCreate()").find("InstallCreateHook();") != std::string::npos);
-        // variants are made from the description the device really created (it keeps upstream's changes, e.g. anisotropy)
-        CHECK(Body(hooks, "void OnSamplerCreated(").find("sampler->GetDesc(&created);") != std::string::npos);
+        CHECK(Body(hooks, "void OnFeatureCreate()").find("Perform(g_plan.OnFeatureCreate());") != std::string::npos);
+        CHECK(Body(hooks, "void OnDeviceHooked(").find("Perform(g_plan.OnDeviceHooked(AutoEnabled()));") != std::string::npos);
+        CHECK(Body(hooks, "void OnSettingChanged()").find("Perform(g_plan.OnSettingChanged(AutoEnabled()));") != std::string::npos);
+
+        // no reference is held on the game's device or context (upstream's release hook looks for the last release)
+        CHECK(hooks.find("ComPtr<ID3D11Device> g_device") == std::string::npos);
+        CHECK(hooks.find("ComPtr<ID3D11DeviceContext> g_context") == std::string::npos);
+        CHECK(Body(hooks, "void Capture(").find("g_cap.context = context.Get();") != std::string::npos);
+        CHECK(Body(hooks, "void Uninstall()").find("g_engine.ReleaseAll();") != std::string::npos);
+
+        // the identity marker is the tested one of the engine header
+        CHECK(hooks.find("ContextMarker::Stamp(context.Get())") != std::string::npos);
+        CHECK(hooks.find("ContextMarker::Matches(context, g_cap.stamp)") != std::string::npos);
         CHECK(hooks.find("kContextSetSamplersSlots[s]") != std::string::npos && hooks.find("kContextGetSamplersSlots[s]") != std::string::npos);
         CHECK(hooks.find("kDeviceCreateSamplerStateSlot") != std::string::npos);
     }
-
     // ---- 3. keys and ini fragment -------------------------------------------------------------------------------
     {
         const std::string cfg = ReadAll(ext + "core/ExtConfig.cpp");
