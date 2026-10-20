@@ -163,6 +163,7 @@ void TestFragment(const std::string& repo)
                 start = crlf;
             const std::string text = ffxiv.substr(start, at - start);
             CHECK(text.find("learns") != std::string::npos && text.find("60%") != std::string::npos && text.find("EVERY DLSS evaluate") != std::string::npos);
+            CHECK(text.find("verification stale") != std::string::npos && text.find("keeps being applied") != std::string::npos); // F2: no over-promise
             CHECK(text.find("generation off first") != std::string::npos && text.find("Test with frame") != std::string::npos); // the comment wraps between the lines
             CHECK(text.find("same-frame") == std::string::npos && text.find("held-back") == std::string::npos &&
                   text.find("frame counter did not increase") == std::string::npos && text.find("replaced by the applied") == std::string::npos);

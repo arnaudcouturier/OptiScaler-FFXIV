@@ -477,13 +477,19 @@ void TestScaleArithmeticAndCap()
     d = DecideScale(0.0f, 0.0f, 0.6f, none);
     CHECK(d.action == ScaleAction::Scale && d.x == 0.0f && d.y == 0.0f);
 
-    // the cap (a ratio above 1 cannot be adopted, so the guard is tested on the function itself): +-kMaxAppliedPixels
-    d = DecideScale(0.5f, -0.5f, 3.0f, none);
-    CHECK(d.action == ScaleAction::Scale && d.x == kMaxAppliedPixels && d.y == -kMaxAppliedPixels);
-    d = DecideScale(0.3f, -0.3f, 3.0f, none);
-    CHECK(Close(d.x, 0.9) && Close(d.y, -0.9)); // below the cap: untouched
-    d = DecideScale(0.5f, 0.1f, 2.0f, none);
-    CHECK(d.x == 1.0f && Close(d.y, 0.2)); // exactly at the cap
+    // F4: the ratio is guarded inside DecideScale (finite, 0 < r <= 1): anything else writes nothing, so the 1 pixel cap below is a second
+    // line of defence that no ratio can reach; it is tested on CapApplied itself
+    for (float bad : { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), 0.0f,
+                       -0.0f, -0.5f, 1.0000001f, 2.0f, 3.0f })
+    {
+        const auto r = DecideScale(0.3f, -0.2f, bad, none);
+        CHECK_MSG(r.action == ScaleAction::NotUsable && r.guard == Guard::ScaleRatioInvalid && r.x == 0.0f && r.y == 0.0f, "ratio %g", bad);
+    }
+    CHECK(DecideScale(0.3f, -0.2f, 1.0f, none).action == ScaleAction::Scale && DecideScale(0.3f, -0.2f, 0.25f, none).action == ScaleAction::Scale);
+    CHECK(DecideScale(0.3f, -0.2f, 1e-30f, none).action == ScaleAction::Scale);
+    CHECK(CapApplied(1.5f) == kMaxAppliedPixels && CapApplied(-1.5f) == -kMaxAppliedPixels && CapApplied(0.9f) == 0.9f && CapApplied(1.0f) == 1.0f);
+    // the ratio is judged before the pair: a bad ratio with a bad pair names the ratio
+    CHECK(DecideScale(std::nullopt, 0.1f, 3.0f, none).guard == Guard::ScaleRatioInvalid);
 
     // a pair the function never writes beyond the range, whatever it is given
     for (float ratio : { 0.25f, 0.5f, 0.9f, 0.979f })
@@ -671,6 +677,7 @@ void TestTextOfTheNewGuards()
 {
     CHECK(std::string(GuardName(Guard::JitterTooSmall)).find("too small") != std::string::npos);
     CHECK(std::string(GuardName(Guard::ReportedOutOfRange)).find("0.55") != std::string::npos);
+    CHECK(std::string(GuardName(Guard::ScaleRatioInvalid)).find("ratio") != std::string::npos);
 }
 } // namespace
 

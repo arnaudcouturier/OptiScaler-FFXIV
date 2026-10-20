@@ -396,6 +396,20 @@ void TestAnExceptionMidLearningDropsTheRunButAnAdoptedRatioSurvives()
     }
 }
 
+// F5: an exception AFTER the snapshot was taken (a throwing log or status line in the sample stage) must not drop the learning run: the
+// snapshot had been observed correctly. (An exception at the reads or at the decision still drops it: TestAnExceptionMidLearning...)
+void TestAnExceptionInTheSampleStageKeepsTheLearningRun()
+{
+    Session g;
+    g.sequence = false;
+    g.e.fgThrows = true; // the status line asks frame generation: the first evaluate is a tick and throws after Observe
+    CHECK(g.Next().sets.empty());
+    CHECK(CountLines(g.e.logs, "fg state") == 1);
+    for (int i = 2; i <= 4; ++i)
+        CHECK(g.Next().sets.empty());
+    CHECK(Wrote(g.Next(), 0.18, -0.12)); // the 5th snapshot adopts at once: the run of the throwing evaluate was kept
+}
+
 // ---- the write: X then Y, put-back, and what is remembered ------------------------------------------------------------------------
 
 void TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered()
@@ -897,6 +911,7 @@ int main()
     TestABuildMismatchStaysIdle();
     TestSwitchingTheCorrectionOffAndOnStartsLearningAgain();
     TestAnExceptionMidLearningDropsTheRunButAnAdoptedRatioSurvives();
+    TestAnExceptionInTheSampleStageKeepsTheLearningRun();
     TestAHalfWrittenPairIsPutBackAndWhatTheBlockHoldsIsRemembered();
     TestARatioChangeIsAppliedToTheRawPairNotTheHeldResult();
     TestTheRawPairSurvivesAFailedRepairAndAStalePairIsNotMistakenForOurs();

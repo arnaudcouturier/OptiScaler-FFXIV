@@ -327,6 +327,12 @@ inline float CapApplied(float v) { return std::clamp(v, -kMaxAppliedPixels, kMax
 inline ScaleDecision DecideScale(const std::optional<float>& ngxX, const std::optional<float>& ngxY, float ratio, const WrittenPair& last)
 {
     ScaleDecision d;
+    // callers cannot reach this (the ratio is an adopted Scale ratio or a valid manual scale); a bad ratio would otherwise be written
+    if (!std::isfinite(ratio) || !(ratio > 0.0f) || ratio > 1.0f)
+    {
+        d.guard = Guard::ScaleRatioInvalid;
+        return d;
+    }
     if (!ngxX || !ngxY || !std::isfinite(*ngxX) || !std::isfinite(*ngxY))
     {
         d.guard = Guard::NgxJitterUnavailable;

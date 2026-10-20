@@ -157,7 +157,8 @@ class Engine
     // it, and a run must be consecutive), an adopted ratio is not; the exception is reported once per episode.
     template <class Env> void AbandonStep(Env& env, const char* what) noexcept
     {
-        _cal.AbandonRun();
+        if (_stage <= Stage::Decide)
+            _cal.AbandonRun(); // an exception after the snapshot was taken (the sample stage) must not throw a correct run away
         if (_thrownAt != _stage)
             _exceptions.Close(); // another place is another episode, even while one is open
         _thrownAt = _stage;

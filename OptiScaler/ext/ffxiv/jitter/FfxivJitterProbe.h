@@ -44,6 +44,7 @@ enum class Guard : std::uint8_t
     NgxJitterUnavailable,
     JitterTooSmall,        // an axis has too little reported jitter to give a ratio (the calibration skips the snapshot)
     ReportedOutOfRange,    // the jitter this evaluate carries to NGX is above the plausible reported size (not scaled)
+    ScaleRatioInvalid,     // the ratio handed to the scaling is not finite or not in (0, 1]: nothing is written
     AppliedImplausible,
     SignMismatch,        // reported and applied jitter have opposite signs: the convention is not understood, nothing is touched
 };
@@ -69,6 +70,7 @@ constexpr const char* GuardName(Guard g)
     case Guard::NgxJitterUnavailable: return "NGX jitter parameters not readable";
     case Guard::JitterTooSmall: return "reported jitter too small on an axis to give a ratio";
     case Guard::ReportedOutOfRange: return "NGX jitter value above 0.55 pixel";
+    case Guard::ScaleRatioInvalid: return "scale ratio not finite or not in the range above 0 up to 1";
     case Guard::AppliedImplausible: return "applied jitter not finite or above 1 pixel";
     case Guard::SignMismatch: return "reported and applied jitter have opposite signs";
     }
