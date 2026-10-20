@@ -364,6 +364,37 @@ inline int InsnIndex(const std::vector<x64::Insn>& insns, uint32_t rva)
     return (it != insns.end() && it->at == rva) ? static_cast<int>(it - insns.begin()) : -1;
 }
 
+// Start of a fragment of the exception table that is chained to `create` (a cold part of the same function: code the decode of create
+// does not cover); 0 when there is none. Both ways of chaining are read: UNWIND_INFO with UNW_FLAG_CHAININFO (the parent
+// RUNTIME_FUNCTION follows the unwind codes) and an unwind pointer with the low bit set.
+inline uint32_t ChainedFragmentOf(const Scanner& sc, uint32_t create)
+{
+    const auto& v = sc.view();
+    for (uint32_t off = 0; off + 12 <= v.pdataSize; off += 12)
+    {
+        const uint32_t begin = sc.U32(v.pdataVa + off), end = sc.U32(v.pdataVa + off + 4), unwind = sc.U32(v.pdataVa + off + 8);
+        if (begin == 0 && end == 0)
+            break;
+        uint32_t parent = 0;
+        if (unwind & 1)
+        {
+            const uint32_t at = unwind & ~3u;
+            if (sc.InImage(at, 12))
+                parent = sc.U32(at);
+        }
+        else if (sc.InImage(unwind, 4) && ((v.bytes[unwind] >> 3) & 4) != 0)
+        {
+            const uint32_t codes = v.bytes[unwind + 2];
+            const uint32_t at = unwind + 4 + ((codes + 1) & ~1u) * 2;
+            if (sc.InImage(at, 12))
+                parent = sc.U32(at);
+        }
+        if (parent == create && begin != create)
+            return begin;
+    }
+    return 0;
+}
+
 struct ContextFacts
 {
     Loc loc;
@@ -382,9 +413,13 @@ struct ContextFacts
 //     frame slots: any store whose bytes overlap it, through rsp or rbp; also no address of the slot or of anything below it is
 //     taken, no copy of rsp/rbp as a value, no push/pop or other move of rsp/rbp);
 //  4. control flow: no jump from outside [save, reload] lands in it, no jump lands anywhere in (reload, call] and none lands on the
-//     entry run, every direct jump target inside create is an instruction start and there is no indirect jump, so the only way to the
-//     call is through the save and then the reload.
-inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
+//     entry run, every direct jump target inside create is an instruction start, there is no indirect jump, no call into create
+//     itself, a jump out of create goes only to the start of another function (a tail call), and no cold fragment of the exception
+//     table is chained to create: the only way to the call is through the save and then the reload.
+//  Stores through a register other than rsp/rbp/rip with a negative displacement or an index, and string stores / bit-string stores
+//  (they write where a register says), are refused in the region; so is a frame address copied or stored. NOT tracked: a pointer
+//  built by arithmetic on a frame address (lea rax,[rbp-30h]; sub rax,70h; mov [rax],r12): no compiler emits it, only hand-made code.
+inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, const std::vector<Function>& fns, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
 {
     using namespace x64;
     const int iCall = InsnIndex(insns, readCall);
@@ -460,6 +495,13 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
     const uint32_t saveStart = insns[iSave].at, reloadStart = reload.at, callStart = readCall;
     const uint32_t createEnd = insns.back().at + insns.back().len;
 
+    // a cold fragment chained to create runs code that the decode of create does not cover
+    if (chainedFragment != 0)
+    {
+        failAt = chainedFragment;
+        return Why::CreateContext;
+    }
+
     // 4. control flow (two passes: first every target must be an instruction start, then the rules)
     for (const Insn& b : insns)
     {
@@ -476,8 +518,29 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
     }
     for (const Insn& b : insns)
     {
-        if ((b.flow != Flow::Jump && b.flow != Flow::CondJump) || b.target < create || b.target >= createEnd)
+        const bool direct = b.flow == Flow::Jump || b.flow == Flow::CondJump || (b.flow == Flow::Call && b.target != -1);
+        if (!direct)
             continue;
+        if (b.target < 0 || b.target > 0xFFFFFFFFll)
+        {
+            failAt = b.at;
+            return Why::CreateContext;
+        }
+        if (b.target < create || b.target >= createEnd)
+        {
+            // leaving create: a call comes back, a jump must be a tail call to the start of another function (it never comes back)
+            if (b.flow != Flow::Call && StartOf(fns, static_cast<uint32_t>(b.target)) == nullptr)
+            {
+                failAt = b.at;
+                return Why::CreateContext;
+            }
+            continue;
+        }
+        if (b.flow == Flow::Call) // a call into create itself would run region code without the save
+        {
+            failAt = b.at;
+            return Why::CreateContext;
+        }
         const uint32_t t = static_cast<uint32_t>(b.target);
         const bool fromRegion = b.at >= saveStart && b.at <= reloadStart;
         if ((t >= create && t <= saveStart) || (!fromRegion && t >= saveStart && t <= reloadStart) || (t > reloadStart && t <= callStart))
@@ -487,22 +550,68 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
         }
     }
 
+    // Registers that may hold a frame address before each instruction of the region (slot mode): a frame location's address taken
+    // with lea, a copy of it, arithmetic on it. Overwritten by a load, an immediate, a zero idiom or a pop, and lost in a call for the
+    // volatile registers. Path-insensitive (address order, two rounds so that a loop carries it round).
+    std::vector<uint16_t> taint(static_cast<size_t>(iReload - iSave + 1), 0);
+    if (want.slot)
+    {
+        constexpr uint16_t kVolatile = (1u << RAX) | (1u << RCX) | (1u << RDX) | (1u << R8) | (1u << R9) | (1u << R10) | (1u << R11);
+        uint16_t cur = 0;
+        for (int round = 0; round < 2; ++round)
+            for (int j = iSave + 1; j <= iReload; ++j)
+            {
+                const Insn& n = insns[j];
+                taint[static_cast<size_t>(j - iSave)] = static_cast<uint16_t>(taint[static_cast<size_t>(j - iSave)] | cur);
+                auto holds = [&](uint8_t r) { return r != kNoReg && (cur & (1u << r)) != 0; };
+                if (n.flow == Flow::Call)
+                    cur = static_cast<uint16_t>(cur & ~kVolatile);
+                if (n.isLea && n.mem.present)
+                {
+                    const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP);
+                    const bool derived = frame || holds(n.mem.ripRel ? kNoReg : n.mem.base) || holds(n.mem.index);
+                    cur = static_cast<uint16_t>(derived ? (cur | (1u << n.reg)) : (cur & ~(1u << n.reg)));
+                }
+                else if (!n.twoByte && n.hasModrm && n.mod == 3 && (n.opcode == 0x89 || n.opcode == 0x8B))
+                {
+                    const uint8_t dst = (n.opcode == 0x89) ? n.rm : n.reg, src = (n.opcode == 0x89) ? n.reg : n.rm;
+                    cur = static_cast<uint16_t>(holds(src) ? (cur | (1u << dst)) : (cur & ~(1u << dst)));
+                }
+                else
+                {
+                    const bool overwrite =
+                        (!n.twoByte && ((n.opcode >= 0xB0 && n.opcode <= 0xBF) || (n.opcode >= 0x58 && n.opcode <= 0x5F) || (n.opcode == 0xC7 && n.mod == 3) ||
+                                        ((n.opcode == 0x8B || n.opcode == 0x8A || n.opcode == 0x63) && n.mod != 3) ||
+                                        ((n.opcode == 0x31 || n.opcode == 0x33 || n.opcode == 0x29 || n.opcode == 0x2B) && n.mod == 3 && n.reg == n.rm))) ||
+                        (n.twoByte && (n.opcode == 0xB6 || n.opcode == 0xB7 || n.opcode == 0xBE || n.opcode == 0xBF) && n.mod != 3);
+                    if (overwrite)
+                        cur = static_cast<uint16_t>(cur & ~n.gprWrites);
+                }
+            }
+    }
+
     // 3. nothing in the region writes the saved place
     for (int j = iSave + 1; j <= iReload; ++j)
     {
         const Insn& n = insns[j];
-        bool clobbered = false;
+        bool clobbered = n.aliasStore; // rep movs/stos and bts/btr/btc write where a register says: refused in every mode
         if (!want.slot)
-            clobbered = (n.gprWrites & (1u << want.reg)) != 0;
+            clobbered = clobbered || (n.gprWrites & (1u << want.reg)) != 0;
         else
         {
             int64_t off = 0;
-            if (n.writesStack || (n.gprWrites & ((1u << RSP) | (1u << RBP))) != 0 || (n.readsFrameRegAsValue && !n.isLea))
-                clobbered = true; // the frame moves, or its address is copied somewhere
+            if (n.writesStack || (n.gprWrites & ((1u << RSP) | (1u << RBP))) != 0 || n.readsFrameRegAsValue)
+                clobbered = true; // the frame moves, or its address is copied or stored somewhere
             if (n.isLea && n.mem.present && !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP))
                 clobbered = clobbered || !FrameOffset(n.mem, f, off) || off < want.off + 8; // the address of the slot, or of something below it, is taken
             if (n.memWrite && n.mem.present && !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP))
                 clobbered = clobbered || !FrameOffset(n.mem, f, off) || (off < want.off + 8 && off + n.memSize > want.off);
+            else if (n.memWrite && n.mem.present && !n.mem.ripRel)
+            {
+                // a store through another register: refused when that register may hold a frame address (or when an index is used)
+                const uint16_t held = taint[static_cast<size_t>(j - iSave)];
+                clobbered = clobbered || n.mem.index != kNoReg || (n.mem.base != kNoReg && (held & (1u << n.mem.base)) != 0);
+            }
         }
         if (clobbered)
         {
@@ -656,7 +765,7 @@ inline Located Locate(const ImageView& view)
     ContextFacts ctx;
     {
         uint32_t failAt = 0;
-        const Why proof = ProveContext(insns, create, frame, readCallInCreate, ctx, failAt);
+        const Why proof = ProveContext(insns, create, frame, fns, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
         if (proof != Why::Ok)
         {
             fail.failAt = failAt;
@@ -678,7 +787,7 @@ inline Located Locate(const ImageView& view)
     Why late = Why::Ok;
     for (uint32_t at = create; at + 9 <= createEnd; ++at)
     {
-        if (!sc.Match(at, kLeaRcxRbp40Call))
+        if (!sc.Match(at, kLeaRcxRbp40Call) || InsnIndex(insns, at) < 0)
             continue;
         const int64_t target64 = static_cast<int64_t>(at) + 9 + sc.I32(at + 5);
         if (target64 < 0 || target64 > static_cast<int64_t>(view.size))
@@ -698,7 +807,7 @@ inline Located Locate(const ImageView& view)
             if (copyHits < 2)
             {
                 // mov rdx,[rip+global] right before "lea rcx,[rbp+40h]"
-                if (at < create + 7 || !sc.Match(at - 7, kMovRdxRip))
+                if (at < create + 7 || !sc.Match(at - 7, kMovRdxRip) || InsnIndex(insns, at - 7) < 0)
                     late = Why::CopySetup;
                 else if (static_cast<int64_t>(at) - 7 + 7 + sc.I32(at - 4) != globalRead)
                     late = Why::GlobalMismatch;

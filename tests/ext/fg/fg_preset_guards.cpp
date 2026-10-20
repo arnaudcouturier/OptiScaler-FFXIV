@@ -33,6 +33,7 @@ enum class Where
     SlotRbp,  // the same slot through rbp
     Volatile, // r8: not preserved across calls
     Home,     // [rsp+10h]: the callee-writable home area
+    HomeEdge, // [rsp+18h]: still the home area (it ends at rsp+20h)
     Beyond,   // [rsp+frameSub]: just above the frame (the saved registers), not a local slot
     None
 };
@@ -44,6 +45,13 @@ enum class Clobber
     RegMov, RegXor32, RegPop, RegXchg, RegByte, RegLea,
     // writes the saved slot (refused when the context sits in a slot)
     SlotQword, SlotViaRbp, SlotDword, SlotMovups, SlotByte, SlotLeaBelow, SlotLeaRbpBelow, MovRaxRsp, PushRax,
+    // review 2 (M2/M3): aliasing stores, boundaries of the slot, frame addresses copied, string and bit-string stores
+    AliasStore, SlotLeaAt60, SlotLeaAt64, SlotLeaAt67, SlotDwordAt5D, SlotIndexedStore, SlotLeaIndexed, WriteRbp, StoreRspToMem, MovqXmmRsp,
+    LeaRbpIndex,
+    // pointer tracking: a register that may hold a frame address (lea of a frame location, a copy of it, arithmetic on it)
+    AliasViaMov, AliasViaArithmetic, AliasKilledByLoad, AliasKilledByCall, AliasKeptInCalleeSaved, NegDispUntainted,
+    // string and bit-string stores write where a register says: refused in every mode
+    StringStore, BtsMem,
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -92,6 +100,20 @@ struct Spec
     bool jumpMidInstruction = false;
     bool indirectJump = false;
     bool unknownOpcode = false;
+    // review 2 (M2/M3)
+    bool jumpToCall = false;           // jmp from after the sites to the read call itself
+    bool jumpToReload = false;         // jmp from outside to the reload instruction
+    bool jumpBackToSaveInside = false; // jz inside the region back to the save
+    bool branchBeforeSave = false;     // test eax,eax / jz far, before the save
+    bool callIntoFunction = false;     // call whose target is inside create
+    int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
+    bool chainedFragment = false;      // a cold fragment in the exception table chained to create
+    bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
+    // signature proof
+    bool wideLoadAtSixth = false;      // movups xmm0,[rbp+...] over the 6th argument: 16 bytes reach the 7th
+    bool loadAt14th = false;           // mov rax,[rbp+...] at entry rsp+70h
+    bool loadAt15th = false;           // ... at entry rsp+78h (outside the window)
+    bool statusDecoyHigh = false;      // mov eax,0BAD10002h only
 };
 
 struct Code
@@ -157,6 +179,7 @@ void EmitSave(Code& c, Where w, const Spec& s, int32_t rbpToRsp)
     case Where::SlotRsp: c.b({ 0x48, 0x89, 0x54, 0x24, 0x60 }); break;
     case Where::SlotRbp: c.b({ 0x48, 0x89, 0x95 }); c.i32(0x60 - rbpToRsp); break;
     case Where::Home: c.b({ 0x48, 0x89, 0x54, 0x24, 0x10 }); break;
+    case Where::HomeEdge: c.b({ 0x48, 0x89, 0x54, 0x24, 0x18 }); break;
     case Where::Beyond: c.b({ 0x48, 0x89, 0x94, 0x24 }); c.i32(static_cast<int32_t>(s.frameSub)); break;
     default: c.b({ 0x90 }); break;
     }
@@ -175,6 +198,7 @@ void EmitReload(Code& c, Where w, int32_t rbpToRsp, uint32_t frameSub)
     case Where::SlotRsp: c.b({ 0x48, 0x8B, 0x54, 0x24, 0x60 }); break;
     case Where::SlotRbp: c.b({ 0x48, 0x8B, 0x95 }); c.i32(0x60 - rbpToRsp); break;
     case Where::Home: c.b({ 0x48, 0x8B, 0x54, 0x24, 0x10 }); break;
+    case Where::HomeEdge: c.b({ 0x48, 0x8B, 0x54, 0x24, 0x18 }); break;
     case Where::Beyond: c.b({ 0x48, 0x8B, 0x94, 0x24 }); c.i32(static_cast<int32_t>(frameSub)); break;
     default: c.b({ 0x48, 0x8B, 0xD1 }); break; // mov rdx, rcx
     }
@@ -210,6 +234,50 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::SlotLeaRbpBelow: c.b({ 0x48, 0x8D, 0x8D }); c.i32(0x50 - rbpToRsp); break;
     case Clobber::MovRaxRsp: c.b({ 0x48, 0x8B, 0xC4 }); break;
     case Clobber::PushRax: c.b({ 0x50 }); break;
+    case Clobber::AliasStore:
+        c.b({ 0x48, 0x8D, 0x45, 0xD0 }); // lea rax,[rbp-30h]: a frame address above the slot (allowed)
+        c.b({ 0x4C, 0x89, 0x60, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) }); // mov [rax-70h],r12 = the slot
+        break;
+    case Clobber::AliasViaMov:
+        c.b({ 0x48, 0x8D, 0x45, 0xD0 });                // lea rax,[rbp-30h]
+        c.b({ 0x48, 0x89, 0xC2 });                      // mov rdx,rax
+        c.b({ 0x4C, 0x89, 0x62, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) }); // mov [rdx-70h],r12
+        break;
+    case Clobber::AliasViaArithmetic:
+        c.b({ 0x48, 0x8D, 0x45, 0xD0 });                // lea rax,[rbp-30h]
+        c.b({ 0x48, 0x83, 0xE8, static_cast<int>(static_cast<uint8_t>(rbpToRsp - 0x30 - 0x60)) }); // sub rax,70h: now the slot
+        c.b({ 0x4C, 0x89, 0x20 });                      // mov [rax],r12
+        break;
+    case Clobber::AliasKilledByLoad:
+        c.b({ 0x48, 0x8D, 0x45, 0xD0 });                // lea rax,[rbp-30h]
+        c.b({ 0x48, 0x8B, 0x01 });                      // mov rax,[rcx]: not a frame address any more
+        c.b({ 0x4C, 0x89, 0x60, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) }); // mov [rax-70h],r12
+        break;
+    case Clobber::AliasKilledByCall:
+        c.b({ 0x48, 0x8D, 0x45, 0xD0 });                // lea rax,[rbp-30h]
+        c.b({ 0xFF, 0x15 });
+        c.rip(kImport);                                 // call: rax is volatile
+        c.b({ 0x4C, 0x89, 0x60, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) });
+        break;
+    case Clobber::AliasKeptInCalleeSaved:
+        c.b({ 0x48, 0x8D, 0x5D, 0xD0 });                // lea rbx,[rbp-30h]
+        c.b({ 0xFF, 0x15 });
+        c.rip(kImport);                                 // call: rbx survives
+        c.b({ 0x4C, 0x89, 0x63, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) }); // mov [rbx-70h],r12
+        break;
+    case Clobber::NegDispUntainted: c.b({ 0x4C, 0x89, 0x67, 0xF0 }); break;  // mov [rdi-10h],r12: rdi never held a frame address
+    case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
+    case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
+    case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
+    case Clobber::SlotDwordAt5D: c.b({ 0x89, 0x44, 0x24, 0x5D }); break;       // 5Dh..61h: overlaps byte 60h only
+    case Clobber::SlotIndexedStore: c.b({ 0x48, 0x89, 0x4C, 0xC4, 0x58 }); break; // mov [rsp+rax*8+58h],rcx
+    case Clobber::SlotLeaIndexed: c.b({ 0x48, 0x8D, 0x4C, 0xC4, 0x70 }); break;  // lea rcx,[rsp+rax*8+70h]
+    case Clobber::WriteRbp: c.b({ 0x48, 0x89, 0xC5 }); break;                    // mov rbp,rax
+    case Clobber::StoreRspToMem: c.b({ 0x48, 0x89, 0x60, 0xD5 }); break;         // mov [rax-2Bh],rsp
+    case Clobber::MovqXmmRsp: c.b({ 0x66, 0x48, 0x0F, 0x6E, 0xE4 }); break;      // movq xmm4,rsp
+    case Clobber::LeaRbpIndex: c.b({ 0x48, 0x8D, 0x04, 0x29 }); break;           // lea rax,[rcx+rbp*1]
+    case Clobber::StringStore: c.b({ 0xF3, 0x48, 0xAB }); break;                  // rep stosq
+    case Clobber::BtsMem: c.b({ 0x48, 0x0F, 0xAB, 0x04, 0x24 }); break;          // bts [rsp],rax
     case Clobber::NeighborAbove: c.b({ 0x48, 0x89, 0x44, 0x24, 0x68 }); break;  // qword at 68h..70h
     case Clobber::NeighborBelow: c.b({ 0x89, 0x44, 0x24, 0x5C }); break;        // dword at 5Ch..60h
     case Clobber::MovupsAbove: c.b({ 0x0F, 0x11, 0x44, 0x24, 0x68 }); break;    // 16 bytes at 68h..78h
@@ -275,6 +343,12 @@ Fake Build(const Spec& s)
         c.b({ 0xFF, 0x15 });
         c.rip(kImport); // call [rip+import]: rdx is gone after this
     }
+    if (s.branchBeforeSave)
+    {
+        c.b({ 0x85, 0xC0, 0x0F, 0x84 }); // test eax,eax / jz far (to the epilogue): the straight-line run ends here
+        toEpilogue.push_back(c.at);
+        c.i32(0);
+    }
     if (s.rdxWrittenBeforeSave)
         c.b({ 0x33, 0xD2 }); // xor edx,edx
     if (s.pushBeforeSave)
@@ -295,6 +369,21 @@ Fake Build(const Spec& s)
             c.b({ 0x48, 0x8B, 0x85 });
             c.i32(56 - d + 0x38);                 // entry rsp + 38h, the 7th
         }
+        if (s.wideLoadAtSixth)
+        {
+            c.b({ 0x0F, 0x10, 0x85 }); // movups xmm0,[rbp+disp32] at entry rsp+30h: 16 bytes
+            c.i32(56 - d + 0x30);
+        }
+        if (s.loadAt14th)
+        {
+            c.b({ 0x48, 0x8B, 0x85 });
+            c.i32(56 - d + 0x70);
+        }
+        if (s.loadAt15th)
+        {
+            c.b({ 0x48, 0x8B, 0x85 });
+            c.i32(56 - d + 0x78);
+        }
         if (s.seventhArgRsp)
         {
             c.b({ 0x48, 0x8B, 0x84, 0x24 });
@@ -305,7 +394,9 @@ Fake Build(const Spec& s)
     c.rip(kImport);               // call [rip+import]  (a call between the save and the reload is fine for callee-saved places)
     c.b({ 0x85, 0xC0 });          // test eax,eax
     c.b({ 0x74, 0x0A });          // jz +10 (over the error return)
-    if (s.statusConstant)
+    if (s.statusDecoyHigh)
+        c.b({ 0xB8, 0x02, 0x00, 0xD1, 0xBA }); // mov eax,0BAD10002h: not an NGX status
+    else if (s.statusConstant)
         c.b({ 0xB8, 0x02, 0x00, 0xD0, 0xBA }); // mov eax,0BAD0002h
     else
         c.b({ 0xB8, 0x02, 0x00, 0x00, 0x00 }); // a mov eax,2 that is not an NGX status
@@ -315,9 +406,25 @@ Fake Build(const Spec& s)
     EmitClobber(c, s.clobber, s.save, rbpToRsp);
     if (s.unknownOpcode)
         c.b({ 0x0F, 0x38, 0x00, 0xC1 }); // pshufb xmm0, xmm1: not in the decoder's table
+    if (s.hiddenDefaultsCall)
+    {
+        // mov rax, imm64 whose bytes are "lea rcx,[rbp+40h] / call defaults" (the fourth byte of the rel32 is the 00 of the next
+        // instruction): the pattern is there, but no instruction starts on it
+        c.b({ 0x48, 0xB8 });
+        const uint32_t at = c.at;
+        const int32_t rel = static_cast<int32_t>(kDefaults) - static_cast<int32_t>(at + 9);
+        c.b({ 0x48, 0x8D, 0x4D, 0x40, 0xE8, rel & 0xFF, (rel >> 8) & 0xFF, (rel >> 16) & 0xFF });
+        c.b({ 0x00, 0xC0 }); // add al,al (its first byte completes the rel32)
+    }
     f.midRegionAt = c.at;
     c.b({ 0x4C, 0x89, 0x54, 0x24, 0x68 }); // mov [rsp+68h], r10
     c.b({ 0x0F, 0x10, 0x44, 0x24, 0x68 }); // movups xmm0,[rsp+68h]
+    if (s.jumpBackToSaveInside)
+    {
+        const int rel = static_cast<int>(f.saveAt) - static_cast<int>(c.at + 2);
+        CHECK_MSG(rel >= -128, "builder: the region is too long for a rel8 back to the save (%d)", rel);
+        c.b({ 0x74, rel & 0xFF }); // jz back to the save
+    }
     {
         // jnz rel32 whose displacement, read as a modrm byte pair, looks like [rbp+disp32] of the 7th argument
         int32_t rel = 56 - static_cast<int32_t>(s.frameDisp) + 0x38 + 8;
@@ -416,6 +523,26 @@ Fake Build(const Spec& s)
         c.b({ 0xE9 });
         c.rel32(kCreate);
     }
+    if (s.jumpToCall)
+    {
+        c.b({ 0xE9 });
+        c.rel32(f.callAt);
+    }
+    if (s.jumpToReload)
+    {
+        c.b({ 0xE9 });
+        c.rel32(f.reloadAt);
+    }
+    if (s.callIntoFunction)
+    {
+        c.b({ 0xE8 });
+        c.rel32(f.midRegionAt);
+    }
+    if (s.leavingJump != 0)
+    {
+        c.b({ 0xE9 });
+        c.rel32(s.leavingJump == 1 ? kDefaults + 8 : kDefaults); // inside another function / the start of a function (tail call)
+    }
     if (s.jumpToSave)
     {
         c.b({ 0xE9 });
@@ -462,6 +589,18 @@ Fake Build(const Spec& s)
         std::memcpy(&im[p], &fn.begin, 4);
         std::memcpy(&im[p + 4], &fn.end, 4);
         p += 12;
+    }
+    if (s.chainedFragment)
+    {
+        // a cold fragment {0x3000, 0x3040} whose unwind info is "chained to {create}": UNWIND_INFO flags = UNW_FLAG_CHAININFO, no codes,
+        // then the parent RUNTIME_FUNCTION
+        const uint32_t unwind = kPdataVa + 0x800;
+        const uint32_t cold[3] = { 0x3000, 0x3040, unwind };
+        std::memcpy(&im[p], cold, 12);
+        const uint8_t info[4] = { 0x21, 0, 0, 0 };
+        std::memcpy(&im[unwind], info, 4);
+        const uint32_t parent[3] = { kCreate, f.createEnd, 0 };
+        std::memcpy(&im[unwind + 4], parent, 12);
     }
     if (!s.pdataOk)
         f.pdataSize = 0; // no exception table
@@ -722,6 +861,92 @@ void ContextProofRefuses()
         }
 }
 
+// ---- review 2 (M2/M3): the region rules and their boundaries -----------------------------------------------------------------------
+void RegionRules()
+{
+    auto scan = [](Spec s, Where w, Clobber k)
+    {
+        s.save = w;
+        s.clobber = k;
+        return Scan(s);
+    };
+    const Clobber slotRefused[] = { Clobber::AliasStore, Clobber::SlotLeaAt60, Clobber::SlotLeaAt64, Clobber::SlotLeaAt67, Clobber::SlotDwordAt5D,
+                                    Clobber::SlotIndexedStore, Clobber::SlotLeaIndexed, Clobber::WriteRbp, Clobber::StoreRspToMem,
+                                    Clobber::MovqXmmRsp, Clobber::LeaRbpIndex, Clobber::StringStore, Clobber::BtsMem };
+    for (Clobber k : slotRefused)
+        for (Where w : { Where::SlotRsp, Where::SlotRbp })
+        {
+            const Located l = scan(Shape31016(), w, k);
+            CHECK_MSG(l.why == Why::CreateContext, "slot %d, clobber %d: %s", static_cast<int>(w), static_cast<int>(k), WhyText(l.why));
+        }
+    // in the 310.9.1.0 frame as well
+    for (Clobber k : { Clobber::AliasStore, Clobber::SlotLeaAt60, Clobber::SlotDwordAt5D, Clobber::SlotIndexedStore })
+        CHECK_MSG(scan(Spec {}, Where::SlotRsp, k).why == Why::CreateContext, "310.9.1.0 frame, clobber %d", static_cast<int>(k));
+    // a register holds the context: only the string and bit-string stores are refused (they write where a register says); frame addresses,
+    // slot writes and the like are irrelevant to a register
+    for (Clobber k : { Clobber::AliasStore, Clobber::SlotLeaAt60, Clobber::SlotLeaAt64, Clobber::SlotDwordAt5D, Clobber::SlotIndexedStore,
+                       Clobber::SlotLeaIndexed, Clobber::WriteRbp, Clobber::StoreRspToMem, Clobber::MovqXmmRsp, Clobber::LeaRbpIndex })
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register case, clobber %d: %s", static_cast<int>(k), WhyText(scan(Spec {}, Where::R13, k).why));
+    for (Clobber k : { Clobber::StringStore, Clobber::BtsMem })
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::CreateContext, "register case, store %d", static_cast<int>(k));
+    // pointer tracking: a frame address copied or computed on keeps pointing into the frame; overwritten or lost in a call it does not
+    for (Clobber k : { Clobber::AliasViaMov, Clobber::AliasViaArithmetic, Clobber::AliasKeptInCalleeSaved })
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::CreateContext, "alias clobber %d", static_cast<int>(k));
+    for (Clobber k : { Clobber::AliasKilledByLoad, Clobber::AliasKilledByCall, Clobber::NegDispUntainted })
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "not an alias, clobber %d: %s", static_cast<int>(k),
+                  WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
+    // the stores above the slot and the lea at its end stay allowed (the real function has them)
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NeighborAbove).why == Why::Ok);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::LeaAbove).why == Why::Ok);
+    // a save in the last 8 bytes of the home area is still in the home area
+    { Spec s; s.save = Where::HomeEdge; CHECK(Scan(s).why == Why::CreateContext); }
+}
+
+void ControlFlowBoundaries()
+{
+    for (bool slot : { false, true })
+    {
+        auto base = [&]() { return slot ? Shape31016() : Spec {}; };
+        { Spec s = base(); s.jumpToCall = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the read call itself (slot %d)", slot); }
+        { Spec s = base(); s.jumpToReload = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump from outside to the reload (slot %d)", slot); }
+        { Spec s = base(); s.jumpBackToSaveInside = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump back to the save from inside (slot %d)", slot); }
+        { Spec s = base(); s.branchBeforeSave = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a branch before the save (slot %d)", slot); }
+        { Spec s = base(); s.callIntoFunction = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of a function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
+    }
+    // the fragment is reported by its place
+    Spec s;
+    s.leavingJump = 1;
+    const Located l = Scan(s);
+    CHECK(l.failAt >= kCreate && l.failAt < kCreate + 0x800);
+}
+
+void SiteScansUseInstructions()
+{
+    // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate are not a call: the defaults function is still found once
+    for (bool slot : { false, true })
+    {
+        Spec s = slot ? Shape31016() : Spec {};
+        s.hiddenDefaultsCall = true;
+        const Located l = Scan(s);
+        CHECK_MSG(l.why == Why::Ok && l.defaults == kDefaults, "hidden pattern (slot %d): %s", slot, WhyText(l.why));
+    }
+}
+
+void SignatureBoundaries()
+{
+    for (bool slot : { false, true })
+    {
+        auto base = [&]() { return slot ? Shape31016() : Spec {}; };
+        { Spec s = base(); s.wideLoadAtSixth = true; CHECK_MSG(Scan(s).why == Why::CreateSignature, "a 16-byte load over the 6th and 7th argument (slot %d)", slot); }
+        { Spec s = base(); s.loadAt14th = true; CHECK_MSG(Scan(s).why == Why::CreateSignature, "a load at the 14th argument (slot %d)", slot); }
+        { Spec s = base(); s.loadAt15th = true; CHECK_MSG(Scan(s).why == Why::Ok, "a load past the window (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.statusDecoyHigh = true; CHECK_MSG(Scan(s).why == Why::CreateSignature, "0BAD1xxxx is not a status (slot %d)", slot); }
+    }
+}
+
 void ControlFlowRules()
 {
     auto expect = [](const char* name, const Spec& s, Why why)
@@ -829,6 +1054,10 @@ int main()
     ContextProofHarmlessWrites();
     ContextProofRefuses();
     ControlFlowRules();
+    RegionRules();
+    ControlFlowBoundaries();
+    SiteScansUseInstructions();
+    SignatureBoundaries();
     ImageBounds();
     ProviderChoice();
     KnownHashes();
