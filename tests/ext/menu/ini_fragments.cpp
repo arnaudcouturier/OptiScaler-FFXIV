@@ -319,6 +319,8 @@ const NotCompared kNotCompared[] = {
                    "'Default (auto) is' (the ones that do are compared); the generated Pass2/Pass3 keys have no named member; "
                    "ToggleKey's default is the UnboundKey constant of Config.h, outside ext" },
     { "[HDR] Screenshot", "the screenshot keys describe their default in prose (-1 = unbound, formats by name)" },
+    { "[Mipmap] MipmapBiasAuto:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): the default depends on the game (on for FFXIV, off elsewhere) and an explicit false must survive a save" },
+    { "[Mipmap] AutomaticFFXIV", "the alias of MipmapBiasAuto, declared without a default for the same reason" },
     { "[LowLatency] ", "upstream enum members (LowLatencyInput/Output) declared in Config.h, not in ext" },
     { "[Window] Mode", "the member name 'mode' is declared in several config structs (HDR, HudLess, Window) and the Window binder sits in ExtConfig.cpp, so the declaration cannot be told apart by name; it is a string key" },
 };

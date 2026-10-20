@@ -210,7 +210,8 @@ int main(int argc, char** argv)
         CHECK(Count(cfg, "upscaler.PostLoad();") == 1);
 
         const std::string header = ReadAll(root + "/OptiScaler/ext/upscaler/UpscalerConfig.h");
-        CHECK(header.find("CustomOptional<bool> mipBiasAuto { false };") != std::string::npos);
+        // No default on purpose since the bind-time work: an explicit false must survive a save (FFXIV defaults to on).
+        CHECK(header.find("CustomOptional<bool, NoDefault> mipBiasAuto;") != std::string::npos);
         CHECK(header.find("CustomOptional<float> mipBiasAutoOffset { 0.0f };") != std::string::npos);
 
         // PostLoad reaches the glue through a pointer the glue registers, never through a symbol of MipBias.cpp: the
@@ -287,7 +288,7 @@ int main(int argc, char** argv)
         };
         CHECK(body("void EnsureConfigured()").find("settings.mipBiasAutoOffset.value_or_default(), ScaleOverrideOn());") !=
               std::string::npos);
-        CHECK(body("void OnConfigLoaded(bool enabled, float offset)")
+        CHECK(body("void OnConfigLoaded(float offset)")
                   .find("const Outcome o = Configure(policy, enabled, offset, ScaleOverrideOn());") != std::string::npos);
         CHECK(body("void OnFeatureCreate(").find("create.scaleMode = ScaleOverrideOn();") != std::string::npos);
         CHECK(body("void OnSettingChanged()")

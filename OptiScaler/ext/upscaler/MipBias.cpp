@@ -3,6 +3,7 @@
 #include "ext/upscaler/MipBias.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/upscaler/MipBindHooks.h"
 
 #include <State.h>
 
@@ -11,6 +12,10 @@
 // Glue of the automatic mipmap bias (docs/FEATURES.md "Automatic mipmap bias"). The decisions are in MipBias.h (pure,
 // unit-tested); this file only reads the config, writes upstream's volatile `Config::MipmapBiasOverride` (which the
 // three sampler hooks already apply, additive by default) and logs.
+//
+// This is the create-time mode. Where the bind-time hooks are attached (a matched FFXIV build, ext/upscaler/MipBindHooks.h)
+// the samplers are bound with the bias instead, the override is never written and this module stands down: every entry
+// point below asks `mipbind::Owns()`.
 namespace ext::upscaler::mipbias
 {
 namespace
@@ -55,7 +60,7 @@ void EnsureConfigured()
         return;
 
     const auto& settings = Cfg().upscaler;
-    const Outcome o = Configure(policy, settings.mipBiasAuto.value_or_default(),
+    const Outcome o = Configure(policy, mipbind::AutoEnabled() && !mipbind::Owns(),
                                 settings.mipBiasAutoOffset.value_or_default(), ScaleOverrideOn());
     Write(o);
 
@@ -67,6 +72,9 @@ void EnsureConfigured()
 // override (once per episode), else the INFO line of the change. Caller holds the mutex.
 void LogSetting(const Outcome& o, bool enabled)
 {
+    if (mipbind::Owns())
+        return; // the bind-time module logs its own state; "the manual setting is back" would be wrong there
+
     if (o.warn)
         LOG_WARN("{}", ScaleModeWarning());
     else if (o.action != Action::None)
@@ -74,8 +82,12 @@ void LogSetting(const Outcome& o, bool enabled)
 }
 } // namespace
 
-void OnConfigLoaded(bool enabled, float offset)
+void OnConfigLoaded(float offset)
 {
+    // The setting (key, alias, game default) is read here, not passed in: the game default is only known once the device
+    // seam ran, and a Config::Reload after the bind-time hooks are attached must not take the override back.
+    const bool enabled = mipbind::AutoEnabled() && !mipbind::Owns();
+
     std::scoped_lock lock(PolicyMutex());
     auto& policy = CurrentPolicy();
     const Outcome o = Configure(policy, enabled, offset, ScaleOverrideOn());
@@ -90,6 +102,8 @@ void OnConfigLoaded(bool enabled, float offset)
 
 void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigned outHeight, bool lowResMvFlag)
 {
+    mipbind::OnFeatureCreate(); // the bind-time module attaches its CreateSamplerState hook at the first create
+
     const auto* config = Config::Instance();
 
     RawCreate create;
@@ -125,7 +139,7 @@ void OnFeatureCreate(unsigned width, unsigned height, unsigned outWidth, unsigne
 void OnSettingChanged()
 {
     const auto& settings = Cfg().upscaler;
-    const bool enabled = settings.mipBiasAuto.value_or_default();
+    const bool enabled = mipbind::AutoEnabled() && !mipbind::Owns();
     const float offset = settings.mipBiasAutoOffset.value_or_default();
 
     std::scoped_lock lock(PolicyMutex());

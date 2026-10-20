@@ -9,6 +9,7 @@
 #include "ext/ffxiv/companion/CompanionCallbackMap.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
+#include "ext/upscaler/MipBindHooks.h"
 
 #include <atomic>
 
@@ -60,10 +61,17 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
 
     if (Current().hdr != nullptr)
         ext::ffxiv::companion::Install(device);
+
+    // Bind-time mip bias (ext/upscaler/MipBindHooks.h): sampler hooks on this device and its immediate context; FFXIV only.
+    if (Current().geometry != nullptr)
+        ext::upscaler::mipbind::OnDeviceHooked(device);
 }
 
 void OnD3D11Unhook()
 {
+    if (Current().geometry != nullptr)
+        ext::upscaler::mipbind::OnUnhook();
+
     if (Current().lighting != nullptr)
         ext::ffxiv::lighting::OnUnhook();
 
@@ -89,6 +97,9 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 
     // FFXIV game-jitter probe/correction ([FFXIV] JitterProbe, JitterCorrection; both off by default): ext/ffxiv/jitter/FfxivJitter.h.
     ext::ffxiv::jitter::OnUpscaleBoundary(parameters);
+
+    // Bind-time mip bias: the target follows the sizes of this evaluate (no-op unless the sampler hooks are attached).
+    ext::upscaler::mipbind::OnEvaluate(context, parameters);
 }
 
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
