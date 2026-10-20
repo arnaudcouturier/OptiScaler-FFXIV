@@ -43,6 +43,10 @@ struct FgConfig
     // (true), so Off (false) differs from it and Save Settings writes `false` instead of `auto`.
     CustomOptional<bool> uiRecomposition { true };
 
+    // WS2: DLSS-G render preset of the built-in NVIDIA runtime, 0 Auto, 1 A, 2 B, 3 C ([DLSSG] RenderPreset). Answered inside the process
+    // (no NVIDIA profile is written) and changeable live from the menu (ext/fg/dlssg/PresetSwitch.h). PostLoad drops values outside 0..3.
+    CustomOptional<int> renderPreset { 0 };
+
     // Dynamic MFG on RTX 40 ([DLSSG] section, ext/fg/DynamicMfgSeams.cpp). Off by default. AutoMFGMax is the highest
     // multiplier an automatic choice may use (2..4), AutoMFGTarget the frame rate to reach (0 = the lower of the frame
     // rate limit and the display refresh). AutoMFGSelfTest runs the one-off 2x,3x,4x,3x,2x check of in-place count changes.

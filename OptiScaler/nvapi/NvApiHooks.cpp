@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "NvApiHooks.h"
 #include "ext/Seams.h"
+#include "ext/fg/dlssg/PresetDrs.h" // ext: WS2
 #include <NvApiDriverSettings.h>
 
 #include "State.h"
@@ -65,6 +66,7 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
         return NVAPI_ERROR;
 
     auto result = o_NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting);
+    result = ext::fg::preset::OnDrsGetSetting(settingId, pSetting, result, _ReturnAddress()); // ext: WS2 DLSS-G preset
     if (pSetting && result == NVAPI_OK)
     {
 #ifdef LOG_ALL_DRS_GET_CALLS

@@ -4,6 +4,7 @@
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
 #include "ext/fg/dlssg/AmpereMfgLoader.h"
+#include "ext/fg/FgInternal.h"
 #include "ext/fg/dlssg/MfgUnlock.h"
 
 #include <menu/menu_common.h>
@@ -145,6 +146,8 @@ void DrawFgUnlocks(ext::menu::Ctx& ctx)
     ext::menu::SectionTitle("Frame generation unlocks");
 
     DrawAmpereRuntime(cfg);
+
+    ext::fg::DrawRenderPresetSection(); // WS2
 
     /// FG INPUTS
     bool adaUnlock = cfg.adaMfgUnlock.value_or_default();

@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/FgInternal.h"
+#include "ext/fg/dlssg/PresetLogRelay.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
 
@@ -49,7 +50,12 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
 {
     const auto recomposition = ext::hudless::QueryRecomposition();
 
-    if (recomposition.enabled)
+    // WS2: DLSS-G Preset A turns the UI recomposition of the NVIDIA runtime off (Preset C only when the runtime confirmed that it acts
+    // on C and turned it off), so it is not requested while that is the case. The menu says so; Auto and B bring it back with the
+    // next feature creation (the preset switch makes one).
+    const bool paused = recomposition.enabled && ext::fg::preset::UiRecompositionPaused();
+
+    if (recomposition.enabled && !paused)
     {
         options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
 
@@ -60,14 +66,21 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
     }
 
     static int lastLogged = -1;
-    if (lastLogged != (int) recomposition.enabled)
+    static int lastEnabled = -1;
+    const int effective = recomposition.enabled && !paused ? 1 : 0;
+    if (lastLogged != effective)
     {
-        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}",
-                 recomposition.enabled, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
-                 recomposition.formatSource, options.uiBufferFormat,
-                 lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
-        lastLogged = (int) recomposition.enabled;
+        // "only applies after a game restart" is true for the config / hud-less mode changing; a pause by the preset switch is
+        // picked up at the next feature creation, which the preset switch itself causes.
+        const char* restart = lastEnabled != -1 && lastEnabled != (int) recomposition.enabled
+                                  ? " -- changed after start, only applies after a game restart"
+                                  : "";
+        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}{}",
+                 effective != 0, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
+                 recomposition.formatSource, options.uiBufferFormat, paused ? " -- paused by the DLSS-G render preset" : "", restart);
+        lastLogged = effective;
     }
+    lastEnabled = (int) recomposition.enabled;
 }
 
 IFGFeature_Dx12* AsDx12(IFGFeature* fg) { return dynamic_cast<IFGFeature_Dx12*>(fg); }
