@@ -151,7 +151,11 @@ int main(int argc, char** argv)
     {
         const auto body = Between(glue, "ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, bool shuttingDown) {", "return result; }");
         CHECK(!body.empty());
-        CHECK(Has(body, "plan.gate = !shuttingDown && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();"));
+        CHECK(Has(body, "plan.gate = !shuttingDown && !xefgRebuild && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();"));
+        // the XeFG rebuild decides once, before the drain, and the block that rebuilds uses the same flag
+        CHECK(Has(body, "const bool xefgRebuild = !shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG && ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() && &feature == State::Instance().currentFeature && fg != nullptr && State::Instance().activeFgInput == FGInput::Upscaler;"));
+        CHECK(Has(glue, "if (xefgRebuild) { OwnedLockGuard guard(fg->Mutex, 5);"));
+        CHECK(body.find("const bool xefgRebuild") < body.find("PrepareRelease(Registry(), plan, ops)"));
         CHECK(Has(body, "PrepareRelease(Registry(), plan, ops)"));
         CHECK(Has(body, "bool shuttingDown) { ext::upscaler::LogReleaseThread(handleId); if (!IsolatesNgx() || !feature.IsWithDx12()) return ReleaseDrain::NotApplicable;")); // the thread line comes first, before the early return
         CHECK(Has(body, "if (result == ReleaseDrain::Failed) {"));

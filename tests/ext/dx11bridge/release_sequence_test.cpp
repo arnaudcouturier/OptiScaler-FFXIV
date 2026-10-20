@@ -146,8 +146,10 @@ int main()
         ops.id = 42;
         ops.upscale = QueueDrain::Absent;
         CHECK(PrepareRelease(reg, Plan(false, true), ops).result == ReleaseDrain::NotApplicable);
+        CHECK(!reg.IsClosed(42)); // fail open: no proof, so the old flow - evaluates run through the kept sleep
         ops.upscale = QueueDrain::DeviceLost;
         CHECK(PrepareRelease(reg, Plan(false, true), ops).result == ReleaseDrain::NotApplicable);
+        CHECK(!reg.IsClosed(42));
     }
     // ---- an evaluate in flight on another thread: the wait is bounded, the result is not a proof ------------------------
     {
@@ -168,6 +170,7 @@ int main()
         CHECK(out.quiet == Quiescence::EvaluateInFlight);
         CHECK(out.result == ReleaseDrain::NotApplicable); // drains were fine, the CPU side was not proven
         CHECK(ops.calls == (std::vector<std::string> { "upscale" })); // the drain still ran
+        CHECK(!reg.IsClosed(42)); // reopened: the kept sleep must not refuse evaluates
         release = true;
         evaluator.join();
     }
@@ -181,6 +184,7 @@ int main()
         const auto out = PrepareRelease(reg, Plan(false, true), ops);
         CHECK(out.quiet == Quiescence::SelfInside);
         CHECK(out.result == ReleaseDrain::NotApplicable);
+        CHECK(!reg.IsClosed(42));
     }
     // ---- the key off (gate false): no close, no wait, no proof; the drain and the Failed answer are as before -------------
     {

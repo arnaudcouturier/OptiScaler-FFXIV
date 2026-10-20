@@ -6,8 +6,9 @@
 //   2. FG attached to the feature:  drain the FG queue (Ops::DrainFg also cancels the FG's pending upscaler work)
 //   3. drain the upscale queue
 //   4. classify (ReleaseDrain.h)
-// A Failed or throwing release reopens the handle (the feature stays in use). A release that goes on leaves the handle closed
-// until the entry is extracted from the table, which forgets it. With the gate off nothing is closed and nothing is waited for,
+// Only a Drained release leaves the handle closed (until the entry is extracted from the table, which forgets it); every other
+// result - Failed, an exception, NotApplicable - reopens it, so an unproven release behaves as before: evaluates keep running
+// through the sleep that stays. With the gate off nothing is closed and nothing is waited for,
 // which is the flow before this change. No step runs under the table lock (checked by the test).
 //
 // Ops:  QueueDrain DrainFg();   QueueDrain DrainUpscale(QueueDrain fgResult);   (the second one knows when both roles share a queue)
@@ -69,7 +70,9 @@ template <class Ops> ReleaseOutcome PrepareRelease(EvalRegistry& registry, const
         return out;
     }
     out.result = ClassifyRelease(plan.fgRequired, out.fg, out.upscale, out.quiet);
-    if (out.result == ReleaseDrain::Failed && plan.gate)
+    // Only a proven release keeps the handle closed (the caller then skips the sleep, so the window is milliseconds). Any
+    // other answer falls back to the old flow in full: evaluates keep running through the 500 ms sleep that stays.
+    if (out.result != ReleaseDrain::Drained && plan.gate)
         registry.Reopen(plan.handleId);
     return out;
 }

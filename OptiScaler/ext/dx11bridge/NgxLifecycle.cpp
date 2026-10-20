@@ -127,12 +127,19 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, boo
     ops.fgRequired = &feature == State::Instance().currentFeature && fg != nullptr &&
                      State::Instance().activeFgInput == FGInput::Upscaler;
 
+    // The XeFG context rebuild below runs after the drain and tears down GPU state the drain does not cover, so a release that
+    // will do it is not proven: it keeps the old flow in full (sleep kept, handle never closed).
+    const bool xefgRebuild = !shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG &&
+                             ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() &&
+                             &feature == State::Instance().currentFeature && fg != nullptr &&
+                             State::Instance().activeFgInput == FGInput::Upscaler;
+
     ReleasePlan plan;
     plan.handleId = handleId;
     plan.fgRequired = ops.fgRequired;
     // Closing the handle and waiting for the evaluates in flight is what makes skipping the sleep safe; with the key off
     // (or on shutdown, where nothing is skipped anyway) the flow is the old one.
-    plan.gate = !shuttingDown && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();
+    plan.gate = !shuttingDown && !xefgRebuild && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();
 
     const auto outcome = PrepareRelease(Registry(), plan, ops);
     if (outcome.threw)
@@ -155,9 +162,7 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, boo
     // Upstream OptiScaler destroys the FG context on this event instead, so frame generation restarts with a clean
     // history. Do the same, after the queues above have drained: XeFG_Dx12 recreates the context on the next frame when
     // _fgContext is null.
-    if (!shuttingDown && State::Instance().activeFgOutput == FGOutput::XeFG &&
-        ext::Cfg().fg.xefgResetOnUpscalerChange.value_or_default() && &feature == State::Instance().currentFeature &&
-        fg != nullptr && State::Instance().activeFgInput == FGInput::Upscaler)
+    if (xefgRebuild)
     {
         OwnedLockGuard guard(fg->Mutex, 5);
         LOG_INFO("FFXIV upscaler release: rebuilding FG context so pacing restarts clean");
