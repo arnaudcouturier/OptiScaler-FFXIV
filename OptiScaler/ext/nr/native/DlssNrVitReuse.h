@@ -219,6 +219,14 @@ class Filter
         entries_.clear();
     }
 
+    // The NR runtime was switched: the next module is judged on its own, so the old modules cached results and its "unexpected launch
+    // order" verdict do not carry over.
+    void Reset()
+    {
+        Clear();
+        disabled_ = false;
+    }
+
     bool Disabled() const { return disabled_; }
     unsigned long long Computed() const { return computed_; }
     unsigned long long Reused() const { return reused_; }

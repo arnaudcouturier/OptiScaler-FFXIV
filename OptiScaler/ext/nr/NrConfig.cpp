@@ -20,6 +20,7 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "PreSRTrailGuard", preSrTrailGuard);
     b.Add("DlssNr", "SplitFrameWork", splitFrameWork);
     b.Add("DlssNr", "ResidualFG", residualFg);
+    b.Add("DlssNr", "Runtime", runtime);
     b.Add("DlssNr", "Precision", precision);
     b.Add("DlssNr", "ResidualFGApproxCamera", residualFgApproxCamera);
     b.Add("DlssNr", "ToggleKey", toggleKey, true); // hex when positive (a key code), like the reference build

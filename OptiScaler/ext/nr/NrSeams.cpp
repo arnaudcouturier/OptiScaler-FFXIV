@@ -11,6 +11,7 @@
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/presr/PreSrModelHints.h"
+#include "ext/nr/runtime/NrRuntime.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 #include "ext/nr/vk/DlssNr_VkExtensions.h"
 
@@ -259,12 +260,19 @@ bool NeedsDlssgRuntime(const std::filesystem::path& fileName)
 
 void AppendNgxSearchPaths(const std::filesystem::path& exePath, std::vector<std::wstring>& paths)
 {
+    (void) exePath; // the model is found through the runtime selection now, not by a search from the executable
     // Streamline can initialize NGX before the upscaler does. Include the NR runtime now: later NGX initialization
     // cannot repair the first search list.
-    auto nvngxDlssNrPath = Util::FindFilePath(exePath, "nvngx_dlssnr.dll");
+    // The first search path is set once, so it names the folder of the model the session started with (ext/nr/runtime); a later
+    // runtime switch loads its model by full path and does not move it. No recursive search here: an NR.<version> folder must never
+    // be picked by search order.
+    const auto startup = runtime::Startup();
 
-    if (nvngxDlssNrPath.has_value())
-        paths.push_back(nvngxDlssNrPath.value().parent_path().wstring());
+    if (startup && startup->Available())
+    {
+        paths.push_back(startup->path.parent_path().wstring());
+        runtime::NoteNgxSearchFolder(startup->path.parent_path());
+    }
 }
 } // namespace ext::nr
 

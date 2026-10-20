@@ -15,6 +15,9 @@ inline unsigned ReuseEveryForPass(unsigned pass, unsigned requestedEvery, bool f
 {
     return (!firstPassOnly || pass == 0) && requestedEvery > 1 ? 2u : 1u;
 }
+// The NR model file was switched (ext/nr/runtime): drop the reuse caches and the old verdict. Reuse stays off on the new module until its
+// kernel blob is verified (or the override is on); the next unverified evaluation says so in the log.
+void OnModelSwitch();
 std::string VitStatus();
 std::string Status();
 }

@@ -4,6 +4,7 @@
 #include "ext/core/PathText.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/nr/runtime/NrPreviewRuntime.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/nr/DlssNr.h"
@@ -112,6 +113,14 @@ struct Module
     std::atomic<bool> releasePending { false }; // the old objects are kept and released in Maintain: a device change found the GPU busy, or a teardown threw (set from the handler of a teardown entry, so atomic)
 
     DlssNr::PreviewBackend backend;
+    // The NR runtime revision (the model file the card selected) that each stream's model instance was built from. A stream whose
+    // revision is not the backend's is rebuilt from the new model path once the GPU is finished with it (see SyncRuntime, RunCoreSteps).
+    uint64_t streamRuntime[kMaxStreams] = {};
+    // A failure the MODEL caused (it would not initialise, or the run failed in the model's recording step). Unlike the session latch of
+    // `latches` it ends when another NR runtime is selected (SyncRuntime), so a bad model file does not switch previews off until restart.
+    std::atomic<bool> modelLatched { false };
+    uint64_t latchedRuntime = 0; // the NR runtime revision that was current when the model latch was set
+    uint64_t probedRuntime = 0; // the NR runtime revision the model probe was made for (a later revision probes again)
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
     TimerRing timerRing; // mirrors the query slots of `timer` (CharaNrRules.h): which list wrote each, its done value and mode
@@ -160,6 +169,16 @@ void Latch(const char* why)
         LOG_WARN("CharaView NR: {}; switched off for this session, native previews retained", why);
 }
 
+// The latch for a failure the selected model file caused: previews fall back to the native image until another runtime is selected.
+void LatchModel(const char* why)
+{
+    if (!M().modelLatched.exchange(true))
+    {
+        M().latchedRuntime = DlssNr::PreviewRuntimeRevision();
+        LOG_WARN("CharaView NR: {}; switched off until another NR runtime is selected, native previews retained", why);
+    }
+}
+
 bool Late() { return ext::Cfg().ffxiv.chara.previewNrLate.value_or_default(); }
 
 GateFacts Facts()
@@ -167,7 +186,7 @@ GateFacts Facts()
     Module& m = M();
     GateFacts f;
     f.configOn = Wanted();
-    f.latched = m.latches.NrLatched();
+    f.latched = m.latches.NrLatched() || m.modelLatched;
     f.bridgeUp = WithDx12::IsInited() && Dx11WithDx12::GetD3D12Device() != nullptr && Dx11WithDx12::GetD3D12CommandQueue() != nullptr;
     f.bridgeSuspended = m.holdOff || DlssNr::PreviewBackendSuspended();
     f.releasePending = m.releasePending;
@@ -525,6 +544,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
     if (m.forwarder == Probe::Unknown)
     {
         const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(dev12, m.backend);
+        m.probedRuntime = m.backend.revision;
         m.forwarder = status == DlssNr::PreviewBackendStatus::ForwarderMissing ? Probe::Missing : Probe::Present;
         m.model = status == DlssNr::PreviewBackendStatus::ModelMissing ? Probe::Missing : (status == DlssNr::PreviewBackendStatus::ForwarderMissing ? Probe::Unknown : Probe::Present);
         if (status == DlssNr::PreviewBackendStatus::CapabilityFailed)
@@ -645,6 +665,7 @@ class GpuRecorder
     {
         const DlssNr::PreviewBackend& b = _m.backend;
         DlssNr::PreviewEvaluateScope serialised; // the main pass holds the same lock around its evaluate
+        DlssNr::PreviewBindModel(b.modelPath);   // the shared capability block must hold this module's callbacks
         // The capability block is shared with the main NR pass: its interface pointers are cleared before every evaluate.
         if (b.setExtras != nullptr)
             b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
@@ -794,6 +815,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     const auto start = std::chrono::steady_clock::now();
     {
         DlssNr::PreviewEvaluateScope serialised;
+        DlssNr::PreviewBindModel(b.modelPath); // the shared capability block must hold this module's callbacks
         if (b.setExtras != nullptr)
             b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
         DlssNr::PreviewStateEnvelope envelope(m.list.Get());
@@ -806,7 +828,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
         m.list->Close();
         const char* text = b.lastModelError != nullptr ? b.lastModelError() : "";
         LOG_ERROR("CharaView NR: the model could not be created for {}x{} ({})", s.width, s.height, text != nullptr ? text : "");
-        Latch("the model would not initialise");
+        LatchModel("the model would not initialise");
         return RunOutcome::Failed;
     }
     uint64_t value = 0;
@@ -820,6 +842,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     }
     s.createDone = value;
     s.created = start;
+    m.streamRuntime[index] = b.revision;
     const uint64_t after = VramUsedBytes();
     LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB (before the stream's images) -> {} MB",
              PlacementName(PlacementFrom(s.production, s.preSr)), index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
@@ -908,7 +931,10 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
             m.list->Close(); // the list was reset for this run but never recorded
         char text[96];
         std::snprintf(text, sizeof(text), "a run failed at the %s step", HandoffStepName(out.failedAt));
-        Latch(text);
+        if (out.failedAt == HandoffStep::Record)
+            LatchModel(text); // the recording step includes the model's evaluate
+        else
+            Latch(text);
         return RunOutcome::Failed;
     }
 
@@ -964,7 +990,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
 } // namespace
 
 bool Wanted() { return ext::Cfg().ffxiv.chara.previewNr.value_or_default(); }
-bool Latched() { return M().latches.NrLatched(); }
+bool Latched() { return M().latches.NrLatched() || M().modelLatched; }
 bool Available() { return static_cast<Availability>(M().availabilitySnapshot.load(std::memory_order_relaxed)) == Availability::Available; }
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
@@ -976,6 +1002,69 @@ static ImageInfo InfoOf(ID3D11Texture2D* texture)
     if (texture != nullptr)
         texture->GetDesc(&d);
     return ImageInfo { d.Width, d.Height, static_cast<uint32_t>(d.Format) };
+}
+
+// The NR runtime picker (ext/nr/runtime) selected another model file: the backend follows (new model path and revision) and the streams
+// built from the old file are rebuilt one by one in RunCoreSteps. A selection without a model makes the module unavailable (the native
+// image stays) until a model is selected again. Caller holds the module mutex and the module is initialised.
+static void SyncRuntime()
+{
+    Module& m = M();
+    const uint64_t revision = DlssNr::PreviewRuntimeRevision();
+    if (revision == m.backend.revision)
+        return;
+    DlssNr::PreviewBackend next;
+    const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(m.dev12, next);
+    switch (status)
+    {
+    case DlssNr::PreviewBackendStatus::Ready:
+        m.backend = next;
+        m.model = Probe::Present;
+        LOG_INFO("CharaView NR: NR runtime revision {}; model {}; streams built from the previous model are rebuilt", next.revision,
+                 ext::PathText(next.modelPath));
+        break;
+    case DlssNr::PreviewBackendStatus::ModelMissing:
+        // Remember the revision so this is not retried every call; the entry points stay as they were (a stream holding the old model
+        // keeps it until it is rebuilt), and the availability now says the model is missing.
+        m.backend.revision = revision;
+        m.backend.modelPath.clear();
+        m.model = Probe::Missing;
+        LOG_INFO("CharaView NR: NR runtime revision {} has no model; previews keep the native image until one is selected", revision);
+        break;
+    default:
+        Latch("the NGX core would not provide its capability parameters");
+        break;
+    }
+    Refresh();
+}
+
+// Looks at the NR runtime selection and does what ObservePreviewRuntime says. Called from the maintenance call (which runs whatever the
+// availability is) AND at the top of every draw: a model failure latch and a missing model both CLOSE the gate in front of the draw
+// entry points, so the draws alone could never see the selection change that is supposed to open it again (review N1).
+// Caller holds the module mutex.
+static void ObserveRuntime()
+{
+    Module& m = M();
+    ext::nr::runtime::PreviewRuntimeView view;
+    view.inited = m.inited;
+    view.modelMissing = m.model == Probe::Missing;
+    view.modelLatched = m.modelLatched;
+    view.backendRevision = m.backend.revision;
+    view.probedRevision = m.probedRuntime;
+    view.latchedRevision = m.latchedRuntime;
+    const uint64_t revision = DlssNr::PreviewRuntimeRevision();
+    const ext::nr::runtime::PreviewRuntimeActions action = ext::nr::runtime::ObservePreviewRuntime(view, revision);
+    if (action.clearModelLatch)
+    {
+        m.modelLatched = false; // another model gets its own chance
+        LOG_INFO("CharaView NR: NR runtime revision {}; the model failure of the previous runtime is forgotten", revision);
+    }
+    if (action.resync && m.inited)
+        SyncRuntime();
+    else if (action.reprobe)
+        m.forwarder = m.model = Probe::Unknown; // started without a model, or one that was not installed: EnsureInit probes again
+    if (action.clearModelLatch || action.resync || action.reprobe)
+        Refresh();
 }
 
 // All three placements run through this one function; `production` is null for the bring-up (and set for the other two, whose requests carry
@@ -998,6 +1087,7 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     if (const int known = m.table.Find(key); known != kNoStream)
         ++m.table.At(known).attempts;
 
+    ObserveRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return RunOutcome::NotAvailable;
 
@@ -1015,6 +1105,22 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     }
     if (m.table.At(index).attempts == 0)
         m.table.At(index).attempts = 1; // a stream Bind just created
+
+    // A stream whose model instance was built from another NR runtime (the card selected a different model file) is rebuilt from the
+    // current one, once the GPU is finished with it. The old instance is released through the forwarder, which routes the release to the
+    // module that created it; no model file is ever unloaded.
+    if (m.streams[index].feature != nullptr && m.streamRuntime[index] != m.backend.revision)
+    {
+        if (!GpuDone(m.table.At(index).lastSubmitted))
+            return RunOutcome::Skipped;
+        LOG_INFO("CharaView NR: stream {} rebuilt for NR runtime revision {} (was {})", index, m.backend.revision, m.streamRuntime[index]);
+        ReleaseStreamObjects(m.streams[index], true);
+        m.table.Free(index);
+        index = m.table.Bind(key, req.width, req.height, req.now);
+        if (index == kNoStream)
+            return RunOutcome::Skipped;
+        m.table.At(index).attempts = 1;
+    }
 
     // What the stream has to be built for. A change (size, the model preset or style, the hand-off variant) must hold still for a
     // moment before the stream is rebuilt: dragging a window to a new size reports a new size every frame, and each one would
@@ -1230,6 +1336,7 @@ static void MaintainImpl(uint64_t now)
     if (m.releasePending && ReleaseAll(false))
         LOG_INFO("CharaView NR: the objects of the previous graphics device were released");
 
+    ObserveRuntime(); // the draws are not reached while a model failure or a missing model closes the gate: look at the selection here
     const Availability a = Refresh(); // also with nothing created: the dispatcher reads the cached result (Available())
     if (!m.inited && m.table.UsedCount() == 0)
         return;

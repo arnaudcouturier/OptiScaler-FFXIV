@@ -2,6 +2,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuWidgets.h"
+#include "ext/core/PathText.h"
 #include "ext/game/Game.h"
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/NrHooks.h"
@@ -9,6 +10,8 @@
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/presets/NrUserPresets.h"
+#include "ext/nr/runtime/NrRuntime.h"
+#include "ext/nr/runtime/NrRuntimeText.h"
 #include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 
@@ -19,6 +22,7 @@
 #include <imgui/imgui.h>
 
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <algorithm>
 #include <cmath>
@@ -124,6 +128,51 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
     return true;
 }
 
+// The NR model version (ext/nr/runtime): which nvngx_dlssnr.dll runs. Applied live, in the scene and in the character previews.
+static void RenderRuntimePicker(ext::NrConfig& nr)
+{
+    namespace rt = ext::nr::runtime;
+    const auto catalog = rt::Catalog();
+    // This control owns [DlssNr] Runtime but never touches nr.runtime directly: it is read and written through the glue's mutex
+    // (Requested / RequestRuntime), because the render thread and the previews poll it too.
+    static_assert(std::is_same_v<decltype(nr.runtime.value_or_default()), std::string>, "[DlssNr] Runtime is text");
+    const auto choices = rt::text::BuildChoices(catalog, rt::Requested());
+
+    std::vector<const char*> items;
+    for (const auto& label : choices.labels)
+        items.push_back(label.c_str());
+
+    int selected = choices.selected;
+    const char* lock = rt::SwitchLockReason();
+    ImGui::BeginDisabled(lock != nullptr);
+    if (ImGui::Combo("NR model version", &selected, items.data(), (int) items.size()) && selected != choices.selected)
+        rt::RequestRuntime(choices.values[(size_t) selected]);
+    ImGui::EndDisabled();
+    HelpMarker("Which nvngx_dlssnr.dll the Neural Rendering pass runs. Put each version in a folder named OptiScaler/NR.<version> (for example NR.310.9) next to the game and switch between them while playing, in the scene and in character previews. Automatic picks the newest installed version.\nThe SHA-256 shown is the start of the file's hash, computed in the background.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rescan"))
+        rt::Rescan();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Look for NR.<version> folders again. Automatic only changes model when you rescan.");
+
+    const auto snapshot = rt::Current();
+    rt::text::CardFacts facts;
+    facts.available = snapshot->Available();
+    facts.reason = rt::UnavailableReason(*snapshot);
+    facts.loadedId = rt::Utf8(snapshot->id);
+    facts.loadedVersion = rt::Utf8(rt::VersionText(snapshot->version));
+    facts.pending = rt::Pending();
+    facts.scanNote = rt::ScanNote();
+    facts.lockReason = lock != nullptr ? lock : "";
+    facts.nativeVulkanRunning = IsRunningVk();
+    facts.ngxPathFollows = rt::FollowsNgxSearchPath(*snapshot);
+    facts.ngxFolder = ext::PathText(rt::NgxSearchFolder());
+    facts.reuseWanted = nr.vitEvery.value_or_default() > 1 && nr.precision.value_or_default() != 4;
+    facts.reuseStatus = DlssNrNative::VitStatus();
+    for (const auto& line : rt::text::StatusLines(facts))
+        ImGui::TextWrapped("%s", line.c_str());
+}
+
 // Drawn as the body of the ext::menu card `dlss_nr` (ext/nr/menu/NrMenu.cpp), i.e. inside upstream's ScopedCard: the
 // card title replaces the reference build's own collapsing header (docs/SEAMS.md 3.6).
 void RenderMenu(float menuResScale)
@@ -185,6 +234,8 @@ void RenderMenu(float menuResScale)
             ImGui::TextWrapped("%s", SpatialStatus().c_str());
             ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
         }
+
+        RenderRuntimePicker(nr);
 
         bool deferredDlss = nr.deferredDlss.value_or_default();
         int precisionChoice = nr.precision.value_or_default() == 4 ? 1 : 0;
@@ -287,7 +338,8 @@ void RenderMenu(float menuResScale)
         {
             const auto feature = State::Instance().currentFeature;
             const bool nativeVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
-            const char* reason = nativeVk ? DlssNr::FailureReasonVk() : DlssNr::FailureReason();
+            const std::string reasonCopy = nativeVk ? std::string() : DlssNr::FailureReason();
+            const char* reason = nativeVk ? DlssNr::FailureReasonVk() : reasonCopy.c_str();
 
             if (reason[0] != 0)
             {

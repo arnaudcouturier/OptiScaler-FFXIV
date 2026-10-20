@@ -404,5 +404,11 @@ std::string VitStatus()
     if(s.enabled)return "Unavailable with FP8+NVFP4 hybrid precision";
     return s.vit.Status()+" | "+s.reuseReason;
 }
+void OnModelSwitch(){
+    auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
+    s.vit.Reset();
+    s.reuseReason="waiting for a DX12 NR evaluation";
+    LOG_INFO("NR reuse: runtime switched, cached results dropped; reuse stays off until the new module is verified");
+}
 std::string Status(){auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);return s.status+" | rewritten original launches: "+std::to_string(s.launches)+" | candidate split contractions: "+std::to_string(s.splitLaunches);}
 }

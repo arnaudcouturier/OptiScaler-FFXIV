@@ -54,6 +54,7 @@ struct PreviewBackend
     std::wstring modelPath;
     std::wstring dataPath;
     const char* (*lastModelError)() = nullptr; // may be null
+    uint64_t revision = 0;                     // the NR runtime selection this backend was acquired for (ext/nr/runtime)
 };
 
 enum class PreviewBackendStatus
@@ -66,6 +67,13 @@ enum class PreviewBackendStatus
 
 // Loads the forwarder (once), finds the model file and obtains the capability block on `device`. Safe to call repeatedly.
 PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend& out);
+
+// The current NR runtime revision (the model file the card selected). A stream built for another revision is rebuilt from the new
+// model path: re-acquire the backend (its modelPath and revision follow the selection) and rebuild the streams.
+uint64_t PreviewRuntimeRevision();
+
+// Before a preview creates or evaluates a model of `modelPath`: the shared capability block must hold that module's callbacks.
+void PreviewBindModel(const std::wstring& modelPath);
 
 // The tuning the main NR pass creates its first model pass with ([DlssNr] preset, intensity, style, structure, tone, skin, mask).
 struct PreviewTuning
@@ -200,7 +208,7 @@ std::string DeferredDlssStatus();
 bool PausedByFocus();
 
 // Why it is not, if it is not. Empty while it is running or has not been tried yet.
-const char* FailureReason();
+std::string FailureReason();
 
 // What the game offers by way of exposure. Observed every frame whether or not the setting is on, so
 // the menu can say whether turning it on would do anything here.
