@@ -294,8 +294,8 @@ static void NewTargetAndRefresh()
     r.engine.SetTarget(-1.0, Mode::Add);
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -1.5));
     // a bind of the same sampler after the move, before any Refresh, already gets the new variant (the record is per revision)
-    r.Bind(0, 5, art.Get());
-    CHECK(Near(BiasOf(r.Bound(0, 5).Get()), -2.0));
+    r.Bind(0, 0, art.Get());
+    CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -2.0));
     r.engine.Refresh();
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -2.0));
     CHECK(Near(BiasOf(r.Bound(4, 7).Get()), -2.0));
