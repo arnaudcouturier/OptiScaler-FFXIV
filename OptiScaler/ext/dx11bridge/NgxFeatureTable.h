@@ -3,6 +3,11 @@
 // closed/in-flight registry that lets a release prove no Evaluate is still running on the handle. Pure, std only:
 // tests/ext/dx11bridge/ngx_feature_table_test.cpp.
 //
+// Scope: the lock protects the table STRUCTURE (find/insert/erase/iteration) and the currentFeature stores of create, evaluate and
+// release. It does not protect the contents of an entry that a caller reached through operator[]: Create writes `feature` of its
+// brand-new handle and FeatureProvider_Dx11::ChangeFeature swaps `feature` of the handle being evaluated, both without it (see
+// ADOPT-REL-LOG.md "Fix round 1", M2). Unlocked readers of State::currentFeature elsewhere are not covered either.
+//
 // Why: FFXIV changes quality on its update thread (the native resize callbacks release and re-create the upscaler there) while
 // the render thread evaluates. Upstream keeps the table in an ankerl::unordered_dense::map, which is neither thread-safe nor
 // reference-stable (an insert can reallocate, an erase moves the last element into the hole), and Evaluate holds a pointer into
@@ -18,6 +23,9 @@
 // lock (ext/nr g_nrMutex, DlssNrNative State::mutex), no feature destructor. NR runs inside the NGX calls and never calls back into
 // the DX11 entry points, so "NR lock -> table lock" is the only direction that can occur and there is no cycle. The registry has its
 // own mutex, also a leaf, never held together with the table lock or across a wait that calls out.
+// Not part of this claim: the FG mutex (fg->Mutex) IS held across the FG queue drain in BeforeReleaseFeature, as it always was;
+// the "never held across" statements above are about the table lock only. The premise that NR and FG never call into the table is
+// pinned by tests/ext/dx11bridge/ngx_lock_order_pins_test.cpp.
 
 #include "ext/dx11bridge/ReleaseDrain.h"
 
@@ -65,10 +73,12 @@ class OwnedLeafMutex
     std::atomic<bool> _held { false };
 };
 
+// Never destroyed on purpose: a thread still running at process exit must not lock a destroyed mutex, and the table (a namespace
+// static of the host file) may outlive a function-local static.
 inline OwnedLeafMutex& TableMutex()
 {
-    static OwnedLeafMutex m;
-    return m;
+    static OwnedLeafMutex* m = new OwnedLeafMutex;
+    return *m;
 }
 } // namespace detail
 
@@ -100,7 +110,9 @@ class EvalRegistry
         return true;
     }
 
-    // Pairs with a successful TryEnter. A handle forgotten in between is ignored.
+    // Pairs with a successful TryEnter. A handle forgotten in between is ignored. Handle ids are monotonic and never reused
+    // (IFeature::GetNextHandleId), so a Forget cannot be confused with a later handle of the same id; a TryEnter after Forget
+    // (a late evaluate of a released handle) starts a fresh, empty entry, one small entry per such handle.
     void Leave(unsigned id)
     {
         bool wake = false;
@@ -224,10 +236,11 @@ class EvalRegistry
     std::unordered_map<unsigned, Entry> _entries;
 };
 
+// Never destroyed, same reason as TableMutex.
 inline EvalRegistry& Registry()
 {
-    static EvalRegistry r;
-    return r;
+    static EvalRegistry* r = new EvalRegistry;
+    return *r;
 }
 
 // RAII for one Evaluate: `if (!pin) return` when the handle is closed.
