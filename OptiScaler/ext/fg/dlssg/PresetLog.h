@@ -8,7 +8,9 @@
 //   310.9.1.0   "Preset ID: N", "Preset A selected, disabling UIR.", "Enabling/Disabling bUIRecompositionSupported due to preset
 //               override.", "ReportOverrideStates: render preset (requested=N, applied=N, value=N)"
 //   310.9.16    "Applying settings for render preset N.", "Warning: Ignoring unsupported render preset ID N.",
-//               "ReportOverrideStates: render preset (requested=N, effective=N)"  (nothing else about presets is left in that build)
+//               "ReportOverrideStates: render preset (requested=N, effective=N)", and two private-flag notes of ReadRegkeys
+//               ("Disabling UI recomposition / FG Lite due to private flag override."); "Preset ID", "Preset A selected" and the
+//               bUIRecomposition notes of 310.9.1.0 are gone
 // so every check is a case-insensitive keyword match and anything with "preset" in it that no rule claims is kept as a candidate:
 // shown raw in the menu and logged at a low rate for a parser follow-up.
 
@@ -277,10 +279,12 @@ inline ParsedLine ParseLine(std::string_view line)
         out.recognised = true;
         return out;
     }
-    if (Has(low, "private flag override")) // 310.9.16: the flag changes the recomposition or FG Lite setting, the preset is still applied
+    if (Has(low, "private flag override")) // the flag changes the recomposition or FG Lite setting, the preset is still applied
     {
         out.kind = LineKind::FlagOverride;
         out.recognised = true;
+        if (Has(low, "disabling") && (Has(low, "recomposition") || Has(low, "buirecomposition")))
+            out.uir = Uir::Disabled; // 310.9.16 "Disabling UI recomposition ...", 310.9.1.0 "Disabling bUIRecompositionSupported ..."
         return out;
     }
     if (Has(low, "buirecompositionsupported"))
@@ -451,6 +455,8 @@ class Readout
             break;
         case LineKind::FlagOverride:
             state_.flagOverride = true;
+            if (p.uir != Uir::Unknown)
+                state_.uir = p.uir;
             break;
         default:
             break;

@@ -268,10 +268,14 @@ void Runtime31016Lines()
     CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:857", "ReportOverrideStates: multi-frame count (requested=1, applied=1, value=3)")).kind == LineKind::None);
     CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:904", "ReportOverrideStates: FG mode (requested=1, applied=0, value=2)")).kind == LineKind::None);
     // the private flag lines of ReadRegkeys: the preset is still applied, a flag overrides part of it (not "presets are ignored")
-    for (const char* text : { "Disabling UI recomposition due to private flag override.", "Disabling FG Lite due to private flag override." })
+    for (const char* text : { "Disabling UI recomposition due to private flag override.", "Disabling FG Lite due to private flag override.",
+                              "INFO: Disabling bUIRecompositionSupported due to private flag override." }) // the last one is the 310.9.1.0 wording
     {
         const auto p = ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:171", text));
         CHECK_MSG(p.kind == LineKind::FlagOverride && p.recognised, "%s: kind %d", text, static_cast<int>(p.kind));
+        // a flag that forces the recomposition off says so; FG Lite says nothing about it
+        const bool recomposition = std::string(text).find("FG Lite") == std::string::npos;
+        CHECK_MSG(p.uir == (recomposition ? Uir::Disabled : Uir::Unknown), "%s: uir %d", text, static_cast<int>(p.uir));
     }
     CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:147", "INFO: Not parsing presets due to private flag overrides.")).kind == LineKind::BlockedByFlags);
 }
@@ -321,6 +325,10 @@ void Runtime31016Confirmation()
         const auto s = r.Snapshot();
         CHECK(s.flagOverride && !s.blockedByFlags && s.confirmed);
         CHECK(Confirm(r, 3) == Effect::Applied);
+        CHECK(r.Confirm(3).uir == Uir::Disabled); // from the Applying line; FG Lite does not change it
+        Readout q;
+        q.Feed(Ngx("EndpointConfiguration::ReadRegkeys:171", "Disabling UI recomposition due to private flag override."), 1);
+        CHECK(q.Snapshot().flagOverride && q.Confirm(1).uir == Uir::Disabled); // a private flag forces the recomposition off
         r.BeginRequest();
         CHECK(!r.Snapshot().flagOverride);
     }
