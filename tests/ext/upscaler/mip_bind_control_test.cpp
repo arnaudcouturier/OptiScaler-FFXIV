@@ -214,7 +214,13 @@ static void ManualOverride()
     g_log.clear();
     r.controller.OnEvaluate(off, Eval(2560, 3840, 4000));
     CHECK(CountLog("set by hand") == 0);
-}
+
+    // the override cleared while the setting is off, then set again with the setting on: the WARN comes again (a new episode)
+    Settings offClear;
+    offClear.autoEnabled = false;
+    r.controller.OnEvaluate(offClear, Eval(2560, 3840, 4500));
+    r.controller.OnEvaluate(manual, Eval(2560, 3840, 5000));
+    CHECK(CountLog("set by hand") == 1);}
 
 // Duplicate creates, the fork's own samplers, address reuse and the full table.
 static void CreatesAndTable()
