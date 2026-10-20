@@ -35,6 +35,7 @@ enum class LineKind : uint8_t
     Selected,       // "Preset A selected, disabling UIR."
     UirNote,        // "Enabling/Disabling bUIRecompositionSupported due to preset override."
     BlockedByFlags, // "Not parsing presets due to private flag overrides."
+    FlagOverride,   // 310.9.16: "Disabling UI recomposition / FG Lite due to private flag override." (the preset is still applied)
     Applying,       // 310.9.16: "Applying settings for render preset N."
     Unsupported,    // 310.9.16: "Warning: Ignoring unsupported render preset ID N."
     Candidate       // mentions a preset, no rule claims it
@@ -270,9 +271,15 @@ inline ParsedLine ParseLine(std::string_view line)
         out.recognised = requested && applied;
         return out;
     }
-    if (Has(low, "not parsing presets") || Has(low, "private flag override"))
+    if (Has(low, "not parsing presets"))
     {
         out.kind = LineKind::BlockedByFlags;
+        out.recognised = true;
+        return out;
+    }
+    if (Has(low, "private flag override")) // 310.9.16: the flag changes the recomposition or FG Lite setting, the preset is still applied
+    {
+        out.kind = LineKind::FlagOverride;
         out.recognised = true;
         return out;
     }
@@ -325,6 +332,7 @@ class Readout
         int applied = -1;
         uint64_t value = 0;
         bool blockedByFlags = false; // "Not parsing presets due to private flag overrides"
+        bool flagOverride = false;   // 310.9.16: a private flag overrides the recomposition or FG Lite setting; the preset is still applied
         bool reportNew = false;      // the report is in the 310.9.16 wording: `requested` is the preset number, `effective` the one in force
         int effective = -1;
         int appliedLine = -1;        // "Applying settings for render preset N."
@@ -440,6 +448,9 @@ class Readout
             break;
         case LineKind::BlockedByFlags:
             state_.blockedByFlags = true;
+            break;
+        case LineKind::FlagOverride:
+            state_.flagOverride = true;
             break;
         default:
             break;

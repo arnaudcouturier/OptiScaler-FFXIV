@@ -267,9 +267,13 @@ void Runtime31016Lines()
     // the other reports of the same function are not about the render preset
     CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:857", "ReportOverrideStates: multi-frame count (requested=1, applied=1, value=3)")).kind == LineKind::None);
     CHECK(ParseLine(Ngx("EndpointCore::ReportOverrideStates:904", "ReportOverrideStates: FG mode (requested=1, applied=0, value=2)")).kind == LineKind::None);
-    // the private flag lines of ReadRegkeys
-    CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:171", "Disabling UI recomposition due to private flag override.")).kind == LineKind::BlockedByFlags);
-    CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:176", "Disabling FG Lite due to private flag override.")).kind == LineKind::BlockedByFlags);
+    // the private flag lines of ReadRegkeys: the preset is still applied, a flag overrides part of it (not "presets are ignored")
+    for (const char* text : { "Disabling UI recomposition due to private flag override.", "Disabling FG Lite due to private flag override." })
+    {
+        const auto p = ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:171", text));
+        CHECK_MSG(p.kind == LineKind::FlagOverride && p.recognised, "%s: kind %d", text, static_cast<int>(p.kind));
+    }
+    CHECK(ParseLine(Ngx("EndpointConfiguration::ReadRegkeys:147", "INFO: Not parsing presets due to private flag overrides.")).kind == LineKind::BlockedByFlags);
 }
 
 void Runtime31016Confirmation()
@@ -309,6 +313,16 @@ void Runtime31016Confirmation()
         const auto s = r.Snapshot();
         CHECK(s.unsupportedId == 3 && s.confirmed);
         CHECK(s.presetId == -1); // not read as "Preset ID: N"
+    }
+    {   // a private flag line: shown as an override, never as "presets ignored", and it does not unconfirm anything
+        Readout r;
+        r.Feed(Applying(3), 1);
+        r.Feed(Ngx("EndpointConfiguration::ReadRegkeys:171", "Disabling FG Lite due to private flag override."), 2);
+        const auto s = r.Snapshot();
+        CHECK(s.flagOverride && !s.blockedByFlags && s.confirmed);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+        r.BeginRequest();
+        CHECK(!r.Snapshot().flagOverride);
     }
     {   // a new request forgets all of it
         Readout r;
