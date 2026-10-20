@@ -4,6 +4,8 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/FgInternal.h"
+#include "ext/fg/dlssg/PresetRequest.h"
+#include "ext/fg/dlssg/PresetSwitch.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
 
@@ -49,7 +51,11 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
 {
     const auto recomposition = ext::hudless::QueryRecomposition();
 
-    if (recomposition.enabled)
+    // WS2: DLSS-G Preset A and C turn the UI recomposition of the NVIDIA runtime off, so it is not requested while one of them is
+    // the active request. The menu says so; Auto and B bring it back with the next feature creation (the preset switch makes one).
+    const bool paused = recomposition.enabled && ext::fg::preset::PausesUiRecomposition(ext::fg::preset::Requests().Active());
+
+    if (recomposition.enabled && !paused)
     {
         options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
 
@@ -60,13 +66,14 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
     }
 
     static int lastLogged = -1;
-    if (lastLogged != (int) recomposition.enabled)
+    const int effective = recomposition.enabled && !paused ? 1 : 0;
+    if (lastLogged != effective)
     {
-        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}",
-                 recomposition.enabled, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
-                 recomposition.formatSource, options.uiBufferFormat,
+        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}{}",
+                 effective != 0, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
+                 recomposition.formatSource, options.uiBufferFormat, paused ? " -- paused by the DLSS-G render preset" : "",
                  lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
-        lastLogged = (int) recomposition.enabled;
+        lastLogged = effective;
     }
 }
 

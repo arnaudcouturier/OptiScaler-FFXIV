@@ -9,9 +9,6 @@
 
 namespace ext::fg::preset
 {
-// The request state of the process. The configured [DLSSG] RenderPreset becomes the first active request, read when this is
-// first called (config is loaded long before NVIDIA's runtime asks for its settings).
-RequestState& Requests();
 
 // NvApiHooks.cpp hkNvAPI_DRS_GetSetting, right after the original call. `status` is the original result; returns the status
 // to hand back to the caller. Only the DLSS-G preset ids are looked at. An explicit request (A/B/C) turns a found or a "setting

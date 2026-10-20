@@ -163,6 +163,10 @@ class RequestState
     std::atomic<uint64_t> baseline_ { 0 };
     std::atomic<bool> querySeen_ { false };
 };
+// The request state of the process (PresetDrs.cpp). The configured [DLSSG] RenderPreset becomes the first active request, read
+// when this is first called (config is loaded long before NVIDIA runtime asks for its settings).
+RequestState& Requests();
+
 // The hook's decision for one driver reply. `ok` = the call found the setting, `isNumber` = it is a DWORD. Call it only
 // for a found / not-found reply (not for other errors). `replace`: make the reply "found, DWORD, `value`".
 struct DriverEdit

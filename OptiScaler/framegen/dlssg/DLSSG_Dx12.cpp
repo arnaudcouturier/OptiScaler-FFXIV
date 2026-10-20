@@ -196,6 +196,8 @@ bool DLSSG_Dx12::Dispatch()
         return false;
     }
 
+    if (ext::fg::PresetSwitchTick(this, _viewport)) // ext: WS2 live DLSS-G render preset change
+        return false;
     SetOptions(true);
 
     if (!_haveHudless.has_value())

@@ -83,6 +83,10 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
 // Reflex options built next to the DLSS-G ones: in dynamic mode Streamline sees the same output cap as the user, so
 // dynamic MFG can account for it.
 void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& reflex);
+// WS2: DLSSG_Dx12::Dispatch, before the options of the frame are set. A live change of the DLSS-G render preset ([DLSSG]
+// RenderPreset) is made here: FG off, resources freed, the request activated (ext/fg/dlssg/PresetSeams.cpp). True = a switch
+// just happened, skip this frame; FG resumes on the next dispatch with fresh history.
+bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport);
 
 // UpscalerInputsDx11wDx12::UpscaleStart, right after StartNewFrame: the game module's per-upscale hook
 // (ext::game::IFgMarkers, null for every game but FFXIV).

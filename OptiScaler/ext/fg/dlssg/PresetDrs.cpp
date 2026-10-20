@@ -4,6 +4,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/dlssg/PresetLogRelay.h"
+#include "ext/fg/dlssg/PresetModule.h"
 
 #include <atomic>
 
@@ -18,8 +19,6 @@ RequestState& Requests()
 
 NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Status status, void* caller)
 {
-    (void) caller; // the provider module is identified from it (PresetModule.cpp)
-
     if ((settingId != kRenderPresetSettingId && settingId != kOverrideSettingId) || setting == nullptr)
         return status;
 
@@ -30,7 +29,10 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
 
     const bool isNumber = found && setting->settingType == NVDRS_DWORD_TYPE;
     if (settingId == kRenderPresetSettingId)
+    {
         ReadoutState().NoteDriverQuery(true); // the runtime asked, whatever the answer
+        module::ObserveDriverQuery(caller);   // possible provider of the live path
+    }
 
     const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0);
     if (!edit.replace)
