@@ -120,6 +120,8 @@ Fake Build(const Spec& s)
 
     if (s.statusConstant)
         Put(im, kCreate + 0x38, { 0xB8, 0x02, 0x00, 0xD0, 0xBA });
+    else
+        Put(im, kCreate + 0x38, { 0xB8, 0x02, 0x00, 0x00, 0x00 }); // a mov eax,2 that is not an NGX status
     {
         const int32_t d = static_cast<int32_t>(s.frameDisp);
         auto putRbp = [&](uint32_t at, int32_t disp)
