@@ -27,19 +27,19 @@ None of that is done. If you only need to follow the game, edit the values in pl
 
 ## 3. Every game address the code uses
 
-All values are for the build recorded in `GameBuild.h` (`TimeDateStamp 0x6ac3dc96`, `SizeOfImage 0x380a000`). RVAs are relative to the image base. "Guard" means a byte array that the code compares before use.
+All values are for the build recorded in `GameBuild.h` (`TimeDateStamp 0x6ad10bfd`, `SizeOfImage 0x381f000`). RVAs are relative to the image base. "Guard" means a byte array that the code compares before use.
 
 ### 3.1 Native quality (`ext/ffxiv/quality/FfxivNativeQualityHooks.h`)
 
 | Name in `GameBuild.h` | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
-| `settingsInstructionsRva` | `0x374347` | Function body that loads the graphics settings and gates on `+0x54`, `+0x44`, `+0x45`, `+0x55` | 37 bytes | `SettingsGuardOk()`; if it fails, the settings read is disabled |
-| `querySizeRva` | `0x3520c0` | Wrapper around the game's DLSS size query (detoured) | 28 bytes | `DoInstall()` |
-| `rendererUpdateRva` | `0x2da290` | Renderer update (detoured) | 18 bytes | `DoInstall()` |
-| `resizeCallbacksRva` | `0x236a40` | Resize-callback dispatcher (called, not detoured) | 20 bytes (generic prologue) | `DoInstall()` |
-| `settingsPointerRva` | `0x28f9470` | Global: pointer to the graphics settings | none | `DlaaRequiredNow()` |
-| `managerPointerRva` | `0x28f9498` | Global: manager pointer | none | context lookup |
-| `devicePointerRva` | `0x28f2d00` | Global: device pointer | none | resize-callback dispatch |
+| `settingsInstructionsRva` | `0x3745d7` | Function body that loads the graphics settings and gates on `+0x54`, `+0x44`, `+0x45`, `+0x55` | 37 bytes | `SettingsGuardOk()`; if it fails, the settings read is disabled |
+| `querySizeRva` | `0x352350` | Wrapper around the game's DLSS size query (detoured) | 28 bytes | `DoInstall()` |
+| `rendererUpdateRva` | `0x2da5b0` | Renderer update (detoured) | 18 bytes | `DoInstall()` |
+| `resizeCallbacksRva` | `0x2369a0` | Resize-callback dispatcher (called, not detoured) | 20 bytes (generic prologue) | `DoInstall()` |
+| `settingsPointerRva` | `0x290e470` | Global: pointer to the graphics settings | none | `DlaaRequiredNow()` |
+| `managerPointerRva` | `0x290e498` | Global: manager pointer | none | context lookup |
+| `devicePointerRva` | `0x2907d00` | Global: device pointer | none | resize-callback dispatch |
 | `settingsModeOffset` `0x54`, `settingsQualityOffset` `0x44`, `settingsDlaaOffset` `0x45`, `settingsRendererOffset` `0x47`, `settingsAdditionalOffset` `0x49`, `settingsSelectorOffset` `0x55` | | Fields of the settings structure; DLAA is required when `+0x54 == 2` and `+0x45 == 0` | via the settings guard | `DlaaRequiredNow()` |
 | `managerContextOffset` `0x4220`, `contextFlagsOffset` `0x181`, `contextCacheOffset` `0x150`, `deviceCallbacksOffset` `0x30`, `rendererSceneSizeOffset` `0x428` | | Manager to context, context flags and cache, device callback array (critical section at `+8`, count at `+0x38`), renderer scene size | none | live quality change and renderer update |
 
@@ -47,11 +47,11 @@ All values are for the build recorded in `GameBuild.h` (`TimeDateStamp 0x6ac3dc9
 
 | Name | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
-| `batch16Rva`, `batch32Rva` | `0x6e5570`, `0x6e6110` | The two UI batch functions (16-bit and 32-bit index buffers), detoured | the same 16 bytes at both | `CompanionNative.cpp` |
-| `enqueueRva` | `0x240bc0` | Command append (detoured) | 16 bytes | `CompanionNative.cpp` |
-| `bindStateRva` | `0x22d7f0` | Draw-state bind (detoured) | 16 bytes | `CompanionNative.cpp` |
-| `nameplateModulePointerRva` | `0x2aa35c0` | Global: UI module pointer; the queue is `[[[g] + 8] + 8]` | **none** (medium confidence) | `CompanionNative.cpp`, `CompanionPackets.h`, `replay/FfxivNameplatePackets.h` |
-| `layoutSlotTableRva` | `0x217bc00` | Read-only table: vertex slot per layout, 8-byte entries, low dwords `0,0,0,0,1,2,2,1,1` | none (pattern checked by hand) | `CompanionPackets.h`, `CompanionVisibilityQueue.h` |
+| `batch16Rva`, `batch32Rva` | `0x6e56d0`, `0x6e6270` | The two UI batch functions (16-bit and 32-bit index buffers), detoured | the same 16 bytes at both | `CompanionNative.cpp` |
+| `enqueueRva` | `0x240b80` | Command append (detoured) | 16 bytes | `CompanionNative.cpp` |
+| `bindStateRva` | `0x22d750` | Draw-state bind (detoured) | 16 bytes | `CompanionNative.cpp` |
+| `nameplateModulePointerRva` | `0x2ab8650` | Global: UI module pointer; the queue is `[[[g] + 8] + 8]` | **none** (medium confidence) | `CompanionNative.cpp`, `CompanionPackets.h`, `replay/FfxivNameplatePackets.h` |
+| `layoutSlotTableRva` | `0x217c760` | Read-only table: vertex slot per layout, 8-byte entries, low dwords `0,0,0,0,1,2,2,1,1` | none (pattern checked by hand) | `CompanionPackets.h`, `CompanionVisibilityQueue.h` |
 
 Structure offsets, all read by the Companion code; none has its own guard:
 
@@ -128,7 +128,7 @@ It takes about a minute on this image. Expect exactly one hit for each guard exc
 | `batch16Rva`, `batch32Rva` | The shared 16-byte guard has exactly two hits in `.text`. The one that locks an index buffer as 16-bit values is `batch16`; both read the renderer list at `+0x580/+0x588`, the table at `layoutSlotTableRva`, and are called from the same dispatcher, which chooses by the index-buffer format | By address order if the decompiler cannot tell: in the supported build the 16-bit one comes first |
 | `enqueueRva` | Unique 16-byte guard; decompiles to: context index at `+0xc`, key at `+8`, a per-group counter at `ctx + index*0x18 + 0x28`, refill through the device global, write of a 16-byte (key, command) entry | Also called when an indexed queue command (type 6, size `0xb0`) is appended |
 | `bindStateRva` | Unique 16-byte guard; tests the byte at `state+0x49` and uses the native context at `+0x17b4/+0x17b3/+0x17b8` | |
-| `nameplateModulePointerRva` | **No guard.** A bss pointer global with hundreds of references such that `[[[g] + 8] + 8]` is the queue the batch functions fill (the queue object has the head at `+0x50`, remaining at `+0x68`, blocks at `+0x6c`, next-block pointer at `+0x3f0`). Do **not** assume the old delta: in the previous patch this one moved by a different amount than the neighbouring globals, and the naive address had no references at all | Run the game and read the log line `Companion native submissions: queue chain module=... renderer=... queue=...`; all three must be plausible, non-zero heap or image addresses once you are in the world |
+| `nameplateModulePointerRva` | **No guard.** A bss pointer global with hundreds of references such that `[[[g] + 8] + 8]` is the queue the batch functions fill (the queue object has the head at `+0x50`, remaining at `+0x68`, blocks at `+0x6c`, next-block pointer at `+0x3f0`). Do **not** assume the old delta: in both of the last two patches this one moved by a different amount than the neighbouring globals (2026.10.16: +0x15090 while the others moved +0x15000), and the naive address had no references at all. Recipe that found it in 2026.10.16: scan `.text` for `mov r64, [rip+g]` followed within 14 bytes by two `mov r64, [r64+8]` loads and group by `g`; the right global has about nine hundred references, all in the UI code around the batch functions | Run the game and read the log line `Companion native submissions: queue chain module=... renderer=... queue=...`; all three must be plausible, non-zero heap or image addresses once you are in the world |
 | `layoutSlotTableRva` | The only `.rdata` match of the nine-entry pattern (low dwords `0,0,0,0,1,2,2,1,1` in 8-byte entries), referenced by the batch functions as `table[layout*8]` to pick the vertex slot | |
 
 Struct offsets (the `+0x...` rows) rarely change in a patch, but they are not guarded. Re-verify by decompiling the same functions: renderer list and count, index buffer capacity, flags and CPU pointer, queue head, remaining, blocks, next-block, batch header fields, and the settings fields above. If a function now loads a field from a different offset, edit that member.
@@ -175,6 +175,8 @@ So after a patch that is not yet followed, the game still runs with the fork's g
 
 ## 7. Checklist
 
+Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd`, `SizeOfImage 0x381f000`, executable sha256 `46A52AB1DBE80B9A8D6C4D4531BF66693904200C5135FACACD053EF28A5DE14A` (51,976,960 bytes). The previous build (`TimeDateStamp 0x6ac3dc96`, `SizeOfImage 0x380a000`) is no longer matched. In 2026.10.16 every address moved (the globals by +0x15000, the nameplate module global by +0x15090, code by -0xa0 to +0x320), every guard was found again, and only the three guards that carry a RIP-relative displacement changed their bytes. The nameplate module global and the queue structure offsets (`+0x50`, `+0x68`, `+0x6c`, `+0x34`, `+0x3f0`) have no byte guard and were not proven offline: confirm them with the in-game log line of section 5.
+
 1. Patch released; install it, keep a copy of the previous executable.
 2. Check the new executable offline against the existing guards: run `scan.ps1` (section 4.2) with the exact guard bytes from `GameBuild.h`, without wildcards, and compare each hit with the RVA in `GameBuild.h`. Running the old fork build on the new executable cannot tell you this, because the new timestamp stops it before any byte guard is reached. If every guard is found at its old RVA, only `TimeDateStamp` and `SizeOfImage` need editing (the three globals loaded by the guards, `settingsPointerRva`, `managerPointerRva` and the stack cookie, are then unchanged as well; `devicePointerRva`, the nameplate module global and the slot table are not covered by a guard, so confirm those with the in-game log of section 5). If a guard is missing or sits elsewhere, re-derive it (section 4).
 3. If a guard warning appears, find the function again (section 4), edit `GameBuild.h`, build, test, play (section 5).
@@ -185,8 +187,8 @@ So after a patch that is not yet followed, the game still runs with the fork's g
 
 | Name in `GameBuild.h` | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
-| `JitterBuild::cameraGlobalRva` | `0x28f8ba0` | Global holding the scene camera holder G; the camera is `[G + 0x3028]`, its 20-byte jitter object `{jx, jy, ndcX, ndcY, counter}` is at `[camera + 0x278]` | none (pointer chain; every hop is range- and readability-checked at run time, the exe build must match) | `FfxivJitterProbe` |
+| `JitterBuild::cameraGlobalRva` | `0x290dba0` | Global holding the scene camera holder G; the camera is `[G + 0x3028]`, its 20-byte jitter object `{jx, jy, ndcX, ndcY, counter}` is at `[camera + 0x278]` | none (pointer chain; every hop is range- and readability-checked at run time, the exe build must match) | `FfxivJitterProbe` |
 
-**Finding it again after a game patch.** Search the string `Jitter.Offset.X`; its only user is the game's DLSS evaluate wrapper (RVA `0x378540` in the supported build), which copies two floats of a descriptor. The function that records that descriptor from the scene camera (`0x373dc0`) loads `[[global] + 0x3028]` and then `[camera + 0x278]`: that global and those offsets are the constants. The camera update (vtable slot 6, `0x25f610`) calls the Halton generator (`0x2ebae0`: `index % count + 1`) and increments the counter. Check offline that the object is `{float, float, float, float, int}` with `|jx|,|jy| <= 0.5`.
+**Finding it again after a game patch.** Search the string `Jitter.Offset.X`; its only user is the game's DLSS evaluate wrapper (RVA `0x3787d0` in the supported build), which copies two floats of a descriptor. The function that records that descriptor from the scene camera (`0x374050`) loads `[[global] + 0x3028]` and then `[camera + 0x278]`: that global and those offsets are the constants. The one-line getter `0x25f610` returns `[camera + 0x278]`, and the camera update (`0x25f690`, the function that contains the fallback site below) loads that pointer into `rbx`, calls the Halton generator (`0x2ebd90`: `index % count + 1`, outputs `x - 0.5`, `y - 0.5`) with `rdx = rbx` (jx), `r8 = rbx + 4` (jy) and `r9d = [rbx + 0x10]` (counter), and increments the counter. Check offline that the object is `{float, float, float, float, int}` with `|jx|,|jy| <= 0.5`.
 
-**Fallback patch site (documented, NOT built).** The DLSS-mode cycle length is the immediate of `mov edx, 0xFFFFFFFF` at RVA `0x25f6b2` (bytes `BA FF FF FF FF`; guard: the 48 bytes at `0x25f6a1`: `48 8B 05 ?? ?? ?? ?? 0F 57 F6 48 8B 9F 78 02 00 00 BA FF FF FF FF 48 8B 88 28 04 00 00 48 8B F1 8B C1 48 C1 EE 20 F3 48 0F 2A F0 41 80 F8 02 74`). The game's own cycle never repeats in that mode, so it is not needed; a finite value there should only ever lengthen a finite cycle.
+**Fallback patch site (documented, NOT built).** The DLSS-mode cycle length is the immediate of `mov edx, 0xFFFFFFFF` at RVA `0x25f732` (bytes `BA FF FF FF FF`; guard: the 48 bytes at `0x25f721`: `48 8B 05 ?? ?? ?? ?? 0F 57 F6 48 8B 9F 78 02 00 00 BA FF FF FF FF 48 8B 88 28 04 00 00 48 8B F1 8B C1 48 C1 EE 20 F3 48 0F 2A F0 41 80 F8 02 74`). The game's own cycle never repeats in that mode, so it is not needed; a finite value there should only ever lengthen a finite cycle.

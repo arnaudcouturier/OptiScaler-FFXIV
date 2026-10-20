@@ -279,7 +279,7 @@ OptiScaler registers itself with the user's ReShade as a built-in add-on (docs/H
 
 ## game
 
-`ext::game::Current()` returns a struct of interface pointers selected once at init (null for every game except a matched FFXIV build). Seam bodies test a pointer, never a `gameExe` string. `ext/ffxiv/GameBuild.h` is the only file with FFXIV addresses; the offsets hard-coded inside `ProcessFfxivQualityRequest` move there too. The current descriptor is keyed by `TimeDateStamp=0x6ac3dc96` and `SizeOfImage=0x380a000`; its native-quality and Companion RVAs, structure offsets, and byte guards are centralized in that descriptor.
+`ext::game::Current()` returns a struct of interface pointers selected once at init (null for every game except a matched FFXIV build). Seam bodies test a pointer, never a `gameExe` string. `ext/ffxiv/GameBuild.h` is the only file with FFXIV addresses; the offsets hard-coded inside `ProcessFfxivQualityRequest` move there too. The current descriptor is keyed by `TimeDateStamp=0x6ad10bfd` and `SizeOfImage=0x381f000`; its native-quality and Companion RVAs, structure offsets, and byte guards are centralized in that descriptor.
 
 Upstream seams in this group:
 
