@@ -8,6 +8,7 @@
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"
 #include "ext/dx11bridge/BridgeState.h"
+#include "ext/dx11bridge/ReleaseDrain.h"
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/FgSeams.h"
 #include "ext/hdr/HdrSeams.h"
@@ -125,8 +126,10 @@ bool ShutdownNgx(ID3D11Device* device, NVSDK_NGX_Result& out);
 // NVSDK_NGX_D3D11_Shutdown1, first statement. True = the caller must `return NVSDK_NGX_D3D11_Shutdown();`.
 // `recordedDevice` is the translation unit's D3D11Device, set to `inDevice` when handled.
 bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice);
-// NVSDK_NGX_D3D11_ReleaseFeature, before the feature is reset. False -> return FAIL_PlatformError.
-bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
+// NVSDK_NGX_D3D11_ReleaseFeature, before the feature is reset. Failed -> return FAIL_PlatformError. Drained = the GPU
+// work that could reference the feature is proven finished, so the caller may skip its 500 ms sleep when
+// SkipReleaseSleep(result) says so; NotApplicable = no proof, nothing changes (ext/dx11bridge/ReleaseDrain.h).
+ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown);
 
 // IFeature_Dx11wDx12.cpp Evaluate, before binding NVSDK_NGX_Parameter_Color (replaces the unconditional
 // dx11Color.Dx12Resource bind). C4's forced-quality colour scale: Lanczos3-downscales the display-sized colour

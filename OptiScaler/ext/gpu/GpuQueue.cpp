@@ -8,32 +8,42 @@
 
 namespace ext::gpu
 {
-bool DrainQueue(ID3D12CommandQueue* queue)
+QueueDrain DrainQueueEx(ID3D12CommandQueue* queue)
 {
     if (queue == nullptr)
-        return true;
+        return QueueDrain::Absent;
+    FenceOutcome outcome;
+    DWORD waited = WAIT_FAILED;
+    HRESULT result = E_FAIL;
     Microsoft::WRL::ComPtr<ID3D12Device> device;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
-        return false;
+        return ClassifyFence(outcome); // setupOk stays false: Failed
     // Once removed, this device can no longer execute work referencing the feature.
-    if (FAILED(device->GetDeviceRemovedReason()))
-        return true;
+    outcome.removedBefore = FAILED(device->GetDeviceRemovedReason());
+    if (outcome.removedBefore)
+        return ClassifyFence(outcome);
     if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
-        return false;
+        return ClassifyFence(outcome);
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr)
-        return false;
-    auto result = queue->Signal(fence.Get(), 1);
+        return ClassifyFence(outcome);
+    outcome.setupOk = true;
+    result = queue->Signal(fence.Get(), 1);
     if (SUCCEEDED(result))
         result = fence->SetEventOnCompletion(1, event);
-    const auto waited = SUCCEEDED(result) ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
+    outcome.signalOk = SUCCEEDED(result);
+    waited = outcome.signalOk ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
     CloseHandle(event);
-    const bool completed = waited == WAIT_OBJECT_0 || FAILED(device->GetDeviceRemovedReason());
-    LOG_INFO("FFXIV upscaler release: queue {:X} drained={}, wait={:X}, result={:X}", (size_t) queue, completed, waited,
-             (UINT) result);
-    return completed;
+    outcome.waitSignaled = waited == WAIT_OBJECT_0;
+    outcome.removedAfter = FAILED(device->GetDeviceRemovedReason());
+    const auto drain = ClassifyFence(outcome);
+    LOG_INFO("FFXIV upscaler release: queue {:X} drained={}, wait={:X}, result={:X}", (size_t) queue,
+             drain == QueueDrain::Drained, waited, (UINT) result);
+    return drain;
 }
+
+bool DrainQueue(ID3D12CommandQueue* queue) { return DrainedOk(DrainQueueEx(queue)); }
 
 bool ExecuteOrdered(ID3D12CommandQueue* queue, ID3D12CommandList* list, ID3D12Fence* fence, OrderedFence& state,
                     UINT64& allocatorValue)

@@ -706,7 +706,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (auto deviceContext = Dx11Contexts[handleId].feature.get(); deviceContext != nullptr)
     {
-        if (!ext::dx11bridge::BeforeReleaseFeature(*deviceContext, shutdown)) // ext: C6 drain the queues first
+        const auto drain = ext::dx11bridge::BeforeReleaseFeature(*deviceContext, shutdown); // ext: C6 drain the queues first
+        if (drain == ext::dx11bridge::ReleaseDrain::Failed)
             return NVSDK_NGX_Result_FAIL_PlatformError;
 
         if (!shutdown)

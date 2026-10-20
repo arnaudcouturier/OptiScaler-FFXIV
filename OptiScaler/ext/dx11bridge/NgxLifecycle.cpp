@@ -4,6 +4,8 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/game/Game.h"
 
+#include <chrono>
+
 #include <Config.h>
 #include <OwnedMutex.h>
 #include <State.h>
@@ -60,25 +62,45 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice)
     return true;
 }
 
-bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
+ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
 {
     if (!IsolatesNgx() || !feature.IsWithDx12())
-        return true;
+        return ReleaseDrain::NotApplicable;
 
+    using gpu::QueueDrain;
+    const auto started = std::chrono::steady_clock::now();
     auto fg = State::Instance().currentFG;
     ID3D12CommandQueue* fgQueue = nullptr;
-    if (&feature == State::Instance().currentFeature && fg != nullptr &&
-        State::Instance().activeFgInput == FGInput::Upscaler)
+    QueueDrain fgDrain = QueueDrain::Absent;
+    QueueDrain upscaleDrain = QueueDrain::Absent;
+    bool fgRequired = false;
+    try
     {
-        OwnedLockGuard guard(fg->Mutex, 5);
-        ext::Access::CancelPendingUpscalerWork(*fg);
-        fgQueue = fg->GetCommandQueue();
-        if (!gpu::DrainQueue(fgQueue))
-            return false;
+        if (&feature == State::Instance().currentFeature && fg != nullptr &&
+            State::Instance().activeFgInput == FGInput::Upscaler)
+        {
+            fgRequired = true;
+            OwnedLockGuard guard(fg->Mutex, 5);
+            ext::Access::CancelPendingUpscalerWork(*fg);
+            fgQueue = fg->GetCommandQueue();
+            fgDrain = gpu::DrainQueueEx(fgQueue);
+            if (fgDrain == QueueDrain::Failed)
+                return ReleaseDrain::Failed;
+        }
+        auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
+        // One queue serving both roles was waited for once, above.
+        upscaleDrain = (fgRequired && upscaleQueue == fgQueue) ? fgDrain : gpu::DrainQueueEx(upscaleQueue);
     }
-    auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
-    if (upscaleQueue != fgQueue && !gpu::DrainQueue(upscaleQueue))
-        return false;
+    catch (...)
+    {
+        LOG_ERROR("FFXIV upscaler release: exception while draining the queues");
+        return ReleaseDrain::Failed;
+    }
+
+    // Nothing here proves an Evaluate is not running on another thread yet (P3), so a GPU drain alone is no proof.
+    const auto result = ClassifyRelease(fgRequired, fgDrain, upscaleDrain, Quiescence::NotChecked);
+    if (result == ReleaseDrain::Failed)
+        return result;
 
     // D3: the upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps running straight across that
     // hole: CancelPendingUpscalerWork only switches it off and back on, so the provider's presentation timing history
@@ -99,6 +121,10 @@ bool BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
         fg->DestroyFGContext();
     }
 
-    return true;
+    const double waitedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    LOG_INFO("FFXIV upscaler release: result={} (fg queue required={}, fg={}, upscale={}), waited {:.2f} ms",
+             Name(result), fgRequired, (int) fgDrain, (int) upscaleDrain, waitedMs);
+    return result;
 }
 } // namespace ext::dx11bridge

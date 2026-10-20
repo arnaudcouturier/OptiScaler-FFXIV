@@ -10,6 +10,7 @@
 // With no owner registered every entry point is the plain D3D12 call (one relaxed load and one branch).
 
 #include "ext/ExtFeatures.h"
+#include "ext/gpu/DrainResult.h"
 #include "ext/gpu/GpuLifetime.h"
 #include "ext/gpu/GpuSubmission.h"
 
@@ -130,6 +131,9 @@ class Scope
 // Blocks until `queue` has drained (5 s), tolerating device removal. False = could not prove idle.
 // Used on upscaler release so nothing the queue still runs references the feature being destroyed.
 bool DrainQueue(ID3D12CommandQueue* queue);
+// Same wait, but says what it proved (DrainResult.h): a null queue is Absent and a removed device DeviceLost, neither
+// is a drain. DrainQueue above is DrainedOk of this.
+QueueDrain DrainQueueEx(ID3D12CommandQueue* queue);
 
 // Ordered submit with a monotonic completion fence (the C6 half of ext::fg::SubmitSC, SEAMS-catalog `fg`).
 struct OrderedFence
