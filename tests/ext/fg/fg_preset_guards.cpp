@@ -82,6 +82,7 @@ struct Spec
     bool pushBeforeSave = false;       // push rax after the prologue: the frame offsets would shift
     Clobber clobber = Clobber::None;
     bool movRcxOk = true;       // mov rcx,[rip+global] right before the read call
+    bool movRcxFromFrame = false; // mov rcx,[rbp+disp32] there instead: same length, not a global
 
     // control flow around the region between the save and the reload
     bool jumpBackIntoRegion = false;
@@ -360,11 +361,19 @@ Fake Build(const Spec& s)
         f.reloadAt = c.at;
         EmitReload(c, s.reloadFrom < 0 ? s.save : static_cast<Where>(s.reloadFrom), rbpToRsp, s.frameSub);
         f.movRcxAt = c.at;
-        if (s.movRcxOk)
-            c.b({ 0x48, 0x8B, 0x0D });
+        if (s.movRcxFromFrame)
+        {
+            c.b({ 0x48, 0x8B, 0x8D });
+            c.i32(0x40);
+        }
         else
-            c.b({ 0x48, 0x8B, 0x05 });
-        c.rip(kGlobal);
+        {
+            if (s.movRcxOk)
+                c.b({ 0x48, 0x8B, 0x0D });
+            else
+                c.b({ 0x48, 0x8B, 0x05 });
+            c.rip(kGlobal);
+        }
         f.callAt = c.at;
         c.b({ 0xE8 });
         c.rel32(kReadFn);
@@ -545,6 +554,7 @@ void EachGuardFailsOnItsOwn()
     { Spec s; s.seventhArgRbp = true; s.frameDisp = 0xFFFFFC70; expect("7th argument, other frame size", s, Why::CreateSignature); }
     { Spec s = Shape31016(); s.seventhArgRbp = true; expect("7th argument, 310.9.16 shape", s, Why::CreateSignature); }
     { Spec s; s.movRcxOk = false; expect("mov rcx,[rip+g] before the read call", s, Why::ReadCallSetup); }
+    { Spec s; s.movRcxFromFrame = true; expect("rcx loaded from the frame, not from a global", s, Why::ReadCallSetup); }
     { Spec s; s.defaultsOk = false; expect("defaults body", s, Why::DefaultsNotFound); }
     { Spec s; s.defaultsHits = 2; expect("two defaults calls", s, Why::DefaultsNotFound); }
     { Spec s; s.copyOk = false; expect("copy body", s, Why::CopySites); }
@@ -683,6 +693,12 @@ void ContextProofRefuses()
     { Spec s; s.save = Where::Volatile; expect("saved in a volatile register", s, Why::CreateContext); }
     { Spec s; s.save = Where::Home; expect("saved in the home area", s, Why::CreateContext); }
     { Spec s; s.save = Where::Beyond; expect("saved just above the frame", s, Why::CreateContext); }
+    {   // the same with the locals far above the slot, so that taking their address is not what refuses it
+        Spec s;
+        s.save = Where::Beyond;
+        s.frameDisp = 0xFFFFFFF0;
+        expect("saved just above the frame (locals above it)", s, Why::CreateContext);
+    }
     // the saved register written between the save and the reload, in every way
     for (Where w : { Where::R13, Where::Rbx, Where::Rsi, Where::Rdi, Where::R12, Where::R15 })
         for (Clobber k : { Clobber::RegMov, Clobber::RegXor32, Clobber::RegPop, Clobber::RegXchg, Clobber::RegByte, Clobber::RegLea })
