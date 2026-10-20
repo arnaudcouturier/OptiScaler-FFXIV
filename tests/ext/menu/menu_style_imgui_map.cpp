@@ -5,6 +5,7 @@
 // Source-level, on the text with comments removed. The negative controls rerun each rule on a copy with one assignment removed.
 #include "menu_scan.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <set>
 #include <string>
@@ -52,7 +53,9 @@ std::vector<std::string> LibraryColours(const std::string& imguiH)
 std::set<std::string> StructMembers(const std::string& header, const std::string& structName)
 {
     std::set<std::string> members;
-    const std::string text = menuscan::StripComments(header);
+    // The checkout may use CRLF (core.autocrlf on Windows): read the header as LF text.
+    std::string text = menuscan::StripComments(header);
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
     const size_t open = text.find("struct " + structName + "\n");
     if (open == std::string::npos)
         return members;
