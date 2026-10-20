@@ -3,6 +3,12 @@
 // and the file's SHA-256. For the two DLLs this was developed on it also asserts the RVAs found with a decompiler (310.9.1.0
 // and 310.8.0); for any other DLL it passes when the guards locate everything and fails with the reason otherwise, so it is the
 // check to run on a new runtime before trusting the live switch on it.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include "fg_preset_harness.h"
 
 #include "ext/fg/dlssg/PresetGuards.h"
@@ -40,8 +46,9 @@ struct Expect
     const char* what;
     uint32_t reader, readFn, create, defaults, copy, site0, site1, global;
 };
-// RVAs read with a decompiler (REA, Ghidra 12.1.4) for 310.9.1.0, and with the structural scan run by hand for 310.8.0.
+// RVAs read with a decompiler (REA, Ghidra 12.1.4) for 310.9.1.0 and 310.9.16, and with the structural scan run by hand for 310.8.0.
 const Expect kExpect[] = {
+    { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "310.9.16 (Streamline 2.14.16 SDK)", 0x13FF0, 0x344D0, 0x36310, 0x34BB0, 0x35BC0, 0x369F0, 0x36A75, 0x66AA20 },
     { "5d5cbf14d2727d47f93fd10bf77bd91708ae122482a6f86fd564971641ebd47b", "310.8.0 (structural scan, cross-checked with a second implementation)", 0x13E80, 0x33E80, 0x35B70, 0x34530, 0x35460, 0x3624E, 0x362D5, 0x6679E0 },
     { "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82", "310.9.1.0", 0x13EF0, 0x340E0, 0x35DD0, 0x34790, 0x356C0, 0x364AE, 0x36535, 0x6689E0 },
 };
@@ -131,8 +138,18 @@ int main()
     std::printf("file %s\nsha256 %s (%s)\n", path, sha.c_str(), KnownHashLabel(sha) ? KnownHashLabel(sha) : "not in the known list");
     std::printf("guards: %s\n", WhyText(l.why));
     if (l.why == Why::Ok)
+    {
         std::printf("reader %X readFn %X create %X defaults %X copy %X sites %X %X global %X\n", l.reader, l.readFn, l.create, l.defaults,
                     l.copy, l.copySites[0], l.copySites[1], l.sharedGlobal);
+        if (l.ctxInSlot)
+            std::printf("context argument: kept at create+%X (RVA %X) in the frame slot [rsp+%X], loaded back at RVA %X; %u instructions in between checked, %u decoded in create\n",
+                        l.ctxSaveAt - l.create, l.ctxSaveAt, static_cast<unsigned>(l.ctxSlot), l.ctxReloadAt, l.ctxChecked, l.createInsns);
+        else
+            std::printf("context argument: kept at create+%X (RVA %X) in register %u, loaded back at RVA %X; %u instructions in between checked, %u decoded in create\n",
+                        l.ctxSaveAt - l.create, l.ctxSaveAt, static_cast<unsigned>(l.ctxReg), l.ctxReloadAt, l.ctxChecked, l.createInsns);
+    }
+    else if (l.failAt != 0)
+        std::printf("the check stopped at RVA %X\n", l.failAt);
     CHECK(l.why == Why::Ok);
 
     for (const auto& e : kExpect)

@@ -280,7 +280,8 @@ std::string Evaluate(Seen& seen, guards::Located& found)
     if (!MappedView(seen.module, sections, view) || !SafeLocate(view, found))
         return "its memory image could not be read";
     if (found.why != guards::Why::Ok)
-        return std::string("safety check failed: ") + guards::WhyText(found.why);
+        return std::string("safety check failed: ") + guards::WhyText(found.why) +
+               (found.failAt != 0 ? std::format(" (module offset 0x{:X})", found.failAt) : std::string());
     return {};
 }
 

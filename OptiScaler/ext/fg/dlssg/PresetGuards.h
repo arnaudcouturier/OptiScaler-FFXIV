@@ -13,7 +13,10 @@
 // request, so every guard below is about proving those four functions and the data flow between them:
 //   * every pattern matches exactly once (or exactly twice for the two copy sites) across the executable sections;
 //   * every target is the first byte of a function of the exception table and lies in an executable section;
-//   * create's second argument is the context: `mov r13,rdx` near its start, `mov rdx,r13` right before the readFn call;
+//   * create's second argument is the context. create is decoded instruction by instruction (PresetX64.h); the context must be kept
+//     (a callee-saved register or a frame slot) by the straight-line code at its start, and the very same place must be loaded back
+//     into rdx right before the readFn call, with nothing between the two that can write that place and no way into that stretch of
+//     code from outside (see ProveContext). No fixed register is assumed: 310.9.1.0 keeps it in r13, 310.9.16 in [rsp+60h];
 //   * the global read before the readFn call and before both copy calls is the same global;
 //   * the stack-frame constants of create are masked (they differ between builds) but must still look like a frame.
 
@@ -25,6 +28,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "PresetX64.h"
 
 namespace ext::fg::preset::guards
 {
@@ -58,6 +63,7 @@ enum class Why : uint8_t
     NoCreate,
     CreateNotUnique,
     CreatePrologue,
+    CreateDecode,
     CreateContext,
     CreateSignature,
     ReadCallSetup,
@@ -92,6 +98,8 @@ constexpr const char* WhyText(Why why)
         return "the settings read function has more than one caller";
     case Why::CreatePrologue:
         return "the endpoint create function does not start as expected";
+    case Why::CreateDecode:
+        return "the endpoint create function contains code the safety check cannot follow";
     case Why::CreateContext:
         return "the endpoint create function does not keep its context argument as expected";
     case Why::CreateSignature:
@@ -123,6 +131,16 @@ struct Located
     uint32_t copy = 0;
     uint32_t copySites[2] {};  // address after each copy call inside create (the hook compares return addresses)
     uint32_t sharedGlobal = 0; // RVA of the shared configuration pointer
+    // Where the proof that create passes its context argument to the settings read function found things (informational; set when why == Ok).
+    bool ctxInSlot = false;    // false: kept in the register ctxReg; true: kept in a frame slot at rsp+ctxSlot (after the prologue)
+    uint8_t ctxReg = 0;        // x64 register number (3 rbx, 6 rsi, 7 rdi, 12..15 r12..r15)
+    int32_t ctxSlot = 0;       // offset from rsp after the prologue
+    uint32_t ctxSaveAt = 0;    // RVA of the instruction that keeps rdx
+    uint32_t ctxReloadAt = 0;  // RVA of the instruction that puts it back into rdx before the read call
+    uint32_t ctxChecked = 0;   // instructions between the two that were checked
+    uint32_t createInsns = 0;  // instructions decoded in create
+    // When why != Ok and the failure is at a place in the code: its RVA (0 when not applicable).
+    uint32_t failAt = 0;
 };
 
 namespace detail
@@ -246,7 +264,284 @@ inline bool InsideFunction(const std::vector<Function>& fns, uint32_t rva)
             return true;
     return false;
 }
-} // namespace detail
+// ---- the context argument ----------------------------------------------------------------------------------------------------
+// Frame of create as the prologue builds it:  lea rbp,[rsp+rbpDisp]  and  sub rsp,size  (after seven pushes). Offsets below are
+// "frame offsets": bytes above rsp after the prologue. [rsp+d] is frame offset d, [rbp+d] is d + rbpToRsp.
+struct Frame
+{
+    int64_t rbpDisp;  // negative
+    int64_t size;
+    int64_t rbpToRsp; // rbp - rsp after the prologue
+};
+
+// A place the context can be kept: a register, or an 8-byte slot of the frame.
+struct Loc
+{
+    bool slot = false;
+    uint8_t reg = x64::kNoReg;
+    int64_t off = 0;
+    bool operator==(const Loc& o) const { return slot == o.slot && (slot ? off == o.off : reg == o.reg); }
+};
+
+constexpr bool CalleeSaved(uint8_t r)
+{
+    return r == x64::RBX || r == x64::RSI || r == x64::RDI || (r >= x64::R12 && r <= x64::R15);
+}
+
+// Frame offset of an [rsp+disp] / [rbp+disp] operand without an index register.
+inline bool FrameOffset(const x64::MemOperand& m, const Frame& f, int64_t& off)
+{
+    if (!m.present || m.ripRel || m.index != x64::kNoReg)
+        return false;
+    if (m.base == x64::RSP)
+        off = m.disp;
+    else if (m.base == x64::RBP)
+        off = static_cast<int64_t>(m.disp) + f.rbpToRsp;
+    else
+        return false;
+    return true;
+}
+
+// mov r64, rdx  /  mov [frame slot], rdx
+inline bool IsSaveOfRdx(const x64::Insn& n, const Frame& f, Loc& loc)
+{
+    if (n.twoByte || !n.rexW || !n.hasModrm)
+        return false;
+    if (n.opcode == 0x89 && n.reg == x64::RDX) // mov r/m64, rdx
+    {
+        if (n.mod == 3)
+        {
+            loc = Loc { false, n.rm, 0 };
+            return true;
+        }
+        int64_t off = 0;
+        if (FrameOffset(n.mem, f, off))
+        {
+            loc = Loc { true, x64::kNoReg, off };
+            return true;
+        }
+        return false;
+    }
+    if (n.opcode == 0x8B && n.mod == 3 && n.rm == x64::RDX) // mov r64, rdx
+    {
+        loc = Loc { false, n.reg, 0 };
+        return true;
+    }
+    return false;
+}
+
+// mov rdx, r64  /  mov rdx, [frame slot]
+inline bool IsReloadToRdx(const x64::Insn& n, const Frame& f, Loc& loc)
+{
+    if (n.twoByte || !n.rexW || !n.hasModrm)
+        return false;
+    if (n.opcode == 0x8B && n.reg == x64::RDX) // mov rdx, r/m64
+    {
+        if (n.mod == 3)
+        {
+            loc = Loc { false, n.rm, 0 };
+            return true;
+        }
+        int64_t off = 0;
+        if (FrameOffset(n.mem, f, off))
+        {
+            loc = Loc { true, x64::kNoReg, off };
+            return true;
+        }
+        return false;
+    }
+    if (n.opcode == 0x89 && n.mod == 3 && n.rm == x64::RDX) // mov rdx, r64 (the other encoding)
+    {
+        loc = Loc { false, n.reg, 0 };
+        return true;
+    }
+    return false;
+}
+
+inline int InsnIndex(const std::vector<x64::Insn>& insns, uint32_t rva)
+{
+    const auto it = std::lower_bound(insns.begin(), insns.end(), rva, [](const x64::Insn& a, uint32_t v) { return a.at < v; });
+    return (it != insns.end() && it->at == rva) ? static_cast<int>(it - insns.begin()) : -1;
+}
+
+struct ContextFacts
+{
+    Loc loc;
+    uint32_t saveAt = 0;
+    uint32_t reloadAt = 0;
+    uint32_t checked = 0;
+    uint32_t globalRead = 0; // RVA of the global that "mov rcx,[rip+g]" loads before the read call
+};
+
+// Proves that create hands its own second argument (the context, rdx at entry) to the settings read function:
+//  1. the read call is preceded by "mov rcx,[rip+g]" and, before that, "mov rdx, X" (X a register or a frame slot);
+//  2. the straight-line code at the start of create (after the prologue, up to its first branch, call or return, and while rdx is
+//     untouched) keeps rdx in a place that survives calls (a callee-saved register, or a frame slot at or above rsp+20h): that
+//     instruction is the "save", and it must keep it in exactly X;
+//  3. nothing between the save and the reload writes X (registers: any write incl. partial writes, pop, xchg, implicit writes;
+//     frame slots: any store whose bytes overlap it, through rsp or rbp; also no address of the slot or of anything below it is
+//     taken, no copy of rsp/rbp as a value, no push/pop or other move of rsp/rbp);
+//  4. control flow: no jump from outside [save, reload] lands in it, no jump lands anywhere in (reload, call] and none lands on the
+//     entry run, every direct jump target inside create is an instruction start and there is no indirect jump, so the only way to the
+//     call is through the save and then the reload.
+inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
+{
+    using namespace x64;
+    const int iCall = InsnIndex(insns, readCall);
+    if (iCall < 3 || insns[iCall].flow != Flow::Call)
+    {
+        failAt = readCall;
+        return Why::CreateDecode;
+    }
+    const Insn& movRcx = insns[iCall - 1];
+    const Insn& reload = insns[iCall - 2];
+    // 1. mov rcx,[rip+g] / mov rdx, X
+    if (movRcx.twoByte || movRcx.opcode != 0x8B || !movRcx.rexW || !movRcx.hasModrm || movRcx.reg != RCX || !movRcx.mem.present || !movRcx.mem.ripRel || movRcx.len != 7)
+    {
+        failAt = movRcx.at;
+        return Why::ReadCallSetup;
+    }
+    out.globalRead = static_cast<uint32_t>(static_cast<int64_t>(movRcx.at) + movRcx.len + movRcx.mem.disp);
+    Loc want;
+    if (!IsReloadToRdx(reload, f, want))
+    {
+        failAt = reload.at;
+        return Why::ReadCallSetup;
+    }
+
+    // 2. the entry run and the saves in it
+    const int iStart = InsnIndex(insns, create + 31); // the instruction after "sub rsp,imm32"
+    if (iStart < 0)
+    {
+        failAt = create + 31;
+        return Why::CreateDecode;
+    }
+    struct Save
+    {
+        Loc loc;
+        int idx;
+    };
+    std::vector<Save> saves;
+    for (int j = iStart; j < iCall; ++j)
+    {
+        const Insn& n = insns[j];
+        Loc loc;
+        if (IsSaveOfRdx(n, f, loc))
+        {
+            const bool survives = loc.slot ? (loc.off >= 0x20 && loc.off + 8 <= f.size) : CalleeSaved(loc.reg);
+            if (survives)
+                saves.push_back({ loc, j });
+        }
+        if ((n.gprWrites & (1u << RDX)) != 0)
+            break; // rdx no longer holds the argument
+        if (n.writesStack || (n.gprWrites & ((1u << RSP) | (1u << RBP))) != 0)
+            break; // the frame moves: offsets would not be comparable
+        if (n.flow != Flow::Next)
+            break; // the end of the straight-line run (a call destroys rdx)
+    }
+    const Save* save = nullptr;
+    for (const auto& s : saves)
+        if (s.loc == want)
+        {
+            save = &s;
+            break;
+        }
+    if (save == nullptr)
+    {
+        failAt = reload.at;
+        return Why::CreateContext;
+    }
+    const int iSave = save->idx, iReload = iCall - 2;
+    if (iSave >= iReload)
+    {
+        failAt = reload.at;
+        return Why::CreateContext;
+    }
+    const uint32_t saveStart = insns[iSave].at, reloadStart = reload.at, callStart = readCall;
+    const uint32_t createEnd = insns.back().at + insns.back().len;
+
+    // 4. control flow (two passes: first every target must be an instruction start, then the rules)
+    for (const Insn& b : insns)
+    {
+        if (b.flow == Flow::JumpIndirect)
+        {
+            failAt = b.at;
+            return Why::CreateDecode;
+        }
+        if ((b.flow == Flow::Jump || b.flow == Flow::CondJump) && b.target >= create && b.target < createEnd && InsnIndex(insns, static_cast<uint32_t>(b.target)) < 0)
+        {
+            failAt = b.at;
+            return Why::CreateDecode;
+        }
+    }
+    for (const Insn& b : insns)
+    {
+        if ((b.flow != Flow::Jump && b.flow != Flow::CondJump) || b.target < create || b.target >= createEnd)
+            continue;
+        const uint32_t t = static_cast<uint32_t>(b.target);
+        const bool fromRegion = b.at >= saveStart && b.at <= reloadStart;
+        if ((t >= create && t <= saveStart) || (!fromRegion && t >= saveStart && t <= reloadStart) || (t > reloadStart && t <= callStart))
+        {
+            failAt = b.at;
+            return Why::CreateContext;
+        }
+    }
+
+    // 3. nothing in the region writes the saved place
+    for (int j = iSave + 1; j <= iReload; ++j)
+    {
+        const Insn& n = insns[j];
+        bool clobbered = false;
+        if (!want.slot)
+            clobbered = (n.gprWrites & (1u << want.reg)) != 0;
+        else
+        {
+            int64_t off = 0;
+            if (n.writesStack || (n.gprWrites & ((1u << RSP) | (1u << RBP))) != 0 || (n.readsFrameRegAsValue && !n.isLea))
+                clobbered = true; // the frame moves, or its address is copied somewhere
+            if (n.isLea && n.mem.present && !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP))
+                clobbered = clobbered || !FrameOffset(n.mem, f, off) || off < want.off + 8; // the address of the slot, or of something below it, is taken
+            if (n.memWrite && n.mem.present && !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP))
+                clobbered = clobbered || !FrameOffset(n.mem, f, off) || (off < want.off + 8 && off + n.memSize > want.off);
+        }
+        if (clobbered)
+        {
+            failAt = n.at;
+            return Why::CreateContext;
+        }
+    }
+
+    out.loc = want;
+    out.saveAt = saveStart;
+    out.reloadAt = reloadStart;
+    out.checked = static_cast<uint32_t>(iReload - iSave - 1);
+    return Why::Ok;
+}
+
+// The hook forwards six pointer arguments and returns a 32-bit value (an NGX status). Proven here from the decoded code of create:
+//  * no memory operand reaches a stack argument after the sixth: with the frame the prologue showed, the argument slots are at
+//    entry-rsp + 28h (5th), 30h (6th), 38h (7th) ...; an access that touches the window of the 7th..14th slot is refused;
+//  * the status is a 32-bit value: `mov eax, 0BAD0xxxxh` occurs in create (the error returns).
+inline bool LooksLikeSixArgumentStatusFunction(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f)
+{
+    using namespace x64;
+    bool seventh = false, status = false;
+    for (const Insn& n : insns)
+    {
+        if (n.at < create + 31)
+            continue;
+        if (n.mem.present && !n.mem.ripRel && n.mem.index == kNoReg && (n.mem.base == RBP || n.mem.base == RSP))
+        {
+            const int64_t e = (n.mem.base == RBP) ? static_cast<int64_t>(n.mem.disp) + f.rbpDisp - 56 : static_cast<int64_t>(n.mem.disp) - f.size - 56;
+            const int64_t bytes = n.memBytes != 0 ? n.memBytes : 1;
+            if (e < 0x78 && e + bytes > 0x38)
+                seventh = true;
+        }
+        if (!n.twoByte && n.opcode == 0xB8 && !n.rexW && n.immLen == 4 && n.gprWrites == (1u << RAX) && (static_cast<uint32_t>(n.imm) >> 16) == 0xBAD0)
+            status = true;
+    }
+    return !seventh && status;
+}} // namespace detail
 
 inline Located Locate(const ImageView& view)
 {
@@ -338,56 +633,39 @@ inline Located Locate(const ImageView& view)
             return no(Why::CreatePrologue);
     }
 
-    // mov r13,rdx (the context argument) within the first 0x80 bytes
-    constexpr uint8_t kMovR13Rdx[] = { 0x4C, 0x8B, 0xEA };
-    bool contextKept = false;
-    for (uint32_t at = create + 32; at < create + 0x80 && at + 3 <= createEnd; ++at)
-        if (sc.Match(at, kMovR13Rdx))
-            contextKept = true;
-    if (!contextKept)
-        return no(Why::CreateContext);
-
-    // The hook forwards six pointer arguments and returns a 32-bit value (an NGX status). Proven here from the code of create:
-    //   * no memory operand reaches a stack argument after the sixth: with the frame the prologue just showed, the argument slots
-    //     are at entry-rsp + 28h, 30h, 38h ..., which is [rbp + (56 - disp) + k] and [rsp + (sub + 56) + k]; the window of the 7th..
-    //     14th argument slots is refused (disp32 encodings; a 7th argument load with a disp8 would need a frame under 128 bytes);
-    //   * the status is a 32-bit value: `mov eax, 0BAD0xxxxh` occurs in create (the error returns).
+    // ---- decode create, then prove its context argument and its signature ----------------------------------------------------
+    if (createEnd > view.size || !sc.Exec(create, createEnd - create))
+        return no(Why::CreatePrologue);
+    Frame frame {};
+    frame.rbpDisp = sc.I32(create + 20);
+    frame.size = static_cast<int64_t>(sc.U32(create + 27));
+    frame.rbpToRsp = frame.size + frame.rbpDisp;
+    std::vector<x64::Insn> insns;
+    insns.reserve((createEnd - create) / 3 + 16);
+    for (uint32_t at = create; at < createEnd;)
     {
-        const int32_t frameDisp = sc.I32(create + 20);                      // lea rbp,[rsp + frameDisp]
-        const int64_t frameSub = static_cast<int64_t>(sc.U32(create + 27)); // sub rsp, frameSub
-        const int64_t rbpLow = 56 - static_cast<int64_t>(frameDisp) + 0x38, rspLow = frameSub + 56 + 0x38;
-        constexpr int64_t kWindow = 0x40; // eight slots
-        bool seventh = false, status = false;
-        for (uint32_t at = create; at + 6 <= createEnd; ++at)
+        x64::Insn n;
+        if (!x64::DecodeAt(view.bytes, view.size, at, createEnd, n))
         {
-            const uint8_t b = view.bytes[at];
-            if ((b & 0xC7) == 0x85 && at + 5 <= createEnd) // modrm: [rbp + disp32]
-            {
-                const int64_t disp = sc.I32(at + 1);
-                if (disp >= rbpLow && disp < rbpLow + kWindow)
-                    seventh = true;
-            }
-            if ((b & 0xC7) == 0x84 && view.bytes[at + 1] == 0x24 && at + 6 <= createEnd) // modrm + SIB: [rsp + disp32]
-            {
-                const int64_t disp = sc.I32(at + 2);
-                if (disp >= rspLow && disp < rspLow + kWindow)
-                    seventh = true;
-            }
-            if (b == 0xB8 && view.bytes[at + 3] == 0xD0 && view.bytes[at + 4] == 0xBA) // mov eax, 0BAD0xxxxh
-                status = true;
+            fail.failAt = at;
+            return no(Why::CreateDecode);
         }
-        if (seventh || !status)
-            return no(Why::CreateSignature);
+        insns.push_back(n);
+        at += n.len;
     }
-
-    // mov rdx,r13 / mov rcx,[rip+global] right before the call to the read function
-    constexpr uint8_t kMovRdxR13[] = { 0x49, 0x8B, 0xD5 };
-    constexpr uint8_t kMovRcxRip[] = { 0x48, 0x8B, 0x0D };
-    if (readCallInCreate < create + 10 || !sc.Match(readCallInCreate - 10, kMovRdxR13) || !sc.Match(readCallInCreate - 7, kMovRcxRip))
-        return no(Why::ReadCallSetup);
-    const int64_t globalRead =
-        static_cast<int64_t>(readCallInCreate) + sc.I32(readCallInCreate - 4); // after the 7-byte mov at call-7
-
+    ContextFacts ctx;
+    {
+        uint32_t failAt = 0;
+        const Why proof = ProveContext(insns, create, frame, readCallInCreate, ctx, failAt);
+        if (proof != Why::Ok)
+        {
+            fail.failAt = failAt;
+            return no(proof);
+        }
+    }
+    if (!LooksLikeSixArgumentStatusFunction(insns, create, frame))
+        return no(Why::CreateSignature);
+    const int64_t globalRead = ctx.globalRead;
     // ---- 4. defaults and copy, inside create -----------------------------------------------------------------------------
     constexpr uint8_t kLeaRcxRbp40Call[] = { 0x48, 0x8D, 0x4D, 0x40, 0xE8 };
     constexpr uint8_t kDefaultsStart[] = { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x7C, 0x24, 0x18, 0x55, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x20, 0x41, 0xBB, 0x03, 0, 0, 0 };
@@ -450,6 +728,13 @@ inline Located Locate(const ImageView& view)
     ok.copySites[0] = sites[0];
     ok.copySites[1] = sites[1];
     ok.sharedGlobal = static_cast<uint32_t>(globalRead);
+    ok.ctxInSlot = ctx.loc.slot;
+    ok.ctxReg = ctx.loc.slot ? 0 : ctx.loc.reg;
+    ok.ctxSlot = ctx.loc.slot ? static_cast<int32_t>(ctx.loc.off) : 0;
+    ok.ctxSaveAt = ctx.saveAt;
+    ok.ctxReloadAt = ctx.reloadAt;
+    ok.ctxChecked = ctx.checked;
+    ok.createInsns = static_cast<uint32_t>(insns.size());
     return ok;
 }
 
@@ -516,7 +801,7 @@ inline const char* KnownHashLabel(std::string_view sha256Hex)
     static constexpr Known kKnown[] = {
         { "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82", "NVIDIA DLSS-G 310.9.1.0, code shape read in full with a decompiler" },
         { "5d5cbf14d2727d47f93fd10bf77bd91708ae122482a6f86fd564971641ebd47b", "NVIDIA DLSS-G 310.8.0, structural scan only" },
-        { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "a build verified by the Nickle fork (not read here)" },
+        { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "NVIDIA DLSS-G 310.9.16 (Streamline 2.14.16), code shape read in full with a decompiler" },
         { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "a build verified by the Nickle fork (not read here)" },
     };
     if (sha256Hex.size() != 64)
