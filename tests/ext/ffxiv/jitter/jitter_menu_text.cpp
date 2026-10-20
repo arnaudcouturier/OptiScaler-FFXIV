@@ -102,6 +102,13 @@ int main(int argc, char** argv)
     CHECK(raw.find("1.0 (changes nothing), 0.8, 0.6 and 0.5") != std::string::npos);
     CHECK(raw.find("0 learns the ratio") != std::string::npos);
     CHECK(raw.find("only used while the correction switch above is ticked") != std::string::npos);
+    // the correction tooltip describes the calibrate-and-scale behaviour, not the old per-frame replacement
+    CHECK(raw.find("hands DLSS the jitter the game really applied") == std::string::npos);
+    CHECK(raw.find("Learns how much of the jitter the game reports it really applies") != std::string::npos);
+    CHECK(raw.find("measured 0.6 in this game") != std::string::npos && raw.find("scaled by that ratio") != std::string::npos);
+    CHECK(raw.find("Jitter correction: calibrated ratio") != std::string::npos);
+    CHECK(raw.find("how many evaluates were replaced") == std::string::npos);
+    CHECK(raw.find("how many evaluates were scaled") != std::string::npos);
     // registered in the FFXIV tab (its place comes from the layout table), visible only for the FFXIV build entry
     CHECK(Count(code, "ext::menu::AutoRegisterregistration{{\"\",\"\",\"\",Draw,\"\",Visible}};") == 1);
     CHECK(raw.find("{ \"ffxiv_jitter\", \"FFXIV\", ") != std::string::npos);

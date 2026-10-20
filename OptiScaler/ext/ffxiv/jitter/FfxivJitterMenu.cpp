@@ -33,8 +33,9 @@ void Draw(ext::menu::Ctx&)
     bool correct = cfg.jitterCorrection.value_or_default();
     if (ImGui::Checkbox("Correct the game's jitter (experimental)", &correct))
         cfg.jitterCorrection = correct;
-    ext::menu::Tooltip("Hands DLSS the jitter the game really applied instead of the one it reports, when they differ\n"
-                       "(the jitter probe showed a constant factor of 0.6 in this game). Applies at once.\n\n"
+    ext::menu::Tooltip("Learns how much of the jitter the game reports it really applies (it measured 0.6 in this game),\n"
+                       "then hands DLSS the reported jitter scaled by that ratio. Applies at once; the log line\n"
+                       "\"Jitter correction: calibrated ratio ...\" says when it is ready.\n\n"
                        "One write feeds super resolution, frame generation, NR and the Jitter Count readout: to compare,\n"
                        "look at the picture with frame generation off first. If something looks wrong, untick it.");
 
@@ -49,8 +50,7 @@ void Draw(ext::menu::Ctx&)
                        "Applies at once. Look at the picture with frame generation off first.");
 
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped("The log line \"Jitter correction: on; totals since the start of the session ...\" shows how many "
-                       "evaluates were replaced and how many passed through unchanged.");
+    ImGui::TextWrapped("The log line \"Jitter correction: on; totals since the start of the session ...\" shows how many evaluates were scaled and how many passed through unchanged, and the calibrated ratio.");
     ImGui::PopStyleColor();
 }
 

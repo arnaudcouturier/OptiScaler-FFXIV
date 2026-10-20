@@ -151,6 +151,23 @@ void TestFragment(const std::string& repo)
         if (at != std::string::npos)
             CHECK(ffxiv.rfind("Default (auto) is false", at) != std::string::npos && at - ffxiv.rfind("Default (auto) is false", at) < 40);
     }
+    // the correction key: the text describes the calibrate-and-scale behaviour and no longer the per-frame proof
+    {
+        const size_t at = ffxiv.find("JitterCorrection=auto");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos)
+        {
+            const size_t lf = ffxiv.rfind("\n\n", at), crlf = ffxiv.rfind("\r\n\r\n", at);
+            size_t start = lf == std::string::npos ? 0 : lf;
+            if (crlf != std::string::npos && crlf > start)
+                start = crlf;
+            const std::string text = ffxiv.substr(start, at - start);
+            CHECK(text.find("learns") != std::string::npos && text.find("60%") != std::string::npos && text.find("EVERY DLSS evaluate") != std::string::npos);
+            CHECK(text.find("generation off first") != std::string::npos && text.find("Test with frame") != std::string::npos); // the comment wraps between the lines
+            CHECK(text.find("same-frame") == std::string::npos && text.find("held-back") == std::string::npos &&
+                  text.find("frame counter did not increase") == std::string::npos && text.find("replaced by the applied") == std::string::npos);
+        }
+    }
     // the experiment key: documented as default off (0), the line right above the key, with the valid range and the condition
     CHECK(HasKeyLine(ffxiv, "JitterScaleOverride"));
     {
