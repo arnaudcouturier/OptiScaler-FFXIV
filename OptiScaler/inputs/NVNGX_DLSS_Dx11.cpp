@@ -710,7 +710,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
         if (drain == ext::dx11bridge::ReleaseDrain::Failed)
             return NVSDK_NGX_Result_FAIL_PlatformError;
 
-        if (!shutdown)
+        if (!shutdown && !ext::dx11bridge::ShouldSkipReleaseSleep(drain)) // ext: skipped only on a proven drain
         {
             LOG_TRACE("sleeping for 500ms before reset()!");
             std::this_thread::sleep_for(std::chrono::milliseconds(500));

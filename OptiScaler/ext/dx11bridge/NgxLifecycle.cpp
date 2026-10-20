@@ -62,6 +62,12 @@ bool RedirectShutdown1(ID3D11Device* inDevice, ID3D11Device*& recordedDevice)
     return true;
 }
 
+bool ShouldSkipReleaseSleep(ReleaseDrain drain)
+{
+    // shuttingDown is false here by construction: the caller only asks on the non-shutdown path.
+    return SkipReleaseSleep(drain, ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default(), false);
+}
+
 ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
 {
     if (!IsolatesNgx() || !feature.IsWithDx12())
@@ -123,8 +129,9 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, bool shuttingDown)
 
     const double waitedMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    LOG_INFO("FFXIV upscaler release: result={} (fg queue required={}, fg={}, upscale={}), waited {:.2f} ms",
-             Name(result), fgRequired, (int) fgDrain, (int) upscaleDrain, waitedMs);
+    LOG_INFO("FFXIV upscaler release: result={} (fg queue required={}, fg={}, upscale={}), waited {:.2f} ms, sleep {}",
+             Name(result), fgRequired, (int) fgDrain, (int) upscaleDrain, waitedMs,
+             shuttingDown ? "n/a (shutdown)" : (ShouldSkipReleaseSleep(result) ? "skipped" : "kept (500 ms)"));
     return result;
 }
 } // namespace ext::dx11bridge

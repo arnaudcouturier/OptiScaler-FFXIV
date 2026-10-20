@@ -28,6 +28,7 @@
 
 #include <Config.h>
 
+#include "ext/dx11bridge/NgxReleaseConfig.h"
 #include "ext/fg/FgConfig.h"
 #include "ext/ffxiv/FfxivConfig.h"
 #include "ext/ffxiv/ui/UiConfig.h"
@@ -176,6 +177,7 @@ struct ExtConfig
     ReShadeConfig reshade; // ext/reshade
     WindowConfig window; // ext/window
     MenuStyleConfig menuStyle; // ext/menu: [Menu] Style
+    NgxReleaseConfig ngxRelease; // ext/dx11bridge: [NgxRelease] SkipReleaseSleep
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
