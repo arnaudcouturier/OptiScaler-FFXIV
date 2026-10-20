@@ -5,16 +5,15 @@
 #include "PresetDrs.h"
 #include "PresetGuards.h"
 #include "PresetLogRelay.h"
-#include "ext/core/DetourThreads.h"
 
 #include <Util.h>
 
 #include <bcrypt.h>
+#include <detours/detours.h>
 #include <intrin.h>
 
 #include <atomic>
 #include <fstream>
-#include <iterator>
 #include <mutex>
 #include <vector>
 
@@ -26,24 +25,36 @@ namespace
 {
 namespace guards = ext::fg::preset::guards;
 
+// A module that asked the driver for the preset. `refused` is final for this identity (base, stamp, image size): the guards or the
+// version gate said no. A module that is merely not mapped any more is not refused, it is just not a candidate right now.
 struct Seen
 {
     HMODULE module = nullptr;
     DWORD stamp = 0;
     DWORD imageSize = 0;
+    bool refused = false;
+    std::string reason;
+    std::string sha; // computed once, when the module is first evaluated
 };
+
+bool SameIdentity(const Seen& a, const Seen& b) { return a.module == b.module && a.stamp == b.stamp && a.imageSize == b.imageSize; }
 
 std::mutex g_seenMutex;
 std::vector<Seen> g_seen;
 
-std::mutex g_ensureMutex;
-enum class State : int
+// what Prepare chose, for Install
+struct Picked
 {
-    Idle,
-    Ready,
-    Failed
+    bool valid = false;
+    Seen seen;
+    guards::Located located;
+    std::string path;
 };
-std::atomic<State> g_state { State::Idle };
+std::mutex g_stateMutex; // Prepare, Install
+Picked g_picked;
+std::atomic<bool> g_ready { false };
+bool g_installFailed = false; // a failed Detours transaction is final for this process
+
 std::mutex g_textMutex;
 std::string g_text = "not needed yet: nothing is hooked until the first live change";
 
@@ -78,10 +89,7 @@ bool IsRuntime(HMODULE module)
     return GetProcAddress(module, "NVSDK_NGX_D3D12_CreateFeature") != nullptr && GetProcAddress(module, "NVSDK_NGX_D3D12_Init_Ext") != nullptr;
 }
 
-std::string Narrow(const std::wstring& w)
-{
-    return std::filesystem::path(w).string();
-}
+std::string Narrow(const std::wstring& w) { return std::filesystem::path(w).string(); }
 
 std::wstring PathOf(HMODULE module)
 {
@@ -90,13 +98,18 @@ std::wstring PathOf(HMODULE module)
     return n ? std::wstring(buffer, n) : std::wstring();
 }
 
+// One block read and one hash call (about 15 ms for the 7 MB runtime); done once per module identity.
 std::string Sha256OfFile(const std::wstring& path)
 {
-    std::ifstream in{ std::filesystem::path(path), std::ios::binary };
+    std::ifstream in { std::filesystem::path(path), std::ios::binary | std::ios::ate };
     if (!in)
         return {};
-    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.empty() || bytes.size() > 128u * 1024u * 1024u)
+    const auto size = in.tellg();
+    if (size <= 0 || size > 128 * 1024 * 1024)
+        return {};
+    std::vector<unsigned char> bytes(static_cast<size_t>(size));
+    in.seekg(0);
+    if (!in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
         return {};
     BCRYPT_ALG_HANDLE alg {};
     unsigned char digest[32] {};
@@ -142,6 +155,15 @@ bool MappedView(HMODULE module, std::vector<guards::Section>& sections, guards::
     const auto& exception = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
     view = { base, size, sections.data(), sections.size(), exception.VirtualAddress, exception.Size };
     return true;
+}
+
+bool StillMapped(const Seen& s)
+{
+    HMODULE mapped = nullptr;
+    DWORD stamp = 0, size = 0;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(s.module), &mapped) &&
+           mapped == s.module && PeInfo(mapped, stamp, size) && stamp == s.stamp && size == s.imageSize;
 }
 
 // ---- the hooks ---------------------------------------------------------------------------------------------------------------
@@ -205,7 +227,11 @@ void CopyHook(void* destination, const void* source)
     }
 }
 
-bool Install(HMODULE module, const guards::Located& found)
+// The three Detours hooks, in ONE transaction that enlists only the calling thread. This runs only after FG was switched off
+// and its resources were released (PresetSwitch.h): no endpoint is being created and the runtime's own threads are idle, so no
+// other thread can be inside the first bytes of the three functions, and no thread has to be suspended (suspending every game
+// thread while Detours allocates is the heap-lock deadlock hazard documented in ext/core/DetourThreads.h).
+bool InstallHooks(HMODULE module, const guards::Located& found)
 {
     const auto base = reinterpret_cast<uintptr_t>(module);
     g_reader = reinterpret_cast<ReaderFn>(base + found.reader);
@@ -216,12 +242,9 @@ bool Install(HMODULE module, const guards::Located& found)
     g_sites[0] = base + found.copySites[0];
     g_sites[1] = base + found.copySites[1];
 
-    ext::core::DetourThreadScope threads;
-    if (!threads.Ok())
-        return false;
     if (DetourTransactionBegin() != NO_ERROR)
         return false;
-    bool ok = threads.Update() == NO_ERROR;
+    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
     if (ok)
         ok = DetourAttach(reinterpret_cast<PVOID*>(&g_reader), ReaderHook) == NO_ERROR;
     if (ok)
@@ -236,27 +259,37 @@ bool Install(HMODULE module, const guards::Located& found)
     return DetourTransactionCommit() == NO_ERROR;
 }
 
-// Returns the reason a module is refused, empty when it passed.
-std::string Evaluate(HMODULE module, guards::Located& found)
+// Returns the reason a module is refused, empty when it passed. Read-only.
+std::string Evaluate(Seen& seen, guards::Located& found)
 {
-    const auto path = PathOf(module);
+    const auto path = PathOf(seen.module);
     version_t version {};
     if (path.empty() || !Util::GetFileVersion(path, &version))
         return "its file version could not be read";
-    const auto sha = Sha256OfFile(path);
-    const char* label = guards::KnownHashLabel(sha);
-    LOG_INFO("DLSS-G render preset: runtime {} version {}.{}.{}, sha256 {} ({})", Narrow(path), version.major, version.minor, version.patch,
-             sha.empty() ? "unreadable" : sha, label ? label : "not a known build");
+    if (seen.sha.empty())
+        seen.sha = Sha256OfFile(path);
+    const char* label = guards::KnownHashLabel(seen.sha);
+    LOG_INFO("DLSS-G render preset: runtime {} version {}.{}.{}, sha256 {} ({}); the live change is decided by the code checks, not by the hash",
+             Narrow(path), version.major, version.minor, version.patch, seen.sha.empty() ? "unreadable" : seen.sha,
+             label ? label : "not a build seen before");
     if (!guards::VersionAccepted(version.major, version.minor))
         return std::format("version {}.{} is not one the live change was checked on (310.8 and 310.9)", version.major, version.minor);
 
     std::vector<guards::Section> sections;
     guards::ImageView view {};
-    if (!MappedView(module, sections, view) || !SafeLocate(view, found))
+    if (!MappedView(seen.module, sections, view) || !SafeLocate(view, found))
         return "its memory image could not be read";
     if (found.why != guards::Why::Ok)
         return std::string("safety check failed: ") + guards::WhyText(found.why);
     return {};
+}
+
+void Remember(const Seen& evaluated)
+{
+    std::lock_guard lock(g_seenMutex);
+    for (auto& s : g_seen)
+        if (SameIdentity(s, evaluated))
+            s = evaluated;
 }
 } // namespace
 
@@ -273,20 +306,20 @@ void ObserveDriverQuery(void* caller)
         return;
     std::lock_guard lock(g_seenMutex);
     for (const auto& s : g_seen)
-        if (s.module == seen.module && s.stamp == seen.stamp && s.imageSize == seen.imageSize)
+        if (SameIdentity(s, seen))
             return;
     if (g_seen.size() < 8)
         g_seen.push_back(seen);
 }
 
-bool Ready() { return g_state.load() == State::Ready; }
+bool Ready() { return g_ready.load(); }
 
-bool Ensure()
+bool Prepare()
 {
-    std::lock_guard lock(g_ensureMutex);
-    if (g_state.load() == State::Ready)
+    std::lock_guard lock(g_stateMutex);
+    if (g_ready.load())
         return true;
-    if (g_state.load() == State::Failed)
+    if (g_installFailed)
         return false;
 
     std::vector<Seen> seen;
@@ -297,21 +330,25 @@ bool Ensure()
 
     std::vector<guards::Candidate> candidates;
     std::vector<guards::Located> located(seen.size());
-    std::vector<std::string> reasons(seen.size());
     for (size_t i = 0; i < seen.size(); ++i)
     {
-        HMODULE mapped = nullptr;
-        DWORD stamp = 0, size = 0;
-        const bool loaded = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                               reinterpret_cast<LPCWSTR>(seen[i].module), &mapped) &&
-                            mapped == seen[i].module && PeInfo(mapped, stamp, size) && stamp == seen[i].stamp && size == seen[i].imageSize;
+        const bool loaded = StillMapped(seen[i]); // not mapped any more: not a candidate now, and not a refusal either
         bool passes = false;
-        if (loaded)
+        if (loaded && seen[i].refused)
         {
-            reasons[i] = Evaluate(seen[i].module, located[i]);
-            passes = reasons[i].empty();
+            // refused before: final for this identity, say so cheaply
+        }
+        else if (loaded)
+        {
+            const auto reason = Evaluate(seen[i], located[i]);
+            passes = reason.empty();
             if (!passes)
-                LOG_WARN("DLSS-G render preset: {} is not usable for a live change: {}", Narrow(PathOf(seen[i].module)), reasons[i]);
+            {
+                seen[i].refused = true;
+                seen[i].reason = reason;
+                LOG_WARN("DLSS-G render preset: {} is not usable for a live change: {}", Narrow(PathOf(seen[i].module)), reason);
+            }
+            Remember(seen[i]);
         }
         candidates.push_back({ loaded ? Narrow(PathOf(seen[i].module)) : std::string(), loaded, passes });
     }
@@ -321,44 +358,58 @@ bool Ensure()
     {
         std::string why = seen.empty() ? "the runtime was not seen asking the driver for its settings" : "no loaded runtime passed the safety checks";
         for (size_t i = 0; i < seen.size(); ++i)
-            if (!reasons[i].empty())
-                why = reasons[i];
+            if (seen[i].refused && candidates[i].loaded)
+                why = seen[i].reason;
         SetText("restart needed: " + why);
-        // "not seen yet" can still change; a refusal by the guards cannot
-        if (!seen.empty())
-            g_state.store(State::Failed);
         LOG_WARN("DLSS-G render preset: live change refused ({})", why);
         return false;
     }
     if (choice.kind == guards::ChoiceKind::Ambiguous)
     {
         SetText("restart needed: more than one DLSS-G runtime is loaded and they cannot be told apart");
-        g_state.store(State::Failed);
         LOG_WARN("DLSS-G render preset: live change refused (several runtimes passed, none preferred)");
         return false;
     }
 
     const auto& picked = seen[choice.index];
-    // Keep the module for the rest of the process: the hooks and their trampolines point into it.
+    // Keep the module for the rest of the process: the hooks and their trampolines will point into it.
     HMODULE retained = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(picked.module), &retained) || retained != picked.module)
     {
         SetText("restart needed: the runtime could not be pinned in memory");
-        g_state.store(State::Failed);
         return false;
     }
-    if (!Install(picked.module, located[choice.index]))
+    g_picked.valid = true;
+    g_picked.seen = picked;
+    g_picked.located = located[choice.index];
+    g_picked.path = Narrow(PathOf(picked.module));
+    SetText("checked, not hooked yet: " + g_picked.path);
+    return true;
+}
+
+bool Install()
+{
+    std::lock_guard lock(g_stateMutex);
+    if (g_ready.load())
+        return true;
+    if (g_installFailed || !g_picked.valid)
+        return false;
+    if (!StillMapped(g_picked.seen)) // cannot happen while pinned; fail closed anyway
     {
+        SetText("restart needed: the runtime module changed after it was checked");
+        return false;
+    }
+    if (!InstallHooks(g_picked.seen.module, g_picked.located))
+    {
+        g_installFailed = true;
         SetText("restart needed: the hooks could not be installed");
-        g_state.store(State::Failed);
         LOG_ERROR("DLSS-G render preset: installing the hooks failed; the old request stays");
         return false;
     }
-
-    SetText("ready: " + Narrow(PathOf(picked.module)));
-    g_state.store(State::Ready);
-    LOG_INFO("DLSS-G render preset: live change ready on {} (reader {:X}, create {:X}, copy {:X})", Narrow(PathOf(picked.module)),
-             located[choice.index].reader, located[choice.index].create, located[choice.index].copy);
+    SetText("ready: " + g_picked.path + " (if \"read the new request\" stays no after a change, another copy of the runtime is the one in use)");
+    g_ready.store(true);
+    LOG_INFO("DLSS-G render preset: live change ready on {} (reader {:X}, create {:X}, copy {:X})", g_picked.path, g_picked.located.reader,
+             g_picked.located.create, g_picked.located.copy);
     return true;
 }
 

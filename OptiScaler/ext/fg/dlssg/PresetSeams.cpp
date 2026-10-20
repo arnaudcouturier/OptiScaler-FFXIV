@@ -78,15 +78,16 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
     status.fail = switcher.LastFail();
     status.restartNeeded = switcher.RestartNeeded(configured);
 
-    // Nothing to do: the request in use is the configured one, or the control is off, or this target already failed.
-    if (available != Unavailable::None || configured == state.Active() || status.restartNeeded)
+    // Nothing to do: the request in use is the configured one (and no switch is waiting to be cancelled), or the control is off, or
+    // this target already failed.
+    if (available != Unavailable::None || (configured == state.Active() && !switcher.Pending()) || status.restartNeeded)
     {
         Publish(status);
         return false;
     }
 
     SwitchSteps steps;
-    steps.prepare = [] { return module::Ensure(); };
+    steps.evaluate = [] { return module::Prepare(); };
     steps.off = [&]
     {
         if (StreamlineProxy::DLSSGSetOptions() == nullptr)
@@ -101,6 +102,7 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
         return StreamlineProxy::FreeResources() != nullptr &&
                StreamlineProxy::FreeResources()(sl::kFeatureDLSS_G, viewport) == sl::Result::eOk;
     };
+    steps.install = [] { return module::Install(); };
     const int previous = state.Active();
     steps.activated = [&]
     {
@@ -109,16 +111,24 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
         ResetDlssgPresentStats();
     };
 
-    const auto result = switcher.Apply(configured, steps);
+    const bool wasPending = switcher.Pending();
+    const auto result = switcher.Apply(configured, steps, GetTickCount64());
     status.switches = switcher.Generation();
     status.fail = switcher.LastFail();
     status.restartNeeded = switcher.RestartNeeded(configured);
     Publish(status);
 
+    if (result == SwitchResult::InProgress)
+    {
+        if (!wasPending)
+            LOG_INFO("DLSS-G render preset: {} -> {}: frame generation is switched off; its resources are released a few frames later",
+                     Name(previous), Name(configured));
+        return true; // FG stays off: skip this frame's dispatch
+    }
     if (result == SwitchResult::Switched)
     {
-        LOG_INFO("DLSS-G render preset: {} -> {}; frame generation was switched off and its resources released, it resumes on the "
-                 "next frame with fresh history",
+        LOG_INFO("DLSS-G render preset: {} -> {}; the resources were released and the hooks are in place, frame generation resumes on "
+                 "the next frame with fresh history",
                  Name(previous), Name(configured));
         return true; // skip this frame's dispatch
     }

@@ -75,24 +75,44 @@ void UpstreamSeams(const std::string& repo)
 void AutoCostsNothing(const std::string& repo)
 {
     const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetSeams.cpp"));
-    // the tick leaves before any step when the configured request is the active one
-    CHECK(seams.find("configured == state.Active() || status.restartNeeded") != std::string::npos);
-    CHECK(Before(seams, "configured == state.Active()", "switcher.Apply(configured, steps)"));
-    // the only caller of Ensure() (which installs hooks) is the prepare step of a switch
-    CHECK(Count(seams, "module::Ensure()") == 1);
-    CHECK(seams.find("steps.prepare = [] { return module::Ensure(); };") != std::string::npos);
+    // the tick leaves before any step when the configured request is the active one (and no switch is waiting to be cancelled)
+    CHECK(seams.find("(configured == state.Active() && !switcher.Pending()) || status.restartNeeded") != std::string::npos);
+    CHECK(Before(seams, "configured == state.Active()", "switcher.Apply(configured, steps, GetTickCount64())"));
+    // the read-only check is the only module call while FG still runs; the hooks come from the install step alone
+    CHECK(Count(seams, "module::Prepare()") == 1);
+    CHECK(Count(seams, "module::Install()") == 1);
+    CHECK(Count(seams, "module::Ensure") == 0);
+    CHECK(seams.find("steps.evaluate = [] { return module::Prepare(); };") != std::string::npos);
+    CHECK(seams.find("steps.install = [] { return module::Install(); };") != std::string::npos);
+    // the dispatch of the frame is skipped while a switch is under way
+    CHECK(seams.find("if (result == SwitchResult::InProgress)") != std::string::npos);
+
+    // the order lives in the state machine (tested in fg_preset_switch): evaluate then off; release, install, commit later
+    const std::string sw = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetSwitch.h"));
+    CHECK(Before(sw, "Run(steps.evaluate)", "Run(steps.off)"));
+    CHECK(Before(sw, "Run(steps.release)", "Run(steps.install)"));
+    CHECK(Before(sw, "Run(steps.install)", "state_.Commit(requested);"));
+    CHECK(sw.find("if (waited_ < kMinWaitTicks || nowMs - offAt_ < kMinWaitMs)") != std::string::npos);
 
     const std::string mod = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetModule.cpp"));
     CHECK(Count(mod, "DetourAttach(") == 3);       // reader, create, copy
     CHECK(Count(mod, "DetourTransactionBegin()") == 1);
-    CHECK(Count(mod, "Install(picked.module") == 1); // only Ensure installs
-    // nothing is hooked before the guards chose a module
-    CHECK(Before(mod, "guards::Choose(candidates)", "Install(picked.module"));
-    CHECK(Before(mod, "Evaluate(seen[i].module", "guards::Choose(candidates)"));
+    CHECK(Count(mod, "InstallHooks(g_picked.seen.module") == 1); // only Install calls it
+    // nothing is suspended: no thread scope, and only the calling thread is enlisted
+    CHECK(Count(mod, "DetourThreadScope") == 0);
+    CHECK(Count(mod, "SuspendThread") == 0);
+    CHECK(Count(mod, "DetourUpdateThread(") == 1);
+    CHECK(mod.find("DetourUpdateThread(GetCurrentThread())") != std::string::npos);
+    // Prepare is read-only: it does not install, and it chooses before it pins
+    CHECK(Before(mod, "bool Prepare()", "guards::Choose(candidates)"));
+    CHECK(Before(mod, "guards::Choose(candidates)", "g_picked.valid = true;"));
+    CHECK(Before(mod, "bool Install()", "InstallHooks(g_picked.seen.module"));
+    CHECK(Before(mod, "Evaluate(seen[i], located[i])", "guards::Choose(candidates)"));
     // the module stays loaded for the life of the process (the trampolines point into it)
     CHECK(mod.find("GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(picked.module)") != std::string::npos);
-    // a refusal is final unless the module was simply not seen yet
-    CHECK(mod.find("if (!seen.empty()) g_state.store(State::Failed);") != std::string::npos);
+    // only a refusal by the checks is final for a module; an unmapped module is just not a candidate
+    CHECK(mod.find("seen[i].refused = true;") != std::string::npos);
+    CHECK(Count(mod, "g_installFailed = true;") == 1);
 }
 
 void UiRecompositionPause(const std::string& repo)
