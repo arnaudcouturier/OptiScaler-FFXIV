@@ -59,6 +59,7 @@ enum class Why : uint8_t
     CreateNotUnique,
     CreatePrologue,
     CreateContext,
+    CreateSignature,
     ReadCallSetup,
     DefaultsNotFound,
     CopySites,
@@ -93,6 +94,8 @@ constexpr const char* WhyText(Why why)
         return "the endpoint create function does not start as expected";
     case Why::CreateContext:
         return "the endpoint create function does not keep its context argument as expected";
+    case Why::CreateSignature:
+        return "the endpoint create function does not look like a six-argument function returning a 32-bit status";
     case Why::ReadCallSetup:
         return "the settings read call is not set up as expected";
     case Why::DefaultsNotFound:
@@ -343,6 +346,39 @@ inline Located Locate(const ImageView& view)
             contextKept = true;
     if (!contextKept)
         return no(Why::CreateContext);
+
+    // The hook forwards six pointer arguments and returns a 32-bit value (an NGX status). Proven here from the code of create:
+    //   * no memory operand reaches a stack argument after the sixth: with the frame the prologue just showed, the argument slots
+    //     are at entry-rsp + 28h, 30h, 38h ..., which is [rbp + (56 - disp) + k] and [rsp + (sub + 56) + k]; the window of the 7th..
+    //     14th argument slots is refused (disp32 encodings; a 7th argument load with a disp8 would need a frame under 128 bytes);
+    //   * the status is a 32-bit value: `mov eax, 0BAD0xxxxh` occurs in create (the error returns).
+    {
+        const int32_t frameDisp = sc.I32(create + 20);                      // lea rbp,[rsp + frameDisp]
+        const int64_t frameSub = static_cast<int64_t>(sc.U32(create + 27)); // sub rsp, frameSub
+        const int64_t rbpLow = 56 - static_cast<int64_t>(frameDisp) + 0x38, rspLow = frameSub + 56 + 0x38;
+        constexpr int64_t kWindow = 0x40; // eight slots
+        bool seventh = false, status = false;
+        for (uint32_t at = create; at + 6 <= createEnd; ++at)
+        {
+            const uint8_t b = view.bytes[at];
+            if ((b & 0xC7) == 0x85 && at + 5 <= createEnd) // modrm: [rbp + disp32]
+            {
+                const int64_t disp = sc.I32(at + 1);
+                if (disp >= rbpLow && disp < rbpLow + kWindow)
+                    seventh = true;
+            }
+            if ((b & 0xC7) == 0x84 && view.bytes[at + 1] == 0x24 && at + 6 <= createEnd) // modrm + SIB: [rsp + disp32]
+            {
+                const int64_t disp = sc.I32(at + 2);
+                if (disp >= rspLow && disp < rspLow + kWindow)
+                    seventh = true;
+            }
+            if (b == 0xB8 && view.bytes[at + 3] == 0xD0 && view.bytes[at + 4] == 0xBA) // mov eax, 0BAD0xxxxh
+                status = true;
+        }
+        if (seventh || !status)
+            return no(Why::CreateSignature);
+    }
 
     // mov rdx,r13 / mov rcx,[rip+global] right before the call to the read function
     constexpr uint8_t kMovRdxR13[] = { 0x49, 0x8B, 0xD5 };

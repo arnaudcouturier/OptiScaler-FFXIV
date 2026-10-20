@@ -36,6 +36,10 @@ struct Spec
     uint32_t frameDisp = 0xFFFFFCA0; // lea rbp,[rsp+disp] (310.9.1.0 has -0x360, Nickle's build -0x390)
     uint32_t frameSub = 0x460;
     bool movR13Ok = true;
+    bool statusConstant = true; // mov eax,0BAD0xxxxh somewhere in create: the 32-bit NGX status return
+    bool sixthArg = true;       // a load of the 6th (last) stack argument is allowed
+    bool seventhArgRbp = false; // [rbp+disp32] that reaches the 7th stack argument
+    bool seventhArgRsp = false; // [rsp+disp32] that reaches the 7th stack argument
     bool readSetupOk = true;     // mov rdx,r13 / mov rcx,[rip+g] before the read call
     bool defaultsOk = true;
     int defaultsHits = 1;
@@ -113,6 +117,27 @@ Fake Build(const Spec& s)
         Put(im, kCreate + 0x34, { 0x4C, 0x8B, 0xEA }); // mov r13, rdx
     else
         Put(im, kCreate + 0x34, { 0x4C, 0x8B, 0xE2 });
+
+    if (s.statusConstant)
+        Put(im, kCreate + 0x38, { 0xB8, 0x02, 0x00, 0xD0, 0xBA });
+    {
+        const int32_t d = static_cast<int32_t>(s.frameDisp);
+        auto putRbp = [&](uint32_t at, int32_t disp)
+        {
+            Put(im, at, { 0x48, 0x8B, 0x9D }); // mov rbx,[rbp+disp32]
+            std::memcpy(&im[at + 3], &disp, 4);
+        };
+        if (s.sixthArg)
+            putRbp(kCreate + 0x40, 56 - d + 0x30); // [entry rsp + 30h], the 6th argument
+        if (s.seventhArgRbp)
+            putRbp(kCreate + 0x48, 56 - d + 0x38); // [entry rsp + 38h], the 7th
+        if (s.seventhArgRsp)
+        {
+            const int32_t disp = static_cast<int32_t>(s.frameSub) + 56 + 0x38;
+            Put(im, kCreate + 0x50, { 0x48, 0x8B, 0x9C, 0x24 }); // mov rbx,[rsp+disp32]
+            std::memcpy(&im[kCreate + 0x54], &disp, 4);
+        }
+    }
 
     uint32_t at = kCreate + 0x60;
     // defaults(rbp+0x40)
@@ -232,6 +257,10 @@ void EachGuardFailsOnItsOwn()
     { Spec s; s.createCallers = 2; expect("two callers of the read function", s, Why::CreateNotUnique); }
     { Spec s; s.createPrologueOk = false; expect("create prologue", s, Why::CreatePrologue); }
     { Spec s; s.movR13Ok = false; expect("mov r13,rdx", s, Why::CreateContext); }
+    { Spec s; s.statusConstant = false; expect("no 32-bit status constant", s, Why::CreateSignature); }
+    { Spec s; s.seventhArgRbp = true; expect("7th argument through rbp", s, Why::CreateSignature); }
+    { Spec s; s.seventhArgRsp = true; expect("7th argument through rsp", s, Why::CreateSignature); }
+    { Spec s; s.seventhArgRbp = true; s.frameDisp = 0xFFFFFC70; expect("7th argument, other frame size", s, Why::CreateSignature); }
     { Spec s; s.readSetupOk = false; expect("read call setup", s, Why::ReadCallSetup); }
     { Spec s; s.defaultsOk = false; expect("defaults body", s, Why::DefaultsNotFound); }
     { Spec s; s.defaultsHits = 2; expect("two defaults calls", s, Why::DefaultsNotFound); }
@@ -242,6 +271,21 @@ void EachGuardFailsOnItsOwn()
     { Spec s; s.copySiteGlobal = kGlobal + 8; expect("copy reads another global", s, Why::GlobalMismatch); }
     { Spec s; s.pdataOk = false; expect("no exception table", s, Why::NoPdata); }
     { Spec s; s.copyInsideOtherFunction = true; expect("copy target is inside another function", s, Why::NotFunctionStart); }
+}
+
+void SignatureFacts()
+{
+    // the 6th argument (the last one the hook forwards) and no stack argument at all are both fine
+    Spec with6;
+    with6.sixthArg = true;
+    CHECK(Scan(with6).why == Why::Ok);
+    Spec without;
+    without.sixthArg = false;
+    CHECK(Scan(without).why == Why::Ok);
+    // the other frame size of Nickle's build, with a 6th argument load: still fine
+    Spec other;
+    other.frameDisp = 0xFFFFFC70;
+    CHECK(Scan(other).why == Why::Ok);
 }
 
 void ImageBounds()
@@ -311,6 +355,7 @@ int main()
     FindsEverything();
     FrameSizeDoesNotMatter();
     EachGuardFailsOnItsOwn();
+    SignatureFacts();
     ImageBounds();
     ProviderChoice();
     KnownHashes();
