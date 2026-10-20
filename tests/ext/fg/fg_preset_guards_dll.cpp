@@ -23,6 +23,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ext::fg::preset::guards;
@@ -54,7 +55,7 @@ const Expect kExpect[] = {
 };
 // The built-in Ada unlock (ext/fg/dlssg/MfgUnlock.cpp) rewrites a few bytes of this DLL in memory before anything here runs.
 // Replays its two 310.9 byte patches on the mapped image and returns how many landed (0 on a DLL of another shape).
-int ApplyAdaUnlockPatches(std::vector<uint8_t>& image)
+int ApplyAdaUnlockPatches(std::vector<uint8_t>& image, std::vector<std::pair<size_t, size_t>>& written)
 {
     int applied = 0;
     auto find = [&](const std::vector<int>& pattern) -> size_t
@@ -79,6 +80,7 @@ int ApplyAdaUnlockPatches(std::vector<uint8_t>& image)
     {
         const uint8_t nop[] = { 0x0F, 0x1F, 0x44, 0x00, 0x00, 0x90 };
         std::memcpy(&image[at + 6], nop, 6);
+        written.push_back({ at + 6, 6 });
         ++applied;
     }
     // validate: cmp eax,1B0h / setae al -> mov al,1 / nop
@@ -86,6 +88,7 @@ int ApplyAdaUnlockPatches(std::vector<uint8_t>& image)
     {
         const uint8_t always[] = { 0xB0, 0x01, 0x90 };
         std::memcpy(&image[at + 5], always, 3);
+        written.push_back({ at + 5, 3 });
         ++applied;
     }
     return applied;
@@ -164,10 +167,20 @@ int main()
     if (l.why == Why::Ok)
     {
         std::vector<uint8_t> patched = image;
-        const int landed = ApplyAdaUnlockPatches(patched);
+        std::vector<std::pair<size_t, size_t>> written;
+        const int landed = ApplyAdaUnlockPatches(patched, written);
         const ImageView after { patched.data(), patched.size(), sections.data(), sections.size(), exc.VirtualAddress, exc.Size };
         const Located m = Locate(after);
         std::printf("with the Ada unlock patches applied (%d of 2 landed): guards %s\n", landed, WhyText(m.why));
+        // The hooks overwrite the first 16 bytes of the reader, create and copy functions (Detours): none of the unlock's bytes may be there.
+        for (const auto& [at, len] : written)
+        {
+            bool clear = true;
+            for (const uint32_t entry : { l.reader, l.create, l.copy })
+                clear = clear && !(at < static_cast<size_t>(entry) + 16 && static_cast<size_t>(entry) < at + len);
+            std::printf("Ada unlock patch writes %zu bytes at RVA %zX: %s\n", len, at, clear ? "clear of the hook entry bytes (reader, create, copy)" : "OVERLAPS A HOOK ENTRY");
+            CHECK(clear);
+        }
         CHECK(m.why == Why::Ok);
         CHECK(m.reader == l.reader && m.readFn == l.readFn && m.create == l.create && m.defaults == l.defaults && m.copy == l.copy);
         CHECK(m.copySites[0] == l.copySites[0] && m.copySites[1] == l.copySites[1] && m.sharedGlobal == l.sharedGlobal);
