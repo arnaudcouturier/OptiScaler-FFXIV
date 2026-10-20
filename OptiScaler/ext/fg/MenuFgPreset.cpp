@@ -34,6 +34,7 @@ const char* UirText(Uir uir)
 
 void DrawReadout(const Status& status)
 {
+    FlushCandidateLines(); // unrecognised preset lines go to the log from here as well as from the dispatch tick
     auto& readout = ReadoutState();
     const auto view = readout.Snapshot();
 
