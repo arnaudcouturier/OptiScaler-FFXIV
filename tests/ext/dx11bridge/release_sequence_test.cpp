@@ -38,7 +38,8 @@ struct FakeOps
     bool throwInUpscale = false;
     std::vector<std::string> calls;
     bool lockHeld = false;
-    bool closedAtDrain = false;
+    bool closedAtDrain = false;   // the handle was closed when the FG drain ran
+    bool closedAtUpscale = false; // ... when the upscale drain ran
     bool sameQueue = false;
 
     QueueDrain DrainFg()
@@ -52,6 +53,7 @@ struct FakeOps
     {
         calls.push_back("upscale");
         lockHeld |= TableLockHeldByThisThread();
+        closedAtUpscale = reg->IsClosed(id);
         if (throwInUpscale)
             throw std::runtime_error("driver");
         return sameQueue ? fgResult : upscale;
@@ -70,6 +72,10 @@ static ReleasePlan Plan(bool fgRequired, bool gate)
 
 int main()
 {
+    // ---- the quiet wait is short: a long evaluate must not stretch the release (kept sleep covers it) --------------------------
+    CHECK(ReleasePlan {}.quietTimeout <= 250ms);
+    CHECK(ReleasePlan {}.quietTimeout >= 100ms);
+
     // ---- all good: drained, handle left closed for the caller's destroy --------------------------------------------------
     {
         EvalRegistry reg;
@@ -82,6 +88,7 @@ int main()
         CHECK(ops.calls == (std::vector<std::string> { "fg", "upscale" })); // FG first, then upscale
         CHECK(!ops.lockHeld);
         CHECK(ops.closedAtDrain); // evaluates were already refused while draining
+        CHECK(ops.closedAtUpscale);
         CHECK(reg.IsClosed(42));  // stays closed until the entry is extracted (Extract forgets it)
     }
     // ---- FG not attached: only the upscale queue ----------------------------------------------------------------------------
@@ -170,6 +177,7 @@ int main()
         CHECK(out.quiet == Quiescence::EvaluateInFlight);
         CHECK(out.result == ReleaseDrain::NotApplicable); // drains were fine, the CPU side was not proven
         CHECK(ops.calls == (std::vector<std::string> { "upscale" })); // the drain still ran
+        CHECK(!ops.closedAtUpscale); // reopened as soon as the wait failed: the drain and the kept sleep run the old flow
         CHECK(!reg.IsClosed(42)); // reopened: the kept sleep must not refuse evaluates
         release = true;
         evaluator.join();
@@ -183,6 +191,7 @@ int main()
         EvaluatePin pin(reg, 42);
         const auto out = PrepareRelease(reg, Plan(false, true), ops);
         CHECK(out.quiet == Quiescence::SelfInside);
+        CHECK(!ops.closedAtUpscale); // reopened before the drains
         CHECK(out.result == ReleaseDrain::NotApplicable);
         CHECK(!reg.IsClosed(42));
     }
