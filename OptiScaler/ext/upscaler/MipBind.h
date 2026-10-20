@@ -117,12 +117,15 @@ inline bool NeedsVariant(float original, float variant) { return std::fabs(varia
 // Size noise, a second upscaler feature at another size, or a window being dragged must not rebuild the variants at every
 // evaluate. The gate (1) follows one anchor, the output width of the first evaluate: an evaluate whose output differs from it
 // by more than 10 % belongs to another feature and is ignored until it has been the only one for two seconds or 120 evaluates
-// in a row (then the anchor moves: a resolution or window change); (2) takes a new base only when it moved by at least one
+// in a row (then the anchor moves: a resolution or window change), or until a BIGGER output has shown up three times within two
+// seconds (the first evaluate belonged to a small feature, a preview window: the main scene is the larger one); (2) takes a new base only when it moved by at least one
 // step of 1/64 in log2 (about 1 % of the width); (3) takes at most four new bases per second.
 inline constexpr double kBaseStep = 1.0 / 64.0;
 inline constexpr double kAnchorTolerance = 0.10;
 inline constexpr unsigned kReanchorAfterMs = 2000;
 inline constexpr unsigned kReanchorEvaluates = 120;
+inline constexpr unsigned kLargerEvaluates = 3;
+inline constexpr unsigned kLargerWindowMs = 2000;
 inline constexpr unsigned kMinApplyIntervalMs = 250;
 
 struct GateResult
@@ -162,8 +165,19 @@ class TargetGate
         if (relative > kAnchorTolerance)
         {
             ++_deviant;
-            if (_deviant < kReanchorEvaluates && nowMs - _lastMatchMs < kReanchorAfterMs)
+            // A bigger output than the anchor's is the main scene when the anchor was captured by a small feature (a preview
+            // window that evaluated first): after three such evaluates within two seconds the anchor moves up to it.
+            bool bigger = false;
+            if (outputW > _anchor)
+            {
+                if (nowMs - _lastLargerMs > kLargerWindowMs)
+                    _larger = 0;
+                _lastLargerMs = nowMs;
+                bigger = ++_larger >= kLargerEvaluates;
+            }
+            if (!bigger && _deviant < kReanchorEvaluates && nowMs - _lastMatchMs < kReanchorAfterMs)
                 return r; // Ignored
+            _larger = 0;
 
             _anchor = outputW; // the output really changed
             _deviant = 0;
@@ -209,6 +223,8 @@ class TargetGate
     bool _haveApplied = false;
     unsigned _anchor = 0;
     unsigned _deviant = 0;
+    unsigned _larger = 0;
+    std::uint64_t _lastLargerMs = 0;
     double _applied = 0.0;
     std::uint64_t _lastMatchMs = 0;
     std::uint64_t _lastApplyMs = 0;
@@ -222,10 +238,12 @@ class TargetGate
 //   - a FAMILY is everything of a sampler description except the bias (filter, address modes, anisotropy, comparison, border,
 //     LOD range): only samplers of one family can be a tracking pair;
 //   - a PAIR is two distinct samplers of one family made at base targets at least 0.25 apart, whose biases differ by the same
-//     amount as the targets (within 0.08: one step of the game's 1/16 quantisation plus rounding). One pair makes the mode
-//     REPLACE provisionally; if 12 more distinct samplers arrive without a second, different pair it is confirmed and final;
-//     a second pair (or one observation pairing with two older ones) is ambiguous: ADD, and the detection is re-opened by the
-//     next observation made at a base target 0.25 or more away from that one;
+//     amount as the targets (within 0.08: one step of the game's 1/16 quantisation plus rounding), i.e. whose INTERCEPT
+//     (bias - base: -1 for FFXIV's tracking family) agrees. One pair makes the mode REPLACE provisionally. It is confirmed and
+//     final by a second family that shows a pair of its own, or by a chain: a sampler that pairs with older ones made at two
+//     different targets (DLAA, Quality, Performance). Pairs that agree on the intercept never contradict each other. A sampler
+//     that pairs with older ones whose intercepts DISAGREE with each other is ambiguous: ADD, and the detection is re-opened
+//     by the next observation made at a base target 0.25 or more away from that one;
 //   - re-creates of a sampler that is already known (the runtime returns the existing object) are not observations;
 //   - ADD is never final: 40 distinct samplers made at other ratios without a pair log "no pair seen" once, and a pair that
 //     arrives later still makes the mode REPLACE. Only a confirmed REPLACE is final.
@@ -233,7 +251,6 @@ inline constexpr double kMinRatioChange = 0.01;  // grouping of the observe log:
 inline constexpr double kMinPairDelta = 0.25;    // a pair needs a change of the target at least this large (log2 units)
 inline constexpr double kPairTolerance = 0.08;   // one 1/16 step of the game's own quantisation plus rounding
 inline constexpr double kSameValue = 0.02;       // two originals this close are the same value
-inline constexpr unsigned kConfirmAfter = 12;    // distinct samplers after a pair, without a second pair, that make it final
 inline constexpr unsigned kNoPairAfter = 40;     // distinct samplers made at other ratios without a pair: "no pair seen"
 inline constexpr size_t kMaxValues = 64;         // distinct original values remembered per observe-log ratio
 inline constexpr size_t kMaxObservations = 128;  // distinct samplers the detector remembers
@@ -349,6 +366,11 @@ class ModeDetector
         if (_n >= _obs.size())
             return {}; // full: later samplers are not looked at
 
+        // A tracking sampler has a constant intercept (bias - base: -1 for FFXIV), so a pair is two samplers of one family at
+        // targets 0.25 or more apart whose intercepts agree. Candidates are the older samplers this one pairs with.
+        const double intercept = static_cast<double>(bias) - base;
+        std::array<double, 8> candidateIntercepts {};
+        std::array<double, 8> candidateBases {};
         unsigned candidates = 0;
         bool otherRatio = false;
         float pairedWith = 0.0f;
@@ -359,12 +381,17 @@ class ModeDetector
             if (std::fabs(dBase) < kMinPairDelta)
                 continue;
             otherRatio = true;
-            if (_obs[i].family == family && std::fabs((static_cast<double>(bias) - _obs[i].bias) - dBase) <= kPairTolerance)
+            if (_obs[i].family == family && std::fabs(intercept - (static_cast<double>(_obs[i].bias) - _obs[i].base)) <= kPairTolerance)
             {
                 if (candidates == 0)
                 {
                     pairedWith = _obs[i].bias;
                     pairedDelta = dBase;
+                }
+                if (candidates < candidateIntercepts.size())
+                {
+                    candidateIntercepts[candidates] = static_cast<double>(_obs[i].bias) - _obs[i].base;
+                    candidateBases[candidates] = _obs[i].base;
                 }
                 ++candidates;
             }
@@ -391,29 +418,49 @@ class ModeDetector
             _state = State::Default; // another ratio: look again
         }
 
-        if (candidates >= 2)
-            return Ambiguous(d, base);
-
-        if (candidates == 1)
+        if (candidates > 0)
         {
+            const size_t known = std::min<size_t>(candidates, candidateIntercepts.size());
+            double lo = candidateIntercepts[0], hi = candidateIntercepts[0];
+            for (size_t i = 1; i < known; ++i)
+            {
+                lo = std::min(lo, candidateIntercepts[i]);
+                hi = std::max(hi, candidateIntercepts[i]);
+            }
+            if (hi - lo > kPairTolerance)
+                return Ambiguous(d, base); // the sampler pairs with older ones that disagree with each other: cannot tell
+
+            // A consistent pair or chain. It is CONFIRMED by a chain of three targets (this sampler pairs with older ones made
+            // at two targets 0.25 apart, e.g. DLAA, Quality and Performance) or by a second family with a pair of its own.
+            unsigned clusters = 0;
+            std::array<double, 8> reps {};
+            for (size_t i = 0; i < known; ++i)
+            {
+                bool found = false;
+                for (unsigned k = 0; k < clusters; ++k)
+                    found = found || std::fabs(reps[k] - candidateBases[i]) < kMinPairDelta;
+                if (!found)
+                    reps[clusters++] = candidateBases[i];
+            }
+            const bool newFamily = AddPairFamily(family);
+            const bool chain = clusters >= 2;
+            if (chain || (_state == State::Provisional && newFamily))
+            {
+                _state = State::Final;
+                _mode = Mode::Replace;
+                d.kind = Decision::Kind::ReplaceConfirmed;
+                d.mode = _mode;
+                return d;
+            }
             if (_state == State::Default)
             {
                 _state = State::Provisional;
                 _mode = Mode::Replace;
-                _since = 0;
                 d.kind = Decision::Kind::ReplaceProvisional;
                 d.mode = _mode;
                 return d;
             }
-            // a second, different pair while the first one is waiting for its confirmation
-            return Ambiguous(d, base);
-        }
-
-        if (_state == State::Provisional && ++_since >= kConfirmAfter)
-        {
-            _state = State::Final;
-            d.kind = Decision::Kind::ReplaceConfirmed;
-            return d;
+            return {}; // another pair of the same family at the same targets: nothing new
         }
 
         if (_state == State::Default && !_noPairLogged && _otherRatio >= kNoPairAfter)
@@ -445,12 +492,24 @@ class ModeDetector
         return d;
     }
 
+    // True when this family had no consistent pair before.
+    bool AddPairFamily(std::uint32_t family)
+    {
+        for (size_t i = 0; i < _pairFamilyCount; ++i)
+            if (_pairFamilies[i] == family)
+                return false;
+        if (_pairFamilyCount < _pairFamilies.size())
+            _pairFamilies[_pairFamilyCount++] = family;
+        return true;
+    }
+
     State _state = State::Default;
     Mode _mode = Mode::Add;
     std::array<Observation, kMaxObservations> _obs {};
     size_t _n = 0;
-    unsigned _since = 0;
     unsigned _otherRatio = 0;
+    std::array<std::uint32_t, 8> _pairFamilies {};
+    size_t _pairFamilyCount = 0;
     bool _noPairLogged = false;
     double _ambiguousBase = 0.0;
 };
@@ -530,10 +589,10 @@ inline std::string DecisionLine(const Decision& d)
     case Decision::Kind::ReplaceProvisional:
         return std::format("Bind-time mip bias: the game already follows the quality mode (one sampler family went from bias {} to "
                            "{} while the ratio target moved by {}), so only the CHANGE of the ratio since a sampler was made is "
-                           "applied (REPLACE mode, provisional until {} more samplers confirm it)",
-                           Num4(d.seenBefore), Num4(d.seenAfter), Num4(d.delta), kConfirmAfter);
+                           "applied (REPLACE mode, provisional until a second sampler family or a further quality change confirms it)",
+                           Num4(d.seenBefore), Num4(d.seenAfter), Num4(d.delta));
     case Decision::Kind::ReplaceConfirmed:
-        return std::format("Bind-time mip bias: REPLACE mode confirmed after {} distinct samplers", d.distinct);
+        return std::format("Bind-time mip bias: REPLACE mode confirmed (after {} distinct samplers)", d.distinct);
     case Decision::Kind::AddAmbiguous:
         return std::format("Bind-time mip bias: {} different sampler pairs fit a change of the ratio, so the game's bias cannot be "
                            "told from art values; staying in ADD mode (the target is added to the game's own bias) and looking "

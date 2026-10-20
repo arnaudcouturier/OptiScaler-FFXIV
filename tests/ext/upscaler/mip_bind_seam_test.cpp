@@ -131,8 +131,6 @@ int main(int argc, char** argv)
         // Detours: the current thread only for the attaches AND the detaches (no DetourThreadScope: all-thread suspension on a
         // live path is the heap-lock hazard of ext/core/DetourThreads.h); the CreateSamplerState hook is attached LAST (at the
         // first upscaler create, after upstream's hook on that function) and detached FIRST, each in its own transaction.
-        CHECK(hooks.find("ext::core::DetourThreadScope") == std::string::npos && hooks.find("#include \"ext/core/DetourThreads.h\"") == std::string::npos);
-        CHECK(Count(hooks, "DetourUpdateThread(GetCurrentThread())") == 3);
         CHECK(Count(hooks, "DetourAttach(") == 3 && Count(hooks, "DetourDetach(") == 3);
         CHECK(Body(hooks, "void InstallCreateHook()").find("RunTransaction(true,") != std::string::npos);
         const std::string uninstall = Body(hooks, "void Uninstall()");

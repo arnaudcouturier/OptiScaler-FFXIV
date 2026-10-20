@@ -307,7 +307,7 @@ static void RelatchAndWatch()
     CHECK(CountLog("moving the hooks", static_cast<int>(LogLevel::Warn)) == 1);
     ComPtr<ID3D11SamplerState> oldBound;
     r.get[0](r.context.Get(), 0, 1, oldBound.GetAddressOf());
-    CHECK(oldBound.Get() == art.Get()); // the old context has the game's sampler back
+    CHECK(oldBound.Get() != art.Get()); // the OLD context is left alone (it may belong to a device that is gone)
 
     // the latch watch: samplers known, substitution on, not one bind in 600 evaluates
     g_log.clear();
@@ -316,10 +316,120 @@ static void RelatchAndWatch()
     auto k = w.Game(-1.0f);
     for (unsigned i = 0; i < LatchWatch::kEvaluates + 50; ++i)
         w.controller.OnEvaluate(On(), Eval(2560, 3840, 1000 + 20ull * i));
-    CHECK(CountLog("not one bind substituted", static_cast<int>(LogLevel::Warn)) == 1);
+    CHECK(CountLog("not one bind of one of them seen", static_cast<int>(LogLevel::Warn)) == 1);
     (void) k;
 }
 
+// Native stand-ins that record which context every call went to (M-E: the old context must not be called after a relatch).
+static std::vector<ID3D11DeviceContext*> g_nativeCalls;
+static void STDMETHODCALLTYPE CountingSet(ID3D11DeviceContext* c, UINT, UINT, ID3D11SamplerState* const*) { g_nativeCalls.push_back(c); }
+static void STDMETHODCALLTYPE CountingGet(ID3D11DeviceContext* c, UINT, UINT, ID3D11SamplerState**) { g_nativeCalls.push_back(c); }
+
+static void RelatchLeavesOldContextAlone()
+{
+    g_log.clear();
+    Rig r;
+    Rig other;
+    CHECK(r.Init() && other.Init());
+    std::array<SetSamplersFn, kStages> fs;
+    std::array<GetSamplersFn, kStages> fg;
+    fs.fill(&CountingSet);
+    fg.fill(&CountingGet);
+    r.engine.Attach(r.context.Get(), fs, fg);
+
+    auto art = r.Game(-1.0f);
+    r.controller.OnEvaluate(On(), Eval(2560, 3840, 0));
+    CHECK(r.engine.Active() && !g_nativeCalls.empty());
+
+    g_nativeCalls.clear();
+    EvalInput move = Eval(2560, 3840, 100);
+    move.relatchTo = other.context.Get();
+    r.controller.OnEvaluate(On(), move);
+    CHECK(r.engine.Latched() == other.context.Get());
+    CHECK(!g_nativeCalls.empty()); // the new context was rebound ...
+    for (auto* c : g_nativeCalls)
+        CHECK(c == other.context.Get()); // ... and the old one was never called
+    (void) art;
+}
+
+// L-5: at native resolution with the default offset 0 nothing has to change, so no bind is "substituted"; the latch watch must
+// not take that for a wrong context as long as the game binds eligible samplers.
+static void WatchAtNativeResolution()
+{
+    g_log.clear();
+    Rig r;
+    CHECK(r.Init());
+    auto art = r.Game(-1.0f);
+    for (unsigned i = 0; i < LatchWatch::kEvaluates + 100; ++i)
+    {
+        r.controller.OnEvaluate(On(0.0), Eval(3840, 3840, 100 + 20ull * i));
+        if (i == 5)
+            r.Bind(0, 0, art.Get()); // the game binds its sampler once (the record keeps it)
+    }
+    CHECK(r.engine.SubstitutedBinds() == 0 && r.engine.EligibleBinds() >= 1);
+    CHECK(CountLog("not one bind of one of them seen") == 0);
+}
+
+// M-F: the address of a released game sampler comes back with the same description and another bias: the detector must see it.
+static void ReCreateFeedsDetector()
+{
+    g_log.clear();
+    Rig r;
+    CHECK(r.Init());
+    const double kQ = -0.584963;
+    auto s = r.Game(-1.0f);
+    r.controller.OnEvaluate(On(), Eval(3840, 3840, 1000)); // DLAA: the sampler is observed with -1.0 at base 0
+    r.controller.OnEvaluate(On(), Eval(2560, 3840, 2000)); // Quality
+    CHECK(Near(r.engine.Base(), kQ) && r.controller.detector().mode() == Mode::Add);
+
+    // the game re-creates "the same" sampler (same description, the runtime returns the same object) with the Quality bias
+    const auto d = Desc(-1.5625f);
+    CHECK(r.controller.OnSamplerCreated(s.Get(), r.device.Get(), d, false) == SamplerTable::Result::Refreshed);
+    r.controller.OnEvaluate(On(), Eval(2560, 3840, 2400));
+    CHECK(r.controller.detector().mode() == Mode::Replace && CountLog("provisional") == 1);
+    CHECK(r.engine.CurrentMode() == Mode::Replace);
+    // the table's view of the sampler is the new one and its variant is rebuilt for it (generation bumped)
+    const auto* entry = r.engine.table().Find(s.Get());
+    CHECK(entry != nullptr && Near(entry->original.load(), -1.5625f) && Near(entry->baseCreate.load(), kQ) && entry->generation.load() >= 1);
+}
+
+// L-8: the target is followed while a hand-set value blocks the feature, so samplers made meanwhile carry the right creation base.
+static void BaseTrackedWhileManual()
+{
+    g_log.clear();
+    Rig r;
+    CHECK(r.Init());
+    Settings manual = On();
+    manual.manualOverride = true;
+    r.controller.OnEvaluate(manual, Eval(3840, 3840, 1000));
+    r.controller.OnEvaluate(manual, Eval(2560, 3840, 2000)); // Quality while the override is set
+    CHECK(!r.engine.Active() && Near(r.engine.Base(), -0.584963));
+    auto during = r.Game(-1.5625f);
+    CHECK(Near(r.engine.table().Find(during.Get())->baseCreate.load(), -0.584963));
+    r.controller.OnEvaluate(On(), Eval(2560, 3840, 3000)); // cleared: resumes with the right creation base
+    CHECK(r.engine.Active());
+    r.Bind(0, 0, during.Get());
+    CHECK(Near(r.BoundBias(0), -1.5625 - 0.584963, 1e-4)); // ADD (no pair seen): the game's bias plus the target
+}
+
+// M-C: a preview window evaluates first, the main scene comes later and every frame.
+static void PreviewFirst()
+{
+    g_log.clear();
+    Rig r;
+    CHECK(r.Init());
+    r.controller.OnEvaluate(On(), Eval(576, 1152, 0)); // the preview (ratio 2) anchors first
+    CHECK(Near(r.engine.Base(), -1.0));
+    std::uint64_t t = 0;
+    for (int i = 1; i <= 60; ++i)
+    {
+        t += 16;
+        r.controller.OnEvaluate(On(), Eval(2560, 3840, t)); // the main scene, Quality
+        if (i % 4 == 0)
+            r.controller.OnEvaluate(On(), Eval(576, 1152, t)); // and the preview now and then
+    }
+    CHECK(Near(r.engine.Base(), -0.584963)); // the main scene's ratio is the target
+}
 // The status the card shows.
 static void Status()
 {
@@ -396,6 +506,11 @@ int main()
     CreatesAndTable();
     SteadyTarget();
     RelatchAndWatch();
+    RelatchLeavesOldContextAlone();
+    WatchAtNativeResolution();
+    ReCreateFeedsDetector();
+    BaseTrackedWhileManual();
+    PreviewFirst();
     Status();
     Plan();
 

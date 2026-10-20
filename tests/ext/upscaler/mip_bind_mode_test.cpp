@@ -55,20 +55,50 @@ int main()
         CHECK(Near(p.seenBefore, -1.0) && Near(p.seenAfter, -1.5625) && Near(p.delta, kQuality));
         CHECK(d.mode() == Mode::Replace && d.state() == ModeDetector::State::Provisional && !d.final());
 
-        // 12 more distinct samplers without a second pair: confirmed, and then final
-        Decision last;
-        for (unsigned i = 0; i < kConfirmAfter; ++i)
-        {
-            last = d.OnObserved(0x9000 + i, -0.25f - 0.1f * static_cast<float>(i), kQuality);
-            CHECK(i + 1 < kConfirmAfter ? !last.any() : last.kind == Kind::ReplaceConfirmed);
-        }
-        CHECK(d.final() && d.mode() == Mode::Replace);
+        // unrelated samplers do not confirm anything (FFXIV makes only a handful of distinct biases per session) ...
+        for (unsigned i = 0; i < 30; ++i)
+            CHECK(!d.OnObserved(0x9000 + i, -0.25f - 0.1f * static_cast<float>(i), kQuality).any());
+        CHECK(d.mode() == Mode::Replace && d.state() == ModeDetector::State::Provisional && !d.final());
+        // ... a further quality change does: Performance pairs with the DLAA AND the Quality sampler of the family (a chain)
+        const auto chain = d.OnObserved(kTrack, -2.0f, kPerf);
+        CHECK(chain.kind == Kind::ReplaceConfirmed && chain.candidates == 2 && d.final() && d.mode() == Mode::Replace);
         // final: nothing changes it any more
-        CHECK(!d.OnObserved(kTrack, -2.0f, kPerf).any());
-        CHECK(!d.OnObserved(kTrack, -1.0f - 0.7f, kPerf).any());
+        CHECK(!d.OnObserved(kTrack, -2.4f, kPerf).any());
+        CHECK(!d.OnObserved(kTrack, -1.0f - 0.7f, -0.2).any());
         CHECK(d.mode() == Mode::Replace && d.final());
     }
 
+    // M-A/M-B: the real sequence DLAA -> Quality -> Performance with the study's handful of biases must END in a confirmed
+    // REPLACE, whatever else is made (-0.5, -2, -1.5 are art values of other families).
+    {
+        ModeDetector d;
+        d.OnObserved(kTrack, -1.0f, kDlaa);
+        d.OnObserved(kArtA, -0.5f, kDlaa);
+        CHECK(d.OnObserved(kTrack, -1.5625f, kQuality).kind == Kind::ReplaceProvisional);
+        d.OnObserved(kArtB, -2.0f, kQuality);
+        d.OnObserved(kArtC, -1.5f, kQuality);
+        d.OnObserved(kArtA, -0.5f, kQuality); // known value: ignored
+        CHECK(d.mode() == Mode::Replace && !d.final());
+        const auto perf = d.OnObserved(kTrack, -2.0f, kPerf); // pairs with -1.0@0 and -1.5625@-0.585 (both agree: intercept -1)
+        CHECK(perf.kind == Kind::ReplaceConfirmed && d.final() && d.mode() == Mode::Replace);
+    }
+    // ... also when Performance comes before anything is confirmed and the Quality pair is still the only one
+    {
+        ModeDetector d;
+        d.OnObserved(kTrack, -1.0f, kDlaa);
+        d.OnObserved(kTrack, -1.5625f, kQuality);
+        d.OnObserved(kTrack, -2.0f, kPerf);
+        CHECK(d.final() && d.mode() == Mode::Replace);
+    }
+    // A second family with a pair of its own confirms too (two independent tracking families)
+    {
+        ModeDetector d;
+        d.OnObserved(kTrack, -1.0f, kDlaa);
+        d.OnObserved(kArtA, -0.8f, kDlaa); // another family that also tracks, with another constant
+        CHECK(d.OnObserved(kTrack, -1.5625f, kQuality).kind == Kind::ReplaceProvisional);
+        CHECK(!d.final());
+        CHECK(d.OnObserved(kArtA, -1.385f, kQuality).kind == Kind::ReplaceConfirmed && d.final());
+    }
     // (a) Duplicates: a sampler the game re-creates (the runtime returns the existing object) is not a new observation.
     {
         ModeDetector d;
@@ -123,8 +153,8 @@ int main()
     {
         ModeDetector d;
         d.OnObserved(kTrack, -1.0f, kDlaa);
-        d.OnObserved(kTrack, -1.05f, kDlaa); // 0.05 apart: two distinct values of one family
-        const auto a = d.OnObserved(kTrack, -1.6f, kQuality); // pairs with both (-0.6 vs -0.585, -0.55 vs -0.585)
+        d.OnObserved(kTrack, -1.14f, kDlaa); // two values 0.14 apart in one family (intercepts -1.0 and -1.14)
+        const auto a = d.OnObserved(kTrack, -1.655f, kQuality); // intercept -1.07: within 0.08 of both, which disagree
         CHECK(a.kind == Kind::AddAmbiguous && a.candidates == 2 && a.mode == Mode::Add);
         CHECK(d.mode() == Mode::Add && d.state() == ModeDetector::State::Ambiguous);
         // ... stays ADD for later observations at the same ratio, even ones that would pair
@@ -133,26 +163,25 @@ int main()
         // ... and is re-opened by an observation made at another ratio: a clean pair then decides
         ModeDetector e;
         e.OnObserved(kTrack, -1.0f, kDlaa);
-        e.OnObserved(kTrack, -1.05f, kDlaa);
+        e.OnObserved(kTrack, -1.14f, kDlaa);
         e.OnObserved(kArtB, -0.8f, kDlaa);
-        e.OnObserved(kTrack, -1.6f, kQuality); // ambiguous
+        e.OnObserved(kTrack, -1.655f, kQuality); // ambiguous
         CHECK(e.state() == ModeDetector::State::Ambiguous);
         CHECK(e.OnObserved(kArtA, -0.3f, kPerf).kind == Kind::None); // another ratio re-opens; this one has no pair
         CHECK(e.state() == ModeDetector::State::Default);
         CHECK(e.OnObserved(kArtB, -1.8f, kPerf).kind == Kind::ReplaceProvisional); // -0.8 + (-1.0) = -1.8, the only pair
     }
-    // ... or a second, different pair while the first one waits for its confirmation
+    // ... or an inconsistent observation while the first pair waits for its confirmation: back to ADD
     {
         ModeDetector d;
         d.OnObserved(kTrack, -1.0f, kDlaa);
+        d.OnObserved(kTrack, -1.14f, kDlaa);
         d.OnObserved(kArtA, -0.5f, kDlaa);
-        CHECK(d.OnObserved(kTrack, -1.5625f, kQuality).kind == Kind::ReplaceProvisional);
-        for (int i = 0; i < 4; ++i)
-            d.OnObserved(0xA000 + i, -0.3f - 0.1f * static_cast<float>(i), kQuality);
-        const auto second = d.OnObserved(kArtA, -1.1f, kQuality); // -0.5 + (-0.585) = -1.085: another pair of another family
-        CHECK(second.kind == Kind::AddAmbiguous && d.mode() == Mode::Add && !d.final());
+        CHECK(d.OnObserved(kArtA, -1.085f, kQuality).kind == Kind::ReplaceProvisional); // -0.5 + (-0.585)
+        CHECK(!d.final() && d.mode() == Mode::Replace);
+        const auto flip = d.OnObserved(kTrack, -1.655f, kQuality); // pairs with two disagreeing older ones
+        CHECK(flip.kind == Kind::AddAmbiguous && d.mode() == Mode::Add && !d.final());
     }
-
     // (d) ADD for lack of data is never final: after 40 distinct samplers at other ratios without a pair it says so once, and a
     // pair that arrives later still decides.
     {

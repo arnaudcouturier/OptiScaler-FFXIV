@@ -366,6 +366,39 @@ static void OnDevice(ID3D11Device* device)
         CHECK(e.table().Count() == 2);
     }
 
+    // M-E: entries of another device (a probe device, or the game's device before a graphics reset) are never touched: the
+    // variant is not made, the device pointer is not dereferenced (a fake pointer would crash), and the entry stays as it was.
+    {
+        Engine e;
+        e.SetCreateFn(NativeCreate(device));
+        ComPtr<ID3D11DeviceContext> context;
+        device->GetImmediateContext(&context);
+        std::array<SetSamplersFn, kStages> fs;
+        std::array<GetSamplersFn, kStages> fg;
+        void** ctxVt = *reinterpret_cast<void***>(context.Get());
+        for (unsigned s = 0; s < kStages; ++s)
+        {
+            fs[s] = reinterpret_cast<SetSamplersFn>(ctxVt[kContextSetSamplersSlots[s]]);
+            fg[s] = reinterpret_cast<GetSamplersFn>(ctxVt[kContextGetSamplersSlots[s]]);
+        }
+        e.Attach(context.Get(), fs, fg);
+
+        auto* deadDevice = reinterpret_cast<ID3D11Device*>(static_cast<std::uintptr_t>(0xDEAD0000));
+        const auto d = Desc(-1.0f);
+        CHECK(e.NoteCreated(Fake(500), deadDevice, d, d, true) == SamplerTable::Result::Inserted);
+        auto live = Make(device, Desc(-0.5f));
+        Created(e, device, live.Get());
+        e.SetTarget(-1.0, 0.0, Mode::Add);
+        e.Refresh(); // MakeVariants must skip the dead device's entry
+        CHECK(e.counters().variantsCreated.load() == 1); // only the live one
+        CHECK(Near(BiasOf(e.VariantFor(live.Get())), -1.5));
+        CHECK(e.VariantFor(Fake(500)) == Fake(500)); // stays as the game made it
+        const auto notReady = e.counters().notReadyBinds.load();
+        e.Service();
+        e.Service();
+        CHECK(e.counters().notReadyBinds.load() == notReady); // and does not keep the engine busy
+    }
+
     // a failing create falls back to the game's sampler, once per revision -------------------------------------------
     {
         Engine e;

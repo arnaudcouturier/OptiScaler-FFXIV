@@ -110,6 +110,7 @@ class SamplerTable
         ComPtr<ID3D11SamplerState> variant;
         std::uint32_t variantRevision = 0;   // 0 = none made for any revision yet
         std::uint32_t variantGeneration = 0; // the generation the variant was made for
+        std::uint32_t observedGeneration = 0; // the generation the detector last saw (the evaluate seam)
     };
 
     enum class Result
@@ -143,7 +144,7 @@ class SamplerTable
                 existing->original.store(info.original, std::memory_order_relaxed);
                 existing->baseCreate.store(info.baseCreate, std::memory_order_relaxed);
                 if (changed)
-                    existing->generation.fetch_add(1, std::memory_order_relaxed);
+                    existing->generation.fetch_add(1, std::memory_order_release); // after original / baseCreate (stored above)
                 existing->eligible.store(true, std::memory_order_release);
                 return Result::Refreshed;
             }
@@ -348,6 +349,10 @@ class Engine
         if (result == SamplerTable::Result::Inserted || result == SamplerTable::Result::Replaced ||
             result == SamplerTable::Result::Refreshed)
             _pending.store(true, std::memory_order_release);
+        if (result == SamplerTable::Result::Refreshed)
+            _reobserve.store(true, std::memory_order_release); // a re-create may carry another bias: the detector looks again
+        else if (result == SamplerTable::Result::Ignored)
+            _negative[NegativeIndex(sampler)].store(reinterpret_cast<std::uintptr_t>(sampler), std::memory_order_relaxed);
         return result;
     }
 
@@ -359,22 +364,23 @@ class Engine
     {
         _set = set;
         _get = get;
+        _latchedDevice = DeviceOf(latched);
         _latched.store(latched, std::memory_order_release);
     }
 
     ID3D11DeviceContext* Latched() const { return _latched.load(std::memory_order_acquire); }
 
-    // The hooks sit on the wrong context: serve another one of the same class. The game's own samplers go back on the old one.
+    // The hooks sit on the wrong context: serve another one of the same class. The OLD context is not touched (it may belong to
+    // a device that is gone: a probe device, or the game's device before a graphics reset): its records are dropped and what it
+    // has bound stays as it is. Variants of samplers made on another device are not made any more (see MakeVariant).
     void Relatch(ID3D11DeviceContext* context)
     {
         const bool wasActive = _active.load(std::memory_order_relaxed);
-        SetActive(false);
+        DropRecords();
+        _latchedDevice = DeviceOf(context);
         _latched.store(context, std::memory_order_release);
         if (wasActive)
-        {
-            _active.store(true, std::memory_order_release);
             Rebind(false);
-        }
     }
 
     // Substitution on or off. Turning it off puts the game's own samplers back on the latched context at once.
@@ -410,7 +416,7 @@ class Engine
             Slot& s = _slots[stage][start + i];
             if (s.revision != _revision || s.asked.Get() != ask)
             {
-                ID3D11SamplerState* const v = Ready(ask);
+                ID3D11SamplerState* const v = Ready(ask, true);
                 s.asked = ask;
                 if (v != ask)
                     s.variant = v;
@@ -491,7 +497,24 @@ class Engine
             SamplerTable::Entry& e = _table.EntryAt(_drained);
             if (!e.ready.load(std::memory_order_acquire))
                 break;
+            e.observedGeneration = e.generation.load(std::memory_order_acquire);
             f(static_cast<const SamplerTable::Entry&>(e));
+        }
+
+        // Entries a create refreshed with another bias are new samplers for the detector (the address of a released game
+        // sampler came back with a new bias): show them again, once per change.
+        if (_reobserve.exchange(false, std::memory_order_acq_rel))
+        {
+            for (size_t i = 0; i < _drained; ++i)
+            {
+                SamplerTable::Entry& e = _table.EntryAt(i);
+                const std::uint32_t generation = e.generation.load(std::memory_order_acquire);
+                if (generation != e.observedGeneration && e.eligible.load(std::memory_order_acquire))
+                {
+                    e.observedGeneration = generation;
+                    f(static_cast<const SamplerTable::Entry&>(e));
+                }
+            }
         }
     }
 
@@ -518,6 +541,9 @@ class Engine
     }
 
     std::uint64_t SubstitutedBinds() const { return _substitutedBinds; }
+    // Binds of eligible samplers seen by Set, whether or not a variant was needed (the hooks are on the right context when this
+    // grows, even at native resolution where nothing has to change).
+    std::uint64_t EligibleBinds() const { return _eligibleBinds; }
     bool AnySubstituted() const { return _anyRecord.load(std::memory_order_relaxed); }
 
   private:
@@ -531,6 +557,28 @@ class Engine
     };
 
     static constexpr size_t kNegativeSize = 512;
+
+    // The device of a context, as a pointer for comparison only (the reference is dropped at once).
+    static ID3D11Device* DeviceOf(ID3D11DeviceContext* context)
+    {
+        if (context == nullptr)
+            return nullptr;
+        ComPtr<ID3D11Device> device;
+        context->GetDevice(&device);
+        return device.Get();
+    }
+
+    void DropRecords()
+    {
+        for (auto& stage : _slots)
+            for (Slot& s : stage)
+            {
+                s.asked.Reset();
+                s.variant.Reset();
+                s.revision = 0;
+            }
+        _anyRecord.store(false, std::memory_order_relaxed);
+    }
 
     static size_t NegativeIndex(const void* p)
     {
@@ -588,7 +636,7 @@ class Engine
     }
 
     // The sampler to bind where the game asked for `ask`: its variant when one is ready for the current revision, else `ask`.
-    ID3D11SamplerState* Ready(ID3D11SamplerState* ask)
+    ID3D11SamplerState* Ready(ID3D11SamplerState* ask, bool fromBind = false)
     {
         if (ask == nullptr || !_hasTarget)
             return ask;
@@ -596,8 +644,10 @@ class Engine
         SamplerTable::Entry* e = EntryFor(ask);
         if (e == nullptr || !e->eligible.load(std::memory_order_acquire))
             return ask;
+        if (fromBind)
+            ++_eligibleBinds;
 
-        if (e->variantRevision == _revision && e->variantGeneration == e->generation.load(std::memory_order_relaxed))
+        if (e->variantRevision == _revision && e->variantGeneration == e->generation.load(std::memory_order_acquire))
             return e->variant ? e->variant.Get() : ask;
 
         ++_counters.notReadyBinds;
@@ -609,8 +659,13 @@ class Engine
     void MakeVariant(SamplerTable::Entry& e)
     {
         e.variantRevision = _revision;
-        e.variantGeneration = e.generation.load(std::memory_order_relaxed);
+        e.variantGeneration = e.generation.load(std::memory_order_acquire);
         e.variant.Reset();
+
+        // A sampler of another device (the context was relatched after a device re-creation) is never touched: its device may
+        // be gone. It stays as the game made it.
+        if (e.device != nullptr && _latchedDevice != nullptr && e.device != _latchedDevice)
+            return;
 
         const float original = e.original.load(std::memory_order_relaxed);
         const float bias = VariantBias(CurrentMode(), original, _base, e.baseCreate.load(std::memory_order_relaxed), _offset);
@@ -644,7 +699,7 @@ class Engine
             SamplerTable::Entry& e = _table.EntryAt(i);
             if (!e.ready.load(std::memory_order_acquire) || !e.eligible.load(std::memory_order_acquire))
                 continue;
-            if (e.variantRevision == _revision && e.variantGeneration == e.generation.load(std::memory_order_relaxed))
+            if (e.variantRevision == _revision && e.variantGeneration == e.generation.load(std::memory_order_acquire))
                 continue;
             MakeVariant(e);
         }
@@ -723,8 +778,11 @@ class Engine
     std::atomic<bool> _active { false };
     std::atomic<bool> _anyRecord { false };
     std::atomic<bool> _pending { false }; // samplers are waiting for their variants
+    std::atomic<bool> _reobserve { false }; // a create changed the bias of a known sampler
+    ID3D11Device* _latchedDevice = nullptr; // identity only
     std::array<std::atomic<std::uintptr_t>, kNegativeSize> _negative {};
     std::array<std::array<Slot, kSlots>, kStages> _slots {};
+    std::uint64_t _eligibleBinds = 0;    // timeline only
     std::uint64_t _substitutedBinds = 0; // timeline only: a plain counter keeps the bind path free of atomic increments
     size_t _drained = 0;
 

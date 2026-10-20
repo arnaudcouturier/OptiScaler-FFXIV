@@ -207,6 +207,34 @@ int main()
             r120 = fast.OnEvaluate(2560, -0.2, i); // 1 ms apart: far under 2 s
         CHECK(r120.kind == GateResult::Kind::Applied && r120.anchorMoved);
 
+        // M-C: a small feature (a preview window) evaluates FIRST and anchors; the main scene is larger and evaluates every frame:
+        // after three evaluates within two seconds the anchor moves up to it, and the preview is ignored from then on.
+        TargetGate pf;
+        CHECK(pf.OnEvaluate(1152, -0.2, 0).kind == GateResult::Kind::Applied && pf.anchor() == 1152);
+        GateResult m1 = pf.OnEvaluate(3840, -0.584963, 16);
+        GateResult m2 = pf.OnEvaluate(3840, -0.584963, 32);
+        CHECK(m1.kind == GateResult::Kind::Ignored && m2.kind == GateResult::Kind::Ignored && pf.anchor() == 1152);
+        GateResult m3 = pf.OnEvaluate(3840, -0.584963, 48);
+        CHECK(m3.kind == GateResult::Kind::Applied && m3.anchorMoved && pf.anchor() == 3840 && Near(pf.applied(), -0.584963));
+        CHECK(pf.OnEvaluate(1152, -0.2, 64).kind == GateResult::Kind::Ignored); // and now the preview is the deviant one
+        for (int i = 0; i < 300; ++i)
+        {
+            const std::uint64_t at = 100 + 16ull * i;
+            pf.OnEvaluate(3840, -0.584963, at);
+            CHECK(pf.OnEvaluate(1152, -0.2, at + 1).kind == GateResult::Kind::Ignored);
+        }
+        CHECK(pf.anchor() == 3840 && Near(pf.applied(), -0.584963));
+
+        // single larger evaluates 3 s apart (never three within two seconds) do not move the anchor
+        TargetGate spike;
+        for (std::uint64_t at = 0; at <= 6000; at += 500)
+        {
+            spike.OnEvaluate(2560, -0.5, at);
+            if (at == 500 || at == 3500)
+                CHECK(spike.OnEvaluate(3840, -0.1, at + 10).kind == GateResult::Kind::Ignored);
+        }
+        CHECK(spike.anchor() == 2560);
+
         // bad input
         TargetGate bad;
         CHECK(bad.OnEvaluate(0, -0.5, 0).kind == GateResult::Kind::Ignored);

@@ -102,7 +102,27 @@ class Controller
                 if (d.any())
                     Log(LogLevel::Info, DecisionLine(d));
             });
-        const bool modeMoved = _detector.mode() != before;
+        (void) before;
+
+        // The target is followed whether or not it is applied: samplers the game makes while a hand-set value blocks the
+        // feature must carry the creation target of their time, and the resume then starts from the right one.
+        const auto base = BaseFromEvaluate(in.renderW, in.outputW, settings.outputScaling);
+        bool targetChanged = false;
+        if (base)
+        {
+            const GateResult gate = _gate.OnEvaluate(in.outputW, *base, in.nowMs);
+            if (gate.kind != GateResult::Kind::Ignored || _engine.HasTarget())
+            {
+                double useBase = _engine.HasTarget() ? _engine.Base() : *base;
+                if (gate.kind == GateResult::Kind::Applied)
+                {
+                    useBase = gate.base;
+                    _lastRender = in.renderW;
+                    _lastOutput = in.outputW;
+                }
+                targetChanged = _engine.SetTarget(useBase, settings.offset, _detector.mode());
+            }
+        }
 
         // A manual value always wins; so does switching the setting off.
         const bool run = BindShouldRun(settings.autoEnabled, settings.manualOverride);
@@ -133,31 +153,10 @@ class Controller
         }
         _manualLogged = false;
 
-        const auto base = BaseFromEvaluate(in.renderW, in.outputW, settings.outputScaling);
-        if (!base)
-            return; // not a game scene: the previous target stays
+        if (!_engine.HasTarget())
+            return; // not a game scene yet: nothing to apply
 
-        const GateResult gate = _gate.OnEvaluate(in.outputW, *base, in.nowMs);
-        if (gate.kind == GateResult::Kind::Ignored && !_engine.HasTarget())
-            return;
-
-        double useBase = _engine.HasTarget() ? _engine.Base() : *base;
-        if (gate.kind == GateResult::Kind::Applied)
-        {
-            useBase = gate.base;
-            _lastRender = in.renderW;
-            _lastOutput = in.outputW;
-        }
-
-        bool changed = _engine.SetTarget(useBase, settings.offset, _detector.mode());
-        if (changed)
-        {
-            Log(LogLevel::Info, TargetLine(_lastRender, _lastOutput, useBase, settings.offset, _engine.Target(), _detector.mode(),
-                                           !_logged));
-            _logged = true;
-        }
-        (void) modeMoved;
-
+        bool changed = targetChanged;
         if (!_engine.Active())
         {
             _engine.SetActive(true);
@@ -165,13 +164,20 @@ class Controller
         }
 
         if (changed)
+        {
+            Log(LogLevel::Info, TargetLine(_lastRender, _lastOutput, _engine.Base(), settings.offset, _engine.Target(),
+                                           _detector.mode(), !_logged));
+            _logged = true;
+        }
+
+        if (changed)
             _engine.Refresh();
         else
             _engine.Service();
 
-        if (_watch.OnEvaluate(_engine.Active(), _engine.table().Count(), _engine.SubstitutedBinds()))
-            Log(LogLevel::Warn, std::format("Bind-time mip bias: {} evaluates with {} eligible samplers known and not one bind "
-                                            "substituted; the hooks may sit on a context the game does not use",
+        if (_watch.OnEvaluate(_engine.Active(), _engine.table().Count(), _engine.EligibleBinds()))
+            Log(LogLevel::Warn, std::format("Bind-time mip bias: {} evaluates with {} eligible samplers known and not one bind of one of them "
+                                            "seen; the hooks may sit on a context the game does not use",
                                             LatchWatch::kEvaluates, _engine.table().Count()));
     }
 
