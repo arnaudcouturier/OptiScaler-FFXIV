@@ -49,7 +49,7 @@ enum class Clobber
     AliasStore, SlotLeaAt60, SlotLeaAt64, SlotLeaAt67, SlotDwordAt5D, SlotIndexedStore, SlotLeaIndexed, WriteRbp, StoreRspToMem, MovqXmmRsp,
     LeaRbpIndex,
     // pointer tracking: a register that may hold a frame address (lea of a frame location, a copy of it, arithmetic on it)
-    AliasViaMov, AliasViaArithmetic, AliasKilledByLoad, AliasKilledByCall, AliasKeptInCalleeSaved, NegDispUntainted,
+    AliasViaMov, AliasViaArithmetic, AliasKilledByLoad, AliasKilledByCall, AliasKeptInCalleeSaved, NegDispUntainted, IndexedOtherBase,
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
     // neighbours and unrelated writes that must NOT be refused
@@ -109,6 +109,8 @@ struct Spec
     int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
+    bool hiddenCopySetup = false;      // the second copy site's "mov rdx,[rip+g]" is only bytes inside an immediate
+    bool chainedPointer = false;       // a cold fragment chained to create through the low-bit pointer form
     // signature proof
     bool wideLoadAtSixth = false;      // movups xmm0,[rbp+...] over the 6th argument: 16 bytes reach the 7th
     bool loadAt14th = false;           // mov rax,[rbp+...] at entry rsp+70h
@@ -266,6 +268,7 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
         c.b({ 0x4C, 0x89, 0x63, static_cast<int>(static_cast<uint8_t>(static_cast<int8_t>(0x60 - (rbpToRsp - 0x30)))) }); // mov [rbx-70h],r12
         break;
     case Clobber::NegDispUntainted: c.b({ 0x4C, 0x89, 0x67, 0xF0 }); break;  // mov [rdi-10h],r12: rdi never held a frame address
+    case Clobber::IndexedOtherBase: c.b({ 0x4C, 0x89, 0x24, 0xC1 }); break;  // mov [rcx+rax*8],r12
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -497,7 +500,9 @@ Fake Build(const Spec& s)
         const uint32_t global = (i == 1) ? s.copySiteGlobal : kGlobal;
         if (i == 1)
             site1Start = c.at;
-        if (s.copySetupOk)
+        if (s.hiddenCopySetup && i == 1)
+            c.b({ 0x48, 0xB8, 0x90, 0x48, 0x8B, 0x15 }); // mov rax,imm64 = 90 48 8B 15 <disp32>: the setup bytes, not an instruction
+        else if (s.copySetupOk)
             c.b({ 0x48, 0x8B, 0x15 });
         else
             c.b({ 0x48, 0x8B, 0x05 });
@@ -601,6 +606,14 @@ Fake Build(const Spec& s)
         std::memcpy(&im[unwind], info, 4);
         const uint32_t parent[3] = { kCreate, f.createEnd, 0 };
         std::memcpy(&im[unwind + 4], parent, 12);
+    }
+    if (s.chainedPointer)
+    {
+        const uint32_t parentAt = kPdataVa + 0x900;
+        const uint32_t cold[3] = { 0x3040, 0x3080, parentAt | 1 };
+        std::memcpy(&im[p], cold, 12);
+        const uint32_t parent[3] = { kCreate, f.createEnd, 0 };
+        std::memcpy(&im[parentAt], parent, 12);
     }
     if (!s.pdataOk)
         f.pdataSize = 0; // no exception table
@@ -892,6 +905,8 @@ void RegionRules()
     // pointer tracking: a frame address copied or computed on keeps pointing into the frame; overwritten or lost in a call it does not
     for (Clobber k : { Clobber::AliasViaMov, Clobber::AliasViaArithmetic, Clobber::AliasKeptInCalleeSaved })
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::CreateContext, "alias clobber %d", static_cast<int>(k));
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::IndexedOtherBase).why == Why::CreateContext);
+    CHECK(scan(Spec {}, Where::R13, Clobber::IndexedOtherBase).why == Why::Ok);
     for (Clobber k : { Clobber::AliasKilledByLoad, Clobber::AliasKilledByCall, Clobber::NegDispUntainted })
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "not an alias, clobber %d: %s", static_cast<int>(k),
                   WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
@@ -915,6 +930,7 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of a function (slot %d): %s", slot, WhyText(Scan(s).why)); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
+        { Spec s = base(); s.chainedPointer = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained through a pointer (slot %d)", slot); }
     }
     // the fragment is reported by its place
     Spec s;
@@ -932,6 +948,17 @@ void SiteScansUseInstructions()
         s.hiddenDefaultsCall = true;
         const Located l = Scan(s);
         CHECK_MSG(l.why == Why::Ok && l.defaults == kDefaults, "hidden pattern (slot %d): %s", slot, WhyText(l.why));
+    }
+}
+
+void HiddenSetup()
+{
+    // the bytes of "mov rdx,[rip+g]" inside an immediate before the second copy are not the setup of that call
+    for (bool slot : { false, true })
+    {
+        Spec s = slot ? Shape31016() : Spec {};
+        s.hiddenCopySetup = true;
+        CHECK_MSG(Scan(s).why == Why::CopySetup, "hidden copy setup (slot %d): %s", slot, WhyText(Scan(s).why));
     }
 }
 
@@ -1057,6 +1084,7 @@ int main()
     RegionRules();
     ControlFlowBoundaries();
     SiteScansUseInstructions();
+    HiddenSetup();
     SignatureBoundaries();
     ImageBounds();
     ProviderChoice();
