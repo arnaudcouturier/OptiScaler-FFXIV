@@ -41,6 +41,8 @@ enum class Guard : std::uint8_t
     // Correction only (the object itself was fine):
     RenderSizeUnknown,   // no trusted render size (the game's Width/Height parameters are missing)
     NgxJitterUnavailable,
+    JitterTooSmall,        // an axis has too little reported jitter to give a ratio (the calibration skips the snapshot)
+    ReportedOutOfRange,    // the jitter this evaluate carries to NGX is above the plausible reported size (not scaled)
     ObjectNotThisEvaluate, // the object's jitter differs from what this evaluate carries: it belongs to another frame
     AppliedImplausible,
     SignMismatch,        // reported and applied jitter have opposite signs: the convention is not understood, nothing is touched
@@ -67,6 +69,8 @@ constexpr const char* GuardName(Guard g)
     case Guard::CounterNotIncreasing: return "frame counter did not increase";
     case Guard::RenderSizeUnknown: return "render size not known from the Width/Height parameters";
     case Guard::NgxJitterUnavailable: return "NGX jitter parameters not readable";
+    case Guard::JitterTooSmall: return "reported jitter too small on an axis to give a ratio";
+    case Guard::ReportedOutOfRange: return "NGX jitter value above 0.55 pixel";
     case Guard::ObjectNotThisEvaluate: return "jitter object does not match this evaluate (another frame)";
     case Guard::AppliedImplausible: return "applied jitter not finite or above 1 pixel";
     case Guard::SignMismatch: return "reported and applied jitter have opposite signs";
