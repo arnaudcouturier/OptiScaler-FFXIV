@@ -351,6 +351,15 @@ class Observer
     size_t _used = 0;
 };
 
+// The note under the status line of the card while the bind-time hooks are attached.
+inline std::string BindCardNote()
+{
+    return "Bind-time mode: the sharpening is applied when the game uses a sampler, so a quality change reaches the textures "
+           "at once, also on samplers the game made earlier. Add or replace is decided from the game's own sampler biases at "
+           "the first quality change (see the log); a Mipmap Bias value set by hand always wins. Only samplers the game made "
+           "after the hooks were attached take part, so turn this on at the start for a full effect.";
+}
+
 // What the menu card shows.
 struct BindStatus
 {

@@ -4,6 +4,7 @@
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
 #include "ext/upscaler/MipBias.h"
+#include "ext/upscaler/MipBindHooks.h"
 
 #include <State.h>
 
@@ -41,11 +42,12 @@ void Draw(ext::menu::Ctx& ctx)
 
     auto& settings = ext::Cfg().upscaler;
 
-    bool on = settings.mipBiasAuto.value_or_default();
+    bool on = mipbind::AutoEnabled();
     if (ImGui::Checkbox("Follow the upscaling ratio", &on))
     {
         settings.mipBiasAuto = on;
         mipbias::OnSettingChanged();
+        mipbind::OnSettingChanged();
     }
 
     ext::menu::Tooltip("Sets the texture sharpening from the upscaling ratio,\n"
@@ -56,7 +58,10 @@ void Draw(ext::menu::Ctx& ctx)
                        "after a change, and only those the game already biases\n"
                        "(tick \"MB Override All Textures\" in the Mipmap Bias card above for the rest).\n\n"
                        "A tick of \"MB Scale Override\" in the Mipmap Bias card above is noticed while this card is on screen,\n"
-                       "otherwise at the next quality change.");
+                       "otherwise at the next quality change.\n\n"
+                       "In FFXIV the sharpening is applied when the game uses a sampler, so a quality change reaches\n"
+                       "the textures at once, including samplers made earlier (see the status line below). A value\n"
+                       "set by hand in the Mipmap Bias card above always wins.");
 
     // Applied while dragging (the number is stored at once), published when the slider is let go: one log line per
     // adjustment instead of one per frame.
@@ -77,7 +82,9 @@ void Draw(ext::menu::Ctx& ctx)
     if (on)
     {
         const auto status = mipbias::CurrentStatus();
-        if (status.blocked)
+        if (mipbind::Owns())
+            Dim(mipbind::BindStatusLine(mipbind::CurrentBindStatus()));
+        else if (status.blocked)
             Red(mipbias::BlockedLine(status.blocked));
         else
         {
@@ -85,6 +92,9 @@ void Draw(ext::menu::Ctx& ctx)
             Dim(mipbias::CreatedLine(ctx.state.lastMipBias, ctx.state.lastMipBiasMax));
         }
     }
+
+    if (mipbind::Owns())
+        Dim(mipbind::BindCardNote());
 
     Dim(mipbias::CardNote());
 }

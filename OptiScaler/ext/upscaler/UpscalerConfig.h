@@ -22,23 +22,28 @@ struct UpscalerConfig
     CustomOptional<int32_t> forcePerfQuality { -1 };
     CustomOptional<bool> renderSizeFromWidthHeight { false };
 
-    // [Mipmap] MipmapBiasAuto / MipmapBiasAutoOffset (ext/upscaler/MipBias.h): when on, the mipmap bias override follows
-    // log2(render width / display width) of the latest upscaler create, plus the offset (limited to +-3). Default off.
+    // [Mipmap] MipmapBiasAuto / MipmapBiasAutoOffset (ext/upscaler/MipBias.h, MipBind.h): when on, the mipmap bias follows
+    // log2(render width / display width), plus the offset (limited to +-3). On by default for FFXIV, off for other games.
     // Comment block lives in ext/ini/Mipmap.ini.
-    CustomOptional<bool> mipBiasAuto { false };
+    // No default on purpose: an explicit false must survive a save (the game default is on for FFXIV), so the key stays auto until set.
+    CustomOptional<bool, NoDefault> mipBiasAuto;
+    // [Mipmap] AutomaticFFXIV: accepted as an alias of MipmapBiasAuto (the key wins when both are set).
+    CustomOptional<bool, NoDefault> mipBiasAutoAlias;
+    // [Mipmap] MipmapBiasObserve (debug, off): log the distinct original sampler biases per upscaling ratio.
+    CustomOptional<bool> mipBiasObserve { false };
     CustomOptional<float> mipBiasAutoOffset { 0.0f };
 
     void Bind(config::Binder& b);
     // End of config::Load. Hands the two mip bias keys to ext/upscaler/MipBias.cpp, which registers `onLoaded` at start-up.
     // A pointer rather than a call so that ExtConfig.cpp keeps no link dependency on the glue (it needs Config.h and
     // State.h): the unit tests that build ExtConfig.cpp alone find the pointer null and nothing happens.
-    using LoadedHook = void (*)(bool enabled, float offset);
+    using LoadedHook = void (*)(float offset);
     static inline LoadedHook onLoaded = nullptr;
 
     void PostLoad()
     {
         if (onLoaded != nullptr)
-            onLoaded(mipBiasAuto.value_or_default(), mipBiasAutoOffset.value_or_default());
+            onLoaded(mipBiasAutoOffset.value_or_default());
     }
 };
 } // namespace ext

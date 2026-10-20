@@ -559,7 +559,7 @@ template <class Optional> bool Apply(Optional& override_, const Outcome& o)
 // ExtConfig::PostLoad, through UpscalerConfig::PostLoad and its onLoaded pointer (registered by MipBias.cpp at start-up):
 // after the ini was read. Runs again on every Config::Reload.
 // Engages the override at once when auto is on. Does not log (it can run before the logger exists).
-void OnConfigLoaded(bool enabled, float offset);
+void OnConfigLoaded(float offset);
 
 // ext::upscaler::ApplyForcedQuality, first statement after EnsureHooks(): every upscaler feature create, with the
 // NGX Width, Height, OutWidth, OutHeight as the game gave them, and whether the DLSS create flags say the motion vectors

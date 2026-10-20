@@ -46,6 +46,8 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] Diagnostics", // shows the HUD-less diagnostics card
     "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
+    "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
+    "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member

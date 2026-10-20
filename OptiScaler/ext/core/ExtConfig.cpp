@@ -171,6 +171,8 @@ void UpscalerConfig::Bind(config::Binder& b)
     b.Add("QualityOverrides", "ForcePerfQuality", forcePerfQuality);
     b.Add("Hotfix", "RenderSizeFromWidthHeight", renderSizeFromWidthHeight);
     b.Add("Mipmap", "MipmapBiasAuto", mipBiasAuto);
+    b.Add("Mipmap", "AutomaticFFXIV", mipBiasAutoAlias);
+    b.Add("Mipmap", "MipmapBiasObserve", mipBiasObserve);
     b.Add("Mipmap", "MipmapBiasAutoOffset", mipBiasAutoOffset);
 }
 
