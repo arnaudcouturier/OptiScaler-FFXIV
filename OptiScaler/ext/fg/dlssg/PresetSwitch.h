@@ -114,6 +114,45 @@ class Switcher
     uint32_t generation_ = 0;
 };
 
+// Why the live control is off. The built-in NVIDIA runtime is the only one a request can reach: the RTX 20/30 companion runtime
+// reads its own settings file, a replacement runtime is not NVIDIA's code, and another frame generation output has no DLSS-G.
+enum class Unavailable : uint8_t
+{
+    None,
+    AmpereRuntime,
+    ReplacementRuntime,
+    OtherOutput
+};
+
+constexpr Unavailable CheckAvailable(bool ampereRuntimeConfigured, bool replacementRuntime, bool dlssgOutput)
+{
+    if (ampereRuntimeConfigured)
+        return Unavailable::AmpereRuntime;
+    if (replacementRuntime)
+        return Unavailable::ReplacementRuntime;
+    if (!dlssgOutput)
+        return Unavailable::OtherOutput;
+    return Unavailable::None;
+}
+
+constexpr const char* UnavailableText(Unavailable why)
+{
+    switch (why)
+    {
+    case Unavailable::AmpereRuntime:
+        return "Not available with the RTX 20/30 frame-generation runtime: it reads its own settings file (its Preset is under the unlocks).";
+    case Unavailable::ReplacementRuntime:
+        return "Not available with a replacement DLSS-G runtime: the preset belongs to NVIDIA's own runtime.";
+    case Unavailable::OtherOutput:
+        return "The frame generation output is not DLSS-G: the preset only applies to NVIDIA's frame generation.";
+    default:
+        return "";
+    }
+}
+
+// Preset A and C turn the UI recomposition of NVIDIA's runtime off (a creation-time option, recreated by the switch).
+constexpr bool PausesUiRecomposition(int request) { return request == kPresetA || request == kPresetC; }
+
 constexpr const char* FailText(SwitchFail why)
 {
     switch (why)

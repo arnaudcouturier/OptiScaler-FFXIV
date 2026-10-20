@@ -236,6 +236,30 @@ void AMissingStepFailsClosed()
     CHECK(sw.Apply(kPresetB, steps) == SwitchResult::RestartNeeded);
     CHECK(bs.s.Active() == kPresetA && sw.LastFail() == SwitchFail::Prepare);
 }
+void AvailabilityReasons()
+{
+    // the live control is off, with a stated reason, for the RTX 20/30 companion runtime and for everything that is not the
+    // built-in DLSS-G runtime; the companion reason wins when several apply
+    CHECK(CheckAvailable(false, false, true) == Unavailable::None);
+    CHECK(CheckAvailable(true, false, true) == Unavailable::AmpereRuntime);
+    CHECK(CheckAvailable(true, true, false) == Unavailable::AmpereRuntime);
+    CHECK(CheckAvailable(false, true, true) == Unavailable::ReplacementRuntime);
+    CHECK(CheckAvailable(false, true, false) == Unavailable::ReplacementRuntime);
+    CHECK(CheckAvailable(false, false, false) == Unavailable::OtherOutput);
+    for (auto u : { Unavailable::AmpereRuntime, Unavailable::ReplacementRuntime, Unavailable::OtherOutput })
+        CHECK(std::string(UnavailableText(u)).size() > 20);
+    CHECK(std::string(UnavailableText(Unavailable::None)).empty());
+    CHECK(std::string(UnavailableText(Unavailable::AmpereRuntime)).find("RTX 20/30") != std::string::npos);
+    CHECK(std::string(UnavailableText(Unavailable::OtherOutput)).find("not DLSS-G") != std::string::npos);
+}
+
+void UiRecompositionPause()
+{
+    // Preset A and C pause the UI recomposition of the NVIDIA runtime (the menu says so); Auto and B keep it
+    CHECK(PausesUiRecomposition(kPresetA) && PausesUiRecomposition(kPresetC));
+    CHECK(!PausesUiRecomposition(kAuto) && !PausesUiRecomposition(kPresetB));
+    CHECK(!PausesUiRecomposition(-1) && !PausesUiRecomposition(4));
+}
 } // namespace
 
 int main()
@@ -250,6 +274,8 @@ int main()
     InvalidRequestIsRejected();
     ASequenceOfSwitches();
     AMissingStepFailsClosed();
+    AvailabilityReasons();
+    UiRecompositionPause();
     if (g_failures)
     {
         std::printf("fg_preset_switch: %d check(s) failed\n", g_failures);
