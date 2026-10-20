@@ -153,7 +153,7 @@ int main(int argc, char** argv)
         CHECK(!body.empty());
         CHECK(Has(body, "plan.gate = !shuttingDown && ext::Cfg().ngxRelease.skipReleaseSleep.value_or_default();"));
         CHECK(Has(body, "PrepareRelease(Registry(), plan, ops)"));
-        CHECK(Has(body, "bool shuttingDown) { if (!IsolatesNgx() || !feature.IsWithDx12()) return ReleaseDrain::NotApplicable;"));
+        CHECK(Has(body, "bool shuttingDown) { ext::upscaler::LogReleaseThread(handleId); if (!IsolatesNgx() || !feature.IsWithDx12()) return ReleaseDrain::NotApplicable;")); // the thread line comes first, before the early return
         CHECK(Has(body, "if (result == ReleaseDrain::Failed) {"));
     }
     // the key binding

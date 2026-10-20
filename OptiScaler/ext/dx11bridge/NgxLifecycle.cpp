@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/dx11bridge/ReleaseSequence.h"
 #include "ext/game/Game.h"
+#include "ext/upscaler/NgxThreadTrace.h"
 
 #include <chrono>
 
@@ -112,6 +113,9 @@ struct ReleaseOps
 
 ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, bool shuttingDown)
 {
+    // Before the early return: the thread of every release is wanted in the log, whatever the game.
+    ext::upscaler::LogReleaseThread(handleId);
+
     if (!IsolatesNgx() || !feature.IsWithDx12())
         return ReleaseDrain::NotApplicable;
 
