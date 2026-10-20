@@ -68,7 +68,7 @@ void TestPatternScan()
     CHECK(Scan(t).hits == 0);
 
     // 1 hit, any displacement
-    Put(t, 1000, AccessorBytes(0x0268e949));
+    Put(t, 1000, AccessorBytes(0x026a38b9));
     auto r = Scan(t);
     CHECK(r.hits == 1 && r.firstOffset == 1000);
 
@@ -130,15 +130,15 @@ void TestChunkedScan()
 void TestRipDecoding()
 {
     // global = match + 7 + disp32 (the load is 7 bytes long)
-    CHECK(RipTargetRva(0x26ab40, kBuild.ripInstructionLength, 0x0268e949) == 0x28f9490);
+    CHECK(RipTargetRva(0x26abd0, kBuild.ripInstructionLength, 0x026a38b9) == 0x290e490);
     CHECK(RipTargetRva(0x1000, 7, -0x10) == 0xff7);
     CHECK(RipTargetRva(0x10, 7, -0x100) < 0);
 
     // and the documented constants agree with each other
-    CHECK(kBuild.accessorRva + 7 + 0x0268e949 == kBuild.managerPointerRva);
-    // bytes of the real function, as read from the executable: the displacement 49 e9 68 02
-    auto bytes = AccessorBytes(0x0268e949);
-    CHECK(bytes[3] == 0x49 && bytes[4] == 0xe9 && bytes[5] == 0x68 && bytes[6] == 0x02);
+    CHECK(kBuild.accessorRva + 7 + 0x026a38b9 == kBuild.managerPointerRva);
+    // bytes of the real function, as read from the executable: the displacement b9 38 6a 02
+    auto bytes = AccessorBytes(0x026a38b9);
+    CHECK(bytes[3] == 0xb9 && bytes[4] == 0x38 && bytes[5] == 0x6a && bytes[6] == 0x02);
 }
 
 // A fake PE header copy with the sections named

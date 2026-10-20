@@ -34,7 +34,7 @@ void TestEntryPointWritesThroughANonConstBlock()
 void TestConstants()
 {
     const JitterBuild& b = kCurrentBuild.jitter;
-    CHECK(b.cameraGlobalRva == 0x28f8ba0 && b.cameraOffset == 0x3028 && b.jitterPointerOffset == 0x278);
+    CHECK(b.cameraGlobalRva == 0x290dba0 && b.cameraOffset == 0x3028 && b.jitterPointerOffset == 0x278);
     CHECK(b.jitterXOffset == 0 && b.jitterYOffset == 4 && b.ndcXOffset == 8 && b.ndcYOffset == 12 && b.counterOffset == 16 && b.objectBytes == 20);
 }
 
