@@ -90,6 +90,17 @@ int main()
         CHECK(t.TrackedKeys() <= EvaluateTracker::kMaxKeys);
         CHECK(t.OnEvaluate(65, 1, 100).log); // a new key still logs
     }
+    // eviction is oldest first: with kMaxKeys + 1 keys the first one is forgotten (logs as first again), the others are kept
+    {
+        EvaluateTracker t(10000);
+        for (uintptr_t k = 1; k <= EvaluateTracker::kMaxKeys + 1; ++k)
+            CHECK(t.OnEvaluate(k, 1, k).log);
+        CHECK(t.TrackedKeys() == EvaluateTracker::kMaxKeys);
+        CHECK(!t.OnEvaluate(3, 1, 100).log);                        // a kept key stays silent
+        CHECK(!t.OnEvaluate(EvaluateTracker::kMaxKeys + 1, 1, 101).log); // the newest is kept
+        const auto again = t.OnEvaluate(1, 1, 102);                  // the oldest was evicted
+        CHECK(again.log && again.reason == Reason::First);
+    }
     // time going backwards (a clock reset) never produces a line per call
     {
         EvaluateTracker t(10000);
