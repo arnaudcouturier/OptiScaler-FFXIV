@@ -755,6 +755,7 @@ struct RuntimeHost
         g_nr.modelFailure = false;
         g_nr.reason = "";
         g_nr.runtimeReason.clear();
+        g_nr.modelError.clear();
     }
 
     void ParkFeatures()

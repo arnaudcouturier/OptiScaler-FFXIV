@@ -112,6 +112,9 @@ struct Module
     std::atomic<bool> releasePending { false }; // the old objects are kept and released in Maintain: a device change found the GPU busy, or a teardown threw (set from the handler of a teardown entry, so atomic)
 
     DlssNr::PreviewBackend backend;
+    // The NR runtime revision (the model file the card selected) that each stream's model instance was built from. A stream whose
+    // revision is not the backend's is rebuilt from the new model path once the GPU is finished with it (see SyncRuntime, RunCoreSteps).
+    uint64_t streamRuntime[kMaxStreams] = {};
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
     TimerRing timerRing; // mirrors the query slots of `timer` (CharaNrRules.h): which list wrote each, its done value and mode
@@ -820,6 +823,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     }
     s.createDone = value;
     s.created = start;
+    m.streamRuntime[index] = b.revision;
     const uint64_t after = VramUsedBytes();
     LOG_INFO("CharaView NR: {} model instance {} created for {}x{} in {:.1f} ms (preset {}, style {}); video memory in use {} MB (before the stream's images) -> {} MB",
              PlacementName(PlacementFrom(s.production, s.preSr)), index, s.width, s.height, createMs, t.preset, t.style, s.vramBefore >> 20, after >> 20);
@@ -978,6 +982,40 @@ static ImageInfo InfoOf(ID3D11Texture2D* texture)
     return ImageInfo { d.Width, d.Height, static_cast<uint32_t>(d.Format) };
 }
 
+// The NR runtime picker (ext/nr/runtime) selected another model file: the backend follows (new model path and revision) and the streams
+// built from the old file are rebuilt one by one in RunCoreSteps. A selection without a model makes the module unavailable (the native
+// image stays) until a model is selected again. Caller holds the module mutex and the module is initialised.
+static void SyncRuntime()
+{
+    Module& m = M();
+    const uint64_t revision = DlssNr::PreviewRuntimeRevision();
+    if (revision == m.backend.revision)
+        return;
+    DlssNr::PreviewBackend next;
+    const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(m.dev12, next);
+    switch (status)
+    {
+    case DlssNr::PreviewBackendStatus::Ready:
+        m.backend = next;
+        m.model = Probe::Present;
+        LOG_INFO("CharaView NR: NR runtime revision {}; model {}; streams built from the previous model are rebuilt", next.revision,
+                 ext::PathText(next.modelPath));
+        break;
+    case DlssNr::PreviewBackendStatus::ModelMissing:
+        // Remember the revision so this is not retried every call; the entry points stay as they were (a stream holding the old model
+        // keeps it until it is rebuilt), and the availability now says the model is missing.
+        m.backend.revision = revision;
+        m.backend.modelPath.clear();
+        m.model = Probe::Missing;
+        LOG_INFO("CharaView NR: NR runtime revision {} has no model; previews keep the native image until one is selected", revision);
+        break;
+    default:
+        Latch("the NGX core would not provide its capability parameters");
+        break;
+    }
+    Refresh();
+}
+
 // All three placements run through this one function; `production` is null for the bring-up (and set for the other two, whose requests carry
 // the copied images). The stream table, the availability and creation steps, the settle-and-rebuild rule, the model creation and the readiness
 // wait are common; the placement decides the shape the stream is built for and what the hand-off copies (see Stream).
@@ -998,6 +1036,8 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     if (const int known = m.table.Find(key); known != kNoStream)
         ++m.table.At(known).attempts;
 
+    if (m.inited)
+        SyncRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return RunOutcome::NotAvailable;
 
@@ -1015,6 +1055,22 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     }
     if (m.table.At(index).attempts == 0)
         m.table.At(index).attempts = 1; // a stream Bind just created
+
+    // A stream whose model instance was built from another NR runtime (the card selected a different model file) is rebuilt from the
+    // current one, once the GPU is finished with it. The old instance is released through the forwarder, which routes the release to the
+    // module that created it; no model file is ever unloaded.
+    if (m.streams[index].feature != nullptr && m.streamRuntime[index] != m.backend.revision)
+    {
+        if (!GpuDone(m.table.At(index).lastSubmitted))
+            return RunOutcome::Skipped;
+        LOG_INFO("CharaView NR: stream {} rebuilt for NR runtime revision {} (was {})", index, m.backend.revision, m.streamRuntime[index]);
+        ReleaseStreamObjects(m.streams[index], true);
+        m.table.Free(index);
+        index = m.table.Bind(key, req.width, req.height, req.now);
+        if (index == kNoStream)
+            return RunOutcome::Skipped;
+        m.table.At(index).attempts = 1;
+    }
 
     // What the stream has to be built for. A change (size, the model preset or style, the hand-off variant) must hold still for a
     // moment before the stream is rebuilt: dragging a window to a new size reports a new size every frame, and each one would

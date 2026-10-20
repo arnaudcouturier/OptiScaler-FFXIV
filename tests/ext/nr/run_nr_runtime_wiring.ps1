@@ -45,6 +45,22 @@ Check ($seams.Contains('runtime::Startup()')) 'AppendNgxSearchPaths must use the
 $vk = [IO.File]::ReadAllText((Join-Path $nr 'vk\DlssNrFeature_Vk.cpp'))
 Check ($vk.Contains('ext::nr::runtime::Startup()')) 'Vulkan FindSnippet must use the startup selection'
 
+# 5b. The character previews follow the selection: the backend is re-acquired before the availability is read, and a stream built from
+#     another revision is released (after the GPU is done with it) and rebuilt; the revision of a stream is recorded when its model is made.
+$chara = [IO.File]::ReadAllText((Join-Path $Repo 'OptiScaler\ext\ffxiv\chara\CharaNr.cpp'))
+$sync = $chara.IndexOf('SyncRuntime(); //')
+$avail = $chara.IndexOf('if (Refresh() != Availability::Available || !EnsureInit(req.context))')
+Check ($sync -ge 0 -and $avail -ge 0 -and $sync -lt $avail) 'RunCoreSteps must call SyncRuntime() before it reads the availability'
+$stale = $chara.IndexOf('m.streamRuntime[index] != m.backend.revision')
+Check ($stale -ge 0) 'RunCoreSteps must compare the stream revision with the backend revision'
+if ($stale -ge 0) {
+    $block = $chara.Substring($stale, 700)
+    $gpu = $block.IndexOf('GpuDone(m.table.At(index).lastSubmitted)')
+    $rel = $block.IndexOf('ReleaseStreamObjects(m.streams[index], true)')
+    Check ($gpu -ge 0 -and $rel -ge 0 -and $gpu -lt $rel) 'a stream of another revision is released only after the GPU is done with it'
+}
+Check ($chara.Contains('m.streamRuntime[index] = b.revision;')) 'CreateFeatureStep must record the revision the model was built for'
+
 # 6. The runtime choice is not part of the saved NR presets (the allowlist in NrUserPresets.h), and the config key is bound.
 $presets = [IO.File]::ReadAllText((Join-Path $nr 'presets\NrUserPresets.h'))
 Check ($presets -notmatch '(?i)NR_FIELD\(\s*Runtime\b|\.runtime\b') 'the saved NR presets must not carry the runtime choice'
