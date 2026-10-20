@@ -50,6 +50,7 @@ enum class Clobber
     LeaRbpIndex,
     // pointer tracking: a register that may hold a frame address (lea of a frame location, a copy of it, arithmetic on it)
     AliasViaMov, AliasViaArithmetic, AliasKilledByLoad, AliasKilledByCall, AliasKeptInCalleeSaved, NegDispUntainted, IndexedOtherBase,
+    MovImmRbp, // mov ebp,1: writes rbp without reading it (no modrm byte, nothing else flags it)
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
     // neighbours and unrelated writes that must NOT be refused
@@ -105,7 +106,8 @@ struct Spec
     bool jumpToReload = false;         // jmp from outside to the reload instruction
     bool jumpBackToSaveInside = false; // jz inside the region back to the save
     bool branchBeforeSave = false;     // test eax,eax / jz far, before the save
-    bool callIntoFunction = false;     // call whose target is inside create
+    bool callIntoFunction = false;     // call whose target is inside create (the middle of the region)
+    bool callIntoTail = false;         // call whose target is inside create, after the read call (not in the region)
     int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
@@ -269,6 +271,7 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
         break;
     case Clobber::NegDispUntainted: c.b({ 0x4C, 0x89, 0x67, 0xF0 }); break;  // mov [rdi-10h],r12: rdi never held a frame address
     case Clobber::IndexedOtherBase: c.b({ 0x4C, 0x89, 0x24, 0xC1 }); break;  // mov [rcx+rax*8],r12
+    case Clobber::MovImmRbp: c.b({ 0xBD, 0x01, 0x00, 0x00, 0x00 }); break;   // mov ebp,1
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -542,6 +545,11 @@ Fake Build(const Spec& s)
     {
         c.b({ 0xE8 });
         c.rel32(f.midRegionAt);
+    }
+    if (s.callIntoTail)
+    {
+        c.b({ 0xE8 });
+        c.rel32(f.sites[0]); // the second copy site: an instruction start after the read call
     }
     if (s.leavingJump != 0)
     {
@@ -906,6 +914,8 @@ void RegionRules()
     for (Clobber k : { Clobber::AliasViaMov, Clobber::AliasViaArithmetic, Clobber::AliasKeptInCalleeSaved })
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::CreateContext, "alias clobber %d", static_cast<int>(k));
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::IndexedOtherBase).why == Why::CreateContext);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
+    CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
     CHECK(scan(Spec {}, Where::R13, Clobber::IndexedOtherBase).why == Why::Ok);
     for (Clobber k : { Clobber::AliasKilledByLoad, Clobber::AliasKilledByCall, Clobber::NegDispUntainted })
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "not an alias, clobber %d: %s", static_cast<int>(k),
@@ -927,6 +937,7 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.jumpBackToSaveInside = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump back to the save from inside (slot %d)", slot); }
         { Spec s = base(); s.branchBeforeSave = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a branch before the save (slot %d)", slot); }
         { Spec s = base(); s.callIntoFunction = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the function (slot %d)", slot); }
+        { Spec s = base(); s.callIntoTail = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the tail of the function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of a function (slot %d): %s", slot, WhyText(Scan(s).why)); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
