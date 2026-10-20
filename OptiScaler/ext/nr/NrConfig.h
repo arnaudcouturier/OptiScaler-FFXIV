@@ -28,6 +28,9 @@ struct NrConfig
     CustomOptional<bool> preSrTrailGuard { false };
     CustomOptional<bool> splitFrameWork { false };
     CustomOptional<bool> residualFg { false };
+    // Which NR model file runs: empty or "auto" = the newest installed (ext/nr/runtime), "legacy" = the file found by the old search, or a
+    // folder name such as NR.310.9 (OptiScaler\NR.<version>\nvngx_dlssnr.dll). Switched live from the menu; not part of the saved NR presets.
+    CustomOptional<std::string> runtime { std::string() };
     // 0 NVIDIA FP8 (default), 4 experimental NVFP4 hybrid (coerced to {0,4} on load).
     CustomOptional<uint32_t> precision { 0 };
     CustomOptional<bool> residualFgApproxCamera { false };

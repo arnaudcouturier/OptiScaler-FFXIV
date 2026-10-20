@@ -13,6 +13,7 @@
 #include "ext/nr/presr/DlssNr_Guides.h"
 #include "ext/nr/NrResampler_Vk.h"
 #include "ext/nr/NrHooks.h"
+#include "ext/nr/runtime/NrRuntime.h"
 #include "ext/core/ExtConfig.h"
 
 #include <algorithm>
@@ -495,14 +496,16 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
     return flags;
 }
 
+// Native Vulkan loads its model once: it follows the runtime selection of the session start (ext/nr/runtime), never a later switch,
+// and never finds an NR.<version> folder by search order.
 std::optional<std::filesystem::path> FindSnippet()
 {
-    auto snippet = Util::FindFilePath(Util::DllPath().remove_filename(), "nvngx_dlssnr.dll");
+    const auto startup = ext::nr::runtime::Startup();
 
-    if (!snippet.has_value())
-        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    if (startup && startup->Available())
+        return startup->path;
 
-    return snippet;
+    return std::nullopt;
 }
 
 } // namespace

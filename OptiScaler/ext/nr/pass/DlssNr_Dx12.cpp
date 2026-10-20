@@ -16,6 +16,8 @@
 #include "ext/gpu/Restrack.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/residual/ResidualFg.h"
+#include "ext/nr/runtime/NrRuntime.h"
+#include "ext/nr/runtime/NrRuntimeSwitch.h"
 #include <DirectXMath.h>
 
 
@@ -329,6 +331,15 @@ struct NrState
     // failure into a crash. It stays off and says why.
     bool failed = false;
     const char* reason = "";
+
+    // The NR model file this state was built for (ext/nr/runtime): the snapshot applied last and its revision. A new revision parks
+    // every feature, clears the history and the reuse caches, and loads the new file by its full path. modelFailure marks a failure
+    // the model file caused (missing, would not initialise): a new revision forgets it, so switching back to a working model recovers
+    // without a restart. Failures of the forwarder, the GPU or the colour codec stay latched.
+    std::shared_ptr<const ext::nr::runtime::Snapshot> runtime;
+    uint64_t runtimeRevision = 0;
+    bool modelFailure = false;
+    std::string runtimeReason;
 };
 
 NrState& g_nr = *new NrState; // Retain unresolved GPU ownership at process teardown.
@@ -449,12 +460,14 @@ const char* SelectedModelFile()
     return "nvngx_dlssnr.dll";
 }
 
+// The model file of the runtime selection (ext/nr/runtime): the snapshot this state applied last, else the selection as it stands. No
+// recursive search of its own: an NR.<version> folder must never be found by search order.
 std::optional<std::filesystem::path> FindSelectedModel()
 {
-    auto path = Util::FindFilePath(g_dllDir, SelectedModelFile());
-    if (!path.has_value())
-        path = Util::FindFilePath(Util::ExePath().remove_filename(), SelectedModelFile());
-    return path;
+    const auto snapshot = g_nr.runtime ? g_nr.runtime : ext::nr::runtime::Current();
+    if (snapshot && snapshot->Available())
+        return snapshot->path;
+    return std::nullopt;
 }
 
 // Loads the forwarder that owns the calls into the snippet.
@@ -573,10 +586,7 @@ void ReportScalingRatios()
     if (g_nr.queryRatio == nullptr || g_nr.capabilityParams == nullptr)
         return;
 
-    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
-
-    if (!snippet.has_value())
-        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    const auto snippet = FindSelectedModel();
 
     if (!snippet.has_value())
         return;
@@ -729,6 +739,80 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
 
 void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
              D3D12_RESOURCE_STATES to);
+
+// The scene pass's side of a runtime switch (ext/nr/runtime/NrRuntimeSwitch.h). The model file is only ever loaded by its full path
+// through the forwarder, whose module cache is keyed by path and never unloads: a switch therefore parks the features built from the
+// old file behind their GPU fences (ParkNrFeature) and the next frame builds new ones from the new path.
+struct RuntimeHost
+{
+    std::shared_ptr<const ext::nr::runtime::Snapshot> snapshot;
+
+    void ClearModelFailure()
+    {
+        if (!g_nr.modelFailure)
+            return;
+        g_nr.failed = false;
+        g_nr.modelFailure = false;
+        g_nr.reason = "";
+        g_nr.runtimeReason.clear();
+    }
+
+    void ParkFeatures()
+    {
+        ParkNrFeature(g_nr.feature);
+        g_nr.featurePendingSubmission = false;
+        g_nr.featureReady = {};
+
+        for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
+        {
+            ParkNrFeature(g_nr.passFeature[i]);
+            g_nr.passNeedsReset[i] = false;
+            g_nr.passCreateFailed[i] = false;
+            g_nr.passPendingSubmission[i] = false;
+            g_nr.passReady[i] = {};
+        }
+    }
+
+    void ClearHistory()
+    {
+        // The next features start with an empty history; passes that are rebuilt set their own reset when they are created.
+        g_nr.reset = true;
+    }
+
+    void DropReuseCaches() { DlssNrNative::OnModelSwitch(); }
+
+    void UseModel(const ext::nr::runtime::Snapshot& s)
+    {
+        g_nr.runtime = snapshot;
+        g_nr.runtimeReason.clear();
+        LOG_INFO("DLSS-NR runtime revision {}: {} ({}), file version {}", s.revision, ext::nr::runtime::Utf8(s.id),
+                 ext::PathText(s.path), ext::nr::runtime::Utf8(ext::nr::runtime::VersionText(s.version)));
+        // The model's own scaling ratios are a property of the model file: say them again for this one.
+        if (g_nr.forwarder != nullptr && g_nr.capabilityParams != nullptr)
+            ReportScalingRatios();
+    }
+
+    void MarkUnavailable(const ext::nr::runtime::Snapshot& s)
+    {
+        g_nr.runtime = snapshot;
+        g_nr.runtimeReason = ext::nr::runtime::UnavailableReason(s);
+        g_nr.reason = g_nr.runtimeReason.c_str();
+        g_nr.failed = true;
+        g_nr.modelFailure = true;
+        LOG_ERROR("DLSS-NR runtime revision {}: unavailable, {}", s.revision, g_nr.runtimeReason);
+    }
+};
+
+// Called at the top of every Dispatch (the scene pass is the only place NR features are used). Cheap: one revision compare.
+void PollRuntime()
+{
+    RuntimeHost host;
+    host.snapshot = ext::nr::runtime::Current();
+    const bool first = g_nr.runtimeRevision == 0;
+    const auto result = ext::nr::runtime::ApplyRuntimeChange(host, *host.snapshot, g_nr.runtimeRevision);
+    if (result == ext::nr::runtime::SwitchResult::Switched || (result == ext::nr::runtime::SwitchResult::Unavailable && !first))
+        LOG_INFO("DLSS-NR runtime generation change: features parked behind their GPU fences, history cleared, reuse caches dropped");
+}
 
 // The meter's grid is R32_FLOAT, which makes a row exactly 64 * 4 = 256 bytes -- the alignment a
 // texture-to-buffer copy demands, met without padding, so the readback is a flat array of floats.
@@ -1559,10 +1643,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const Config& cfg = *Config::Instance();
     const ext::NrConfig& nr = ext::Cfg().nr;
 
+    // A new runtime revision (the card picked another model file) is applied first: it forgets a failure the old model caused.
+    PollRuntime();
+
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
         motion == nullptr || output == nullptr)
     {
-        ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
+        ReportSkipOnce(g_nr.failed ? (g_nr.modelFailure ? "the NR runtime is unavailable" : "it already failed this session")
+                                : "a resource was missing");
         return;
     }
 
@@ -1968,6 +2056,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!snippet.has_value())
         {
             g_nr.failed = true;
+            g_nr.modelFailure = true;
             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
@@ -1992,6 +2081,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.featurePendingSubmission = false;
             g_nr.featureReady = {};
             g_nr.failed = true;
+            g_nr.modelFailure = true;
             g_nr.reason = "the model would not initialise";
             if (g_nr.lastModelError && *g_nr.lastModelError())
             {
@@ -3716,9 +3806,10 @@ PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend&
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     if (!EnsureForwarder())
         return PreviewBackendStatus::ForwarderMissing;
-    const auto model = FindSelectedModel();
-    if (!model.has_value())
+    const auto runtime = ext::nr::runtime::Current();
+    if (!runtime->Available())
         return PreviewBackendStatus::ModelMissing;
+    const auto model = std::optional<std::filesystem::path>(runtime->path);
     if (!EnsureCapabilityParams(device))
         return PreviewBackendStatus::CapabilityFailed;
     out.create = g_nr.create;
@@ -3727,10 +3818,13 @@ PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend&
     out.setExtras = g_nr.setExtras;
     out.capabilityParams = g_nr.capabilityParams;
     out.modelPath = model->wstring();
+    out.revision = runtime->revision;
     out.dataPath = State::Instance().NVNGX_ApplicationDataPath;
     out.lastModelError = g_nr.lastModelError;
     return PreviewBackendStatus::Ready;
 }
+
+uint64_t PreviewRuntimeRevision() { return ext::nr::runtime::Current()->revision; }
 
 PreviewTuning CurrentPreviewTuning()
 {

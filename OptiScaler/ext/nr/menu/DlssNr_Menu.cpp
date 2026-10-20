@@ -9,6 +9,7 @@
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/presets/NrUserPresets.h"
+#include "ext/nr/runtime/NrRuntime.h"
 #include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/vk/DlssNrFeature_Vk.h"
 
@@ -124,6 +125,41 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
     return true;
 }
 
+// The NR model version (ext/nr/runtime): which nvngx_dlssnr.dll runs. Applied live, in the scene and in the character previews.
+static void RenderRuntimePicker(ext::NrConfig& nr)
+{
+    namespace rt = ext::nr::runtime;
+    const auto catalog = rt::Catalog();
+    const std::string requested = nr.runtime.value_or_default();
+    const rt::Request parsed = rt::ParseRequest(rt::Wide(requested));
+
+    std::vector<std::string> labels { "Automatic (newest installed)" };
+    std::vector<std::string> values { std::string() };
+    int selected = 0;
+    for (const auto& entry : catalog)
+    {
+        labels.push_back(rt::Utf8(entry.id));
+        values.push_back(entry.legacy ? std::string("legacy") : rt::Utf8(entry.id));
+        const bool match = entry.legacy ? parsed.kind == rt::RequestKind::Legacy
+                                        : parsed.kind == rt::RequestKind::Folder && _wcsicmp(parsed.folder.c_str(), entry.id.c_str()) == 0;
+        if (match)
+            selected = (int) labels.size() - 1;
+    }
+    if (parsed.kind != rt::RequestKind::Automatic && selected == 0)
+    {
+        labels.push_back(requested + " (not installed)");
+        values.push_back(requested);
+        selected = (int) labels.size() - 1;
+    }
+
+    std::vector<const char*> items;
+    for (const auto& l : labels)
+        items.push_back(l.c_str());
+    if (ImGui::Combo("NR model version", &selected, items.data(), (int) items.size()))
+        rt::RequestRuntime(values[(size_t) selected]);
+    HelpMarker("Which nvngx_dlssnr.dll the Neural Rendering pass runs. Drop several into folders named OptiScaler/NR.<version> and switch between them while playing.");
+}
+
 // Drawn as the body of the ext::menu card `dlss_nr` (ext/nr/menu/NrMenu.cpp), i.e. inside upstream's ScopedCard: the
 // card title replaces the reference build's own collapsing header (docs/SEAMS.md 3.6).
 void RenderMenu(float menuResScale)
@@ -185,6 +221,8 @@ void RenderMenu(float menuResScale)
             ImGui::TextWrapped("%s", SpatialStatus().c_str());
             ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
         }
+
+        RenderRuntimePicker(nr);
 
         bool deferredDlss = nr.deferredDlss.value_or_default();
         int precisionChoice = nr.precision.value_or_default() == 4 ? 1 : 0;

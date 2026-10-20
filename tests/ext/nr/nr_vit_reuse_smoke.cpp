@@ -220,6 +220,22 @@ int main()
         CHECK(roles.Lookup(21) == Role::None && roles.Lookup(22) == Role::End);
     }
 
+    { // the NR runtime was switched (Reset): cached results and the "unexpected launch order" verdict of the old module do not carry over
+        Filter f;
+        Eval(f, &a, false, 2);
+        CHECK(Dropped(Eval(f, &a, false, 2))); // warm
+        f.Reset();
+        CHECK(Kept(Eval(f, &a, false, 2)));    // the cache is gone: a full computation again
+        CHECK(Dropped(Eval(f, &a, false, 2))); // and reuse works for the new module
+        auto bad = Eval(f, &a, false, 2, { Role::None, Role::End });
+        CHECK(!bad.wellFormed && f.Disabled());
+        CHECK(Kept(Eval(f, &a, false, 2)));    // a disabled filter keeps everything...
+        f.Reset();
+        CHECK(!f.Disabled());                  // ...until the next runtime is judged on its own
+        Eval(f, &a, false, 2);
+        CHECK(Dropped(Eval(f, &a, false, 2)));
+    }
+
     printf(fails ? "nr_vit_reuse_smoke: %d FAILED\n" : "nr_vit_reuse_smoke: all passed\n", fails);
     return fails != 0;
 }

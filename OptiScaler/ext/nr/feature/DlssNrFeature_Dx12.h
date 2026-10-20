@@ -54,6 +54,7 @@ struct PreviewBackend
     std::wstring modelPath;
     std::wstring dataPath;
     const char* (*lastModelError)() = nullptr; // may be null
+    uint64_t revision = 0;                     // the NR runtime selection this backend was acquired for (ext/nr/runtime)
 };
 
 enum class PreviewBackendStatus
@@ -66,6 +67,10 @@ enum class PreviewBackendStatus
 
 // Loads the forwarder (once), finds the model file and obtains the capability block on `device`. Safe to call repeatedly.
 PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend& out);
+
+// The current NR runtime revision (the model file the card selected). A stream built for another revision is rebuilt from the new
+// model path: re-acquire the backend (its modelPath and revision follow the selection) and rebuild the streams.
+uint64_t PreviewRuntimeRevision();
 
 // The tuning the main NR pass creates its first model pass with ([DlssNr] preset, intensity, style, structure, tone, skin, mask).
 struct PreviewTuning
