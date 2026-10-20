@@ -163,4 +163,19 @@ class RequestState
     std::atomic<uint64_t> baseline_ { 0 };
     std::atomic<bool> querySeen_ { false };
 };
+// The hook's decision for one driver reply. `ok` = the call found the setting, `isNumber` = it is a DWORD. Call it only
+// for a found / not-found reply (not for other errors). `replace`: make the reply "found, DWORD, `value`".
+struct DriverEdit
+{
+    bool replace = false;
+    uint32_t value = 0;
+};
+
+inline DriverEdit HandleDriverReply(RequestState& state, uint32_t settingId, bool ok, bool isNumber, uint32_t value)
+{
+    if (settingId == kRenderPresetSettingId)
+        state.NoteDriverQuery(ok, isNumber, value); // the original answer, before any override
+    const auto answer = AnswerDriverQuery(settingId, state.Active());
+    return { answer.handled && answer.found, answer.value };
+}
 } // namespace ext::fg::preset

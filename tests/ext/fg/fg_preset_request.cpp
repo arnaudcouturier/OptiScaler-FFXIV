@@ -165,6 +165,52 @@ void StateBasics()
     CHECK(!v.QuerySeen());
     CHECK(v.Base().kind == Baseline::Kind::Value);
 }
+void DriverQuerySeam()
+{
+    // The hook records the driver reply of the preset id BEFORE it answers, then answers for the active request.
+    {
+        RequestState s; // Auto
+        s.InitOnce(kAuto);
+        const auto e = HandleDriverReply(s, kRenderPresetSettingId, true, true, 2);
+        CHECK(!e.replace);
+        CHECK(s.QuerySeen() && s.Base().kind == Baseline::Kind::Value && s.Base().value == 2u);
+    }
+    {
+        RequestState s; // A, driver profile holds B
+        s.InitOnce(kPresetA);
+        const auto e = HandleDriverReply(s, kRenderPresetSettingId, true, true, 2);
+        CHECK(e.replace && e.value == 1u);
+        CHECK(s.Base().kind == Baseline::Kind::Value && s.Base().value == 2u); // the original, not the request
+    }
+    {
+        RequestState s; // C, no such setting in the driver profile: the reply becomes a found number
+        s.InitOnce(kPresetC);
+        const auto e = HandleDriverReply(s, kRenderPresetSettingId, false, false, 0);
+        CHECK(e.replace && e.value == 3u);
+        CHECK(s.Base().kind == Baseline::Kind::NotFound);
+    }
+    {
+        RequestState s; // the override-on id follows the request but is not the preset query
+        s.InitOnce(kPresetB);
+        const auto e = HandleDriverReply(s, kOverrideSettingId, false, false, 0);
+        CHECK(e.replace && e.value == kOverrideOn);
+        CHECK(!s.QuerySeen() && s.Base().kind == Baseline::Kind::Unknown);
+    }
+    {
+        RequestState s; // other ids are none of our business
+        s.InitOnce(kPresetB);
+        CHECK(!HandleDriverReply(s, 0x10308298u, true, true, 1).replace);
+        CHECK(!s.QuerySeen());
+    }
+    {
+        RequestState s; // live switch later: the same hook answers the new request
+        s.InitOnce(kPresetA);
+        s.Commit(kPresetB);
+        CHECK(HandleDriverReply(s, kRenderPresetSettingId, true, true, 0).value == 2u);
+        s.Commit(kAuto);
+        CHECK(!HandleDriverReply(s, kRenderPresetSettingId, true, true, 0).replace);
+    }
+}
 } // namespace
 
 int main()
@@ -178,6 +224,7 @@ int main()
     StaleStartScenario();
     ReturnToAutoNeedsBaseline();
     StateBasics();
+    DriverQuerySeam();
     if (g_failures)
     {
         std::printf("%d check(s) failed\n", g_failures);
