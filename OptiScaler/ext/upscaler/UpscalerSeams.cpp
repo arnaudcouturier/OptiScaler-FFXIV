@@ -7,6 +7,7 @@
 #include "ext/game/Game.h"
 #include "ext/game/GameInterfaces.h"
 #include "ext/upscaler/MipBias.h"
+#include "ext/upscaler/NgxThreadTrace.h"
 
 #include <upscalers/IFeature.h>
 
@@ -102,6 +103,7 @@ bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigne
     // Also unconditional and before every early exit below: the automatic mipmap bias (ext/upscaler/MipBias.h)
     // follows every upscaler feature create, whether or not a preset is forced, native DLAA included.
     mipbias::OnFeatureCreate(width, height, outWidth, outHeight, MvLowResFlag(params));
+    ext::upscaler::LogCreateThread(width, height, outWidth, outHeight);
 
     const bool dlaaRequired = NativeDlaaRequired();
     const int forced = Cfg().upscaler.forcePerfQuality.value_or_default();

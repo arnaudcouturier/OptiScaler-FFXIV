@@ -10,6 +10,7 @@
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/upscaler/MipBindHooks.h"
+#include "ext/upscaler/NgxThreadTrace.h"
 
 #include <atomic>
 
@@ -85,6 +86,7 @@ namespace ext::dx11bridge
 void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
                        NVSDK_NGX_Parameter* parameters)
 {
+    ext::upscaler::LogEvaluateThread(context);
     if (auto* lighting = game::Current().lighting)
     {
         unsigned int flags = 0;
