@@ -93,7 +93,7 @@ int main(int argc, char** argv)
     CHECK(Count(code, "cfg.jitterCorrection=") == 1);
     // the manual scale: read from and written back to its own slider, once, greyed out while the correction switch is off
     CHECK(Count(code, "floatscale=cfg.jitterScaleOverride.value_or_default();") == 1);
-    CHECK(Count(code, "if(ImGui::SliderFloat(\"\",&scale,0.0f,1.0f,scale>0.0f?\"\":\"\"))cfg.jitterScaleOverride=scale;") == 1);
+    CHECK(Count(code, "if(ImGui::SliderFloat(\"\",&scale,0.0f,1.0f,scale>0.0f?\"\":\"\"))cfg.jitterScaleOverride=SnapManualScale(scale);") == 1);
     CHECK(Count(code, "cfg.jitterScaleOverride=") == 1);
     CHECK(Count(code, "ImGui::BeginDisabled(!correct);") == 1 && Count(code, "ImGui::EndDisabled();") == 1);
     // the plain-English text: the label, what 0 means, the valid range, that it is an experiment and what it needs

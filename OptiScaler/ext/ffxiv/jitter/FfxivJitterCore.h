@@ -316,12 +316,18 @@ class Engine
         {
             // Switched on, changed or switched off: the calibration state is dropped (a manual scale does not learn, and learning starts from
             // scratch when it is switched off), and so is the pair written with the old scale.
+            const std::optional<float> previous = _manual;
             _manual = manual;
             _cal.Reset();
             _written.Forget();
             _staleOpen = false;
             _keyText.clear();
-            _announceScaled = manual && !ManualScaleIsBaseline(*manual);
+            // The first scaled pair is announced (with the read-back) when a manual scale is switched on from off. A change of the value keeps the
+            // announcement as it was: a slider drag changes the value at every frame and must not spend the line budget the calibration needs.
+            if (!manual)
+                _announceScaled = false;
+            else if (!previous || ManualScaleIsBaseline(*previous))
+                _announceScaled = !ManualScaleIsBaseline(*manual);
             if (manual && _manualInUse.Occurrence())
                 env.Log(FormatManualScaleInUse(*manual));
         }

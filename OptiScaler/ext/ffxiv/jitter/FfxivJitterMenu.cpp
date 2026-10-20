@@ -3,6 +3,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
+#include "ext/ffxiv/jitter/FfxivJitterCalibration.h"
 #include "ext/game/Game.h"
 
 #include <imgui/imgui.h>
@@ -42,7 +43,7 @@ void Draw(ext::menu::Ctx&)
     float scale = cfg.jitterScaleOverride.value_or_default();
     ImGui::BeginDisabled(!correct);
     if (ImGui::SliderFloat("Manual jitter scale (0 = learn it)", &scale, 0.0f, 1.0f, scale > 0.0f ? "%.2f" : "Off"))
-        cfg.jitterScaleOverride = scale;
+        cfg.jitterScaleOverride = SnapManualScale(scale);
     ImGui::EndDisabled();
     ext::menu::Tooltip("Experiment. Hands DLSS a fixed fraction of the jitter the game reports instead of the ratio the correction learns.\n"
                        "Try 1.0 (changes nothing), 0.8, 0.6 and 0.5 one after the other and compare the picture. Valid values are 0.25 to 1.0,\n"

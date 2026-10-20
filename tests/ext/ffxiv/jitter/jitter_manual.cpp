@@ -275,6 +275,7 @@ void TestTheValueCanBeChangedLive()
     // one line per change of the value (0.8 appears twice: two lines)
     CHECK(CountLines(logs, "manual scale 0.800 in use, calibration off") == 2);
     CHECK(CountLines(logs, "manual scale 0.600 in use, calibration off") == 1 && CountLines(logs, "manual scale 0.500 in use, calibration off") == 1);
+    CHECK(CountLines(logs, "first scaled pair") == 1); // announced when switched on from off, not at every change of the value
 }
 
 // A change of the value forgets the remembered pair (the scale it was written with is gone): the block of a game that never refreshes it
@@ -311,6 +312,55 @@ void TestSwitchingTheCorrectionOffAndOnStartsTheManualScaleFresh()
     for (int i = 0; i < 3; ++i)
         CHECK(ScaledNext(g, 0.8));
     CHECK(CountLines(g.e.logs, "manual scale 0.800 in use, calibration off") == 2 && CountLines(g.e.logs, "first scaled pair") == 2);
+}
+
+// The menu slider writes the key at every frame of a drag, so every value in between is a "new value" for the engine. A sweep must not use
+// up the line budgets the calibration needs (the first-scaled-pair line of the calibrated mode shares its budget with the manual mode),
+// and only the switch-on from off announces the first scaled pair of a manual scale.
+void TestASweepOfTheValueDoesNotUseUpTheCalibrationLines()
+{
+    Session g;
+    g.sequence = false;
+    for (int i = 0; i < 100; ++i)
+    {
+        g.manual = 0.30f + 0.006f * static_cast<float>(i); // a new value at every evaluate, all valid
+        CHECK(!g.Next().sets.empty());
+    }
+    CHECK(CountLines(g.e.logs, "first scaled pair") == 1); // the switch-on from off, not every value
+    CHECK(CountLines(g.e.logs, "in use, calibration off") == 32); // one per value, under the 32-line budget
+    g.manual = 0.0f;
+    std::vector<std::string> logs;
+    for (int i = 0; i < 6; ++i)
+    {
+        const Outcome o = g.Next();
+        logs.insert(logs.end(), o.logs.begin(), o.logs.end());
+    }
+    CHECK(CountLines(logs, "calibrated ratio 0.600/0.600") == 1);
+    CHECK_MSG(CountLines(logs, "first scaled pair of this calibration") == 1, "the calibrated mode lost its read-back line"); // R9
+    // switching the manual scale off and on again announces again
+    g.manual = 0.8f;
+    CHECK(CountLines(g.Next().logs, "first scaled pair") == 1);
+}
+
+// The menu snaps the slider to steps of 0.05 and turns anything below 0.25 into 0, so a drag can land on exactly 0.6 or 0.8 and cannot
+// produce an ignored value.
+void TestTheSnapOfTheSlider()
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(SnapManualScale(0.0f) == 0.0f && SnapManualScale(0.03f) == 0.0f && SnapManualScale(0.2f) == 0.0f && SnapManualScale(0.22f) == 0.0f);
+    CHECK(SnapManualScale(0.23f) == 0.25f && SnapManualScale(0.25f) == 0.25f && SnapManualScale(0.27f) == 0.25f);
+    CHECK(SnapManualScale(0.5f) == 0.5f && SnapManualScale(0.504f) == 0.5f && SnapManualScale(0.476f) == 0.5f);
+    CHECK(SnapManualScale(0.6f) == 0.6f && SnapManualScale(0.604f) == 0.6f && SnapManualScale(0.589f) == 0.6f);
+    CHECK(SnapManualScale(0.8f) == 0.8f && SnapManualScale(0.78f) == 0.8f && SnapManualScale(0.83f) == 0.85f);
+    CHECK(SnapManualScale(0.97f) == 0.95f && SnapManualScale(0.99f) == 1.0f && SnapManualScale(1.0f) == 1.0f);
+    CHECK(SnapManualScale(1.2f) == 1.0f && SnapManualScale(100.0f) == 1.0f);
+    CHECK(SnapManualScale(-0.5f) == 0.0f && SnapManualScale(nan) == 0.0f);
+    // whatever the slider hands over, the result is a value the engine accepts or 0
+    for (int i = 0; i <= 1000; ++i)
+    {
+        const float s = SnapManualScale(static_cast<float>(i) / 1000.0f);
+        CHECK(ClassifyManualScale(s) != ManualScaleKind::Ignored);
+    }
 }
 
 void TestTheOverrideChangesNothingWhileTheCorrectionKeyIsOff()
@@ -500,6 +550,8 @@ int main()
     TestTheOverrideTakesPrecedenceOverAnAdoptedRatioAndSwitchingOffLearnsFromScratch();
     TestTheValueCanBeChangedLive();
     TestAChangeOfTheValueForgetsTheRememberedPair();
+    TestASweepOfTheValueDoesNotUseUpTheCalibrationLines();
+    TestTheSnapOfTheSlider();
     TestSwitchingTheCorrectionOffAndOnStartsTheManualScaleFresh();
     TestTheOverrideChangesNothingWhileTheCorrectionKeyIsOff();
     TestABuildMismatchStaysIdleWithTheOverride();

@@ -494,4 +494,17 @@ inline std::string FormatManualScaleIgnored(float v)
 
 // The state field of the status line while a manual scale is in use.
 inline std::string ManualStateText(float v) { return std::format("manual scale {:.3f} (calibration off)", v); }
+
+// What the menu slider stores: the slider writes the key at every frame of a drag, so the value is snapped to steps of 0.05 (a drag can land
+// on exactly 0.6 or 0.8, and every distinct value is a transition for the engine) and anything below 0.25 becomes 0 (off), so the slider can
+// never produce an ignored value. Not a number or negative = 0, above 1.0 = 1.0.
+inline float SnapManualScale(float v)
+{
+    if (!(v > 0.0f))
+        return 0.0f;
+    if (v >= 1.0f)
+        return 1.0f;
+    const float snapped = static_cast<float>(std::lround(v * 20.0f)) / 20.0f;
+    return snapped < kMinPlausibleRatio ? 0.0f : snapped;
+}
 } // namespace ext::ffxiv::jitter
