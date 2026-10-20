@@ -1689,6 +1689,7 @@ void MenuCommon::ApplyThemeStyle()
     c[ImGuiCol_NavWindowingDimBg] = dimBg;
     c[ImGuiCol_ModalWindowDimBg] = modalDimBg;
 
+    ext::menu::ApplyStyle(style);
     _hdrTonemapApplied = false;
     MenuHdrCheck(ImGui::GetIO());
     ext::menu::AdjustTheme(ImGui::GetStyle());

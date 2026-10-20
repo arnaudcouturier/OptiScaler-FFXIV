@@ -14,6 +14,7 @@
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"
 #include "ext/hudless/HudlessSeams.h"
+#include "ext/menu/MenuStyleSeams.h"
 #include "ext/nr/NrSeams.h"
 #include "ext/present/PresentSeams.h"
 #include "ext/reshade/ReShadeSeams.h"

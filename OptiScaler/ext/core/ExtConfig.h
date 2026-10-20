@@ -33,6 +33,7 @@
 #include "ext/ffxiv/ui/UiConfig.h"
 #include "ext/hdr/HdrConfig.h"
 #include "ext/hudless/HudlessConfig.h"
+#include "ext/menu/MenuStyleConfig.h"
 #include "ext/nr/NrConfig.h"
 #include "ext/reshade/ReShadeConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
@@ -174,6 +175,7 @@ struct ExtConfig
     UpscalerConfig upscaler; // ext/upscaler
     ReShadeConfig reshade; // ext/reshade
     WindowConfig window; // ext/window
+    MenuStyleConfig menuStyle; // ext/menu: [Menu] Style
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)

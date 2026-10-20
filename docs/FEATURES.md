@@ -39,6 +39,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 | FFXIV composition swapchain hook | untested on its own | [FFXIV module](#ffxiv-module) |
 | Character preview DLSS and spatial AA (CharaView) | opt-in, off by default; untested in game | [CharaView](#character-preview-charaview) |
 | Automatic mipmap bias | opt-in, off by default; untested in game | [Automatic mipmap bias](#automatic-mipmap-bias) |
+| Menu style (Ember, `[Menu] Style`) | opt-in, off by default (classic); palette and rules unit-tested, not yet seen in game | [Menu style](#menu-style-ember) |
 | Recovered items F2, F3, F4 | untested | [Recovered items](#items-recovered-from-nickles-build) |
 
 ## DLSS Neural Rendering (NR)
@@ -267,6 +268,22 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 **How to check.** Set `MipmapBiasAuto = true`, start the game and read `OptiScaler.log`: every accepted create logs a line (on FFXIV the two DLSS layers each read the same numbers, so every line comes twice in a row and the second one says `unchanged`; the existing `SetInitParameters Render Resolution` line is doubled the same way), `Automatic mipmap bias: create render 3840x2160, display 3840x2160, ratio 1.000 -> bias 0.0000 ...` at the login screen and `... create render 2560x1440, display 3840x2160, ratio 1.500 -> bias -0.5850 (was 0.0000 ...)` after the quality switch, and a create that was ignored logs `ignored create ...` with the reason. With `MipmapBiasScaleOverride = true` the first create logs the warning above instead and no `create render ...` lines. With the debug log level the existing `Overriding mipmap bias X -> Y` lines after it show the sampler hook received the value.
 
 **DLSS presets L and M.** The fork forwards `[DLSS] RenderPresetForAll = 12` (L) and `13` (M) to NGX unchanged, like the working `11` (K), so to see whether the installed DLL takes them set the key, start the game and look for `Using App hint Preset L` (or `Preset M`) in `OptiScaler.log`; a line that still says K means the DLL does not accept the letter.
+
+## Menu style (Ember)
+
+**What it does.** A second look for the in-game menu, selected with `[Menu] Style = ember` (the default, `classic`, is upstream's). The classic theme mixes the accent colour into almost everything: a button is 32% accent over near black, its hover 55%, the title bar and the headers the same, so a bright accent such as orange turns into brown and rust. Ember keeps every surface and control neutral and uses the accent only to mark state: the check mark, the slider grab, the overline of the selected tab, the focus ring, the text selection, the resize grips and the plots.
+
+- **Surfaces:** three steps of one charcoal (canvas `#141519`, card `#1A1B20`, field `#212329`) with a lift for hover (`#2A2D35`) and for press (`#33363F`), and hairline borders of white at 9% alpha, so a translucent window shows the game through its edges. Text is `#F4F4F5`, dim text `#A0A0A6`.
+- **Shape:** 10 px window corners, 8 px for cards and popups, 6 px for controls, tabs and grabs; a 6 to 8 px scrollbar; wider padding and spacing than ImGui's defaults (window 14 x 12, frame 10 x 5, item 10 x 8).
+- **Buttons, headers, title bar:** neutral. Ember has no accent-filled button; ImGui cannot give one button a different border from the others, so the lift on hover is what shows the state.
+- **Inputs:** the accent is `[Menu] AccentColorR/G/B`, the window's opacity is `[Menu] BGColorA`; `BGColorR/G/B` is not used, because the classic code mixes at most 12% of it into a fixed grey. A dark accent is lifted towards white so the check mark stays visible. Under HDR output the colours are tone-mapped like the classic ones (the seam runs before the tone mapping), and the window is still forced opaque by `AdjustTheme`.
+- **Dark only:** with `LightTheme = true` the menu stays classic.
+
+**Status.** Opt-in, off by default. The palette and its rules are unit-tested (every slot set, the neutrals identical for every accent and never tinted, the accent only on state slots, contrast of text 12:1, dim text 4.5:1 and the orange accent 3:1 on the card, alpha, metrics), and so are the ImGui adapter (every `ImGuiCol_` the library declares is assigned) and the single upstream line. It has not been seen in game yet.
+
+**Code.** `ext/menu/EmberPalette.h` (the palette and metrics as plain data, no ImGui types), `ext/menu/MenuStyleSeams.cpp` (copies the palette into the ImGuiStyle), `ext/menu/MenuStyle.h` and `MenuStyleConfig.h` (the key). **Seams.** menu `ApplyStyle`. **Config.** `[Menu] Style` (`classic` or `ember`; anything else is `classic`). Ini only: no menu control. It applies the next time the menu opens, and when a theme colour is changed in the menu's own theme section.
+
+**Tests.** `tests/ext/menu/ember_palette`, `menu_style_parse`, `menu_style_config`, `menu_style_imgui_map`, `menu_style_call_site`.
 
 ## Items recovered from Nickle's build
 

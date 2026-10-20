@@ -181,6 +181,8 @@ void ReShadeConfig::Bind(config::Binder& b)
 
 void WindowConfig::Bind(config::Binder& b) { b.Add("Window", "Mode", mode); }
 
+void MenuStyleConfig::Bind(config::Binder& b) { b.Add("Menu", "Style", look); }
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -192,6 +194,7 @@ void ExtConfig::Bind(config::Binder& b)
     upscaler.Bind(b);
     reshade.Bind(b);
     window.Bind(b);
+    menuStyle.Bind(b);
 }
 
 void ExtConfig::PostLoad()

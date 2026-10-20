@@ -41,10 +41,11 @@ struct Alias
 };
 inline constexpr std::array<Alias, 0> kAliases {};
 
-// Config keys ("[Section] Key") that stay without a control on purpose: developer gates that are read from the ini only.
+// Config keys ("[Section] Key") that stay without a control on purpose: developer gates and the menu style, read from the ini only.
 inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] Diagnostics", // shows the HUD-less diagnostics card
     "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
+    "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member
