@@ -33,6 +33,7 @@ enum class Where
     SlotRbp,  // the same slot through rbp
     Volatile, // r8: not preserved across calls
     Home,     // [rsp+10h]: the callee-writable home area
+    Beyond,   // [rsp+frameSub]: just above the frame (the saved registers), not a local slot
     None
 };
 
@@ -155,11 +156,12 @@ void EmitSave(Code& c, Where w, const Spec& s, int32_t rbpToRsp)
     case Where::SlotRsp: c.b({ 0x48, 0x89, 0x54, 0x24, 0x60 }); break;
     case Where::SlotRbp: c.b({ 0x48, 0x89, 0x95 }); c.i32(0x60 - rbpToRsp); break;
     case Where::Home: c.b({ 0x48, 0x89, 0x54, 0x24, 0x10 }); break;
+    case Where::Beyond: c.b({ 0x48, 0x89, 0x94, 0x24 }); c.i32(static_cast<int32_t>(s.frameSub)); break;
     default: c.b({ 0x90 }); break;
     }
 }
 
-void EmitReload(Code& c, Where w, int32_t rbpToRsp)
+void EmitReload(Code& c, Where w, int32_t rbpToRsp, uint32_t frameSub)
 {
     const int r = RegOf(w);
     if (r >= 0)
@@ -172,6 +174,7 @@ void EmitReload(Code& c, Where w, int32_t rbpToRsp)
     case Where::SlotRsp: c.b({ 0x48, 0x8B, 0x54, 0x24, 0x60 }); break;
     case Where::SlotRbp: c.b({ 0x48, 0x8B, 0x95 }); c.i32(0x60 - rbpToRsp); break;
     case Where::Home: c.b({ 0x48, 0x8B, 0x54, 0x24, 0x10 }); break;
+    case Where::Beyond: c.b({ 0x48, 0x8B, 0x94, 0x24 }); c.i32(static_cast<int32_t>(frameSub)); break;
     default: c.b({ 0x48, 0x8B, 0xD1 }); break; // mov rdx, rcx
     }
 }
@@ -355,7 +358,7 @@ Fake Build(const Spec& s)
     for (int i = 0; i < s.createCallers; ++i)
     {
         f.reloadAt = c.at;
-        EmitReload(c, s.reloadFrom < 0 ? s.save : static_cast<Where>(s.reloadFrom), rbpToRsp);
+        EmitReload(c, s.reloadFrom < 0 ? s.save : static_cast<Where>(s.reloadFrom), rbpToRsp, s.frameSub);
         f.movRcxAt = c.at;
         if (s.movRcxOk)
             c.b({ 0x48, 0x8B, 0x0D });
@@ -679,6 +682,7 @@ void ContextProofRefuses()
     // places that do not survive: a volatile register, the callee's home area
     { Spec s; s.save = Where::Volatile; expect("saved in a volatile register", s, Why::CreateContext); }
     { Spec s; s.save = Where::Home; expect("saved in the home area", s, Why::CreateContext); }
+    { Spec s; s.save = Where::Beyond; expect("saved just above the frame", s, Why::CreateContext); }
     // the saved register written between the save and the reload, in every way
     for (Where w : { Where::R13, Where::Rbx, Where::Rsi, Where::Rdi, Where::R12, Where::R15 })
         for (Clobber k : { Clobber::RegMov, Clobber::RegXor32, Clobber::RegPop, Clobber::RegXchg, Clobber::RegByte, Clobber::RegLea })

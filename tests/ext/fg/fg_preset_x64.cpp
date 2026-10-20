@@ -111,6 +111,8 @@ void Table()
         { "neg rax", { 0x48, 0xF7, 0xD8 }, 3, Flow::Next, Bit(RAX), false, 0 },
         { "test dword [rax],1", { 0xF7, 0x00, 0x01, 0x00, 0x00, 0x00 }, 6, Flow::Next, 0, false, 0 },
         { "xchg r13,rax", { 0x49, 0x87, 0xC5 }, 3, Flow::Next, Bit(R13) | Bit(RAX), false, 0 },
+        { "xchg rcx,rax (short form)", { 0x48, 0x91 }, 2, Flow::Next, Bit(RCX) | Bit(RAX), false, 0 },
+        { "xchg r9,rax (short form)", { 0x49, 0x91 }, 2, Flow::Next, Bit(R9) | Bit(RAX), false, 0 },
         { "mov r13b,al", { 0x41, 0x88, 0xC5 }, 3, Flow::Next, Bit(R13), false, 0 },
         { "mov sil,al", { 0x40, 0x88, 0xC6 }, 3, Flow::Next, Bit(RSI), false, 0 },
         { "mov ah,al (no rex: ah is part of rax)", { 0x88, 0xC4 }, 2, Flow::Next, Bit(RAX), false, 0 },
