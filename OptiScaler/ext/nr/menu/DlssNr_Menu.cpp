@@ -333,7 +333,8 @@ void RenderMenu(float menuResScale)
         {
             const auto feature = State::Instance().currentFeature;
             const bool nativeVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
-            const char* reason = nativeVk ? DlssNr::FailureReasonVk() : DlssNr::FailureReason();
+            const std::string reasonCopy = nativeVk ? std::string() : DlssNr::FailureReason();
+            const char* reason = nativeVk ? DlssNr::FailureReasonVk() : reasonCopy.c_str();
 
             if (reason[0] != 0)
             {

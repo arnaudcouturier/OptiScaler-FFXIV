@@ -115,6 +115,9 @@ struct Module
     // The NR runtime revision (the model file the card selected) that each stream's model instance was built from. A stream whose
     // revision is not the backend's is rebuilt from the new model path once the GPU is finished with it (see SyncRuntime, RunCoreSteps).
     uint64_t streamRuntime[kMaxStreams] = {};
+    // A failure the MODEL caused (it would not initialise, or the run failed in the model's recording step). Unlike the session latch of
+    // `latches` it ends when another NR runtime is selected (SyncRuntime), so a bad model file does not switch previews off until restart.
+    std::atomic<bool> modelLatched { false };
     uint64_t probedRuntime = 0; // the NR runtime revision the model probe was made for (a later revision probes again)
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
@@ -164,6 +167,13 @@ void Latch(const char* why)
         LOG_WARN("CharaView NR: {}; switched off for this session, native previews retained", why);
 }
 
+// The latch for a failure the selected model file caused: previews fall back to the native image until another runtime is selected.
+void LatchModel(const char* why)
+{
+    if (!M().modelLatched.exchange(true))
+        LOG_WARN("CharaView NR: {}; switched off until another NR runtime is selected, native previews retained", why);
+}
+
 bool Late() { return ext::Cfg().ffxiv.chara.previewNrLate.value_or_default(); }
 
 GateFacts Facts()
@@ -171,7 +181,7 @@ GateFacts Facts()
     Module& m = M();
     GateFacts f;
     f.configOn = Wanted();
-    f.latched = m.latches.NrLatched();
+    f.latched = m.latches.NrLatched() || m.modelLatched;
     f.bridgeUp = WithDx12::IsInited() && Dx11WithDx12::GetD3D12Device() != nullptr && Dx11WithDx12::GetD3D12CommandQueue() != nullptr;
     f.bridgeSuspended = m.holdOff || DlssNr::PreviewBackendSuspended();
     f.releasePending = m.releasePending;
@@ -650,6 +660,7 @@ class GpuRecorder
     {
         const DlssNr::PreviewBackend& b = _m.backend;
         DlssNr::PreviewEvaluateScope serialised; // the main pass holds the same lock around its evaluate
+        DlssNr::PreviewBindModel(b.modelPath);   // the shared capability block must hold this module's callbacks
         // The capability block is shared with the main NR pass: its interface pointers are cleared before every evaluate.
         if (b.setExtras != nullptr)
             b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
@@ -799,6 +810,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
     const auto start = std::chrono::steady_clock::now();
     {
         DlssNr::PreviewEvaluateScope serialised;
+        DlssNr::PreviewBindModel(b.modelPath); // the shared capability block must hold this module's callbacks
         if (b.setExtras != nullptr)
             b.setExtras(b.capabilityParams, 1.0f, nullptr, nullptr, nullptr, 0, 0, 0, 0);
         DlssNr::PreviewStateEnvelope envelope(m.list.Get());
@@ -811,7 +823,7 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
         m.list->Close();
         const char* text = b.lastModelError != nullptr ? b.lastModelError() : "";
         LOG_ERROR("CharaView NR: the model could not be created for {}x{} ({})", s.width, s.height, text != nullptr ? text : "");
-        Latch("the model would not initialise");
+        LatchModel("the model would not initialise");
         return RunOutcome::Failed;
     }
     uint64_t value = 0;
@@ -914,7 +926,10 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
             m.list->Close(); // the list was reset for this run but never recorded
         char text[96];
         std::snprintf(text, sizeof(text), "a run failed at the %s step", HandoffStepName(out.failedAt));
-        Latch(text);
+        if (out.failedAt == HandoffStep::Record)
+            LatchModel(text); // the recording step includes the model's evaluate
+        else
+            Latch(text);
         return RunOutcome::Failed;
     }
 
@@ -970,7 +985,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
 } // namespace
 
 bool Wanted() { return ext::Cfg().ffxiv.chara.previewNr.value_or_default(); }
-bool Latched() { return M().latches.NrLatched(); }
+bool Latched() { return M().latches.NrLatched() || M().modelLatched; }
 bool Available() { return static_cast<Availability>(M().availabilitySnapshot.load(std::memory_order_relaxed)) == Availability::Available; }
 bool HoldsResources() { return M().holds.load(std::memory_order_relaxed); }
 Latches& SharedLatches() { return M().latches; }
@@ -993,6 +1008,7 @@ static void SyncRuntime()
     const uint64_t revision = DlssNr::PreviewRuntimeRevision();
     if (revision == m.backend.revision)
         return;
+    m.modelLatched = false; // another model gets its own chance
     DlssNr::PreviewBackend next;
     const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(m.dev12, next);
     switch (status)

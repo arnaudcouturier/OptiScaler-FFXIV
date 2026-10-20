@@ -72,6 +72,9 @@ PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend&
 // model path: re-acquire the backend (its modelPath and revision follow the selection) and rebuild the streams.
 uint64_t PreviewRuntimeRevision();
 
+// Before a preview creates or evaluates a model of `modelPath`: the shared capability block must hold that module's callbacks.
+void PreviewBindModel(const std::wstring& modelPath);
+
 // The tuning the main NR pass creates its first model pass with ([DlssNr] preset, intensity, style, structure, tone, skin, mask).
 struct PreviewTuning
 {
@@ -205,7 +208,7 @@ std::string DeferredDlssStatus();
 bool PausedByFocus();
 
 // Why it is not, if it is not. Empty while it is running or has not been tried yet.
-const char* FailureReason();
+std::string FailureReason();
 
 // What the game offers by way of exposure. Observed every frame whether or not the setting is on, so
 // the menu can say whether turning it on would do anything here.

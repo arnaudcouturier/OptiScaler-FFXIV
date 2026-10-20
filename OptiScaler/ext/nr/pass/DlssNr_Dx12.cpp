@@ -54,6 +54,11 @@
 #include "DlssNr_Spatial_Guides_Shader.h"
 #include "ext/nr/NrResampler_Dx12.h"
 
+namespace DlssNr::DeferredSr
+{
+void Cancel(); // DlssNr_DeferredSr.inl: resets the deferred pre-SR generation's history
+}
+
 namespace
 {
 std::atomic<uint64_t> g_modelDimensions { 0 };
@@ -329,17 +334,20 @@ struct NrState
 
     // Once something fails there is no recovering it mid-session, and retrying every frame turns a
     // failure into a crash. It stays off and says why.
-    bool failed = false;
-    const char* reason = "";
+    // Why the pass is off, and who caused it (ext/nr/runtime/NrRuntimeSwitch.h): a failure the model file caused is forgotten by a
+    // runtime switch, any other one stays. Set only through FailModel / FailGlobal below; guarded by g_nrMutex.
+    ext::nr::runtime::FailureState fail;
+    // The last thing the setup steps (forwarder, NGX core, capability block) reported; copied into the latch by the caller that gives up.
+    std::string setupError;
 
     // The NR model file this state was built for (ext/nr/runtime): the snapshot applied last and its revision. A new revision parks
-    // every feature, clears the history and the reuse caches, and loads the new file by its full path. modelFailure marks a failure
+    // every feature, clears the history and the reuse caches, and loads the new file by its full path. The latch below marks a failure
     // the model file caused (missing, would not initialise): a new revision forgets it, so switching back to a working model recovers
     // without a restart. Failures of the forwarder, the GPU or the colour codec stay latched.
     std::shared_ptr<const ext::nr::runtime::Snapshot> runtime;
     uint64_t runtimeRevision = 0;
-    bool modelFailure = false;
-    std::string runtimeReason;
+    // Which model's callbacks the shared capability block holds right now (see BindCapabilityBlock).
+    ext::nr::runtime::BlockBinding capabilityBinding;
 };
 
 NrState& g_nr = *new NrState; // Retain unresolved GPU ownership at process teardown.
@@ -490,7 +498,7 @@ bool EnsureForwarder()
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll not found beside OptiScaler ({}) or the game executable",
                   ext::PathText(g_dllDir));
-        g_nr.reason = "nvngx.dll_dlssnr.dll is missing";
+        g_nr.setupError = "nvngx.dll_dlssnr.dll is missing";
         return false;
     }
 
@@ -502,7 +510,7 @@ bool EnsureForwarder()
     {
         LOG_ERROR("nvngx.dll_dlssnr.dll found at {} but would not load, error {}", ext::PathText(path),
                   GetLastError());
-        g_nr.reason = "nvngx.dll_dlssnr.dll would not load";
+        g_nr.setupError = "nvngx.dll_dlssnr.dll would not load";
         return false;
     }
 
@@ -523,7 +531,7 @@ bool EnsureForwarder()
 
     if (g_nr.create == nullptr || g_nr.evaluate == nullptr)
     {
-        g_nr.reason = "Update nvngx.dll_dlssnr.dll from the complete release (NR v2 exports required)";
+        g_nr.setupError = "Update nvngx.dll_dlssnr.dll from the complete release (NR v2 exports required)";
         return false;
     }
 
@@ -543,13 +551,13 @@ bool EnsureCapabilityParams(ID3D12Device* device)
 
     if (!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device))
     {
-        g_nr.reason = "the NGX core would not initialise";
+        g_nr.setupError = "the NGX core would not initialise";
         return false;
     }
 
     if (NVNGXProxy::D3D12_GetCapabilityParameters() == nullptr)
     {
-        g_nr.reason = "the NGX core has no capability parameters";
+        g_nr.setupError = "the NGX core has no capability parameters";
         return false;
     }
 
@@ -557,7 +565,7 @@ bool EnsureCapabilityParams(ID3D12Device* device)
         g_nr.capabilityParams == nullptr)
     {
         g_nr.capabilityParams = nullptr;
-        g_nr.reason = "the NGX core refused its capability parameters";
+        g_nr.setupError = "the NGX core refused its capability parameters";
         return false;
     }
 
@@ -617,6 +625,10 @@ void ReportScalingRatios()
         if (written > 0)
             used += (size_t) written;
     }
+
+    // The queries above published this module's callbacks into the shared capability block.
+    if (g_nr.lastRatioStage != nullptr && *g_nr.lastRatioStage >= 1)
+        g_nr.capabilityBinding.Note(*snippet);
 
     if (any)
         LOG_INFO("DLSS-NR the model's own scaling ratios: {}", line);
@@ -750,13 +762,8 @@ struct RuntimeHost
 
     void ClearModelFailure()
     {
-        if (!g_nr.modelFailure)
-            return;
-        g_nr.failed = false;
-        g_nr.modelFailure = false;
-        g_nr.reason = "";
-        g_nr.runtimeReason.clear();
-        g_nr.modelError.clear();
+        if (ext::nr::runtime::ForgetModelFailure(g_nr.fail))
+            g_nr.modelError.clear();
     }
 
     void ParkFeatures()
@@ -779,6 +786,11 @@ struct RuntimeHost
     {
         // The next features start with an empty history; passes that are rebuilt set their own reset when they are created.
         g_nr.reset = true;
+        // A fallback to ordinary NR that the old model caused (the packed evaluation failed) is tried again with the new one.
+        g_nr.spatialFailed = false;
+        // The deferred pre-SR generation keeps its own hold / half-resolution history and a pending residual: all of it describes the
+        // old model's output. A Precision change cancels it the same way.
+        DlssNr::DeferredSr::Cancel();
     }
 
     void DropReuseCaches()
@@ -790,7 +802,6 @@ struct RuntimeHost
     void UseModel(const ext::nr::runtime::Snapshot& s)
     {
         g_nr.runtime = snapshot;
-        g_nr.runtimeReason.clear();
         LOG_INFO("DLSS-NR runtime revision {}: {} ({}), file version {}", s.revision, ext::nr::runtime::Utf8(s.id),
                  ext::PathText(s.path), ext::nr::runtime::Utf8(ext::nr::runtime::VersionText(s.version)));
         // The model's own scaling ratios are a property of the model file: say them again for this one.
@@ -801,13 +812,30 @@ struct RuntimeHost
     void MarkUnavailable(const ext::nr::runtime::Snapshot& s)
     {
         g_nr.runtime = snapshot;
-        g_nr.runtimeReason = ext::nr::runtime::UnavailableReason(s);
-        g_nr.reason = g_nr.runtimeReason.c_str();
-        g_nr.failed = true;
-        g_nr.modelFailure = true;
-        LOG_ERROR("DLSS-NR runtime revision {}: unavailable, {}", s.revision, g_nr.runtimeReason);
+        const std::string why = ext::nr::runtime::UnavailableReason(s);
+        // A latch that is already there for another reason stays (FailModel does not replace it).
+        ext::nr::runtime::FailModel(g_nr.fail, why);
+        LOG_ERROR("DLSS-NR runtime revision {}: unavailable, {}", s.revision, why);
     }
 };
+
+// The capability block is shared by every model copy and a module's callbacks are written into it by that module's
+// PopulateParameters_Impl. Before a create or an evaluate on module X the block must hold X's callbacks: this runs the same
+// populate-and-query the startup ratio report uses (the forwarder's dlssnr_query_scaling_ratio, read-only apart from two scratch
+// values the block already carried) for X. Host side only; the shipped forwarder is unchanged.
+bool BindCapabilityBlock(const std::filesystem::path& module)
+{
+    if (g_nr.queryRatio == nullptr || g_nr.capabilityParams == nullptr)
+        return true; // an older forwarder without the query: the create path does what it always did
+    float ratio = -1.0f;
+    g_nr.queryRatio(module.wstring().c_str(), g_nr.capabilityParams, 5u /* DLAA */, &ratio);
+    return g_nr.lastRatioStage == nullptr || *g_nr.lastRatioStage >= 1;
+}
+
+void EnsureCapabilityBound(const std::filesystem::path& module)
+{
+    ext::nr::runtime::EnsureBound(g_nr.capabilityBinding, module, BindCapabilityBlock);
+}
 
 // Called at the top of every Dispatch (the scene pass is the only place NR features are used). Cheap: one revision compare.
 void PollRuntime()
@@ -1653,10 +1681,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // A new runtime revision (the card picked another model file) is applied first: it forgets a failure the old model caused.
     PollRuntime();
 
-    if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
+    if (g_nr.fail.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
         motion == nullptr || output == nullptr)
     {
-        ReportSkipOnce(g_nr.failed ? (g_nr.modelFailure ? "the NR runtime is unavailable" : "it already failed this session")
+        ReportSkipOnce(g_nr.fail.failed ? (g_nr.fail.kind == ext::nr::runtime::FailureKind::Model ? "the NR runtime is unavailable" : "it already failed this session")
                                 : "a resource was missing");
         return;
     }
@@ -1834,8 +1862,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (!EnsureForwarder() || !EnsureCapabilityParams(device))
     {
-        g_nr.failed = true;
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        ext::nr::runtime::FailGlobal(g_nr.fail, g_nr.setupError);
+        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.fail.reason);
         device->Release();
         return;
     }
@@ -1957,9 +1985,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
     if (cropColor && g_nr.activeColor == nullptr)
     {
-        g_nr.failed = true;
-        g_nr.reason = "the pre-SR active colour staging texture could not be allocated";
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        ext::nr::runtime::FailGlobal(g_nr.fail, "the pre-SR active colour staging texture could not be allocated");
+        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.fail.reason);
         device->Release();
         return;
     }
@@ -2062,15 +2089,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (!snippet.has_value())
         {
-            g_nr.failed = true;
-            g_nr.modelFailure = true;
-            g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
-            LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+            ext::nr::runtime::FailModel(g_nr.fail, "nvngx_dlssnr.dll was not found beside OptiScaler or the game");
+            LOG_ERROR("DLSS-NR unavailable: {}", g_nr.fail.reason);
             device->Release();
             return;
         }
 
         SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
+        EnsureCapabilityBound(*snippet);
         const auto tuning = PassTuning(nr, 0);
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
@@ -2087,14 +2113,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             g_nr.featurePendingSubmission = false;
             g_nr.featureReady = {};
-            g_nr.failed = true;
-            g_nr.modelFailure = true;
-            g_nr.reason = "the model would not initialise";
+            std::string createReason = "the model would not initialise";
             if (g_nr.lastModelError && *g_nr.lastModelError())
             {
                 g_nr.modelError = g_nr.lastModelError();
-                g_nr.reason = g_nr.modelError.c_str();
+                createReason = g_nr.modelError;
             }
+            ext::nr::runtime::FailModel(g_nr.fail, createReason);
             const auto initResult = (unsigned int) (g_nr.lastInit != nullptr ? *g_nr.lastInit : 0);
             const auto createResult = (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0);
 
@@ -2214,6 +2239,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             else
             {
                 SetExtras(nr, nullptr, nullptr, 0, 0, 0, 0);
+                EnsureCapabilityBound(*snippet);
                 const auto tuning = PassTuning(nr, pass);
                 g_nr.passFeature[pass] = g_nr.create(
                     snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
@@ -2281,9 +2307,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (!haveCodec)
     {
-        g_nr.failed = true;
-        g_nr.reason = "the colour codec would not compile";
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        ext::nr::runtime::FailGlobal(g_nr.fail, "the colour codec would not compile");
+        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.fail.reason);
         device->Release();
         return;
     }
@@ -2598,9 +2623,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (depthIn == nullptr || motionIn == nullptr)
     {
-        g_nr.failed = true;
-        g_nr.reason = "the game's depth or motion vectors could not be made readable";
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        ext::nr::runtime::FailGlobal(g_nr.fail, "the game's depth or motion vectors could not be made readable");
+        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.fail.reason);
         FinishColor(false);
         device->Release();
         return;
@@ -2774,6 +2798,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const auto tuning = PassTuning(nr, pass);
 
         MakeModelWritable(passOutput);
+        if (g_nr.runtime && g_nr.runtime->Available())
+            EnsureCapabilityBound(g_nr.runtime->path); // a preview may have bound another module's callbacks since the create
         // ViT reuse of the NVIDIA model: tell the NvAPI wrapper which feature this is, whether it starts over, and how often to compute the bottleneck
         DlssNrNative::BeginEvaluate(passFeature, passReset,
             DlssNrNative::ReuseEveryForPass(pass, reuseEvery, reuseFirstPassOnly), reuseOverride);
@@ -3081,14 +3107,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else
     {
-        g_nr.failed = !spatial;
-        if (spatial) { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: packed NR evaluation failed"; }
-        g_nr.reason = "the model refused to run";
+        std::string evaluateReason = "the model refused to run";
         if (g_nr.lastModelError && *g_nr.lastModelError())
         {
             g_nr.modelError = g_nr.lastModelError();
-            g_nr.reason = g_nr.modelError.c_str();
+            evaluateReason = g_nr.modelError;
         }
+        // With spatial packing the pass falls back to ordinary NR (cleared by a runtime switch); without it the model is what failed.
+        if (spatial) { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: packed NR evaluation failed"; }
+        else ext::nr::runtime::FailModel(g_nr.fail, evaluateReason);
         LOG_ERROR("DLSS-NR evaluate returned 0x{:X} ({}): {}", (uint32_t) result,
                   NgxResultName((unsigned int) result),
                   spatial ? "spatial processing disabled; ordinary NR will retry next frame" : "disabled for this session");
@@ -3212,7 +3239,7 @@ bool DispatchSceneNr(ID3D12GraphicsCommandList* cmd,ID3D12Resource* target,ID3D1
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:(D3D12_RESOURCE_STATES)cfg.ColorResourceBarrier.value()):
         cfg.OutputResourceBarrier.has_value()?(D3D12_RESOURCE_STATES)cfg.OutputResourceBarrier.value():D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     ScopedNrStateEnvelope envelope(cmd);
-    if(requested && !g_nr.failed && hooks.prepare) {
+    if(requested && !g_nr.fail.failed && hooks.prepare) {
         const bool restorable=frame.IndependentCommands ||
             !(cfg.RestoreComputeSignature.value_or_default() || cfg.RestoreGraphicSignature.value_or_default()) ||
             D3D12Hooks::CanRestoreRootSignature(cmd);
@@ -3271,8 +3298,12 @@ bool PausedByFocus() { return g_focusPaused.load(); }
 
 void RetryAfterFailure()
 {
-    g_nr.failed = false;
-    g_nr.reason = "";
+    // "Drop the DLL in later and press Retry" worked when the model was searched for at every create; the catalog is scanned once, so
+    // Retry looks at the disk again (a changed selection then switches by itself). The scan runs before the pass mutex is taken: the
+    // render thread must not wait for a disk search.
+    ext::nr::runtime::Rescan();
+    std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    ext::nr::runtime::ClearAllFailures(g_nr.fail);
     g_nr.reset = true;
 
 }
@@ -3712,11 +3743,13 @@ CalibrationReading Calibration()
     return r;
 }
 
-bool IsRunning() { return !g_bridgeSuspended.load() && g_nr.feature != nullptr && !g_nr.failed; }
+bool IsRunning() { return !g_bridgeSuspended.load() && g_nr.feature != nullptr && !g_nr.fail.failed; }
 
-const char* FailureReason()
+// A copy taken under the pass mutex: the reason string is rewritten by Dispatch (a switch, a failure, a retry).
+std::string FailureReason()
 {
-    return g_bridgeSuspended.load() ? "the graphics bridge is shutting down" : (g_nr.failed ? g_nr.reason : "");
+    std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    return g_bridgeSuspended.load() ? std::string("the graphics bridge is shutting down") : (g_nr.fail.failed ? g_nr.fail.reason : std::string());
 }
 
 // What the game offers by way of exposure, and what has been read from it. For the menu, so a user
@@ -3834,6 +3867,13 @@ PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend&
 
 uint64_t PreviewRuntimeRevision() { return ext::nr::runtime::Current()->revision; }
 
+void PreviewBindModel(const std::wstring& modelPath)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    if (!modelPath.empty())
+        EnsureCapabilityBound(std::filesystem::path(modelPath));
+}
+
 PreviewTuning CurrentPreviewTuning()
 {
     const ext::NrConfig& nr = ext::Cfg().nr;
@@ -3863,7 +3903,7 @@ void Shutdown()
     if (!g_nrLifetime.Idle())
     {
         LOG_WARN("DLSS-NR: retaining GPU ownership at shutdown; recordings or fences remain unresolved");
-        g_nr.failed = true;
+        ext::nr::runtime::FailGlobal(g_nr.fail, "the graphics bridge is shutting down");
         g_compose.release();
         g_gpuTime.release();
         g_ngxTime.release();

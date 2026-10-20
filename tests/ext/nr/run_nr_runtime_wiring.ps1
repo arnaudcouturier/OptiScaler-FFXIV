@@ -19,8 +19,8 @@ $dx12 = [IO.File]::ReadAllText((Join-Path $nr 'pass\DlssNr_Dx12.cpp'))
 $dispatch = $dx12.IndexOf('void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,')
 Check ($dispatch -ge 0) 'Dispatch not found'
 $poll = $dx12.IndexOf('PollRuntime();', $dispatch)
-$latch = $dx12.IndexOf('if (g_nr.failed || cmdList == nullptr', $dispatch)
-Check ($poll -ge 0 -and $latch -ge 0 -and $poll -lt $latch) 'Dispatch must call PollRuntime() before it tests g_nr.failed'
+$latch = $dx12.IndexOf('if (g_nr.fail.failed || cmdList == nullptr', $dispatch)
+Check ($poll -ge 0 -and $latch -ge 0 -and $poll -lt $latch) 'Dispatch must call PollRuntime() before it tests the failure latch'
 
 # 3. A switch parks the scene feature and every extra-pass feature through ParkNrFeature, and drops the reuse caches.
 $host_ = $dx12.IndexOf('struct RuntimeHost')
@@ -83,6 +83,44 @@ $cat = $glue.IndexOf('std::vector<Entry> Catalog()')
 Check ($cat -ge 0 -and $glue.Substring($cat, 400).Contains('StartHashingLocked();')) 'Catalog() (the card) starts the hash worker'
 $cur = $glue.IndexOf('std::shared_ptr<const Snapshot> Current()')
 Check ($cur -ge 0 -and $glue.IndexOf('LockedBySession(nullptr);', $cur) -lt $glue.IndexOf('std::lock_guard<std::mutex> lock(g.mutex);', $cur)) 'Current() must evaluate the session lock before it takes the module mutex'
+
+# 5e. Fix round 1 (review H1, M1, M2, M5, M6, M7). EVERY place that gives up goes through FailModel / FailGlobal (ext/nr/runtime/NrRuntimeSwitch.h);
+#     nothing sets the latch by hand, and the set of sites is a reviewed table: adding a site means classifying it HERE as model-caused (a
+#     runtime switch forgets it) or global (it stays), which is the point of this check.
+Check ($dx12 -notmatch 'g_nr\.fail\.(failed|kind)\s*=[^=]') 'the failure latch must only be set through FailModel / FailGlobal'
+Check ($dx12 -notmatch 'g_nr\.failed|g_nr\.modelFailure|g_nr\.reason\b') 'the old failed / modelFailure / reason fields must not come back'
+$sites = @([regex]::Matches($dx12, 'ext::nr::runtime::(FailModel|FailGlobal)\(g_nr\.fail,\s*([^;]*)\);') | ForEach-Object { $_.Groups[1].Value + ' | ' + $_.Groups[2].Value.Trim() } | Sort-Object)
+$expected = @(
+    'FailGlobal | "the colour codec would not compile"',
+    'FailGlobal | "the game''s depth or motion vectors could not be made readable"',
+    'FailGlobal | "the graphics bridge is shutting down"',
+    'FailGlobal | "the pre-SR active colour staging texture could not be allocated"',
+    'FailGlobal | g_nr.setupError',
+    'FailModel | "nvngx_dlssnr.dll was not found beside OptiScaler or the game"',
+    'FailModel | createReason',
+    'FailModel | evaluateReason',
+    'FailModel | why'
+) | Sort-Object
+Check (($sites -join "`n") -ceq ($expected -join "`n")) ("the set of failure sites changed; classify the new one in this table. Found:`n" + ($sites -join "`n"))
+
+$hist = $dx12.IndexOf('void ClearHistory()', $host_)
+$histBody = $dx12.Substring($hist, 900)
+Check ($histBody.Contains('g_nr.spatialFailed = false;') -and $histBody.Contains('DlssNr::DeferredSr::Cancel();')) 'a switch must reset the spatial fallback and cancel the deferred pre-SR generation (as a Precision change does)'
+$retry = $dx12.IndexOf('void RetryAfterFailure()')
+$retryBody = $dx12.Substring($retry, 900)
+$rescan = $retryBody.IndexOf('ext::nr::runtime::Rescan();')
+$retryLock = $retryBody.IndexOf('std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);')
+Check ($rescan -ge 0 -and $retryLock -gt $rescan -and $retryBody.Contains('ClearAllFailures(g_nr.fail);')) 'Retry must rescan the disk (before taking the pass mutex) and clear every failure'
+Check ($dx12.Contains('std::string FailureReason()') -and $dx12.IndexOf('std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);', $dx12.IndexOf('std::string FailureReason()')) -lt $dx12.IndexOf('std::string FailureReason()') + 200) 'FailureReason must return a copy taken under the pass mutex'
+Check ($menu.Contains('const std::string reasonCopy')) 'the card must hold a copy of the failure reason'
+Check (([regex]::Matches($dx12, 'EnsureCapabilityBound\(')).Count -ge 4) 'both creates and the evaluate must run EnsureCapabilityBound (plus its definition)'
+$eval = $dx12.IndexOf('g_nr.evaluate(')
+Check ($eval -gt 0 -and $dx12.Substring([Math]::Max(0, $eval - 900), 900).Contains('EnsureCapabilityBound(g_nr.runtime->path)')) 'the scene evaluate must be preceded by the capability block rebind'
+$createAt = $dx12.IndexOf('g_nr.feature =', $dx12.IndexOf('auto snippet = FindSelectedModel();', $dx12.IndexOf('PollRuntime();')))
+Check ($createAt -gt 0 -and $dx12.Substring([Math]::Max(0, $createAt - 400), 400).Contains('EnsureCapabilityBound(*snippet)')) 'the scene create must be preceded by the capability block rebind'
+Check (([regex]::Matches($chara, 'DlssNr::PreviewBindModel\(b\.modelPath\)')).Count -eq 2) 'a preview create and a preview evaluate must both rebind the capability block'
+Check ($chara.Contains('LatchModel("the model would not initialise")') -and $chara.Contains('if (out.failedAt == HandoffStep::Record)') -and $chara.Contains('m.modelLatched = false; // another model gets its own chance')) 'preview model failures must use the recoverable model latch, cleared when the runtime changes'
+Check ($chara.Contains('f.latched = m.latches.NrLatched() || m.modelLatched;')) 'the availability must include the model latch'
 
 # 6. The runtime choice is not part of the saved NR presets (the allowlist in NrUserPresets.h), and the config key is bound.
 $presets = [IO.File]::ReadAllText((Join-Path $nr 'presets\NrUserPresets.h'))

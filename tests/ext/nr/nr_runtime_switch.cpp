@@ -25,8 +25,7 @@ struct FakeHost
 {
     std::vector<std::string> steps;       // the order things happened in
     std::filesystem::path model;          // current model path ("" = none)
-    bool failed = false;                  // the pass's failure latch
-    bool failedByModel = false;           // ... and whether the model caused it
+    FailureState fail;                    // the pass's failure latch (the production class)
     std::set<int> live;                   // features built and not yet parked
     int nextFeature = 1;
     int created = 0, parked = 0;
@@ -37,9 +36,10 @@ struct FakeHost
     void ClearModelFailure()
     {
         steps.push_back("failure");
-        if (failedByModel)
-            failed = failedByModel = false;
+        ForgetModelFailure(fail);
     }
+    // an evaluate that returns an error: the model's fault
+    void EvaluateFails() { FailModel(fail, "the model refused to run"); }
     void ParkFeatures()
     {
         steps.push_back("park");
@@ -61,16 +61,16 @@ struct FakeHost
         steps.push_back("use");
         model = s.path;
     }
-    void MarkUnavailable(const Snapshot&)
+    void MarkUnavailable(const Snapshot& s)
     {
         steps.push_back("unavailable");
         model.clear();
-        failed = failedByModel = true;
+        FailModel(fail, UnavailableReason(s));
     }
     // what the pass does every frame after the switch check
     void Frame()
     {
-        if (!failed && !model.empty() && live.empty())
+        if (!fail.failed && !model.empty() && live.empty())
         {
             live.insert(nextFeature++);
             ++created;
@@ -130,13 +130,13 @@ static void UnavailableAndRecovery()
     ApplyRuntimeChange(host, ok, applied);
     host.Frame();
     CHECK(ApplyRuntimeChange(host, missing, applied) == SwitchResult::Unavailable);
-    CHECK(host.failed && host.failedByModel && host.model.empty());
+    CHECK(host.fail.failed && host.fail.kind == FailureKind::Model && host.model.empty());
     CHECK(host.live.empty() && host.parked == 1); // the old model's feature was parked, not left running
     host.Frame();
     CHECK(host.created == 1); // nothing is built while there is no model
     // switching back recovers: the latch caused by the model does not survive a new revision
     CHECK(ApplyRuntimeChange(host, back, applied) == SwitchResult::Switched);
-    CHECK(!host.failed && host.model == back.path);
+    CHECK(!host.fail.failed && host.model == back.path);
     host.Frame();
     CHECK(host.created == 2);
 }
@@ -145,14 +145,153 @@ static void OtherFailuresSurvive()
 {
     FakeHost host;
     uint64_t applied = 0;
-    host.failed = true; // say the forwarder could not load: not the model's fault
-    host.failedByModel = false;
+    FailGlobal(host.fail, "nvngx.dll_dlssnr.dll would not load"); // not the model's fault
     Snapshot s = MakeSnapshot({ Folder(L"NR.310.9") }, L"");
     s.revision = 1;
     ApplyRuntimeChange(host, s, applied);
-    CHECK(host.failed);
+    CHECK(host.fail.failed);
     host.Frame();
     CHECK(host.created == 0);
+}
+
+static void EvaluateFailureRecoversOnSwitch()
+{
+    // review H1: a model that fails at EVALUATE is forgotten by a switch, like one that fails at create
+    FakeHost host;
+    uint64_t applied = 0;
+    Snapshot a = MakeSnapshot({ Folder(L"NR.310.8") }, L"");
+    a.revision = 1;
+    Snapshot b = MakeSnapshot({ Folder(L"NR.310.9") }, L"");
+    b.revision = 2;
+    Snapshot backToA = a;
+    backToA.revision = 3;
+    ApplyRuntimeChange(host, a, applied);
+    host.Frame();
+    host.EvaluateFails();
+    CHECK(host.fail.failed && host.fail.kind == FailureKind::Model);
+    host.Frame();
+    CHECK(host.created == 1); // nothing is built while the latch is set
+    ApplyRuntimeChange(host, b, applied);
+    CHECK(!host.fail.failed);
+    host.Frame();
+    CHECK(host.created == 2 && host.builtFrom.back() == b.path);
+    // and again for the model that failed before: the latch of B does not follow the pass to A
+    host.EvaluateFails();
+    ApplyRuntimeChange(host, backToA, applied);
+    host.Frame();
+    CHECK(!host.fail.failed && host.created == 3 && host.builtFrom.back() == a.path);
+}
+
+static void NonModelFailureIsNeverErased()
+{
+    // review M7: a device/global failure is not overwritten by an unavailable runtime and not cleared by a later available one
+    FakeHost host;
+    uint64_t applied = 0;
+    const std::vector<Entry> entries { Folder(L"NR.310.9") };
+    Snapshot ok = MakeSnapshot(entries, L"NR.310.9");
+    ok.revision = 1;
+    Snapshot missing = MakeSnapshot(entries, L"NR.310.8");
+    missing.revision = 2;
+    Snapshot back = MakeSnapshot(entries, L"NR.310.9");
+    back.revision = 3;
+    ApplyRuntimeChange(host, ok, applied);
+    FailGlobal(host.fail, "the colour codec would not compile");
+    ApplyRuntimeChange(host, missing, applied);
+    CHECK(host.fail.failed && host.fail.kind == FailureKind::Global);
+    CHECK(host.fail.reason == "the colour codec would not compile"); // not replaced by the "not installed" text
+    ApplyRuntimeChange(host, back, applied);
+    CHECK(host.fail.failed && host.fail.kind == FailureKind::Global);
+    host.Frame();
+    CHECK(host.created == 0);
+    // a global failure wins over a model failure that is already there, and then survives a switch too
+    FakeHost other;
+    uint64_t applied2 = 0;
+    ApplyRuntimeChange(other, ok, applied2);
+    other.EvaluateFails();
+    FailGlobal(other.fail, "the game's depth or motion vectors could not be made readable");
+    CHECK(other.fail.kind == FailureKind::Global);
+    ApplyRuntimeChange(other, missing, applied2);
+    ApplyRuntimeChange(other, back, applied2);
+    CHECK(other.fail.failed && other.fail.kind == FailureKind::Global);
+    // the Retry button forgets everything
+    ClearAllFailures(other.fail);
+    CHECK(!other.fail.failed && other.fail.reason.empty() && other.fail.kind == FailureKind::None);
+}
+
+// review M1: the shared capability block must carry the callbacks of the module a create/evaluate is about to call.
+struct BindHost
+{
+    std::vector<std::string> events;
+    BlockBinding binding;
+    bool bindWorks = true;
+    static std::string Name(const std::filesystem::path& p) { return p.parent_path().filename().string(); }
+    void Touch(const char* what, const std::filesystem::path& p)
+    {
+        EnsureBound(binding, p,
+                    [&](const std::filesystem::path& q)
+                    {
+                        events.push_back("bind " + Name(q));
+                        return bindWorks;
+                    });
+        events.push_back(std::string(what) + " " + Name(p));
+    }
+    void Create(const std::filesystem::path& p) { Touch("create", p); }
+    void Evaluate(const std::filesystem::path& p) { Touch("evaluate", p); }
+    // every create/evaluate on X must come with X bound: the last bind before it names X
+    bool Ordered() const
+    {
+        std::string bound;
+        for (const auto& e : events)
+        {
+            if (e.rfind("bind ", 0) == 0)
+                bound = e.substr(5);
+            else if (e.substr(e.find(' ') + 1) != bound)
+                return false;
+        }
+        return true;
+    }
+    int Binds() const
+    {
+        int n = 0;
+        for (const auto& e : events)
+            n += e.rfind("bind ", 0) == 0;
+        return n;
+    }
+};
+
+static void CapabilityBlockFollowsTheModule()
+{
+    const auto a = Folder(L"NR.310.8").path, b = Folder(L"NR.310.9").path;
+    {
+        BindHost h;
+        h.Create(a);   // scene creates from A
+        h.Evaluate(a); // and evaluates: no second bind
+        CHECK(h.Binds() == 1);
+        h.Create(b);   // a preview creates from B before the scene has switched
+        h.Evaluate(a); // the scene evaluates A again: the block must be A's again
+        h.Evaluate(a);
+        h.Evaluate(b); // the preview evaluates B
+        CHECK(h.Ordered());
+        CHECK(h.Binds() == 4);
+        const std::vector<std::string> first { "bind NR.310.8", "create NR.310.8", "evaluate NR.310.8", "bind NR.310.9", "create NR.310.9" };
+        CHECK((std::vector<std::string>(h.events.begin(), h.events.begin() + 5) == first));
+    }
+    {
+        // a bind that fails is not remembered: the next call tries again (and the create still goes ahead, fail open)
+        BindHost h;
+        h.bindWorks = false;
+        h.Create(a);
+        h.Create(a);
+        CHECK(h.Binds() == 2);
+        h.bindWorks = true;
+        h.Create(a);
+        h.Create(a);
+        CHECK(h.Binds() == 3);
+        // forgetting the binding (a new block, a device change) binds again
+        h.binding.Forget();
+        h.Create(a);
+        CHECK(h.Binds() == 4);
+    }
 }
 
 static void TwentyRapidSwitches()
@@ -238,6 +377,12 @@ int main()
     SwitchParksTheOldFeature();
     UnavailableAndRecovery();
     OtherFailuresSurvive();
+    EvaluateFailureRecoversOnSwitch();
+    NonModelFailureIsNeverErased();
+    CapabilityBlockFollowsTheModule();
+    EvaluateFailureRecoversOnSwitch();
+    NonModelFailureIsNeverErased();
+    CapabilityBlockFollowsTheModule();
     TwentyRapidSwitches();
     ClicksToFeatures();
     SessionLockRules();
