@@ -84,7 +84,7 @@ int main()
     Q::tracking=true;
     for(UINT width:{2u,4u})
     {
-        assert(Q::Begin(reinterpret_cast<uintptr_t>(table.data())-0x217bc00,reinterpret_cast<uintptr_t>(renderer.data()),width,{packet}));
+        assert(Q::Begin(reinterpret_cast<uintptr_t>(table.data())-0x217c760,reinterpret_cast<uintptr_t>(renderer.data()),width,{packet}));
         Q::batch.snapshot=metadata;
         assert(Q::batch.ranges[0].first==4 && Q::batch.ranges[0].count==4 && Q::batch.ranges[0].texture==123);
         std::array<uint16_t,9> index16{9,9,9,4,5,6,6,7,4};std::array<UINT,9> large{9,9,9,4,5,6,6,7,4};

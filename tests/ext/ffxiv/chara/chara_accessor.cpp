@@ -41,7 +41,7 @@ int main()
 
     // the documentation values of the matched build are present and consistent
     const ext::ffxiv::CharaViewBuild& cv = ext::ffxiv::kCurrentBuild.charaView;
-    CHECK(cv.accessorRva == 0x26AB40 && cv.managerPointerRva == 0x28F9490);
+    CHECK(cv.accessorRva == 0x26ABD0 && cv.managerPointerRva == 0x290E490);
     CHECK(cv.pattern.size() == 18 && cv.pattern[0] == 0x48 && cv.pattern[17] == 0xC3);
     return TEST_RESULT("chara_accessor");
 }
