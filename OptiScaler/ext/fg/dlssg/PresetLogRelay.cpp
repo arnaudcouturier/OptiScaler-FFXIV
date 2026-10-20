@@ -13,16 +13,26 @@ namespace ext::fg::preset
 {
 namespace
 {
-std::mutex g_queueMutex;
-std::vector<std::string> g_queue; // unrecognised preset lines waiting to be logged
+// The queue and the readout are never destroyed: the logger may still call the sink while the process shuts down.
+struct QueueState
+{
+    std::mutex mutex;
+    std::vector<std::string> lines; // unrecognised preset lines waiting to be logged
+};
+QueueState& Queue_()
+{
+    static QueueState* state = new QueueState;
+    return *state;
+}
 std::atomic<bool> g_queued { false };
 std::atomic<const void*> g_attachedTo { nullptr };
 
 void Queue(std::string_view line)
 {
-    std::lock_guard lock(g_queueMutex);
-    if (g_queue.size() < 8)
-        g_queue.emplace_back(line.substr(0, kMaxLineChars));
+    auto& queue = Queue_();
+    std::lock_guard lock(queue.mutex);
+    if (queue.lines.size() < 8)
+        queue.lines.emplace_back(line.substr(0, kMaxLineChars));
     g_queued.store(true, std::memory_order_release);
 }
 
@@ -49,8 +59,8 @@ class RelaySink final : public spdlog::sinks::base_sink<std::mutex>
 
 Readout& ReadoutState()
 {
-    static Readout readout;
-    return readout;
+    static Readout* readout = new Readout; // never destroyed, see Queue_
+    return *readout;
 }
 
 void AttachLogRelay()
@@ -83,8 +93,9 @@ void FlushCandidateLines()
         return;
     std::vector<std::string> lines;
     {
-        std::lock_guard lock(g_queueMutex);
-        lines.swap(g_queue);
+        auto& queue = Queue_();
+        std::lock_guard lock(queue.mutex);
+        lines.swap(queue.lines);
         g_queued.store(false, std::memory_order_release);
     }
     for (const auto& line : lines)
