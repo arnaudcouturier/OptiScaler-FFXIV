@@ -3899,6 +3899,7 @@ PreviewStateEnvelope::~PreviewStateEnvelope() { delete static_cast<ScopedNrState
 
 void Shutdown()
 {
+    ext::nr::runtime::Shutdown(); // stop the background SHA-256 of the model files before the logger and the rest go
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (!g_nrLifetime.Idle())
     {

@@ -74,15 +74,14 @@ Check ($menu.Contains('rt::RequestRuntime(choices.values[(size_t) selected]);'))
 # 5d. The glue: the NGX search folder is the one AppendNgxSearchPaths really added (no folder recorded = nothing to disagree with),
 #     the catalog is hashed only when the card asks for it, and the session lock is evaluated outside the module mutex.
 Check ($seams.Contains('runtime::NoteNgxSearchFolder(')) 'AppendNgxSearchPaths must record the folder it added'
+# The behaviour of the glue (catalog, hashing, lock, scan) is run for real by nr_runtime_core; here only the product binding is pinned.
 $glue = [IO.File]::ReadAllText((Join-Path $nr 'runtime\NrRuntime.cpp'))
-Check ($glue.Contains('!s.Available() || G().ngxFolder.empty() ||')) 'FollowsNgxSearchPath must treat a missing folder as following'
-$build = $glue.IndexOf('void BuildCatalogLocked()')
-$buildEnd = $glue.IndexOf('void StartHashingLocked()')
-Check ($build -ge 0 -and $buildEnd -gt $build -and -not $glue.Substring($build, $buildEnd - $build).Contains('std::thread')) 'building the catalog must not start the hash worker'
-$cat = $glue.IndexOf('std::vector<Entry> Catalog()')
-Check ($cat -ge 0 -and $glue.Substring($cat, 400).Contains('StartHashingLocked();')) 'Catalog() (the card) starts the hash worker'
-$cur = $glue.IndexOf('std::shared_ptr<const Snapshot> Current()')
-Check ($cur -ge 0 -and $glue.IndexOf('LockedBySession(nullptr);', $cur) -lt $glue.IndexOf('std::lock_guard<std::mutex> lock(g.mutex);', $cur)) 'Current() must evaluate the session lock before it takes the module mutex'
+$core = [IO.File]::ReadAllText((Join-Path $nr 'runtime\NrRuntimeCore.h'))
+Check ($glue.Contains('runtime = *new Runtime(Env {') -and -not $glue.Contains('std::thread') -and -not $glue.Contains('lock_guard')) 'NrRuntime.cpp must stay a thin binding of the tested glue'
+Check (-not $core.Contains('LOG_')) 'the tested glue logs only through the environment'
+$workerAt = $core.IndexOf('void HashWorker('); $workerEnd = $core.IndexOf('Env _env;')
+Check ($workerAt -ge 0 -and $workerEnd -gt $workerAt -and -not $core.Substring($workerAt, $workerEnd - $workerAt).Contains('_env.log')) 'the hash worker must not log'
+Check ($dx12.Contains('ext::nr::runtime::Shutdown();')) 'DlssNr::Shutdown must stop the hash worker'
 
 # 5e. Fix round 1 (review H1, M1, M2, M5, M6, M7). EVERY place that gives up goes through FailModel / FailGlobal (ext/nr/runtime/NrRuntimeSwitch.h);
 #     nothing sets the latch by hand, and the set of sites is a reviewed table: adding a site means classifying it HERE as model-caused (a

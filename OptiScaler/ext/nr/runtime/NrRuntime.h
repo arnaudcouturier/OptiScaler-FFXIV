@@ -28,6 +28,12 @@ std::shared_ptr<const Snapshot> Startup();
 // The card chose `text` ("" / "auto", "legacy" or a folder name): written to [DlssNr] Runtime, applied after the quiet period.
 void RequestRuntime(const std::string& text);
 
+// The config value [DlssNr] Runtime, read under the same mutex RequestRuntime writes it with.
+std::string Requested();
+
+// Stops the SHA-256 worker and waits for it (called when the NR pass shuts down).
+void Shutdown();
+
 // Look at the disk again (a folder was added or removed). Automatic never moves by itself when a folder appears; this is the moment.
 void Rescan();
 

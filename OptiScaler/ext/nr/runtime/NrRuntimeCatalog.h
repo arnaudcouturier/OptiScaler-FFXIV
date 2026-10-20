@@ -134,6 +134,7 @@ struct Entry
     VersionParts fileVersion;   // from the file's version resource; empty when it has none
     VersionParts folderVersion; // from the folder name; empty for the legacy file
     uint64_t sizeBytes = 0;
+    uint64_t stamp = 0;         // last write time of the file; with the size it tells a replaced file from the one that was hashed
     std::string sha256;         // 64 lowercase hex characters, empty until computed
 };
 

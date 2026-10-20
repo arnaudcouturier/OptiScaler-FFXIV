@@ -22,6 +22,7 @@
 #include <imgui/imgui.h>
 
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <algorithm>
 #include <cmath>
@@ -132,7 +133,10 @@ static void RenderRuntimePicker(ext::NrConfig& nr)
 {
     namespace rt = ext::nr::runtime;
     const auto catalog = rt::Catalog();
-    const auto choices = rt::text::BuildChoices(catalog, nr.runtime.value_or_default());
+    // This control owns [DlssNr] Runtime but never touches nr.runtime directly: it is read and written through the glue's mutex
+    // (Requested / RequestRuntime), because the render thread and the previews poll it too.
+    static_assert(std::is_same_v<decltype(nr.runtime.value_or_default()), std::string>, "[DlssNr] Runtime is text");
+    const auto choices = rt::text::BuildChoices(catalog, rt::Requested());
 
     std::vector<const char*> items;
     for (const auto& label : choices.labels)

@@ -15,6 +15,7 @@
 #include <bcrypt.h>
 #include <winver.h>
 
+#include <atomic>
 #include <functional>
 #include <queue>
 #include <set>
@@ -59,8 +60,10 @@ inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::pa
             fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, iterEc);
             if (iterEc)
                 continue;
-            for (const auto& entry : it)
+            // increment(ec) rather than a range-for: operator++ throws on an error in the middle of a folder.
+            for (; !iterEc && it != fs::directory_iterator(); it.increment(iterEc))
             {
+                const auto& entry = *it;
                 std::error_code typeEc;
                 if (entry.is_directory(typeEc))
                 {
@@ -139,8 +142,9 @@ inline std::vector<Entry> ScanFolders(const std::vector<fs::path>& roots, const 
         fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
         if (ec)
             continue;
-        for (const auto& dirEntry : it)
+        for (; !ec && it != fs::directory_iterator(); it.increment(ec))
         {
+            const auto& dirEntry = *it;
             std::error_code typeEc;
             const std::wstring name = dirEntry.path().filename().wstring();
             const auto version = ParseFolderVersion(name);
@@ -191,6 +195,14 @@ inline uint64_t FileSize(const fs::path& file)
     std::error_code ec;
     const auto size = fs::file_size(file, ec);
     return ec ? 0 : static_cast<uint64_t>(size);
+}
+
+// Last write time as a number (0 when it cannot be read).
+inline uint64_t FileStamp(const fs::path& file)
+{
+    std::error_code ec;
+    const auto time = fs::last_write_time(file, ec);
+    return ec ? 0 : static_cast<uint64_t>(time.time_since_epoch().count());
 }
 
 namespace detail
@@ -252,7 +264,7 @@ inline std::string Sha256Hex(const void* data, size_t size)
 }
 
 // SHA-256 of a file, read in 1 MiB pieces; empty on any read error. Meant for a worker thread: the model is hundreds of MB.
-inline std::string Sha256File(const fs::path& file)
+inline std::string Sha256File(const fs::path& file, const std::atomic<bool>* cancel = nullptr)
 {
     HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -264,6 +276,11 @@ inline std::string Sha256File(const fs::path& file)
     bool ok = true;
     for (;;)
     {
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed))
+        {
+            ok = false; // asked to stop (the process is shutting down)
+            break;
+        }
         DWORD got = 0;
         if (!ReadFile(f, buffer.data(), static_cast<DWORD>(buffer.size()), &got, nullptr))
         {
