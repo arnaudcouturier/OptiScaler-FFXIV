@@ -211,6 +211,7 @@ SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart t
   HDR10 output (Windows HDR on first):     [HDR] FfxivHDR=true      ([HDR] Mode=1 = RenoDX scene HDR)
   HUD-less frame generation (opt-in):      [HudLess] Mode=ui_free   (needs DLSS-G output)
   Defaults: Neural Rendering, HDR, HUD-less, the DLSS-G unlock and the quality override are all OFF until you switch them on.
+  Menu look:                               [Menu] Style=ember       (flat charcoal menu; set [Menu] AccentColorR/G/B for the accent, default is blue)
 
 BRING YOUR OWN (not included: not redistributable from this repository)
 $(($byo | ForEach-Object { "  $_" }) -join "`n")

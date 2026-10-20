@@ -39,7 +39,7 @@ What this fork adds to OptiScaler, where each piece lives, how it attaches to up
 | FFXIV composition swapchain hook | untested on its own | [FFXIV module](#ffxiv-module) |
 | Character preview DLSS and spatial AA (CharaView) | opt-in, off by default; untested in game | [CharaView](#character-preview-charaview) |
 | Automatic mipmap bias | opt-in, off by default; untested in game | [Automatic mipmap bias](#automatic-mipmap-bias) |
-| Menu style (Ember, `[Menu] Style`) | opt-in, off by default (classic); palette and rules unit-tested, not yet seen in game | [Menu style](#menu-style-ember) |
+| Menu style (Ember, `[Menu] Style`) | opt-in, off by default (classic); tested (RTX 4090) | [Menu style](#menu-style-ember) |
 | Recovered items F2, F3, F4 | untested | [Recovered items](#items-recovered-from-nickles-build) |
 
 ## DLSS Neural Rendering (NR)
@@ -279,7 +279,7 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 - **Inputs:** the accent is `[Menu] AccentColorR/G/B`, the window's opacity is `[Menu] BGColorA`; `BGColorR/G/B` is not used, because the classic code mixes at most 12% of it into a fixed grey. A dark accent is lifted towards white so the check mark stays visible. Under HDR output the colours are tone-mapped like the classic ones (the seam runs before the tone mapping), and the window is still forced opaque by `AdjustTheme`.
 - **Dark only:** with `LightTheme = true` the menu stays classic.
 
-**Status.** Opt-in, off by default. The palette and its rules are unit-tested (every slot set, the neutrals identical for every accent and never tinted, the accent only on state slots, contrast of text 12:1, dim text 4.5:1 and the orange accent 3:1 on the card, alpha, metrics), and so are the ImGui adapter (every `ImGuiCol_` the library declares is assigned) and the single upstream line. It has not been seen in game yet.
+**Status.** Opt-in, off by default. Played in game on one RTX 4090. The palette and its rules are unit-tested (every slot set, the neutrals identical for every accent and never tinted, the accent only on state slots, contrast of text 12:1, dim text 4.5:1 and the orange accent 3:1 on the card, alpha, metrics), and so are the ImGui adapter (every `ImGuiCol_` the library declares is assigned) and the single upstream line.
 
 **Code.** `ext/menu/EmberPalette.h` (the palette and metrics as plain data, no ImGui types), `ext/menu/MenuStyleSeams.cpp` (copies the palette into the ImGuiStyle), `ext/menu/MenuStyle.h` and `MenuStyleConfig.h` (the key). **Seams.** menu `ApplyStyle`. **Config.** `[Menu] Style` (`classic` or `ember`; anything else is `classic`). Ini only: no menu control. It applies the next time the menu opens, and when a theme colour is changed in the menu's own theme section.
 
