@@ -3814,6 +3814,7 @@ PreviewBackendStatus AcquirePreviewBackend(ID3D12Device* device, PreviewBackend&
     if (!EnsureForwarder())
         return PreviewBackendStatus::ForwarderMissing;
     const auto runtime = ext::nr::runtime::Current();
+    out.revision = runtime->revision; // also when there is no model: the caller remembers which revision it probed
     if (!runtime->Available())
         return PreviewBackendStatus::ModelMissing;
     const auto model = std::optional<std::filesystem::path>(runtime->path);

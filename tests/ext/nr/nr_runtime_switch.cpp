@@ -211,6 +211,27 @@ static void ClicksToFeatures()
     CHECK(host.builtFrom.back() == entries[1].path);
     CHECK(host.model == entries[1].path);
 }
+static void SessionLockRules()
+{
+    {
+        SessionLock lock;
+        CHECK(lock.Reason(false, false) == nullptr); // nothing special: live switching allowed
+    }
+    {
+        SessionLock lock;
+        CHECK(lock.Reason(false, true) != nullptr); // the AMD bridge loads its model once
+        CHECK(lock.Reason(false, false) == nullptr); // ... and that follows the bridge state
+    }
+    {
+        // the hybrid precision is sticky: on once, locked for the rest of the session even after it is turned off again
+        SessionLock lock;
+        CHECK(lock.Reason(false, false) == nullptr);
+        CHECK(lock.Reason(true, false) != nullptr);
+        CHECK(lock.Reason(false, false) != nullptr);
+        CHECK(lock.Reason(false, true) != nullptr);
+    }
+}
+
 int main()
 {
     OrderAndFirstRevision();
@@ -219,6 +240,7 @@ int main()
     OtherFailuresSurvive();
     TwentyRapidSwitches();
     ClicksToFeatures();
+    SessionLockRules();
     if (failures == 0)
         std::puts("PASS: NR runtime switch");
     return failures == 0 ? 0 : 1;

@@ -52,6 +52,9 @@ $chara = [IO.File]::ReadAllText((Join-Path $Repo 'OptiScaler\ext\ffxiv\chara\Cha
 $sync = $chara.IndexOf('SyncRuntime(); //')
 $avail = $chara.IndexOf('if (Refresh() != Availability::Available || !EnsureInit(req.context))')
 Check ($sync -ge 0 -and $avail -ge 0 -and $sync -lt $avail) 'RunCoreSteps must call SyncRuntime() before it reads the availability'
+$reprobe = $chara.IndexOf('m.model == Probe::Missing && DlssNr::PreviewRuntimeRevision() != m.probedRuntime')
+Check ($reprobe -ge 0 -and $chara.Substring($reprobe, 220).Contains('m.forwarder = m.model = Probe::Unknown;')) 'a preview module that started without a model must probe again when the selection moves'
+Check ($chara.Contains('m.probedRuntime = m.backend.revision;')) 'EnsureInit must record the revision it probed'
 $stale = $chara.IndexOf('m.streamRuntime[index] != m.backend.revision')
 Check ($stale -ge 0) 'RunCoreSteps must compare the stream revision with the backend revision'
 if ($stale -ge 0) {
@@ -67,6 +70,19 @@ $menu = [IO.File]::ReadAllText((Join-Path $nr 'menu\DlssNr_Menu.cpp'))
 Check ($menu.Contains('rt::text::BuildChoices(') -and $menu.Contains('rt::text::StatusLines(')) 'the card must use NrRuntimeText.h for its entries and status lines'
 Check ($menu.Contains('ImGui::BeginDisabled(lock != nullptr);')) 'the combo must be disabled while live switching is locked'
 Check ($menu.Contains('rt::RequestRuntime(choices.values[(size_t) selected]);')) 'a pick must go through RequestRuntime (the coalescing rule)'
+
+# 5d. The glue: the NGX search folder is the one AppendNgxSearchPaths really added (no folder recorded = nothing to disagree with),
+#     the catalog is hashed only when the card asks for it, and the session lock is evaluated outside the module mutex.
+Check ($seams.Contains('runtime::NoteNgxSearchFolder(')) 'AppendNgxSearchPaths must record the folder it added'
+$glue = [IO.File]::ReadAllText((Join-Path $nr 'runtime\NrRuntime.cpp'))
+Check ($glue.Contains('!s.Available() || G().ngxFolder.empty() ||')) 'FollowsNgxSearchPath must treat a missing folder as following'
+$build = $glue.IndexOf('void BuildCatalogLocked()')
+$buildEnd = $glue.IndexOf('void StartHashingLocked()')
+Check ($build -ge 0 -and $buildEnd -gt $build -and -not $glue.Substring($build, $buildEnd - $build).Contains('std::thread')) 'building the catalog must not start the hash worker'
+$cat = $glue.IndexOf('std::vector<Entry> Catalog()')
+Check ($cat -ge 0 -and $glue.Substring($cat, 400).Contains('StartHashingLocked();')) 'Catalog() (the card) starts the hash worker'
+$cur = $glue.IndexOf('std::shared_ptr<const Snapshot> Current()')
+Check ($cur -ge 0 -and $glue.IndexOf('LockedBySession(nullptr);', $cur) -lt $glue.IndexOf('std::lock_guard<std::mutex> lock(g.mutex);', $cur)) 'Current() must evaluate the session lock before it takes the module mutex'
 
 # 6. The runtime choice is not part of the saved NR presets (the allowlist in NrUserPresets.h), and the config key is bound.
 $presets = [IO.File]::ReadAllText((Join-Path $nr 'presets\NrUserPresets.h'))

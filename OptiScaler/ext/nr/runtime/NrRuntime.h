@@ -41,9 +41,13 @@ std::vector<Entry> Catalog();
 // the AMD bridge). The card shows it and the selection stays where it is.
 const char* SwitchLockReason();
 
-// The folder the NGX core was told to search first, set once at init from Startup(). Empty when there was no model then.
+// AppendNgxSearchPaths reports the folder it really put first on the NGX search list (set once at init; the first report counts).
+void NoteNgxSearchFolder(const std::filesystem::path& folder);
+
+// That folder; empty when the NGX core was not given one.
 std::filesystem::path NgxSearchFolder();
 
-// True when the model has the name of the first NGX search path's file (the card says "restart" when a switch leaves that path).
+// False when the selected model sits outside the folder the NGX core was told to search first (the card then says a restart is needed
+// to move that path too). True when there is no model or no recorded folder: nothing to disagree with.
 bool FollowsNgxSearchPath(const Snapshot& s);
 } // namespace ext::nr::runtime

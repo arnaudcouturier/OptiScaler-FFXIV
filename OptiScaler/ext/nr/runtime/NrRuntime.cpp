@@ -7,11 +7,13 @@
 #include "ext/nr/NrConfig.h"
 #include "ext/nr/amd/AmdBridge.h"
 #include "ext/nr/runtime/NrRuntimeScan.h"
+#include "ext/nr/runtime/NrRuntimeSwitch.h"
 
 #include <Config.h>
 #include <State.h>
 #include <Util.h>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -148,15 +150,12 @@ void BuildCatalogLocked()
             entries.push_back(std::move(e));
     }
 
-    std::vector<fs::path> toHash;
     for (auto& e : entries)
     {
         FillFileFacts(e);
         const auto it = g.hashes.find(Key(e.path));
         if (it != g.hashes.end())
             e.sha256 = it->second;
-        else
-            toHash.push_back(e.path);
     }
     g.catalog = std::move(entries);
     g.catalogBuilt = true;
@@ -169,17 +168,29 @@ void BuildCatalogLocked()
     }
     LOG_INFO("DLSS-NR runtime catalog: {} candidate(s){}", g.catalog.size(), listing);
 
-    if (!toHash.empty() && !g.hashWorkerRunning)
+}
+
+// The model is hundreds of MB: nothing reads it for a hash until the card asks for the catalog (a session that never opens the card
+// does no extra file reads). Caller holds the mutex.
+void StartHashingLocked()
+{
+    Glue& g = G();
+    if (g.hashWorkerRunning)
+        return;
+    std::vector<fs::path> toHash;
+    for (const auto& e : g.catalog)
+        if (g.hashes.find(Key(e.path)) == g.hashes.end())
+            toHash.push_back(e.path);
+    if (toHash.empty())
+        return;
+    g.hashWorkerRunning = true;
+    try
     {
-        g.hashWorkerRunning = true;
-        try
-        {
-            std::thread(HashWorker, std::move(toHash)).detach();
-        }
-        catch (...)
-        {
-            g.hashWorkerRunning = false;
-        }
+        std::thread(HashWorker, std::move(toHash)).detach();
+    }
+    catch (...)
+    {
+        g.hashWorkerRunning = false;
     }
 }
 
@@ -198,13 +209,13 @@ void EnsureSelectorLocked()
         });
 }
 
+// Read without the module mutex: the AMD bridge has its own locks, and the render thread, the previews and the card all come here.
+// The hybrid FP4 precision caches its prepared weights per device, not per model file, so once it has been on in this session the
+// model stays where it is (turning the precision off again would otherwise allow a switch that leaves the old weights behind).
 bool LockedBySession(const char** why)
 {
-    const char* reason = nullptr;
-    if (ext::Cfg().nr.precision.value_or_default() == 4)
-        reason = "the hybrid FP4 model precision keeps its weights per device";
-    else if (!DlssNr::AmdBridge::Status().empty())
-        reason = "the AMD bridge loads its model once";
+    static SessionLock lock;
+    const char* reason = lock.Reason(ext::Cfg().nr.precision.value_or_default() == 4, !DlssNr::AmdBridge::Status().empty());
     if (why)
         *why = reason;
     return reason != nullptr;
@@ -214,18 +225,15 @@ bool LockedBySession(const char** why)
 std::shared_ptr<const Snapshot> Current()
 {
     Glue& g = G();
+    const bool locked = LockedBySession(nullptr);
     std::lock_guard<std::mutex> lock(g.mutex);
     EnsureSelectorLocked();
-    if (g.selector->Current() && LockedBySession(nullptr))
+    if (g.selector->Current() && locked)
         return g.selector->Current();
     const auto snapshot =
         g.selector->Poll(Wide(ext::Cfg().nr.runtime.value_or_default()), GetTickCount64());
     if (!g.startup)
-    {
         g.startup = snapshot;
-        if (snapshot->Available())
-            g.ngxFolder = snapshot->path.parent_path();
-    }
     return snapshot;
 }
 
@@ -269,6 +277,7 @@ std::vector<Entry> Catalog()
     std::lock_guard<std::mutex> lock(g.mutex);
     if (!g.catalogBuilt)
         BuildCatalogLocked();
+    StartHashingLocked();
     std::vector<Entry> copy = g.catalog;
     for (auto& e : copy)
     {
@@ -281,7 +290,6 @@ std::vector<Entry> Catalog()
 
 const char* SwitchLockReason()
 {
-    std::lock_guard<std::mutex> lock(G().mutex);
     const char* why = nullptr;
     LockedBySession(&why);
     return why;
@@ -293,9 +301,17 @@ fs::path NgxSearchFolder()
     return G().ngxFolder;
 }
 
+void NoteNgxSearchFolder(const fs::path& folder)
+{
+    std::lock_guard<std::mutex> lock(G().mutex);
+    if (G().ngxFolder.empty())
+        G().ngxFolder = folder;
+}
+
+// With no folder recorded (the NGX core was not given one) there is nothing the selected model could disagree with.
 bool FollowsNgxSearchPath(const Snapshot& s)
 {
     std::lock_guard<std::mutex> lock(G().mutex);
-    return s.Available() && !G().ngxFolder.empty() && Key(s.path.parent_path()) == Key(G().ngxFolder);
+    return !s.Available() || G().ngxFolder.empty() || Key(s.path.parent_path()) == Key(G().ngxFolder);
 }
 } // namespace ext::nr::runtime

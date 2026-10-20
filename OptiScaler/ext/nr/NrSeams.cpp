@@ -269,7 +269,10 @@ void AppendNgxSearchPaths(const std::filesystem::path& exePath, std::vector<std:
     const auto startup = runtime::Startup();
 
     if (startup && startup->Available())
+    {
         paths.push_back(startup->path.parent_path().wstring());
+        runtime::NoteNgxSearchFolder(startup->path.parent_path());
+    }
 }
 } // namespace ext::nr
 

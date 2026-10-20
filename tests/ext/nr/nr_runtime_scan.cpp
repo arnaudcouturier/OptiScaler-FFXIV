@@ -126,6 +126,7 @@ static void FolderScan()
         CHECK(found[0].fileVersion.empty());
         CHECK(fs::equivalent(found[1].path, r1 / L"NR.310.9" / kFile));
         CHECK(found[1].path == fs::canonical(r1 / L"NR.310.9" / kFile)); // canonical: one file, one spelling
+        CHECK(found[1].path.native().rfind(L"\\\\?\\", 0) != 0);     // and not in the extended-length form (it feeds the NGX search path and the log)
     }
 }
 

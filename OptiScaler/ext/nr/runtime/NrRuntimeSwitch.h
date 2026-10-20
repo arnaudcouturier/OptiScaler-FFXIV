@@ -11,6 +11,7 @@
 
 #include "ext/nr/runtime/NrRuntimeSelection.h"
 
+#include <atomic>
 #include <cstdint>
 
 namespace ext::nr::runtime
@@ -30,6 +31,27 @@ enum class SwitchResult
 //   void DropReuseCaches();                   // reuse caches and the reuse verdict belong to the old module
 //   void UseModel(const Snapshot&);           // the new model becomes current
 //   void MarkUnavailable(const Snapshot&);    // no model: report it, keep running as a pass-through
+// When live switching is off for the rest of the session, and why (null: allowed). The hybrid FP4 precision caches its prepared weights
+// per device, not per model file, so once it has been on the model stays where it is: turning the precision off again must not allow a
+// switch that leaves the old weights behind. The AMD bridge loads its model once. Thread safe.
+class SessionLock
+{
+  public:
+    const char* Reason(bool hybridPrecisionNow, bool amdBridgeActive)
+    {
+        if (hybridPrecisionNow)
+            _hybridSeen = true;
+        if (_hybridSeen)
+            return "the hybrid FP4 model precision was used in this session and keeps its prepared weights per device";
+        if (amdBridgeActive)
+            return "the AMD bridge loads its model once";
+        return nullptr;
+    }
+
+  private:
+    std::atomic<bool> _hybridSeen { false };
+};
+
 template <class Host>
 SwitchResult ApplyRuntimeChange(Host& host, const Snapshot& snapshot, uint64_t& appliedRevision)
 {

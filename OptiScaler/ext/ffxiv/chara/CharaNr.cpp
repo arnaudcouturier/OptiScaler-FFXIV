@@ -115,6 +115,7 @@ struct Module
     // The NR runtime revision (the model file the card selected) that each stream's model instance was built from. A stream whose
     // revision is not the backend's is rebuilt from the new model path once the GPU is finished with it (see SyncRuntime, RunCoreSteps).
     uint64_t streamRuntime[kMaxStreams] = {};
+    uint64_t probedRuntime = 0; // the NR runtime revision the model probe was made for (a later revision probes again)
     std::unique_ptr<DlssNr_Dx12> recorder;
     std::unique_ptr<GpuTime_Dx12> timer;
     TimerRing timerRing; // mirrors the query slots of `timer` (CharaNrRules.h): which list wrote each, its done value and mode
@@ -528,6 +529,7 @@ bool EnsureInit(ID3D11DeviceContext* context)
     if (m.forwarder == Probe::Unknown)
     {
         const DlssNr::PreviewBackendStatus status = DlssNr::AcquirePreviewBackend(dev12, m.backend);
+        m.probedRuntime = m.backend.revision;
         m.forwarder = status == DlssNr::PreviewBackendStatus::ForwarderMissing ? Probe::Missing : Probe::Present;
         m.model = status == DlssNr::PreviewBackendStatus::ModelMissing ? Probe::Missing : (status == DlssNr::PreviewBackendStatus::ForwarderMissing ? Probe::Unknown : Probe::Present);
         if (status == DlssNr::PreviewBackendStatus::CapabilityFailed)
@@ -1038,6 +1040,8 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
 
     if (m.inited)
         SyncRuntime(); // before the availability is read: a selection without a model must show at once
+    else if (m.model == Probe::Missing && DlssNr::PreviewRuntimeRevision() != m.probedRuntime)
+        m.forwarder = m.model = Probe::Unknown; // started without a model and one was selected since: EnsureInit probes again
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return RunOutcome::NotAvailable;
 
