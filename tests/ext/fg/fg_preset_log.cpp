@@ -193,6 +193,9 @@ void ConfirmedEffect()
         Readout r;
         r.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=0, applied=0, value=0)"), 1);
         CHECK(Confirm(r, 3) == Effect::Unknown);
+        Readout q; // the cache held nothing (requested=0) but a number is printed: still no statement about our request
+        q.Feed(Ngx("X:1", "ReportOverrideStates: render preset (requested=0, applied=0, value=3)"), 1);
+        CHECK(Confirm(q, 3) == Effect::Unknown);
     }
     {   // a "Preset B selected" line confirms B, and only B
         Readout r;
