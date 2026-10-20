@@ -386,9 +386,10 @@ void OnDeviceHooked(ID3D11Device* device)
 
     // The older module's view of the setting depends on the game default: tell it now that the game is known.
     if (!g_installed && !g_failed && AutoEnabled())
-        InstallBindHooks(g_device.Get());
-    else
-        mipbias::OnSettingChanged();
+        InstallBindHooks(g_device.Get()); // on success this also tells the older module to stand down
+
+    if (!g_installed)
+        mipbias::OnSettingChanged(); // off, or the install failed: the older module follows the setting with the game known
 }
 
 void OnFeatureCreate()
