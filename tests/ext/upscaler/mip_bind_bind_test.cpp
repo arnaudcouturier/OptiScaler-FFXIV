@@ -3,6 +3,8 @@
 // (taken from its vtable, unhooked); the engine's Set / Get are what the detours call.
 #include "ext/upscaler/MipBindEngine.h"
 
+#include <d3d11_1.h>
+
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -379,8 +381,41 @@ static void SwitchingOff()
     CHECK(Near(BiasOf(r.Bound(0, 0).Get()), -2.0));
 }
 
+// The marker that tells the evaluate seam whether a context is the hooked one: a stamped immediate context matches itself,
+// not another device's immediate context, a deferred context cannot be stamped, and a wrapper that forwards private data to
+// the native context (what ReShade's context does) is the same as asking the native context.
+static void ContextIdentity()
+{
+    Rig a, b;
+    CHECK(a.Init() && b.Init());
+
+    const unsigned long long token = ContextMarker::Stamp(a.context.Get());
+    CHECK(token != 0);
+    CHECK(ContextMarker::Matches(a.context.Get(), token));
+    CHECK(!ContextMarker::Matches(b.context.Get(), token)); // another device's immediate context
+    CHECK(!ContextMarker::Matches(nullptr, token));
+    CHECK(!ContextMarker::Matches(a.context.Get(), 0));
+    CHECK(!ContextMarker::Matches(a.context.Get(), token + 1)); // a stale token
+
+    // the same object seen through another interface pointer (QueryInterface returns the same marker store)
+    ComPtr<ID3D11DeviceContext1> viaInterface;
+    if (SUCCEEDED(a.context.As(&viaInterface)))
+        CHECK(ContextMarker::Matches(viaInterface.Get(), token));
+
+    // a second stamp (another install) replaces the first one
+    const unsigned long long second = ContextMarker::Stamp(a.context.Get());
+    CHECK(second != 0 && second != token);
+    CHECK(ContextMarker::Matches(a.context.Get(), second) && !ContextMarker::Matches(a.context.Get(), token));
+
+    ComPtr<ID3D11DeviceContext> deferred;
+    CHECK(SUCCEEDED(a.device->CreateDeferredContext(0, &deferred)));
+    CHECK(ContextMarker::Stamp(deferred.Get()) == 0);
+    CHECK(!ContextMarker::Matches(deferred.Get(), second));
+}
+
 int main()
 {
+    ContextIdentity();
     SixStages();
     NullsAndRanges();
     PassThrough();

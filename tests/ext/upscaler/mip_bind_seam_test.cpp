@@ -122,6 +122,10 @@ int main(int argc, char** argv)
         CHECK(Body(hooks, "HRESULT STDMETHODCALLTYPE HkCreateSamplerState(").find("ext::core::HooksBypassed()") !=
               std::string::npos);
         CHECK(Body(hooks, "void OnSamplerCreated(").find("!bypassed &&") != std::string::npos);
+        // the identity marker is the tested one of the engine header; a hand-set value that blocks the feature is said once
+        CHECK(hooks.find("ContextMarker::Stamp(context.Get())") != std::string::npos);
+        CHECK(hooks.find("ContextMarker::Matches(context, g_stamp)") != std::string::npos);
+        CHECK(Body(hooks, "void OnEvaluate(").find("MipmapBiasOverride is set by hand (it always wins)") != std::string::npos);
         // a manual value makes the sampler not eligible
         CHECK(Body(hooks, "void OnSamplerCreated(").find("!ManualOverrideSet() &&") != std::string::npos);
         // thirteen detours: CreateSamplerState plus the six pairs; the CreateSamplerState one is attached LAST (at the first

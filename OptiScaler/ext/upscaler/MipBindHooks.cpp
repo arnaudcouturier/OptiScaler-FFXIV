@@ -47,28 +47,10 @@ bool g_tableFullLogged = false;
 
 // Immediate-context timeline only (the evaluate seam): what was applied and what was logged.
 bool g_identityLogged = false;
+bool g_manualBlockLogged = false;
 bool g_firstTarget = true;
 
-constexpr GUID kContextTag { 0x9d0d5c3e, 0x7c1b, 0x4a62, { 0x8f, 0x37, 0x41, 0xb5, 0x0e, 0x6a, 0x2c, 0x90 } };
-std::atomic<unsigned long long> g_stampSequence { 0 };
-unsigned long long g_stamp = 0;
-
-unsigned long long StampContext(ID3D11DeviceContext* context)
-{
-    if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
-        return 0;
-
-    const unsigned long long token = ++g_stampSequence;
-    return SUCCEEDED(context->SetPrivateData(kContextTag, sizeof(token), &token)) ? token : 0;
-}
-
-bool ContextMatches(ID3D11DeviceContext* context)
-{
-    unsigned long long actual = 0;
-    UINT size = sizeof(actual);
-    return context != nullptr && g_stamp != 0 && SUCCEEDED(context->GetPrivateData(kContextTag, &size, &actual)) &&
-           size == sizeof(actual) && actual == g_stamp;
-}
+unsigned long long g_stamp = 0; // the marker put on the hooked immediate context (ContextMarker, MipBindEngine.h)
 
 std::optional<bool> Explicit(const CustomOptional<bool, NoDefault>& setting)
 {
@@ -255,7 +237,7 @@ bool InstallBindHooks(ID3D11Device* device)
     g_engine.Attach(context.Get(), g_set, g_get);
     g_context = context;
     g_device = device;
-    g_stamp = StampContext(context.Get());
+    g_stamp = ContextMarker::Stamp(context.Get());
     g_installed = true;
     g_ready.store(true, std::memory_order_release);
     LOG_INFO("Bind-time mip bias: sampler hooks installed on device {:#x}, immediate context {:#x}", (size_t) device,
@@ -422,7 +404,7 @@ void OnEvaluate(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters)
     if (!g_identityLogged)
     {
         g_identityLogged = true;
-        if (ContextMatches(context))
+        if (ContextMarker::Matches(context, g_stamp))
             LOG_INFO("Bind-time mip bias: the evaluate context is the hooked immediate context");
         else
             LOG_INFO("Bind-time mip bias: the evaluate context {:#x} is not marked as the hooked context {:#x} (a wrapper "
@@ -431,16 +413,31 @@ void OnEvaluate(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters)
     }
 
     // A manual value always wins; so does switching the setting off.
-    if (!BindShouldRun(AutoEnabled(), ManualOverrideSet()))
+    const bool autoOn = AutoEnabled();
+    const bool manual = ManualOverrideSet();
+    if (!BindShouldRun(autoOn, manual))
     {
         if (g_engine.Active())
         {
             g_engine.SetActive(false);
             LOG_INFO("Bind-time mip bias: off ({}); the game's own samplers are bound again",
-                     ManualOverrideSet() ? "a manual Mipmap Bias value is set" : "the setting is off");
+                     manual ? "a manual Mipmap Bias value is set" : "the setting is off");
+        }
+
+        // The setting is on but a hand-set value blocks it: say so once, otherwise nothing in the log tells why nothing happens.
+        if (autoOn && manual && !g_manualBlockLogged)
+        {
+            g_manualBlockLogged = true;
+            LOG_WARN("Bind-time mip bias: not applied because MipmapBiasOverride is set by hand (it always wins); set "
+                     "MipmapBiasOverride=auto in the ini or press Reset in the Mipmap Bias card to let the automatic bias work");
+        }
+        else if (!manual)
+        {
+            g_manualBlockLogged = false;
         }
         return;
     }
+    g_manualBlockLogged = false;
 
     unsigned renderW = 0, outputW = 0;
     if (!ReadSizes(parameters, renderW, outputW))

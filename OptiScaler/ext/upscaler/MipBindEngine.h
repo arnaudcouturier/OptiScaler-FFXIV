@@ -206,6 +206,37 @@ class SamplerTable
     std::atomic<std::uint32_t> _next { 0 };
 };
 
+// ---- context identity ----------------------------------------------------------------------------------------------------
+// A ReShade-style wrapper may hand NGX a different COM pointer for the same immediate context. Private data set through such a
+// wrapper reaches the native context, so a marker put on the hooked context is found again through the wrapper. A deferred
+// context has no marker and never gets one. Used only to LOG whether the evaluate context is the hooked one: binds are served
+// by pointer compare on the hooked context, nothing here is on the bind path.
+struct ContextMarker
+{
+    static constexpr GUID kTag = { 0x9d0d5c3e, 0x7c1b, 0x4a62, { 0x8f, 0x37, 0x41, 0xb5, 0x0e, 0x6a, 0x2c, 0x90 } };
+
+    // The token that was set, 0 when `context` is not an immediate context or the data could not be set.
+    static unsigned long long Stamp(ID3D11DeviceContext* context)
+    {
+        static std::atomic<unsigned long long> sequence { 0 };
+        if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+            return 0;
+
+        const unsigned long long token = ++sequence;
+        return SUCCEEDED(context->SetPrivateData(kTag, sizeof(token), &token)) ? token : 0;
+    }
+
+    static bool Matches(ID3D11DeviceContext* context, unsigned long long token)
+    {
+        if (context == nullptr || token == 0)
+            return false;
+
+        unsigned long long actual = 0;
+        UINT size = sizeof(actual);
+        return SUCCEEDED(context->GetPrivateData(kTag, &size, &actual)) && size == sizeof(actual) && actual == token;
+    }
+};
+
 // ---- the engine ----------------------------------------------------------------------------------------------------
 struct Counters
 {
