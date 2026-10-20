@@ -121,6 +121,11 @@ void Table()
         { "rep stosq", { 0xF3, 0x48, 0xAB }, 3, Flow::Next, Bit(RAX) | Bit(RCX) | Bit(RSI) | Bit(RDI), false, 0 },
         { "cmovnz eax,ecx", { 0x0F, 0x45, 0xC1 }, 3, Flow::Next, Bit(RAX), false, 0 },
         { "bswap r9d", { 0x41, 0x0F, 0xC9 }, 3, Flow::Next, Bit(R9), false, 0 },
+        // review 2, M1: REX.B on 90 is xchg r8,rax; four prefixes are fine
+        { "xchg r8,rax (41 90)", { 0x41, 0x90 }, 2, Flow::Next, Bit(RAX) | Bit(R8), false, 0 },
+        { "four operand-size prefixes and a nop", { 0x66, 0x66, 0x66, 0x66, 0x90 }, 5, Flow::Next, 0, false, 0 },
+        { "cld", { 0xFC }, 1, Flow::Next, 0, false, 0 },
+        { "call [rsp+8] reads 8 bytes", { 0xFF, 0x54, 0x24, 0x08 }, 4, Flow::Call, 0, false, 0 },
     };
     for (const Row& r : rows)
     {
@@ -202,6 +207,64 @@ void OperandDetails()
     CHECK(n.len == 4 && n.immLen == 2 && n.imm == 0x1234);
 }
 
+void SixteenBitOperandSizeAndFrameValues()
+{
+    Insn n;
+    // review 2, M1: 66 changes the length of push imm and of branches, and REX.W overrides it: none of that is guessed
+    CHECK(!Dec({ 0x66, 0x68, 0x34, 0x12 }, n));                      // push imm16
+    CHECK(!Dec({ 0x66, 0x6A, 0x01 }, n));                            // push imm8 with a 16-bit operand
+    CHECK(!Dec({ 0x66, 0x48, 0x05, 0x78, 0x56, 0x34, 0x12 }, n));    // add rax,imm32 under 66 + REX.W
+    CHECK(Dec({ 0x66, 0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8 }, n) && n.len == 11); // mov rax,imm64: REX.W with 66 is still fine (the immediate is 64 bits)
+    CHECK(Dec({ 0xFF, 0x54, 0x24, 0x08 }, n) && n.memBytes == 8);       // call [rsp+8] reads a pointer
+    CHECK(!Dec({ 0x66, 0xE8, 0x01, 0x00, 0x00, 0x00 }, n));          // call with 66
+    CHECK(!Dec({ 0x66, 0xE9, 0x01, 0x00, 0x00, 0x00 }, n));          // jmp with 66
+    CHECK(!Dec({ 0x66, 0xEB, 0x01 }, n));
+    CHECK(!Dec({ 0x66, 0x74, 0x01 }, n));                            // jz with 66
+    CHECK(!Dec({ 0x66, 0x0F, 0x85, 0x01, 0x00, 0x00, 0x00 }, n));    // jnz rel32 with 66
+    CHECK(!Dec({ 0x66, 0xC3 }, n));                                  // retw
+    CHECK(Dec({ 0x66, 0xB8, 0x34, 0x12 }, n) && n.len == 4);          // mov ax,imm16 is a plain 16-bit form
+    CHECK(Dec({ 0x66, 0x90 }, n) && n.len == 2);
+    CHECK(Dec({ 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00 }, n) && n.len == 6); // nop word [rax+rax]
+
+    // rsp / rbp as a register operand in a MEMORY form: the frame address is stored somewhere
+    CHECK(Dec({ 0x48, 0x89, 0x60, 0xD5 }, n));                       // mov [rax-2Bh],rsp
+    CHECK(n.readsFrameRegAsValue && n.memWrite);
+    CHECK(Dec({ 0x48, 0x89, 0x68, 0x08 }, n));                       // mov [rax+8],rbp
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x88, 0x60, 0x08 }, n));                             // mov [rax+8],ah (high byte, no REX): not rsp
+    CHECK(!n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x40, 0x88, 0x68, 0x08 }, n));                       // mov [rax+8],bpl (REX): the low byte of rbp
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x66, 0x48, 0x0F, 0x6E, 0xE4 }, n));                 // movq xmm4,rsp
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x66, 0x48, 0x0F, 0x6E, 0xE5 }, n));                 // movq xmm4,rbp
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0xF2, 0x48, 0x0F, 0x2A, 0xC4 }, n));                 // cvtsi2sd xmm0,rsp
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x66, 0x0F, 0xC4, 0xC5, 0x01 }, n));                 // pinsrw xmm0,ebp,1
+    CHECK(n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x66, 0x0F, 0x6E, 0xC1 }, n));                       // movd xmm0,ecx: nothing to flag
+    CHECK(!n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x48, 0x8D, 0x04, 0x29 }, n));                       // lea rax,[rcx+rbp*1]: rbp as the index
+    CHECK(n.isLea && n.readsFrameRegAsValue);
+    CHECK(Dec({ 0x48, 0x8D, 0x45, 0xD0 }, n));                       // lea rax,[rbp-30h]: an address, handled by the proof
+    CHECK(n.isLea && !n.readsFrameRegAsValue);
+
+    // stores whose address the operand does not give
+    CHECK(Dec({ 0xF3, 0x48, 0xAB }, n) && n.aliasStore);            // rep stosq
+    CHECK(Dec({ 0xA4 }, n) && n.aliasStore);                         // movsb
+    CHECK(Dec({ 0xF3, 0x48, 0xA5 }, n) && n.aliasStore);            // rep movsq
+    CHECK(Dec({ 0x48, 0x0F, 0xAB, 0x04, 0x24 }, n) && n.aliasStore); // bts [rsp],rax
+    CHECK(Dec({ 0x0F, 0xB3, 0x00 }, n) && n.aliasStore);            // btr [rax],eax
+    CHECK(Dec({ 0x0F, 0xBB, 0x00 }, n) && n.aliasStore);            // btc [rax],eax
+    CHECK(Dec({ 0x0F, 0xAB, 0xC1 }, n) && !n.aliasStore);           // bts ecx,eax: a register
+    CHECK(Dec({ 0x0F, 0xBA, 0x28, 0x05 }, n) && !n.aliasStore);     // bts dword [rax],5: the bit offset is inside the operand
+    CHECK(Dec({ 0xAC }, n) && !n.aliasStore);                        // lodsb reads
+    CHECK(Dec({ 0xA6 }, n) && !n.aliasStore);                        // cmpsb reads
+    CHECK(Dec({ 0x48, 0x89, 0x01 }, n) && !n.aliasStore);           // an ordinary store
+    CHECK(!Dec({ 0xFD }, n));                                        // std: a downward string store would reach below
+}
+
 void RefusesWhatItDoesNotKnow()
 {
     Insn n;
@@ -235,7 +298,7 @@ void RefusesWhatItDoesNotKnow()
     CHECK(Dec({ 0xFF, 0xE0 }, n));
     CHECK(n.flow == Flow::JumpIndirect);
     // the instruction length never exceeds the bytes given
-    CHECK(!Dec({ 0x66, 0x66, 0x66, 0x66, 0x66, 0x90 }, n)); // more than four prefixes
+    CHECK(!Dec({ 0x66, 0x66, 0x66, 0x66, 0x66, 0x90 }, n)); // five prefixes (four are accepted, see the table)
 }
 } // namespace
 
@@ -243,6 +306,7 @@ int main()
 {
     Table();
     OperandDetails();
+    SixteenBitOperandSizeAndFrameValues();
     RefusesWhatItDoesNotKnow();
     if (g_failures)
     {

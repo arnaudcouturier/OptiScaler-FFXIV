@@ -67,6 +67,7 @@ struct Insn
     uint8_t memSize = 0;    // bytes stored (a conservative upper bound for SSE stores)
     uint8_t memBytes = 0;   // bytes a memory operand touches, load or store (conservative; 1 for lea, which touches nothing)
     bool isLea = false;
+    bool aliasStore = false; // writes memory at an address the operand does not name: rep movs/stos (rdi), bts/btr/btc with a register bit offset
     bool writesStack = false; // push, pop, leave, call/ret excluded (they balance); also set for any write to rsp
     bool readsFrameRegAsValue = false; // rsp or rbp used as a register operand (not as an addressing base)
 };
@@ -88,7 +89,7 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
     // legacy prefixes (at most 4): operand size, rep, lock, and the ignored segment overrides (cs/ds/es/ss)
     for (;; ++i)
     {
-        if (i >= avail || i >= 4)
+        if (i >= avail || i > 4) // at most four prefixes
             return false;
         const uint8_t b = p[i];
         if (b == 0x66)
@@ -372,7 +373,8 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
                 wRm = true;
                 out.writesStack = true;
                 break;
-            case 0x90: // nop / pause
+            case 0x90: // nop / pause; with REX.B it is xchg r8,rax
+                implicitW = rexB ? (Bit(RAX) | Bit(R8)) : 0;
                 break;
             case 0x98:
                 implicitW = Bit(RAX);
@@ -380,7 +382,9 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
             case 0x99:
                 implicitW = Bit(RDX);
                 break;
-            case 0x9B: case 0x9C: case 0x9D: case 0xF5: case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD:
+            case 0xFD: // std: a downward string store could reach below its operand
+                return fail();
+            case 0x9B: case 0x9C: case 0x9D: case 0xF5: case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC:
                 if (op == 0x9C || op == 0x9D)
                     out.writesStack = true;
                 break;
@@ -391,6 +395,7 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
                 break;
             case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
                 implicitW = Bit(RAX) | Bit(RCX) | Bit(RSI) | Bit(RDI);
+                out.aliasStore = (op == 0xA4 || op == 0xA5 || op == 0xAA || op == 0xAB); // movs and stos write through rdi
                 break;
             case 0xA8:
                 immBytes = 1;
@@ -582,11 +587,25 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
             if (out.mod != 3 || out.ext < 5)
                 return fail();
         }
+        else if (op == 0xAB || op == 0xB3 || op == 0xBB)
+            out.aliasStore = (out.mod != 3); // bts/btr/btc r/m, reg: the bit offset in the register picks the address
         else if (op == 0x71 || op == 0x72 || op == 0x73)
         {
             if (out.mod != 3)
                 return fail();
         }
+    }
+
+    // A 66 prefix changes the length of push imm and of the branches, and REX.W overrides it on the other immediates: none of that is
+    // guessed, the combination is refused (a compiler never emits it).
+    if (out.opsize16)
+    {
+        if (!out.twoByte && (op == 0x68 || op == 0x6A))
+            return fail();
+        if (out.flow != Flow::Next && out.flow != Flow::Stop)
+            return fail();
+        if (out.rexW && immBytes == -1)
+            return fail();
     }
 
     // ---- immediate --------------------------------------------------------------------------------------------------------------
@@ -658,10 +677,13 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
         const bool sse = out.twoByte && ((op >= 0x10 && op <= 0x17) || (op >= 0x28 && op <= 0x2F) || (op >= 0x50 && op <= 0x7F) || op == 0xC2 ||
                                          (op >= 0xC4 && op <= 0xC6) || (op >= 0xD0 && op <= 0xFE));
         out.memBytes = out.isLea ? 1 : (sse ? 16 : static_cast<uint8_t>(width));
+        if (!out.twoByte && ((op == 0xFF && (out.ext == 2 || out.ext == 4 || out.ext == 6)) || op == 0x8F))
+            out.memBytes = 8; // call/jmp/push [mem] and pop [mem] move a pointer
     }
-    if (out.hasModrm && out.mod == 3)
+    if (out.hasModrm)
     {
-        // rsp / rbp named as a plain register operand (a value, not an address): which fields are general-purpose registers?
+        // rsp / rbp named as a plain register operand (a value, not an address), in a register form AND when the other operand is
+        // memory (a store of the frame address): which fields are general-purpose registers?
         bool gprRm = !out.twoByte, gprReg = !out.twoByte;
         if (!out.twoByte)
         {
@@ -678,14 +700,16 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
         else
         {
             const bool intOp = (op >= 0x40 && op <= 0x4F) || (op >= 0x90 && op <= 0x9F) || (op >= 0xA3 && op <= 0xBF && op != 0xA2 && op != 0xAE) || op == 0xC0 || op == 0xC1 || op == 0xC3;
-            gprRm = intOp || (op == 0x7E && !rep);
+            // rm is a general-purpose register for the integer ops, 66 0F 7E (movd/movq r/m, xmm), 0F 6E (movd/movq xmm, r/m),
+            // 0F 2A (cvtsi2ss/sd) and 0F C4 (pinsrw)
+            gprRm = intOp || (op == 0x7E && !rep) || op == 0x6E || op == 0x2A || op == 0xC4;
             gprReg = (intOp && !(op >= 0x90 && op <= 0x9F) && op != 0xBA) || op == 0x2C || op == 0x2D || op == 0x50 || op == 0xD7 || op == 0xC5;
         }
-        auto isFrame = [](uint8_t r) { return r == RSP || r == RBP; };
-        if ((gprRm && isFrame(out.rm)) || (gprReg && isFrame(out.reg)))
+        // without a REX prefix the byte registers 4..7 are ah, ch, dh, bh, not rsp/rbp/rsi/rdi
+        auto isFrame = [&](uint8_t r) { return (r == RSP || r == RBP) && !(is8 && !out.hasRex); };
+        if ((out.mod == 3 && gprRm && isFrame(out.rm)) || (gprReg && isFrame(out.reg)))
             out.readsFrameRegAsValue = true;
-    }
-    if (out.mem.present && !out.mem.ripRel && (out.mem.index == RSP || out.mem.index == RBP))
+    }    if (out.mem.present && !out.mem.ripRel && (out.mem.index == RSP || out.mem.index == RBP))
         out.readsFrameRegAsValue = true;
     in = out;
     return true;
