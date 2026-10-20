@@ -736,8 +736,8 @@ void TestTheLinesOfASession()
         CHECK(first.logs[0] == "Jitter correction: learning the game's jitter ratio for " + kKey + "; the game's values pass through until 5 agreeing snapshots are seen");
         CHECK(first.logs[1] ==
               "Jitter correction: on; totals since the start of the session: 1 evaluates seen, 0 scaled, 1 passed through while learning, 0 passed "
-              "through because the jitter pair was not usable, 0 already scaled (block not refreshed), 0 left alone (game consistent or ratio "
-              "refused); state: learning for " + kKey + "; snapshots: 1 accepted, 0 disagreed with the ratio, 0 ratio changes, 0 restarts after a "
+              "through because the jitter pair was not usable, 0 already scaled (block not refreshed), 0 left alone (nothing to apply); "
+              "state: learning for " + kKey + "; snapshots: 1 accepted, 0 disagreed with the ratio, 0 ratio changes, 0 restarts after a "
               "configuration change; verification fresh; frame generation active no (input Upscaler)");
     }
     for (int i = 2; i <= 4; ++i)
@@ -756,8 +756,8 @@ void TestTheLinesOfASession()
     CHECK(tick.logs.size() == 1);
     CHECK(StatusOf(tick) ==
           "Jitter correction: on; totals since the start of the session: 21 evaluates seen, 17 scaled, 4 passed through while learning, 0 passed "
-          "through because the jitter pair was not usable, 0 already scaled (block not refreshed), 0 left alone (game consistent or ratio "
-          "refused); state: calibrated ratio 0.600 for " + kKey + "; snapshots: 21 accepted, 0 disagreed with the ratio, 0 ratio changes, 0 restarts "
+          "through because the jitter pair was not usable, 0 already scaled (block not refreshed), 0 left alone (nothing to apply); "
+          "state: calibrated ratio 0.600 for " + kKey + "; snapshots: 21 accepted, 0 disagreed with the ratio, 0 ratio changes, 0 restarts "
           "after a configuration change; verification fresh; frame generation active no (input Upscaler)");
 
     // frame generation and its input are named (only the Upscaler input reads the pair from the block)
@@ -786,7 +786,7 @@ void TestOtherStatesAreNamedInTheStatusLine()
         g.t = 10000;
         const std::string status = StatusOf(g.Next());
         CHECK_MSG(Has(status, "state: consistent (ratio 1.000), nothing applied, for " + kKey) && Has(status, "0 scaled, 4 passed through while learning") &&
-                      Has(status, "3 left alone (game consistent or ratio refused)"), "%s", status.c_str());
+                      Has(status, "3 left alone (nothing to apply)"), "%s", status.c_str());
     }
     {
         Session g;

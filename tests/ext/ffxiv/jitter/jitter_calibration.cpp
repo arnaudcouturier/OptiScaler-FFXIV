@@ -655,8 +655,8 @@ void TestTheText()
     snapshots.restarts = 1;
     CHECK(FormatStatus(counts, "calibrated ratio 0.600 for K", snapshots, false, true, "Upscaler") ==
           "Jitter correction: on; totals since the start of the session: 21 evaluates seen, 10 scaled, 4 passed through while learning, 3 passed "
-          "through because the jitter pair was not usable, 2 already scaled (block not refreshed), 1 left alone (game consistent or ratio "
-          "refused); state: calibrated ratio 0.600 for K; snapshots: 17 accepted, 5 disagreed with the ratio, 2 ratio changes, 1 restarts after a "
+          "through because the jitter pair was not usable, 2 already scaled (block not refreshed), 1 left alone (nothing to apply); "
+          "state: calibrated ratio 0.600 for K; snapshots: 17 accepted, 5 disagreed with the ratio, 2 ratio changes, 1 restarts after a "
           "configuration change; verification fresh; frame generation active yes (input Upscaler)");
     CHECK(Has(FormatStatus(counts, "K", snapshots, true, false, "NoFG"), "verification stale; frame generation active no (input NoFG)"));
     CHECK(Has(FormatStatus(counts, "K", snapshots, false, true, "DLSSG"), "frame generation active yes (input DLSSG)"));

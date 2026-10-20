@@ -1,6 +1,8 @@
 #include "check.h"
 #include "ext/core/ExtConfig.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -77,6 +79,66 @@ void TestRoundTrip()
     CHECK(std::string(autoOut.GetValue("FFXIV", "JitterCorrection", "")) == "auto");
 }
 
+// [FFXIV] JitterScaleOverride: a float, default 0 = off ("auto" resolves to 0, which is not an error), read as written.
+void TestScaleOverrideKey()
+{
+    FfxivConfig fresh;
+    CHECK(fresh.jitterScaleOverride.value_or_default() == 0.0f && !fresh.jitterScaleOverride.has_value());
+
+    config::Binder binder;
+    fresh.Bind(binder);
+    int found = 0;
+    for (const auto& b : binder.Table())
+        if (std::string(b.section) == "FFXIV" && std::string(b.key) == "JitterScaleOverride" && b.field == &fresh.jitterScaleOverride)
+            ++found;
+    CHECK(found == 1);
+
+    for (const char* text : { "0.8", "0.6", "0.5", "1.0", "0", "-1", "2.5" })
+    {
+        FfxivConfig loaded;
+        config::Binder b;
+        loaded.Bind(b);
+        CSimpleIniA ini;
+        ini.SetValue("FFXIV", "JitterScaleOverride", text);
+        for (const auto& entry : b.Table())
+            entry.load(entry, ini);
+        CHECK_MSG(std::fabs(loaded.jitterScaleOverride.value_or_default() - std::strtof(text, nullptr)) < 1e-6, "value %s", text);
+        // saved and loaded again: the same value
+        CSimpleIniA out;
+        for (const auto& entry : b.Table())
+            entry.save(entry, out);
+        FfxivConfig again;
+        config::Binder b2;
+        again.Bind(b2);
+        for (const auto& entry : b2.Table())
+            entry.load(entry, out);
+        CHECK_MSG(std::fabs(again.jitterScaleOverride.value_or_default() - std::strtof(text, nullptr)) < 1e-6, "round trip of %s", text);
+    }
+    // "auto", an empty value and a missing key mean unset: 0 = off, written back as auto
+    for (const char* text : { "auto", "" })
+    {
+        FfxivConfig loaded;
+        config::Binder b;
+        loaded.Bind(b);
+        CSimpleIniA ini;
+        ini.SetValue("FFXIV", "JitterScaleOverride", text);
+        for (const auto& entry : b.Table())
+            entry.load(entry, ini);
+        CHECK(loaded.jitterScaleOverride.value_or_default() == 0.0f && !loaded.jitterScaleOverride.has_value());
+        CSimpleIniA out;
+        for (const auto& entry : b.Table())
+            entry.save(entry, out);
+        CHECK(std::string(out.GetValue("FFXIV", "JitterScaleOverride", "")) == "auto");
+    }
+    FfxivConfig missing;
+    config::Binder b;
+    missing.Bind(b);
+    CSimpleIniA empty;
+    for (const auto& entry : b.Table())
+        entry.load(entry, empty);
+    CHECK(missing.jitterScaleOverride.value_or_default() == 0.0f);
+}
+
 void TestFragment(const std::string& repo)
 {
     const std::string ffxiv = ReadFile(repo + "/OptiScaler/ext/ini/FFXIV.ini");
@@ -89,6 +151,24 @@ void TestFragment(const std::string& repo)
         if (at != std::string::npos)
             CHECK(ffxiv.rfind("Default (auto) is false", at) != std::string::npos && at - ffxiv.rfind("Default (auto) is false", at) < 40);
     }
+    // the experiment key: documented as default off (0), the line right above the key, with the valid range and the condition
+    CHECK(HasKeyLine(ffxiv, "JitterScaleOverride"));
+    {
+        const size_t at = ffxiv.find("JitterScaleOverride=auto");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos)
+        {
+            CHECK(ffxiv.rfind("Default (auto) is 0", at) != std::string::npos && at - ffxiv.rfind("Default (auto) is 0", at) < 40);
+            // the comment block of the key: from the blank line before it
+            const size_t lf = ffxiv.rfind("\n\n", at), crlf = ffxiv.rfind("\r\n\r\n", at);
+            size_t start = lf == std::string::npos ? 0 : lf;
+            if (crlf != std::string::npos && crlf > start)
+                start = crlf;
+            const std::string text = ffxiv.substr(start, at - start);
+            CHECK(text.find("xperiment") != std::string::npos && text.find("0.25") != std::string::npos && text.find("1.0") != std::string::npos);
+            CHECK(text.find("JitterCorrection=true") != std::string::npos && text.find("may be removed") != std::string::npos);
+        }
+    }
 }
 } // namespace
 
@@ -96,6 +176,7 @@ int main(int argc, char** argv)
 {
     TestDefaultsAndBinding();
     TestRoundTrip();
+    TestScaleOverrideKey();
     TestFragment(argc > 1 ? argv[1] : ".");
     return TEST_RESULT("jitter_config");
 }

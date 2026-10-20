@@ -430,7 +430,7 @@ struct CorrectionCounts
     std::uint64_t learning = 0;      // passed through while no ratio was adopted
     std::uint64_t notUsable = 0;     // passed through because the NGX pair was missing, not finite or too large
     std::uint64_t alreadyScaled = 0; // not scaled because the block still held our last result (the game did not refresh it)
-    std::uint64_t idle = 0;          // nothing to apply: the game is consistent, or the ratio was refused
+    std::uint64_t idle = 0;          // nothing to apply: the game is consistent, the ratio was refused, or the manual scale is 1.0
 };
 
 // The state field of the status line, with the configuration it belongs to ("n/a" before any evaluate).
@@ -454,10 +454,44 @@ inline std::string FormatStatus(const CorrectionCounts& n, const std::string& st
 {
     const std::string inputText = input.empty() ? std::string() : std::format(" (input {})", input);
     return std::format("Jitter correction: on; totals since the start of the session: {} evaluates seen, {} scaled, {} passed through while learning, "
-                       "{} passed through because the jitter pair was not usable, {} already scaled (block not refreshed), {} left alone (game "
-                       "consistent or ratio refused); state: {}; snapshots: {} accepted, {} disagreed with the ratio, {} ratio changes, {} restarts "
-                       "after a configuration change; verification {}; frame generation active {}{}",
+                       "{} passed through because the jitter pair was not usable, {} already scaled (block not refreshed), {} left alone (nothing to apply); "
+                       "state: {}; snapshots: {} accepted, {} disagreed with the ratio, {} ratio changes, {} restarts after a configuration change; "
+                       "verification {}; frame generation active {}{}",
                        n.evaluated, n.scaled, n.learning, n.notUsable, n.alreadyScaled, n.idle, state, s.accepted, s.disagreed, s.changes, s.restarts,
                        stale ? "stale" : "fresh", frameGeneration ? (*frameGeneration ? "yes" : "no") : "unknown", inputText);
 }
+
+// ---- the manual scale ([FFXIV] JitterScaleOverride) ---------------------------------------------------------------------------------------
+
+// A fixed scale for experiments, used instead of the learned ratio. 0 is OFF and is never applied as a scale (a zeroed jitter would break the
+// image); a value from kMinPlausibleRatio to 1.0 is valid; anything else (NaN, infinite, negative, below 0.25, above 1.0) is ignored and the
+// calibration goes on as if the key were 0.
+enum class ManualScaleKind : std::uint8_t
+{
+    Off,
+    Valid,
+    Ignored
+};
+
+inline ManualScaleKind ClassifyManualScale(float v)
+{
+    if (v == 0.0f) // also -0.0
+        return ManualScaleKind::Off;
+    if (!std::isfinite(v) || v < kMinPlausibleRatio || v > 1.0f)
+        return ManualScaleKind::Ignored;
+    return ManualScaleKind::Valid;
+}
+
+// A valid value within the tolerance of 1.0 is the baseline (what the game does anyway): nothing is written.
+inline bool ManualScaleIsBaseline(float v) { return std::fabs(v - 1.0f) <= kRatioTolerance; }
+
+inline std::string FormatManualScaleInUse(float v) { return std::format("Jitter correction: manual scale {:.3f} in use, calibration off", v); }
+
+inline std::string FormatManualScaleIgnored(float v)
+{
+    return std::format("Jitter correction: manual scale value {:.3f} ignored (valid values are 0.25 to 1.0, 0 turns it off); the calibration goes on", v);
+}
+
+// The state field of the status line while a manual scale is in use.
+inline std::string ManualStateText(float v) { return std::format("manual scale {:.3f} (calibration off)", v); }
 } // namespace ext::ffxiv::jitter

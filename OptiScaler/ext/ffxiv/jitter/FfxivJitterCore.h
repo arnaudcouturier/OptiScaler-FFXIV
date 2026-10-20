@@ -33,6 +33,7 @@
 #include "ext/ffxiv/jitter/FfxivJitterCalibration.h"
 #include "ext/ffxiv/jitter/FfxivJitterProbe.h"
 
+#include <bit>
 #include <cstdint>
 #include <exception>
 #include <format>
@@ -100,7 +101,8 @@ class Engine
     // trace. An episode is the same place failing again and again: a step that gets at least as far as the place that threw ends it, a step
     // that returned before that place proves nothing (the status line is built on sample ticks only, the steps between the ticks do not
     // reach it).
-    template <class Env> void Step(Env& env, bool probe, bool correct)
+    // `manualScale` is [FFXIV] JitterScaleOverride (0 = off), read by the wrapper at every evaluate like the two keys; only used while `correct`.
+    template <class Env> void Step(Env& env, bool probe, bool correct, float manualScale = 0.0f)
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
         // no parameter read, no memory read, no log, no state touched.
@@ -111,7 +113,7 @@ class Engine
         _stage = Stage::Start;
         try
         {
-            Run(env, probe, correct);
+            Run(env, probe, correct, manualScale);
             if (_stage >= _thrownAt)
                 _exceptions.Event(false); // a step that got past the place that threw ends the episode of exceptions
         }
@@ -146,6 +148,8 @@ class Engine
         _announceScaled = false;
         _staleOpen = false;
         _keyText.clear();
+        _manual.reset();
+        _ignoredShown = false;
         _notUsable.Close();
     }
 
@@ -168,7 +172,7 @@ class Engine
         }
     }
 
-    template <class Env> void Run(Env& env, bool probe, bool correct)
+    template <class Env> void Run(Env& env, bool probe, bool correct, float manualScale)
     {
         if (!correct)
             ForgetCorrectionState();
@@ -231,7 +235,7 @@ class Engine
         const NgxMatch match = readGuard == Guard::None ? CompareNgx(object, ngxX, ngxY) : NgxMatch::Unavailable;
 
         if (correct)
-            Correct(env, now, key, ctx, ngxX, ngxY, readGuard, analysis);
+            Correct(env, now, key, ctx, ngxX, ngxY, readGuard, analysis, manualScale);
 
         if (!allowed)
             return;
@@ -262,7 +266,7 @@ class Engine
         // The line is built BEFORE its slot is taken: a failing frame-generation query must not use up the thinned slots without a line.
         if (correct && _statusLog.Ready(now))
         {
-            const std::string status = FormatStatus(_counts, StateText(_cal, _keyText.empty() ? std::string("n/a") : _keyText), _cal.counts(),
+            const std::string status = FormatStatus(_counts, _manual ? ManualStateText(*_manual) : StateText(_cal, _keyText.empty() ? std::string("n/a") : _keyText), _cal.counts(),
                                                     _cal.Stale(now), env.FrameGenerationActive(), env.FrameGenerationInput());
             _statusLog.Take(now);
             env.Log(status);
@@ -272,7 +276,8 @@ class Engine
         // same way. The total is cumulative and `_reportedSuppressed` moves only when a report is written, so a change that comes between
         // two permitted reports is written at the next permitted one.
         const std::uint64_t calibration = static_cast<std::uint64_t>(_learningStarted.Suppressed()) + _adopted.Suppressed() + _ratioChanged.Suppressed() +
-                                          _configChanged.Suppressed() + _staleLog.Suppressed() + _staleBackLog.Suppressed();
+                                          _configChanged.Suppressed() + _staleLog.Suppressed() + _staleBackLog.Suppressed() +
+                                          _manualInUse.Suppressed() + _manualIgnored.Suppressed();
         const std::uint64_t suppressed = static_cast<std::uint64_t>(_probeFailures.Suppressed()) + _notUsable.Suppressed() +
                                          _firstScaled.Suppressed() + _exceptions.Suppressed() + calibration;
         if (suppressed != _reportedSuppressed && _suppressedLog.Take(now))
@@ -286,9 +291,51 @@ class Engine
     // The correction of one evaluate: the configuration key, the snapshot of the object, then the scaling of the NGX pair.
     template <class Env>
     void Correct(Env& env, std::uint64_t now, std::uint64_t key, const Context& ctx, const std::optional<float>& ngxX,
-                 const std::optional<float>& ngxY, Guard readGuard, const Analysis& analysis)
+                 const std::optional<float>& ngxY, Guard readGuard, const Analysis& analysis, float manualScale)
     {
         ++_counts.evaluated;
+
+        // The manual scale ([FFXIV] JitterScaleOverride) takes precedence over the calibration: no learning, no snapshots, every evaluate
+        // scaled by the value through the same application path. 0 is off (never a scale); an invalid value is ignored, once per value.
+        const ManualScaleKind manualKind = ClassifyManualScale(manualScale);
+        if (manualKind == ManualScaleKind::Ignored)
+        {
+            const std::uint32_t bits = std::bit_cast<std::uint32_t>(manualScale);
+            if (!_ignoredShown || bits != _ignoredBits)
+            {
+                _ignoredShown = true;
+                _ignoredBits = bits;
+                if (_manualIgnored.Occurrence())
+                    env.Log(FormatManualScaleIgnored(manualScale));
+            }
+        }
+        else
+            _ignoredShown = false;
+        const std::optional<float> manual = manualKind == ManualScaleKind::Valid ? std::optional<float>(manualScale) : std::nullopt;
+        if (manual.has_value() != _manual.has_value() || (manual && std::bit_cast<std::uint32_t>(*manual) != std::bit_cast<std::uint32_t>(*_manual)))
+        {
+            // Switched on, changed or switched off: the calibration state is dropped (a manual scale does not learn, and learning starts from
+            // scratch when it is switched off), and so is the pair written with the old scale.
+            _manual = manual;
+            _cal.Reset();
+            _written.Forget();
+            _staleOpen = false;
+            _keyText.clear();
+            _announceScaled = manual && !ManualScaleIsBaseline(*manual);
+            if (manual && _manualInUse.Occurrence())
+                env.Log(FormatManualScaleInUse(*manual));
+        }
+        if (_manual)
+        {
+            if (ManualScaleIsBaseline(*_manual))
+            {
+                ++_counts.idle; // the baseline: the game's values are left alone
+                _notUsable.Event(false);
+            }
+            else
+                Scale(env, ngxX, ngxY, *_manual);
+            return;
+        }
 
         // One slot: a different configuration drops the ratio, the runs and the remembered counter (and the remembered pair: the ratio it
         // was written with is gone); the evaluate that sees the new key passes the game's values through and learning starts again.
@@ -354,14 +401,14 @@ class Engine
             ++_counts.idle;
             _notUsable.Event(false);
             break;
-        case Mode::Scale: Scale(env, ngxX, ngxY); break;
+        case Mode::Scale: Scale(env, ngxX, ngxY, _cal.ratio()); break;
         }
     }
 
-    // Scale mode: multiply the NGX pair this evaluate carries (read before any write) by the adopted ratio.
-    template <class Env> void Scale(Env& env, const std::optional<float>& ngxX, const std::optional<float>& ngxY)
+    // Multiply the NGX pair this evaluate carries (read before any write) by `ratio`: the adopted ratio (Scale mode) or the manual scale.
+    template <class Env> void Scale(Env& env, const std::optional<float>& ngxX, const std::optional<float>& ngxY, float ratio)
     {
-        const ScaleDecision d = DecideScale(ngxX, ngxY, _cal.ratio(), _written);
+        const ScaleDecision d = DecideScale(ngxX, ngxY, ratio, _written);
         if (d.action == ScaleAction::NotUsable)
         {
             ++_counts.notUsable;
@@ -415,7 +462,7 @@ class Engine
                 // The first pair of a calibration: ask the block what it holds now, so the line shows what it really took.
                 const std::optional<float> storedX = env.GetFloat(Param::JitterX);
                 const std::optional<float> storedY = env.GetFloat(Param::JitterY);
-                env.Log(FormatFirstScaled(*ngxX, *ngxY, d.x, d.y, _cal.ratio(), storedX, storedY));
+                env.Log(FormatFirstScaled(*ngxX, *ngxY, d.x, d.y, ratio, storedX, storedY));
             }
         }
     }
@@ -445,7 +492,7 @@ class Engine
     EpisodeLog _firstScaled;     // the first scaled pair of each calibration (with the read-back)
     EpisodeLog _exceptions;      // runs of steps that ended in an exception, at the same place
     // One event each, one line per occurrence under the 32-line budget (EpisodeLog::Occurrence):
-    EpisodeLog _learningStarted, _adopted, _ratioChanged, _configChanged, _staleLog, _staleBackLog;
+    EpisodeLog _learningStarted, _adopted, _ratioChanged, _configChanged, _staleLog, _staleBackLog, _manualInUse, _manualIgnored;
     Stage _stage = Stage::Start;    // how far the step in progress has got
     Stage _thrownAt = Stage::Start; // where the last exception happened
     bool _buildNoted = false;
@@ -457,6 +504,9 @@ class Engine
     std::string _keyText;     // the readable form of the configuration key the calibration belongs to
     bool _announceScaled = false; // the next scaled pair is the first of its calibration: log it with the read-back
     bool _staleOpen = false;      // a "verification stale" episode is open
+    std::optional<float> _manual; // the manual scale in use (a valid [FFXIV] JitterScaleOverride), none = the calibration decides
+    bool _ignoredShown = false;   // an invalid manual scale was reported and has not changed since
+    std::uint32_t _ignoredBits = 0;
     CorrectionCounts _counts; // totals since the start of the session
 };
 } // namespace ext::ffxiv::jitter

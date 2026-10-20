@@ -157,6 +157,7 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("Companion", "HudInterpolation", companionHudInterpolation);
     b.Add("FFXIV", "JitterProbe", jitterProbe);
     b.Add("FFXIV", "JitterCorrection", jitterCorrection);
+    b.Add("FFXIV", "JitterScaleOverride", jitterScaleOverride);
     chara.Bind(b);
 }
 

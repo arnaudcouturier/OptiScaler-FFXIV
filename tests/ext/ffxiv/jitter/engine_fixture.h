@@ -187,7 +187,8 @@ struct Outcome
     std::vector<Op> sets;
 };
 
-inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool correct)
+// `manual` is the value of [FFXIV] JitterScaleOverride at this evaluate (0 = off).
+inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, bool correct, float manual = 0.0f)
 {
     RawObject object = ObjectFor(f.jx, f.jy, f.s, 1920, 1080, f.counter);
     if (f.ndcFrom)
@@ -216,7 +217,7 @@ inline Outcome Evaluate(FakeEnv& e, Engine& engine, const Frame& f, bool probe, 
     e.now = f.timeMs;
     e.ops.clear();
     const std::size_t logsBefore = e.logs.size();
-    engine.Step(e, probe, correct);
+    engine.Step(e, probe, correct, manual);
     Outcome o;
     o.ops = e.ops;
     o.logs.assign(e.logs.begin() + static_cast<std::ptrdiff_t>(logsBefore), e.logs.end());

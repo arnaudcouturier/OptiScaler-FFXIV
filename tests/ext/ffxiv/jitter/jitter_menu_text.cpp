@@ -91,6 +91,17 @@ int main(int argc, char** argv)
     // no other writes to the keys
     CHECK(Count(code, "cfg.jitterProbe=") == 1);
     CHECK(Count(code, "cfg.jitterCorrection=") == 1);
+    // the manual scale: read from and written back to its own slider, once, greyed out while the correction switch is off
+    CHECK(Count(code, "floatscale=cfg.jitterScaleOverride.value_or_default();") == 1);
+    CHECK(Count(code, "if(ImGui::SliderFloat(\"\",&scale,0.0f,1.0f,scale>0.0f?\"\":\"\"))cfg.jitterScaleOverride=scale;") == 1);
+    CHECK(Count(code, "cfg.jitterScaleOverride=") == 1);
+    CHECK(Count(code, "ImGui::BeginDisabled(!correct);") == 1 && Count(code, "ImGui::EndDisabled();") == 1);
+    // the plain-English text: the label, what 0 means, the valid range, that it is an experiment and what it needs
+    CHECK(raw.find("\"Manual jitter scale (0 = learn it)\"") != std::string::npos);
+    CHECK(raw.find("Experiment") != std::string::npos && raw.find("0.25 to 1.0") != std::string::npos);
+    CHECK(raw.find("1.0 (changes nothing), 0.8, 0.6 and 0.5") != std::string::npos);
+    CHECK(raw.find("0 learns the ratio") != std::string::npos);
+    CHECK(raw.find("only used while the correction switch above is ticked") != std::string::npos);
     // registered in the FFXIV tab (its place comes from the layout table), visible only for the FFXIV build entry
     CHECK(Count(code, "ext::menu::AutoRegisterregistration{{\"\",\"\",\"\",Draw,\"\",Visible}};") == 1);
     CHECK(raw.find("{ \"ffxiv_jitter\", \"FFXIV\", ") != std::string::npos);
@@ -100,6 +111,11 @@ int main(int argc, char** argv)
     // the card decides nothing: no calls into the engine or the hook
     CHECK(code.find("Engine") == std::string::npos);
     CHECK(code.find("OnUpscaleBoundary") == std::string::npos);
+
+    // the wrapper hands the engine the value of the manual-scale key at every evaluate (read like the two switches, so the menu acts at once)
+    const std::string wrapper = Squash(Strip(ReadFile(repo + "/OptiScaler/ext/ffxiv/jitter/FfxivJitterProbe.cpp")));
+    CHECK(Count(wrapper, "S().engine.Step(env,probe,correct,cfg.jitterScaleOverride.value_or_default());") == 1);
+    CHECK(Count(wrapper, "engine.Step(") == 1);
 
     // the stripper itself: a pin kept alive only by a comment or a string must not count
     CHECK(Squash(Strip("a // cfg.jitterProbe = x;\nb")).find("jitterProbe") == std::string::npos);

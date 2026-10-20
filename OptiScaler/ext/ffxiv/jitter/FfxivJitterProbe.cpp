@@ -126,7 +126,7 @@ void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
         if ((!probe && !correct) || parameters == nullptr)
             return;
         NgxEnvironment env { parameters };
-        S().engine.Step(env, probe, correct);
+        S().engine.Step(env, probe, correct, cfg.jitterScaleOverride.value_or_default());
     }
     catch (...)
     {

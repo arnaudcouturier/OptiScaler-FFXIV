@@ -38,6 +38,16 @@ void Draw(ext::menu::Ctx&)
                        "One write feeds super resolution, frame generation, NR and the Jitter Count readout: to compare,\n"
                        "look at the picture with frame generation off first. If something looks wrong, untick it.");
 
+    float scale = cfg.jitterScaleOverride.value_or_default();
+    ImGui::BeginDisabled(!correct);
+    if (ImGui::SliderFloat("Manual jitter scale (0 = learn it)", &scale, 0.0f, 1.0f, scale > 0.0f ? "%.2f" : "Off"))
+        cfg.jitterScaleOverride = scale;
+    ImGui::EndDisabled();
+    ext::menu::Tooltip("Experiment. Hands DLSS a fixed fraction of the jitter the game reports instead of the ratio the correction learns.\n"
+                       "Try 1.0 (changes nothing), 0.8, 0.6 and 0.5 one after the other and compare the picture. Valid values are 0.25 to 1.0,\n"
+                       "0 learns the ratio, any other value is ignored. It is only used while the correction switch above is ticked.\n"
+                       "Applies at once. Look at the picture with frame generation off first.");
+
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("The log line \"Jitter correction: on; totals since the start of the session ...\" shows how many "
                        "evaluates were replaced and how many passed through unchanged.");
