@@ -283,7 +283,7 @@ inline ParsedLine ParseLine(std::string_view line)
     {
         out.kind = LineKind::FlagOverride;
         out.recognised = true;
-        if (Has(low, "disabling") && (Has(low, "recomposition") || Has(low, "buirecomposition")))
+        if (Has(low, "disabling") && Has(low, "recomposition")) // also inside "bUIRecompositionSupported"
             out.uir = Uir::Disabled; // 310.9.16 "Disabling UI recomposition ...", 310.9.1.0 "Disabling bUIRecompositionSupported ..."
         return out;
     }
