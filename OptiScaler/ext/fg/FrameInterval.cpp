@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/Seams.h"
+#include "ext/fg/FrameLimitSanity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,7 +13,7 @@ namespace ext::present
 // (undefined behaviour); they now mean "no cap". 1 ns .. 100 s per frame.
 std::optional<uint64_t> FrameInterval(float fpsCap, bool fgActive)
 {
-    if (!std::isfinite(fpsCap) || fpsCap <= 0)
+    if (!IsUsableFrameLimit(fpsCap))
         return std::nullopt;
 
     const double ns = std::clamp(1'000'000'000.0 / double(fpsCap), 1.0, 100'000'000'000.0);
