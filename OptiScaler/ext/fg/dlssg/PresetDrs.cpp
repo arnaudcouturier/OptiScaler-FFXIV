@@ -47,8 +47,10 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
         static std::atomic<int> reported { -1 };
         const int request = Requests().Active();
         if (reported.exchange(request) != request)
-            LOG_INFO("DLSS-G render preset: the runtime asked the driver for its preset, answered {} ({}){}", edit.value,
-                     Name(request), found ? "" : " (the driver profile has no such setting)");
+            LOG_INFO("DLSS-G render preset: the runtime asked the driver for its preset (id 0x{:X}), answered {} ({}){}; the DLSS "
+                     "override id 0x{:X} is passed through to the driver",
+                     kRenderPresetSettingId, edit.value, Name(request),
+                     found ? "" : " (the driver profile has no such setting)", kOverrideSettingId);
     }
     return NVAPI_OK;
 }

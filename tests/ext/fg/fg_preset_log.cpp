@@ -95,6 +95,10 @@ void Ignored()
     CHECK(ParseLine(Ngx("Z:1", "Info: (Quality) Using Default Overriden Preset Preset_D", "RayReconstruction")).kind == LineKind::None);
     CHECK(ParseLine(Ngx("Z:1", "Loaded library from path (C:/x/nvngx_dlssg.dll)")).kind == LineKind::None);
     CHECK(ParseLine("DLSS-G render preset: the runtime asked the driver for its preset, answered 1 (Preset A)").kind == LineKind::None);
+    // the PRESET-BOOT probe wording: which ids were answered and which passed through
+    CHECK(ParseLine("DLSS-G render preset: the runtime asked the driver for its preset (id 0x10E41DF1), answered 3 (Preset C); the DLSS "
+                    "override id 0x10E41E03 is passed through to the driver")
+              .kind == LineKind::None);
     CHECK(ParseLine("DLSS-G preset line: SL Log: [..][ngxLog] [FrameGeneration] render preset (requested=1, applied=1, value=1)").kind ==
           LineKind::None);
     CHECK(ParseLine("").kind == LineKind::None);

@@ -134,11 +134,23 @@ void NonDwordRepliesAreLeftAlone()
 
 void OverrideOnId()
 {
-    Reset(kPresetA);
-    auto missing = Fresh();
-    CHECK(OnDrsGetSetting(kOverrideSettingId, &missing, NVAPI_SETTING_NOT_FOUND, nullptr) == NVAPI_OK);
-    CHECK(missing.u32CurrentValue == kOverrideOn && missing.settingType == NVDRS_DWORD_TYPE);
-    CHECK(g_observed == 0 && g_state.Base().kind == Baseline::Kind::Unknown); // not the preset query
+    // PRESET-BOOT probe: the DLSS override id is never answered, whatever the request; the driver's reply goes back untouched
+    for (int request : { 1, 2, 3 })
+    {
+        Reset(request);
+        auto missing = Fresh();
+        CHECK(OnDrsGetSetting(kOverrideSettingId, &missing, NVAPI_SETTING_NOT_FOUND, nullptr) == NVAPI_SETTING_NOT_FOUND);
+        CHECK(missing.settingId == 0xDEADu && missing.settingType == NVDRS_STRING_TYPE && missing.u32CurrentValue == 0x7777u);
+        auto off = Dword(0);
+        CHECK(OnDrsGetSetting(kOverrideSettingId, &off, NVAPI_OK, nullptr) == NVAPI_OK && off.u32CurrentValue == 0u);
+        auto on = Dword(1);
+        CHECK(OnDrsGetSetting(kOverrideSettingId, &on, NVAPI_OK, nullptr) == NVAPI_OK && on.u32CurrentValue == 1u);
+        CHECK(g_observed == 0 && g_state.Base().kind == Baseline::Kind::Unknown); // not the preset query
+        // the preset id of the same request is still answered
+        auto preset = Fresh();
+        CHECK(OnDrsGetSetting(kRenderPresetSettingId, &preset, NVAPI_SETTING_NOT_FOUND, nullptr) == NVAPI_OK);
+        CHECK(preset.u32CurrentValue == (uint32_t) request);
+    }
 
     Reset(kAuto);
     auto autoMissing = Fresh();

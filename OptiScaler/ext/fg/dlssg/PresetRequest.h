@@ -62,16 +62,16 @@ struct Answer
     uint32_t value = 0;
 };
 
-// Restart path. Only an explicit A/B/C request changes the driver's answer: the preset id gets the number, the
-// override id gets "on". Auto, an invalid request and every other id are left alone.
+// Restart path. Only an explicit A/B/C request changes the driver's answer, and only for the preset id, which gets the number.
+// The DLSS override id (kOverrideSettingId) is NOT answered: with both ids answered at boot, NGX was seen loading NVIDIA's
+// model-store module instead of the local one (game logs 2026-10-21); this probe finds out whether the override id is the cause.
+// Auto, an invalid request and every other id are left alone.
 constexpr Answer AnswerDriverQuery(uint32_t settingId, int request)
 {
     if (request < kPresetA || request > kPresetC)
         return {};
     if (settingId == kRenderPresetSettingId)
         return { true, true, static_cast<uint32_t>(request) };
-    if (settingId == kOverrideSettingId)
-        return { true, true, kOverrideOn };
     return {};
 }
 
