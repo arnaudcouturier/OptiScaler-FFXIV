@@ -126,6 +126,13 @@ void Table()
         { "four operand-size prefixes and a nop", { 0x66, 0x66, 0x66, 0x66, 0x90 }, 5, Flow::Next, 0, false, 0 },
         { "cld", { 0xFC }, 1, Flow::Next, 0, false, 0 },
         { "call [rsp+8] reads 8 bytes", { 0xFF, 0x54, 0x24, 0x08 }, 4, Flow::Call, 0, false, 0 },
+        // review 3: F3 0F 7E is the XMM load, 66 0F 7E the store / register write, nothing else is guessed
+        { "movq [rsp+60h],xmm0 (66 REX.W 0F 7E)", { 0x66, 0x48, 0x0F, 0x7E, 0x44, 0x24, 0x60 }, 7, Flow::Next, 0, true, 8 },
+        { "movq r13,xmm0 (66 REX.W+B 0F 7E)", { 0x66, 0x49, 0x0F, 0x7E, 0xC5 }, 5, Flow::Next, Bit(R13), false, 0 },
+        { "movd ecx,mm0 (0F 7E, no prefix)", { 0x0F, 0x7E, 0xC1 }, 3, Flow::Next, Bit(RCX), false, 0 },
+        { "endbr64", { 0xF3, 0x0F, 0x1E, 0xFA }, 4, Flow::Next, 0, false, 0 },
+        { "endbr32", { 0xF3, 0x0F, 0x1E, 0xFB }, 4, Flow::Next, 0, false, 0 },
+        { "rep stosb", { 0xF3, 0xAA }, 2, Flow::Next, Bit(RAX) | Bit(RCX) | Bit(RSI) | Bit(RDI), false, 0 },
     };
     for (const Row& r : rows)
     {
@@ -252,6 +259,8 @@ void SixteenBitOperandSizeAndFrameValues()
 
     // stores whose address the operand does not give
     CHECK(Dec({ 0xF3, 0x48, 0xAB }, n) && n.aliasStore);            // rep stosq
+    CHECK(Dec({ 0xF3, 0xAA }, n) && n.aliasStore);                   // rep stosb: the usual compiled memset
+    CHECK(Dec({ 0xAA }, n) && n.aliasStore);
     CHECK(Dec({ 0xA4 }, n) && n.aliasStore);                         // movsb
     CHECK(Dec({ 0xF3, 0x48, 0xA5 }, n) && n.aliasStore);            // rep movsq
     CHECK(Dec({ 0x48, 0x0F, 0xAB, 0x04, 0x24 }, n) && n.aliasStore); // bts [rsp],rax
@@ -263,6 +272,27 @@ void SixteenBitOperandSizeAndFrameValues()
     CHECK(Dec({ 0xA6 }, n) && !n.aliasStore);                        // cmpsb reads
     CHECK(Dec({ 0x48, 0x89, 0x01 }, n) && !n.aliasStore);           // an ordinary store
     CHECK(!Dec({ 0xFD }, n));                                        // std: a downward string store would reach below
+}
+
+void UndefinedPrefixCombinations()
+{
+    Insn n;
+    // review 3, M2: F2 and F3 are two prefixes; 0F 7E under F2, or under F3 together with 66, is not a defined form
+    CHECK(!Dec({ 0xF2, 0x66, 0x48, 0x0F, 0x7E, 0x44, 0x24, 0x60 }, n)); // would be movq [rsp+60h],xmm0 if F2 were ignored
+    CHECK(!Dec({ 0xF3, 0x66, 0x48, 0x0F, 0x7E, 0x44, 0x24, 0x60 }, n));
+    CHECK(!Dec({ 0xF2, 0x49, 0x0F, 0x7E, 0xC5 }, n));                   // would be a write to r13
+    CHECK(!Dec({ 0xF2, 0x0F, 0x7E, 0xC1 }, n));
+    CHECK(Dec({ 0xF3, 0x0F, 0x7E, 0xC1 }, n) && n.gprWrites == 0 && !n.memWrite); // the defined F3 load
+    CHECK(Dec({ 0xF3, 0x0F, 0x7E, 0x44, 0x24, 0x60 }, n) && !n.memWrite);       // movq xmm0,[rsp+60h]
+    // F2 elsewhere still means nothing for the instructions the guards care about
+    CHECK(Dec({ 0xF2, 0x0F, 0x10, 0xC1 }, n) && n.len == 4);           // movsd xmm0,xmm1
+    // review 3, L5: 0F 1E is a hint nop only as endbr (modrm FA / FB); rdssp writes a register; MPX 0F 1A / 1B are not emitted
+    CHECK(!Dec({ 0xF3, 0x48, 0x0F, 0x1E, 0xC8 }, n));                   // rdsspq rax
+    CHECK(!Dec({ 0x0F, 0x1E, 0xC8 }, n));
+    CHECK(!Dec({ 0xF3, 0x0F, 0x1E, 0xF9 }, n));
+    CHECK(!Dec({ 0x0F, 0x1A, 0x00 }, n));
+    CHECK(!Dec({ 0x0F, 0x1B, 0x00 }, n));
+    CHECK(Dec({ 0x0F, 0x1F, 0x00 }, n));                                // the ordinary nop stays
 }
 
 void RefusesWhatItDoesNotKnow()
@@ -307,6 +337,7 @@ int main()
     Table();
     OperandDetails();
     SixteenBitOperandSizeAndFrameValues();
+    UndefinedPrefixCombinations();
     RefusesWhatItDoesNotKnow();
     if (g_failures)
     {
