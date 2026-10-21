@@ -146,6 +146,80 @@ struct TransactionResult
 // thread, in an outer transaction) already has one open. That one is not ours and is left alone: no Abort. Any other failure
 // comes after Begin took ownership (it makes the trampoline regions writable first and returns the result of that), so the
 // transaction is open and must be aborted here, or every later Begin in the process answers 4317 for the rest of the session.
+// Everything between a successful DetourTransactionBegin and the Commit or Abort that ends the transaction. `at` always names
+// the step being run, so a caller that has to give up half way can say where.
+inline void RunWindow(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads, TransactionResult& out, retry::Stage& at)
+{
+    at = retry::Stage::EnlistCurrent;
+    LONG result = DetourUpdateThread(GetCurrentThread());
+    if (result != NO_ERROR)
+    {
+        out.stage = retry::Stage::EnlistCurrent;
+        out.error = result;
+    }
+    for (size_t i = 0; result == NO_ERROR && i < threads.size(); ++i)
+    {
+        at = retry::Stage::EnlistThread;
+        result = DetourUpdateThread(threads[i]);
+        if (result != NO_ERROR)
+        {
+            out.stage = retry::Stage::EnlistThread;
+            out.error = result;
+            out.threadId = GetThreadId(threads[i]);
+        }
+    }
+    for (size_t i = 0; result == NO_ERROR && i < count; ++i)
+    {
+        at = specs[i].stage;
+        *specs[i].target = specs[i].rawAddress;
+        result = DetourAttach(specs[i].target, specs[i].detour);
+        if (result != NO_ERROR)
+        {
+            out.stage = specs[i].stage;
+            out.error = result;
+        }
+    }
+    if (result == NO_ERROR)
+    {
+        at = retry::Stage::Commit;
+        result = DetourTransactionCommit();
+        if (result != NO_ERROR)
+        {
+            out.stage = retry::Stage::Commit;
+            out.error = result;
+        }
+    }
+    else
+    {
+        DetourTransactionAbort();
+    }
+}
+
+inline int OnlyCppExceptions(unsigned long code)
+{
+    return code == 0xE06D7363UL ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH; // 0xE06D7363 = 'msc', a C++ throw
+}
+
+// RunWindow with a net under it: false when a C++ exception escaped. The net is structured exception handling, not try/catch,
+// on purpose. Detours is declared extern "C"; the product builds with /EHsc, where the compiler assumes extern "C" functions
+// never throw and, optimised (/O2, with or without /GL), drops a catch that only guards them. That was measured with the
+// product's flags: a plain try/catch, and even a noinline noexcept(false) wrapper around each call, compile to no handler at
+// all and the exception ends the process (/EHs, which the project does not use, would keep it). A __try/__except block is not
+// subject to that assumption; the detours test is built with the product's optimisation flags to keep proving it. Any other kind of exception
+// is not understood here and keeps propagating. No object with a destructor lives in this function (C2712).
+inline bool RunWindowGuarded(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads, TransactionResult& out,
+                             retry::Stage& at)
+{
+    __try
+    {
+        RunWindow(specs, count, threads, out, at);
+        return true;
+    }
+    __except (OnlyCppExceptions(GetExceptionCode()))
+    {
+        return false;
+    }
+}
 inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads)
 {
     TransactionResult out;
@@ -159,44 +233,15 @@ inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count,
     }
     else
     {
-        result = DetourUpdateThread(GetCurrentThread());
-        if (result != NO_ERROR)
+        retry::Stage at = retry::Stage::EnlistCurrent;
+        if (!RunWindowGuarded(specs, count, threads, out, at))
         {
-            out.stage = retry::Stage::EnlistCurrent;
-            out.error = result;
-        }
-        for (size_t i = 0; result == NO_ERROR && i < threads.size(); ++i)
-        {
-            result = DetourUpdateThread(threads[i]);
-            if (result != NO_ERROR)
-            {
-                out.stage = retry::Stage::EnlistThread;
-                out.error = result;
-                out.threadId = GetThreadId(threads[i]);
-            }
-        }
-        for (size_t i = 0; result == NO_ERROR && i < count; ++i)
-        {
-            *specs[i].target = specs[i].rawAddress;
-            result = DetourAttach(specs[i].target, specs[i].detour);
-            if (result != NO_ERROR)
-            {
-                out.stage = specs[i].stage;
-                out.error = result;
-            }
-        }
-        if (result == NO_ERROR)
-        {
-            result = DetourTransactionCommit();
-            if (result != NO_ERROR)
-            {
-                out.stage = retry::Stage::Commit;
-                out.error = result;
-            }
-        }
-        else
-        {
+            // A C++ exception (std::bad_alloc from the operator new inside DetourUpdateThread / DetourAttach) escaped with
+            // the transaction open and every enlisted thread suspended: abort resumes them. Reported as a failed step.
             DetourTransactionAbort();
+            out = TransactionResult {};
+            out.error = static_cast<long>(ERROR_NOT_ENOUGH_MEMORY);
+            out.stage = at;
         }
     }
 
@@ -205,7 +250,6 @@ inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count,
     threads.clear();
     return out;
 }
-
 // One complete install attempt as the retry sees it: a FRESH thread snapshot every time (a thread that died since the last
 // attempt is no longer listed), then one transaction over it. A failed snapshot is transient; a failed transaction is
 // classified by the stage and the error code (retry::ClassifyDetours). The caller does the guards before and the success

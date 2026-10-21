@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <new>
 
 using namespace ext::ffxiv::quality;
 using retry::Outcome;
@@ -26,6 +28,33 @@ static int g_failed = 0;
         }                                                                                                        \
     } while (0)
 
+// ---- an allocator that can fail on demand ------------------------------------------------------------------------------------
+// DetourUpdateThread and DetourAttach allocate with the throwing operator new, so a failed allocation inside the transaction is
+// a C++ exception thrown from inside the Detours library. Only the watched thread is counted and only one allocation fails.
+static DWORD g_watchThread = 0;     // 0 = nothing is counted
+static int g_newCount = 0;          // allocations made by the watched thread since it was last reset
+static int g_failAt = 0;            // the 1-based allocation of the watched thread that fails, 0 = none
+static bool g_failWithSeh = false;  // fail with a plain SEH exception instead of std::bad_alloc
+
+void* operator new(size_t size)
+{
+    if (g_watchThread != 0 && GetCurrentThreadId() == g_watchThread)
+    {
+        ++g_newCount;
+        if (g_failAt != 0 && g_newCount == g_failAt)
+        {
+            g_failAt = 0;
+            if (g_failWithSeh)
+                RaiseException(0xE0000001UL, 0, 0, nullptr);
+            throw std::bad_alloc();
+        }
+    }
+    if (void* memory = std::malloc(size))
+        return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, size_t) noexcept { std::free(memory); }
 // ---- two targets and their detours -----------------------------------------------------------------------------------------
 
 static volatile int g_sink = 0;
@@ -509,6 +538,129 @@ static void AttemptHooksUsesTheHandlesOfItsSnapshotAndReportsTheEnlistFailure()
     g_deadForSnapshot = nullptr;
 }
 
+// ---- an exception inside the Begin..Commit window --------------------------------------------------------------------------------
+// The call goes through an SEH handler of the test's own, so a missing guard in the product code fails a check instead of
+// ending the test binary (a C++ try/catch in this file could be dropped by the optimiser, see NativeQualityTransaction.h).
+struct GuardedCall
+{
+    const HookSpec* specs;
+    size_t count;
+    std::vector<HANDLE>* threads;
+    transaction::TransactionResult result;
+    DWORD code;
+};
+static bool CallAndCatchAnyException(GuardedCall* call)
+{
+    __try
+    {
+        call->result = transaction::RunHookTransaction(call->specs, call->count, *call->threads);
+        return false;
+    }
+    __except (call->code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
+    {
+        return true;
+    }
+}
+
+// Leaves the process usable after a run that did not clean up after itself: closes the open transaction (which resumes the
+// enlisted threads) and the handles that were never consumed.
+static void CleanUpAfterAnEscapedException(GuardedCall& call)
+{
+    DetourTransactionAbort();
+    for (const HANDLE h : *call.threads)
+        CloseHandle(h);
+    call.threads->clear();
+}
+
+static void AnExceptionInsideTheWindowResumesTheThreadsAndAbortsTheTransaction()
+{
+    Reset();
+    Parked live = StartParked();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+
+    // How many allocations does one successful transaction make on this thread? Fail the last one: by then the live thread
+    // is enlisted (Detours has suspended it) and the attach of A is pending.
+    {
+        std::vector<HANDLE> probe { Dup(live.thread) };
+        g_newCount = 0;
+        g_watchThread = GetCurrentThreadId();
+        CHECK(transaction::RunHookTransaction(specs, 2, probe).error == 0);
+        g_watchThread = 0;
+        Detach();
+    }
+    const int allocations = g_newCount;
+    CHECK(allocations >= 2);
+
+    std::vector<HANDLE> threads { Dup(live.thread) };
+    GuardedCall call { specs, 2, &threads, {}, 0 };
+    g_failWithSeh = false;
+    g_newCount = 0;
+    g_failAt = allocations;
+    g_watchThread = GetCurrentThreadId();
+    const bool escaped = CallAndCatchAnyException(&call);
+    g_watchThread = 0;
+    g_failAt = 0;
+    if (escaped)
+        CleanUpAfterAnEscapedException(call);
+
+    std::printf("probe: a failed allocation inside the window -> error %ld at '%s'\n", call.result.error,
+                retry::StageName(call.result.stage));
+    CHECK(!escaped); // the exception stays inside RunHookTransaction
+    CHECK(call.result.error == static_cast<long>(ERROR_NOT_ENOUGH_MEMORY));
+    CHECK(call.result.stage == Stage::AttachRendererUpdate); // where it happened
+    CHECK(retry::ClassifyDetours(call.result.stage, call.result.error) == Outcome::Transient);
+    CHECK(threads.empty()); // the handles were consumed
+    CHECK(Unhooked());
+
+    const DWORD suspendCount = SuspendThread(live.thread); // the count BEFORE this call: 0 = the thread was running
+    CHECK(suspendCount == 0);
+    if (suspendCount != static_cast<DWORD>(-1))
+        ResumeThread(live.thread);
+    const LONG next = DetourTransactionBegin(); // an open transaction would answer 4317
+    CHECK(next == NO_ERROR);
+    DetourTransactionAbort();
+
+    std::vector<HANDLE> again { Dup(live.thread) }; // and the next attempt installs
+    CHECK(transaction::RunHookTransaction(specs, 2, again).error == 0);
+    CHECK(Hooked());
+    Detach();
+    CHECK(Unhooked());
+    StopParked(live);
+}
+
+// Only C++ exceptions are turned into a failed attempt. Anything else (an access violation inside the window, say) is not
+// understood here and is left to propagate, not swallowed.
+static void AnExceptionThatIsNotACppExceptionIsNotSwallowed()
+{
+    Reset();
+    Parked live = StartParked();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    {
+        std::vector<HANDLE> probe { Dup(live.thread) };
+        g_newCount = 0;
+        g_watchThread = GetCurrentThreadId();
+        CHECK(transaction::RunHookTransaction(specs, 2, probe).error == 0);
+        g_watchThread = 0;
+        Detach();
+    }
+    const int allocations = g_newCount;
+
+    std::vector<HANDLE> threads { Dup(live.thread) };
+    GuardedCall call { specs, 2, &threads, {}, 0 };
+    g_failWithSeh = true;
+    g_newCount = 0;
+    g_failAt = allocations;
+    g_watchThread = GetCurrentThreadId();
+    const bool escaped = CallAndCatchAnyException(&call);
+    g_watchThread = 0;
+    g_failAt = 0;
+    g_failWithSeh = false;
+    CHECK(escaped);
+    CHECK(call.code == 0xE0000001UL);
+    CleanUpAfterAnEscapedException(call); // nothing handled it, so the test closes the transaction itself
+    CHECK(Unhooked());
+    StopParked(live);
+}
 int main()
 {
     ADeadThreadFailsTheEnlistAndNothingIsHooked();
@@ -525,6 +677,8 @@ int main()
     AttemptHooksCallsARefusedAttachPermanent();
     AFailedSnapshotIsTransientNamesItsStageAndStartsNoTransaction();
     AttemptHooksUsesTheHandlesOfItsSnapshotAndReportsTheEnlistFailure();
+    AnExceptionInsideTheWindowResumesTheThreadsAndAbortsTheTransaction();
+    AnExceptionThatIsNotACppExceptionIsNotSwallowed();
 
     if (g_failed != 0)
     {
