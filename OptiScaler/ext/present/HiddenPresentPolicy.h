@@ -30,7 +30,13 @@ inline Outcome Classify(HRESULT hr, bool flagAdded)
     return SUCCEEDED(hr) ? Outcome::Presented : Outcome::Failed;
 }
 
-// The two answers that mean "this chain does not accept the flag".
+// The two answers that mean "this chain does not accept the flag". They set the latch (Policy::latched_) that switches the flag off.
+// Scope of that latch, decided on purpose (review of 2026-10-21): it is process-wide, one Policy serves every bridged swapchain
+// (HiddenPolicy() in FramePacingTrace.cpp), and DXGI_ERROR_INVALID_CALL could in principle come from a cause unrelated to the flag (for
+// example a present racing a pending resize of the hidden chain). Then the flag stays off for the rest of the session and the rejected
+// present is not retried. That is the kept, fail-safe direction: it falls back to today's plain present, never to something new. The
+// WARN line "hidden DX11 present: DXGI rejected DO_NOT_WAIT" is logged once when it happens, so an A/B run must grep for it: a "switch
+// on" run that shows it has been "switch off" from that frame on.
 inline bool RejectsDoNotWait(HRESULT hr) { return hr == E_INVALIDARG || hr == DXGI_ERROR_INVALID_CALL; }
 
 // Skips in a row that make one log line ("the hidden chain has been busy for a long time").
