@@ -61,13 +61,19 @@ void DrawReadout(const Status& status)
     if (!view.lastLine.empty())
         ImGui::TextDisabled("%s", view.confirmed ? "confirmed: the line has a known format" : "not confirmed: the wording is not one this version knows");
 
-    if (view.hasReport)
+    if (view.hasReport && view.reportNew)
+        ImGui::Text("Runtime report: preset requested %d, in force %d", view.requested, view.effective);
+    else if (view.hasReport)
         ImGui::Text("Runtime report: preset %llu, driver held a preset %d, applied %d", static_cast<unsigned long long>(view.value),
                     view.requested, view.applied);
+    if (view.unsupportedId >= 0)
+        ImGui::TextWrapped("The runtime does not act on preset id %d.", view.unsupportedId);
     if (const char* uir = UirText(view.uir))
         ImGui::Text("Runtime: %s", uir);
     if (view.blockedByFlags)
         ImGui::TextWrapped("The runtime ignores presets because of private flags set in the driver.");
+    if (view.flagOverride)
+        ImGui::TextWrapped("A private flag set in the driver overrides part of the preset (UI recomposition or FG Lite).");
 
     switch (LogRelayState())
     {
@@ -117,7 +123,7 @@ void DrawRenderPresetSection()
         return;
     }
     if (status.configured == kPresetC || status.active == kPresetC)
-        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (it reports applied=0); other builds may differ.");
+        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).");
 
     const auto confirmed = ReadoutState().Confirm(status.active);
     if (status.restartNeeded)
