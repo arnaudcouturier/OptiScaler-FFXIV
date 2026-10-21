@@ -96,7 +96,9 @@ static Parked StartParked()
 static void StopParked(Parked& p)
 {
     SetEvent(p.release);
-    WaitForSingleObject(p.thread, INFINITE);
+    // Bounded: a thread that a failed transaction left suspended never finishes, and that must fail the test, not hang it.
+    const DWORD waited = WaitForSingleObject(p.thread, 5000);
+    CHECK(waited == WAIT_OBJECT_0);
     CloseHandle(p.thread);
     CloseHandle(p.release);
     p = Parked {};
