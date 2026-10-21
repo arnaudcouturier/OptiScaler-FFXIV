@@ -348,15 +348,15 @@ The two FFXIV-only NR options, "Scanned exposure" (the exposure source and light
 
 Upstream files carry only the seam calls and the small marked edits. `tools/footprint.ps1` counts them (added plus removed lines against the upstream base `fd6c2870`, excluding fork-only paths). It needs only git: the `upstream` remote must be fetched so `upstream/master` exists, and a history that reaches the base commit; no build, no submodules.
 
-Measured on `main` at `c3277532` (the release-candidate commit):
+Measured on `adoption-20261020` (the integration branch with the four Nickle-inspired features and the DLSS-G 310.9.16 preset fix; the release-candidate commit `main` at `c3277532` measured 758 persistent lines):
 
 | Measure | Value |
 |---|---|
 | Upstream files touched | 71 |
-| Lines added / removed | +1258 / -292 (1550) |
+| Lines added / removed | +1278 / -308 (1586) |
 | Lines carried by `[UP]` commits (separate, self-contained fixes) | 792 |
-| Persistent seam surface (total minus `[UP]`) | 758 |
-| Target in [SEAMS.md](SEAMS.md) section 1.3 | 600 (over by 158) |
+| Persistent seam surface (total minus `[UP]`) | 794 |
+| Target in [SEAMS.md](SEAMS.md) section 1.3 | 600 (over by 194) |
 
 The overage is known: the seam surface grew with each feature port and with the later HUD-less and composition work, and the earlier figures in [SEAMS-catalog.md](SEAMS-catalog.md) section (d) are historical snapshots. Re-measure with `pwsh -File tools/footprint.ps1` after every sync.
 
