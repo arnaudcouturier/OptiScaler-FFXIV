@@ -322,6 +322,7 @@ const NotCompared kNotCompared[] = {
     { "[Mipmap] MipmapBiasAuto:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): the default depends on the game (on for FFXIV, off elsewhere) and an explicit false must survive a save" },
     { "[Mipmap] AutomaticFFXIV", "the alias of MipmapBiasAuto, declared without a default for the same reason" },
     { "[LowLatency] ", "upstream enum members (LowLatencyInput/Output) declared in Config.h, not in ext" },
+    { "[FramePacing] Trace:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): unset means auto (on only with file logging at Debug or Trace), and an explicit false must survive a save" },
     { "[Window] Mode", "the member name 'mode' is declared in several config structs (HDR, HudLess, Window) and the Window binder sits in ExtConfig.cpp, so the declaration cannot be told apart by name; it is a string key" },
 };
 

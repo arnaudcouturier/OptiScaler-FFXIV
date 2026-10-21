@@ -36,6 +36,7 @@
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/menu/MenuStyleConfig.h"
 #include "ext/nr/NrConfig.h"
+#include "ext/present/FramePacingConfig.h"
 #include "ext/reshade/ReShadeConfig.h"
 #include "ext/upscaler/UpscalerConfig.h"
 #include "ext/window/WindowConfig.h"
@@ -178,6 +179,7 @@ struct ExtConfig
     WindowConfig window; // ext/window
     MenuStyleConfig menuStyle; // ext/menu: [Menu] Style
     NgxReleaseConfig ngxRelease; // ext/dx11bridge: [NgxRelease] SkipReleaseSleep
+    FramePacingConfig framePacing; // ext/present: [FramePacing] Trace, HiddenPresentDoNotWait
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
