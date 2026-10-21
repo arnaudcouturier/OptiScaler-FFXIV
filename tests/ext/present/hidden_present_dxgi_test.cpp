@@ -37,7 +37,8 @@ struct Case
     UINT syncInterval;
 };
 
-void RunCase(IDXGIFactory2* factory, ID3D11Device* device, HWND hwnd, const Case& c)
+// Returns false when the host could not create this swapchain (nothing was asserted); main requires at least one case to have run.
+bool RunCase(IDXGIFactory2* factory, ID3D11Device* device, HWND hwnd, const Case& c)
 {
     DXGI_SWAP_CHAIN_DESC1 desc = {};
     desc.Width = 640;
@@ -54,7 +55,7 @@ void RunCase(IDXGIFactory2* factory, ID3D11Device* device, HWND hwnd, const Case
     if (FAILED(created))
     {
         std::printf("  [%s] swapchain not created on this host (0x%08X): case skipped\n", c.name, static_cast<unsigned>(created));
-        return;
+        return false;
     }
 
     ComPtr<ID3D11DeviceContext> context;
@@ -99,6 +100,7 @@ void RunCase(IDXGIFactory2* factory, ID3D11Device* device, HWND hwnd, const Case
     CHECK(rejected == 0);              // DO_NOT_WAIT is legal on this chain
     CHECK(accepted + stillDrawing == 300); // nothing else came back
     CHECK(accepted > 0);               // the chain is usable (not every present refused)
+    return true;
 }
 } // namespace
 
@@ -141,14 +143,23 @@ int main()
         { "sequential, interval 0", DXGI_SWAP_EFFECT_SEQUENTIAL, 1, 0, 0, 0 },
         { "flip discard + RESTART, interval 0", DXGI_SWAP_EFFECT_FLIP_DISCARD, 2, 0, DXGI_PRESENT_RESTART, 0 },
     };
+    int attempted = 0, executed = 0;
     for (const Case& c : cases)
-        RunCase(factory.Get(), device.Get(), hwnd, c);
+    {
+        ++attempted;
+        executed += RunCase(factory.Get(), device.Get(), hwnd, c) ? 1 : 0;
+    }
     if (tearing)
     {
         const Case tear = { "flip discard + ALLOW_TEARING, interval 0", DXGI_SWAP_EFFECT_FLIP_DISCARD, 2,
                             DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, DXGI_PRESENT_ALLOW_TEARING, 0 };
-        RunCase(factory.Get(), device.Get(), hwnd, tear);
+        ++attempted;
+        executed += RunCase(factory.Get(), device.Get(), hwnd, tear) ? 1 : 0;
     }
+    std::printf("  cases executed: %d of %d\n", executed, attempted);
+    // A host that cannot create any of the swapchains would otherwise pass with zero assertions about DO_NOT_WAIT. Fail instead: the
+    // recipe then needs a host that can (or to be marked manual by a person who read this).
+    CHECK(executed > 0);
 
     DestroyWindow(hwnd);
     if (g_failed != 0)
