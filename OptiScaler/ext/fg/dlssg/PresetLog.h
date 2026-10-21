@@ -37,6 +37,7 @@ enum class LineKind : uint8_t
     Selected,       // "Preset A selected, disabling UIR."
     UirNote,        // "Enabling/Disabling bUIRecompositionSupported due to preset override."
     BlockedByFlags, // "Not parsing presets due to private flag overrides."
+    OverrideReport, // NGX itself: "Feature [FrameGeneration] Override Reported: ModelPreset, Value: N, Requested: Yes, Applied: Yes, ..."
     FlagOverride,   // 310.9.16: "Disabling UI recomposition / FG Lite due to private flag override." (the preset is still applied)
     Applying,       // 310.9.16: "Applying settings for render preset N."
     Unsupported,    // 310.9.16: "Warning: Ignoring unsupported render preset ID N."
@@ -209,6 +210,38 @@ inline ParsedLine ParseLine(std::string_view line)
 
     // 310.9.16: "Applying settings for render preset N." (written by ApplyRenderPreset when ReadRegkeys acts on 1, 2 or 3). The
     // recomposition follows the preset the way ReadRegkeys stores it: 1 (A) and 3 (C) turn it off, 2 (B) turns it on.
+    // NGX's own report (NGXOverrideStatusCallback): "Feature [FrameGeneration] Override Reported: ModelPreset, Value: N, Requested: Yes,
+    // Applied: Yes, Is Latest: No". The other features (super resolution, ray reconstruction) print their own, so the feature is required.
+    if (Has(low, "override reported") && Has(low, "modelpreset") && Has(low, "[framegeneration]"))
+    {
+        out.kind = LineKind::OverrideReport;
+        int64_t n = 0;
+        int number = -1;
+        const bool value = detail::NumberAfter(low, "value", n) && n >= 0 && detail::ToInt(n, number);
+        auto yesNo = [&](std::string_view key) -> int
+        {
+            const size_t at = low.find(key);
+            if (at == std::string::npos)
+                return -1;
+            size_t i = at + key.size();
+            while (i < low.size() && (low[i] == ' ' || low[i] == ':' || low[i] == '='))
+                ++i;
+            if (low.compare(i, 3, "yes") == 0 || low.compare(i, 4, "true") == 0)
+                return 1;
+            if (low.compare(i, 2, "no") == 0 || low.compare(i, 5, "false") == 0)
+                return 0;
+            return -1;
+        };
+        out.requested = yesNo("requested");
+        out.applied = yesNo("applied");
+        if (value)
+        {
+            out.value = static_cast<uint64_t>(number);
+            out.hasValue = true;
+        }
+        out.recognised = value && out.requested >= 0 && out.applied >= 0;
+        return out;
+    }
     if (Has(low, "applying settings for render preset"))
     {
         out.kind = LineKind::Applying;
@@ -336,6 +369,7 @@ class Readout
         int applied = -1;
         uint64_t value = 0;
         bool blockedByFlags = false; // "Not parsing presets due to private flag overrides"
+        int overrideValue = -1, overrideRequested = -1, overrideApplied = -1; // NGX Override Reported: ModelPreset
         bool flagOverride = false;   // 310.9.16: a private flag overrides the recomposition or FG Lite setting; the preset is still applied
         bool reportNew = false;      // the report is in the 310.9.16 wording: `requested` is the preset number, `effective` the one in force
         int effective = -1;
@@ -385,8 +419,14 @@ class Readout
         out.uir = state_.uir;
         if (state_.unsupportedId == request)
             out.effect = Effect::NotApplied; // 310.9.16: "Ignoring unsupported render preset ID N."
+        else if (state_.overrideValue == request && state_.overrideApplied == 0)
+            out.effect = Effect::NotApplied; // NGX itself: "Override Reported: ModelPreset, Value: N, ..., Applied: No"
         else if (state_.hasReport && state_.reportNew && state_.requested == request)
             out.effect = (state_.effective == request) ? Effect::Applied : Effect::NotApplied; // 310.9.16 report: the final word
+        else if (state_.hasReport && state_.reportNew)
+        {
+            // the report is about another preset than the one asked for: a contradiction, no claim either way
+        }
         else if (state_.hasReport && !state_.reportNew && state_.value == static_cast<uint64_t>(request))
         {
             if (state_.applied > 0)
@@ -394,6 +434,8 @@ class Readout
             else if (state_.requested > 0)
                 out.effect = Effect::NotApplied;
         }
+        else if (state_.overrideValue == request && state_.overrideApplied == 1 && state_.overrideRequested != 0)
+            out.effect = Effect::Applied; // NGX itself: "Override Reported: ModelPreset, Value: N, Requested: Yes, Applied: Yes"
         else if (state_.appliedLine == request)
             out.effect = Effect::Applied; // 310.9.16: "Applying settings for render preset N."
         else if (state_.selected != 0 && state_.selected - 'A' + 1 == request)
@@ -453,6 +495,14 @@ class Readout
         case LineKind::BlockedByFlags:
             state_.blockedByFlags = true;
             break;
+        case LineKind::OverrideReport:
+            if (p.recognised)
+            {
+                state_.overrideValue = static_cast<int>(p.value > INT_MAX ? INT_MAX : p.value);
+                state_.overrideRequested = p.requested;
+                state_.overrideApplied = p.applied;
+            }
+            break;
         case LineKind::FlagOverride:
             state_.flagOverride = true;
             if (p.uir != Uir::Unknown)
@@ -470,7 +520,7 @@ class Readout
             lastCandidateLog_ = nowMs;
             return true;
         }
-        if (p.recognised)
+        if (p.recognised && p.kind != LineKind::FlagOverride) // a private-flag note is not a preset line
             state_.confirmed = true;
         return false;
     }

@@ -414,12 +414,15 @@ struct ContextFacts
 //     taken, no copy of rsp/rbp as a value, no push/pop or other move of rsp/rbp);
 //  4. control flow: no jump from outside [save, reload] lands in it, no jump lands anywhere in (reload, call] and none lands on the
 //     entry run, every direct jump target inside create is an instruction start, there is no indirect jump, no call into create
-//     itself, a jump out of create goes only to the start of another function (a tail call), and no cold fragment of the exception
-//     table is chained to create: the only way to the call is through the save and then the reload.
-//  Stores through a register other than rsp/rbp/rip with a negative displacement or an index, and string stores / bit-string stores
-//  (they write where a register says), are refused in the region; so is a frame address copied or stored. NOT tracked: a pointer
-//  built by arithmetic on a frame address (lea rax,[rbp-30h]; sub rax,70h; mov [rax],r12): no compiler emits it, only hand-made code.
-inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, const std::vector<Function>& fns, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
+//     itself, no jump out of create at all (the three real builds have none; a call out returns), and no cold fragment of the
+//     exception table is chained to create: the only way to the call is through the save and then the reload.
+//  A frame slot is also refused when a store in the region goes through a register that may hold a frame address ("marked": a
+//  frame lea, its copies, two-register arithmetic / cmov / xchg with a marked source, arithmetic on it; a mark is dropped only by a
+//  full-width overwrite or by a call for the volatile registers; computed by a forward may-analysis over the whole region, entry run
+//  included, with merges at jump targets and a fixed point for loops), when an index register is marked, and in every slot case for
+//  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored. NOT tracked: a
+//  frame address stored to memory and read back, an xmm carrier; hand-made code only.
+inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
 {
     using namespace x64;
     const int iCall = InsnIndex(insns, readCall);
@@ -521,15 +524,10 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
         const bool direct = b.flow == Flow::Jump || b.flow == Flow::CondJump || (b.flow == Flow::Call && b.target != -1);
         if (!direct)
             continue;
-        if (b.target < 0 || b.target > 0xFFFFFFFFll)
-        {
-            failAt = b.at;
-            return Why::CreateContext;
-        }
         if (b.target < create || b.target >= createEnd)
         {
-            // leaving create: a call comes back, a jump must be a tail call to the start of another function (it never comes back)
-            if (b.flow != Flow::Call && StartOf(fns, static_cast<uint32_t>(b.target)) == nullptr)
+            // leaving create: a call comes back; a jump out would reach the read function, the copy or the defaults without the reload
+            if (b.flow != Flow::Call)
             {
                 failAt = b.at;
                 return Why::CreateContext;
@@ -550,56 +548,155 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
         }
     }
 
-    // Registers that may hold a frame address before each instruction of the region (slot mode): a frame location's address taken
-    // with lea, a copy of it, arithmetic on it. Overwritten by a load, an immediate, a zero idiom or a pop, and lost in a call for the
-    // volatile registers. Path-insensitive (address order, two rounds so that a loop carries it round).
-    std::vector<uint16_t> taint(static_cast<size_t>(iReload - iSave + 1), 0);
+    // Registers that may hold a frame address before each instruction, computed from the end of the prologue (so a frame lea in the
+    // entry run counts) to the reload: a forward may-analysis, union at jump targets, repeated to a fixed point (loops). A frame
+    // location's address taken with lea marks its register; so do mov / lea / two-register add-sub-or-xor-and-adc-sbb-imul-cmov-xchg-xadd
+    // with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
+    // by a FULL-WIDTH overwrite (a 64/32-bit mov from an unmarked register or from memory or an immediate, movzx/movsx, pop, a zero
+    // idiom, lea of unmarked registers) and, for the volatile registers, by a call; 8- and 16-bit writes keep it.
+    const size_t regionLen = static_cast<size_t>(iReload - iStart + 1);
+    std::vector<uint16_t> marks(regionLen, 0);
     if (want.slot)
     {
         constexpr uint16_t kVolatile = (1u << RAX) | (1u << RCX) | (1u << RDX) | (1u << R8) | (1u << R9) | (1u << R10) | (1u << R11);
-        uint16_t cur = 0;
-        for (int round = 0; round < 2; ++round)
-            for (int j = iSave + 1; j <= iReload; ++j)
+        auto step = [&](uint16_t cur, const Insn& n) -> uint16_t
+        {
+            auto holds = [&](uint8_t r) { return r != kNoReg && (cur & (1u << r)) != 0; };
+            const bool narrow = n.opsize16 && !n.rexW; // 16-bit operand: a partial write
+            uint16_t next = cur;
+            if (n.flow == Flow::Call)
+                next = static_cast<uint16_t>(next & ~kVolatile);
+            if (n.isLea && n.mem.present)
             {
-                const Insn& n = insns[j];
-                taint[static_cast<size_t>(j - iSave)] = static_cast<uint16_t>(taint[static_cast<size_t>(j - iSave)] | cur);
-                auto holds = [&](uint8_t r) { return r != kNoReg && (cur & (1u << r)) != 0; };
-                if (n.flow == Flow::Call)
-                    cur = static_cast<uint16_t>(cur & ~kVolatile);
-                if (n.isLea && n.mem.present)
-                {
-                    const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP);
-                    const bool derived = frame || holds(n.mem.ripRel ? kNoReg : n.mem.base) || holds(n.mem.index);
-                    cur = static_cast<uint16_t>(derived ? (cur | (1u << n.reg)) : (cur & ~(1u << n.reg)));
-                }
-                else if (!n.twoByte && n.hasModrm && n.mod == 3 && (n.opcode == 0x89 || n.opcode == 0x8B))
-                {
-                    const uint8_t dst = (n.opcode == 0x89) ? n.rm : n.reg, src = (n.opcode == 0x89) ? n.reg : n.rm;
-                    cur = static_cast<uint16_t>(holds(src) ? (cur | (1u << dst)) : (cur & ~(1u << dst)));
-                }
-                else
-                {
-                    const bool overwrite =
-                        (!n.twoByte && ((n.opcode >= 0xB0 && n.opcode <= 0xBF) || (n.opcode >= 0x58 && n.opcode <= 0x5F) || (n.opcode == 0xC7 && n.mod == 3) ||
-                                        ((n.opcode == 0x8B || n.opcode == 0x8A || n.opcode == 0x63) && n.mod != 3) ||
-                                        ((n.opcode == 0x31 || n.opcode == 0x33 || n.opcode == 0x29 || n.opcode == 0x2B) && n.mod == 3 && n.reg == n.rm))) ||
-                        (n.twoByte && (n.opcode == 0xB6 || n.opcode == 0xB7 || n.opcode == 0xBE || n.opcode == 0xBF) && n.mod != 3);
-                    if (overwrite)
-                        cur = static_cast<uint16_t>(cur & ~n.gprWrites);
-                }
+                const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP);
+                const bool derived = frame || holds(n.mem.ripRel ? kNoReg : n.mem.base) || holds(n.mem.index);
+                if (derived)
+                    next = static_cast<uint16_t>(next | (1u << n.reg));
+                else if (!narrow)
+                    next = static_cast<uint16_t>(next & ~(1u << n.reg));
+                return next;
             }
+            if (!n.hasModrm || n.mod != 3)
+            {
+                // no register source: only the definite full-width overwrites drop a mark
+                bool kill = false;
+                if (!n.twoByte)
+                {
+                    if ((n.opcode >= 0xB8 && n.opcode <= 0xBF) || (n.opcode >= 0x58 && n.opcode <= 0x5F) || n.opcode == 0x63)
+                        kill = !narrow;
+                    else if (n.opcode == 0x8B && n.mod != 3)
+                        kill = !narrow;
+                }
+                else if ((n.opcode == 0xB6 || n.opcode == 0xB7 || n.opcode == 0xBE || n.opcode == 0xBF) && n.mod != 3)
+                    kill = !narrow;
+                if (kill)
+                    next = static_cast<uint16_t>(next & ~n.gprWrites);
+                if (!n.twoByte && n.opcode >= 0x91 && n.opcode <= 0x97 && (cur & n.gprWrites) != 0) // xchg r, rax (short form): both may hold either value
+                    next = static_cast<uint16_t>(next | n.gprWrites);
+                return next;
+            }
+            // register forms (mod == 3): dst and src
+            if (!n.twoByte)
+            {
+                const uint8_t op = n.opcode;
+                if (op == 0x89 || op == 0x8B) // mov
+                {
+                    const uint8_t dst = (op == 0x89) ? n.rm : n.reg, src = (op == 0x89) ? n.reg : n.rm;
+                    if (holds(src))
+                        next = static_cast<uint16_t>(next | (1u << dst));
+                    else if (!narrow)
+                        next = static_cast<uint16_t>(next & ~(1u << dst));
+                    return next;
+                }
+                if (op == 0x87 || op == 0x86) // xchg: both registers may now hold either value
+                {
+                    if (holds(n.reg) || holds(n.rm))
+                        next = static_cast<uint16_t>(next | (1u << n.reg) | (1u << n.rm));
+                    return next;
+                }
+                if (op < 0x40 && (op & 7) <= 3 && op < 0x38) // add or adc sbb and sub xor (not cmp)
+                {
+                    const uint8_t dst = ((op & 2) == 0) ? n.rm : n.reg, src = ((op & 2) == 0) ? n.reg : n.rm;
+                    const bool zeroIdiom = (op == 0x31 || op == 0x33 || op == 0x29 || op == 0x2B) && n.reg == n.rm && !narrow;
+                    if (zeroIdiom)
+                        next = static_cast<uint16_t>(next & ~(1u << dst));
+                    else if (holds(src))
+                        next = static_cast<uint16_t>(next | (1u << dst));
+                    return next;
+                }
+                if (op == 0xC7 && n.ext == 0) // mov r, imm
+                {
+                    if (!narrow)
+                        next = static_cast<uint16_t>(next & ~(1u << n.rm));
+                    return next;
+                }
+                return next;
+            }
+            // two-byte register forms
+            const uint8_t op = n.opcode;
+            if ((op >= 0x40 && op <= 0x4F) || op == 0xAF) // cmovcc, imul r, r/m: the source reaches the destination
+            {
+                if (holds(n.rm))
+                    next = static_cast<uint16_t>(next | (1u << n.reg));
+                return next;
+            }
+            if (op == 0xC1 || op == 0xC0) // xadd: both registers
+            {
+                if (holds(n.reg) || holds(n.rm))
+                    next = static_cast<uint16_t>(next | (1u << n.reg) | (1u << n.rm));
+                return next;
+            }
+            if ((op == 0xB6 || op == 0xB7 || op == 0xBE || op == 0xBF) && !narrow) // movzx / movsx: a small number
+                next = static_cast<uint16_t>(next & ~(1u << n.reg));
+            return next;
+        };
+        // forward worklist over the region
+        std::vector<int> work;
+        std::vector<bool> reached(regionLen, false);
+        reached[0] = true;
+        work.push_back(iStart);
+        while (!work.empty())
+        {
+            const int j = work.back();
+            work.pop_back();
+            const Insn& n = insns[j];
+            const uint16_t out = step(marks[static_cast<size_t>(j - iStart)], n);
+            auto flowTo = [&](int k)
+            {
+                if (k < iStart || k > iReload)
+                    return;
+                const size_t at = static_cast<size_t>(k - iStart);
+                const uint16_t merged = static_cast<uint16_t>(marks[at] | out);
+                if (!reached[at] || merged != marks[at])
+                {
+                    reached[at] = true;
+                    marks[at] = merged;
+                    work.push_back(k);
+                }
+            };
+            const bool falls = n.flow == Flow::Next || n.flow == Flow::CondJump || n.flow == Flow::Call;
+            if (falls && j + 1 <= iReload)
+                flowTo(j + 1);
+            if ((n.flow == Flow::Jump || n.flow == Flow::CondJump) && n.target >= create)
+            {
+                const int k = InsnIndex(insns, static_cast<uint32_t>(n.target));
+                if (k >= 0)
+                    flowTo(k);
+            }
+        }
     }
-
     // 3. nothing in the region writes the saved place
     for (int j = iSave + 1; j <= iReload; ++j)
     {
         const Insn& n = insns[j];
-        bool clobbered = n.aliasStore; // rep movs/stos and bts/btr/btc write where a register says: refused in every mode
+        bool clobbered = false;
         if (!want.slot)
             clobbered = clobbered || (n.gprWrites & (1u << want.reg)) != 0;
         else
         {
             int64_t off = 0;
+            if (n.aliasStore) // rep movs/stos and bts/btr/btc write where a register says
+                clobbered = true;
             if (n.writesStack || (n.gprWrites & ((1u << RSP) | (1u << RBP))) != 0 || n.readsFrameRegAsValue)
                 clobbered = true; // the frame moves, or its address is copied or stored somewhere
             if (n.isLea && n.mem.present && !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP))
@@ -608,9 +705,9 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                 clobbered = clobbered || !FrameOffset(n.mem, f, off) || (off < want.off + 8 && off + n.memSize > want.off);
             else if (n.memWrite && n.mem.present && !n.mem.ripRel)
             {
-                // a store through another register: refused when that register may hold a frame address (or when an index is used)
-                const uint16_t held = taint[static_cast<size_t>(j - iSave)];
-                clobbered = clobbered || n.mem.index != kNoReg || (n.mem.base != kNoReg && (held & (1u << n.mem.base)) != 0);
+                // a store through another register: refused when the base or the index may hold a frame address
+                const uint16_t held = marks[static_cast<size_t>(j - iStart)];
+                clobbered = clobbered || (n.mem.base != kNoReg && (held & (1u << n.mem.base)) != 0) || (n.mem.index != kNoReg && (held & (1u << n.mem.index)) != 0);
             }
         }
         if (clobbered)
@@ -765,7 +862,7 @@ inline Located Locate(const ImageView& view)
     ContextFacts ctx;
     {
         uint32_t failAt = 0;
-        const Why proof = ProveContext(insns, create, frame, fns, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
+        const Why proof = ProveContext(insns, create, frame, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
         if (proof != Why::Ok)
         {
             fail.failAt = failAt;
@@ -911,7 +1008,7 @@ inline const char* KnownHashLabel(std::string_view sha256Hex)
         { "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82", "NVIDIA DLSS-G 310.9.1.0, code shape read in full with a decompiler" },
         { "5d5cbf14d2727d47f93fd10bf77bd91708ae122482a6f86fd564971641ebd47b", "NVIDIA DLSS-G 310.8.0, structural scan only" },
         { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "NVIDIA DLSS-G 310.9.16 (Streamline 2.14.16), code shape read in full with a decompiler" },
-        { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "a build verified by the Nickle fork (not read here)" },
+        { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "NVIDIA DLSS-G 310.9.16 model-store build (ProgramData/NVIDIA/NGX), accepted by the guards; the live change worked with it in game" },
     };
     if (sha256Hex.size() != 64)
         return nullptr;

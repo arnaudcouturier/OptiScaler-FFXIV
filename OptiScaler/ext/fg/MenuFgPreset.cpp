@@ -73,7 +73,7 @@ void DrawReadout(const Status& status)
     if (view.blockedByFlags)
         ImGui::TextWrapped("The runtime ignores presets because of private flags set in the driver.");
     if (view.flagOverride)
-        ImGui::TextWrapped("A private flag set in the driver overrides part of the preset (UI recomposition or FG Lite).");
+        ImGui::TextWrapped("A private flag set in the driver forces UI recomposition or FG Lite off.");
 
     switch (LogRelayState())
     {
