@@ -10,6 +10,7 @@
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/pass/DlssNr_Dx12.h"
+#include "ext/present/PresentSeams.h"
 
 #include <State.h>
 #include <gpu_time/GpuTime_Dx12.h>
@@ -950,6 +951,7 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     m.runs.fetch_add(1, std::memory_order_relaxed);
     m.lastCpuUs.store(static_cast<uint64_t>(ops.cpuMs * 1000.0), std::memory_order_relaxed);
     m.cpuCost.Add(ops.cpuMs);
+    ext::present::RecordSample(ext::present::Phase::PreviewNr, static_cast<uint64_t>(ops.cpuMs * 1000.0)); // PT frame-pacing trace
     if (placement == Placement::PostSr)
     {
         m.productionRuns.fetch_add(1, std::memory_order_relaxed);

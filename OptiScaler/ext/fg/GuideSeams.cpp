@@ -92,6 +92,7 @@ bool DispatchResetHistory(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t 
 
 void PostDispatch(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t frame, bool discontinuity, Provider provider)
 {
+    ext::present::FgDispatchEnd(); // PT: ends the span FgDispatchBegin opened in PresetSwitchTick
     if (!SceneBridge())
         return;
 

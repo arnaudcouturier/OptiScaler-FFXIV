@@ -425,7 +425,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         UINT realFlags = Flags;
 
         // Do not wait for it
-        auto realPresentResult = _real->Present(0, realFlags);
+        auto realPresentResult = ext::present::HiddenPresent(_real, realFlags); // ext: PT hidden present seam
 
         if (FAILED(realPresentResult))
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);

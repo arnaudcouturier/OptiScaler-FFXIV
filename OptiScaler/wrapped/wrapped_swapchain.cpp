@@ -276,6 +276,7 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    ext::present::PacingScope outputPresent(ext::present::Phase::OutputPresent); // ext: PT output present time
     if (State::Instance().isShuttingDown)
     {
         if (pPresentParameters == nullptr)

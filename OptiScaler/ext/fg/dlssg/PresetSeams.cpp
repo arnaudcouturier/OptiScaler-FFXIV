@@ -69,6 +69,7 @@ namespace ext::fg
 {
 bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
 {
+    ext::present::FgDispatchBegin(); // PT: the FG dispatch span ends in ext::fg::PostDispatch
     FlushCandidateLines(); // unrecognised NVIDIA preset lines, queued by the log sink
 
     auto& state = Requests();
