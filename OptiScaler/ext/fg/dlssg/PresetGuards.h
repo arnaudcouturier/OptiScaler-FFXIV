@@ -1008,7 +1008,7 @@ inline const char* KnownHashLabel(std::string_view sha256Hex)
         { "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82", "NVIDIA DLSS-G 310.9.1.0, code shape read in full with a decompiler" },
         { "5d5cbf14d2727d47f93fd10bf77bd91708ae122482a6f86fd564971641ebd47b", "NVIDIA DLSS-G 310.8.0, structural scan only" },
         { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "NVIDIA DLSS-G 310.9.16 (Streamline 2.14.16), code shape read in full with a decompiler" },
-        { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "NVIDIA DLSS-G 310.9.16 model-store build (ProgramData\NVIDIA\NGX), accepted by the guards; the live change worked with it in game" },
+        { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "NVIDIA DLSS-G 310.9.16 model-store build (ProgramData/NVIDIA/NGX), accepted by the guards; the live change worked with it in game" },
     };
     if (sha256Hex.size() != 64)
         return nullptr;
