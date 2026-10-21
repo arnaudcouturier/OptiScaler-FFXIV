@@ -141,8 +141,11 @@ struct TransactionResult
 
 // Begin, enlist the calling thread and every handle in `threads`, attach every spec, commit; abort on any failure before the
 // commit. Takes ownership of the handles (closed on every path, after Detours has resumed the threads through them).
-// A Begin that fails (another component's transaction is open: Detours transactions are process-wide) leaves that
-// transaction alone: Abort is only called for a transaction this call opened.
+// Who owns the transaction after a failing Begin (read from the vendored detours.lib): Begin answers
+// ERROR_INVALID_OPERATION (4317) exactly when it did NOT take the process-wide transaction, because another thread (or this
+// thread, in an outer transaction) already has one open. That one is not ours and is left alone: no Abort. Any other failure
+// comes after Begin took ownership (it makes the trampoline regions writable first and returns the result of that), so the
+// transaction is open and must be aborted here, or every later Begin in the process answers 4317 for the rest of the session.
 inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads)
 {
     TransactionResult out;
@@ -151,6 +154,8 @@ inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count,
     {
         out.error = result;
         out.stage = retry::Stage::Begin;
+        if (result != ERROR_INVALID_OPERATION)
+            DetourTransactionAbort(); // Begin took the transaction before it failed: close it
     }
     else
     {

@@ -274,6 +274,70 @@ static void ATransactionHeldByAnotherThreadIsReportedAndLeftAlone()
     StopParked(live);
 }
 
+// Detours answers 4317 (ERROR_INVALID_OPERATION) exactly when the transaction was NOT taken (another thread owns one, or this
+// thread already has its own open). Any other failing Begin has already taken ownership: it failed while making the
+// trampoline regions writable, and the caller must Abort or the process-wide transaction stays open for ever.
+// The failure is injected by decommitting one page in the middle of an existing 64 KB trampoline region: Begin calls
+// VirtualProtect over the whole region, and that fails when any page of the range is not committed.
+static void ABeginThatFailsForAnotherReasonThanABusyTransactionIsAbortedNotLeftOpen()
+{
+    Reset();
+    const HookSpec specA = MakeSpecA();
+    const HookSpec specB = MakeSpecB();
+    // Hook A first and keep it hooked: Detours releases a trampoline region as soon as nothing uses it any more.
+    std::vector<HANDLE> none;
+    CHECK(transaction::RunHookTransaction(&specA, 1, none).error == 0);
+    const uintptr_t trampolineA = reinterpret_cast<uintptr_t>(g_origA);
+
+    const uintptr_t base = trampolineA & ~static_cast<uintptr_t>(0xFFFF);
+    uintptr_t victim = 0; // a page of the region that does not hold the trampoline of A
+    for (const uintptr_t offset : { 0x8000u, 0x4000u, 0xC000u })
+    {
+        if ((trampolineA & ~static_cast<uintptr_t>(0xFFF)) != base + offset)
+        {
+            victim = base + offset;
+            break;
+        }
+    }
+    const BOOL decommitted = VirtualFree(reinterpret_cast<void*>(victim), 0x1000, MEM_DECOMMIT);
+    if (!decommitted)
+        std::printf("probe: could not decommit the page at %p (error %lu), trampoline of A at %p\n",
+                    reinterpret_cast<void*>(victim), GetLastError(), reinterpret_cast<void*>(trampolineA));
+    CHECK(decommitted != FALSE);
+
+    std::vector<HANDLE> threads;
+    const auto result = transaction::RunHookTransaction(&specB, 1, threads);
+    std::printf("probe: Begin with an uncommitted page inside a trampoline region -> error %ld at '%s'\n", result.error,
+                retry::StageName(result.stage));
+    CHECK(result.error != 0 && result.error != static_cast<long>(ERROR_INVALID_OPERATION));
+    CHECK(result.stage == Stage::Begin);
+
+    // Give the page back, then ask whether the failed Begin left the transaction open (an open one answers 4317).
+    CHECK(VirtualAlloc(reinterpret_cast<void*>(victim), 0x1000, MEM_COMMIT, PAGE_EXECUTE_READWRITE) != nullptr);
+    const LONG next = DetourTransactionBegin();
+    CHECK(next == NO_ERROR);
+    DetourTransactionAbort(); // leaves the process clean even when the check above failed
+
+    std::vector<HANDLE> again;
+    CHECK(transaction::RunHookTransaction(&specB, 1, again).error == 0); // and the install works afterwards
+    CHECK(Hooked());
+    Detach();
+    CHECK(Unhooked());
+}
+// The other side of the rule: a Begin refused with 4317 owns nothing, so it must not Abort. If this thread already has its own
+// transaction open, an Abort here would tear that outer transaction down.
+static void ABeginInsideTheSameThreadsOwnTransactionLeavesThatTransactionAlone()
+{
+    Reset();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    CHECK(DetourTransactionBegin() == NO_ERROR); // an outer transaction of this very thread
+    std::vector<HANDLE> threads;
+    const auto result = transaction::RunHookTransaction(specs, 2, threads);
+    CHECK(result.error == static_cast<long>(ERROR_INVALID_OPERATION));
+    CHECK(result.stage == Stage::Begin);
+    CHECK(DetourTransactionAbort() == NO_ERROR); // still open and still ours (a torn-down transaction answers 4317)
+    CHECK(Unhooked());
+}
 static void AFailingAttachNamesItsStageAbortsAndLetsTheNextTransactionBegin()
 {
     Reset();
@@ -451,6 +515,8 @@ int main()
     FilterLiveDropsAndClosesExitedThreadsAndTheRestInstallsFirstTime();
     ASecondAttemptSucceedsAfterAFailureEvenOnAPoisonedTargetPointer();
     ATransactionHeldByAnotherThreadIsReportedAndLeftAlone();
+    ABeginThatFailsForAnotherReasonThanABusyTransactionIsAbortedNotLeftOpen();
+    ABeginInsideTheSameThreadsOwnTransactionLeavesThatTransactionAlone();
     AFailingAttachNamesItsStageAbortsAndLetsTheNextTransactionBegin();
     AParkedHelperIsInsideItsWaitWhenStartParkedReturns();
     TheSnapshotListsOtherLiveThreadsWithTheRightsTheTransactionNeeds();
