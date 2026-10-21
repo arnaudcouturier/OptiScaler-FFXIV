@@ -208,7 +208,7 @@ void RenderMenu(float menuResScale)
         bool disableOnFocusLoss = nr.disableOnFocusLoss.value_or_default();
         if (ImGui::Checkbox("Pause NR while the game is not focused (experimental)", &disableOnFocusLoss))
             nr.disableOnFocusLoss = disableOnFocusLoss;
-        HelpMarker("Experimental, off by default. Pauses NR while the game window is not focused; the plain DLSS path is shown instead.\nPauses after 1 second without focus (at once when minimised) and resumes 0.25 seconds after focus returns. Applies live. Save Settings to keep your choice.");
+        HelpMarker("Experimental, off by default. Pauses NR while the game window is not focused; the plain DLSS path is shown instead.\nPauses after 1 second without focus (at once when minimised) and resumes 0.25 seconds after focus returns. Applies live. Save Settings to keep your choice.\nThe character preview NR pauses and resumes with it.");
 
         bool beforeSr = nr.runBeforeSr.value_or_default();
         const bool deferredActive = nr.deferredDlss.value_or_default();
