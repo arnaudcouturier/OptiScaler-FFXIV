@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/nr/NrConfig.h"
+#include "ext/nr/NrFocusKey.h"
 #include "ext/ExtFeatures.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/nr/native/DlssNrNative.h"
@@ -25,6 +26,7 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "ResidualFGApproxCamera", residualFgApproxCamera);
     b.Add("DlssNr", "ToggleKey", toggleKey, true); // hex when positive (a key code), like the reference build
     b.Add("DlssNr", "DisableOnFocusLoss", disableOnFocusLoss);
+    b.Add("DlssNr", "PauseOnFocusLoss", pauseOnFocusLoss);
     b.Add("DlssNr", "TransferStrength", transferStrength);
     b.Add("DlssNr", "ColourStrength", colourStrength);
     b.Add("DlssNr", "MaxRatio", maxRatio);
@@ -115,6 +117,9 @@ void NrConfig::Bind(config::Binder& b)
 
 void NrConfig::PostLoad()
 {
+    // QS: the key of another build for the same switch moves into DisableOnFocusLoss once and is cleared (see NrFocusKey.h).
+    nr::MigrateFocusAlias(disableOnFocusLoss, pauseOnFocusLoss);
+
     // The hot-path seams of the exposure scan (ext::restrack::NoteUav/NoteResourceCreated) test this feature bit; it
     // stays set for the session once NR was enabled (EvalBefore latches it for a runtime enable).
     if (enabled.value_or_default())

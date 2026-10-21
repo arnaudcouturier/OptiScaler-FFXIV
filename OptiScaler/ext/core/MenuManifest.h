@@ -49,6 +49,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[NgxRelease] SkipReleaseSleep", // kill switch of the release-path sleep skip
     "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
     "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias
+    "[DlssNr] PauseOnFocusLoss", // another name for DisableOnFocusLoss, moved into it when the ini is read
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member
