@@ -53,7 +53,7 @@ enum class Clobber
     MovImmRbp, // mov ebp,1: writes rbp without reading it (no modrm byte, nothing else flags it)
     // review 3, M1/L3: the frame-address mark through two-register forms, partial writes, merges, loops, and what it must not lose
     MarkAddSource, MarkPartialAl, MarkPartialAx, MarkPartialMovAx, MarkPartialLoadAl, MarkBranchMerge, MarkLoopCarry, MarkKeptInR15, MarkKeptInRsi,
-    MarkLeaFromBase, MarkLeaFromIndex, MarkMov8B, MarkIndexStore, MarkXchg, MarkCmov, StoreViaR12,
+    MarkLeaFromBase, MarkLeaFromIndex, MarkMov8B, MarkIndexStore, MarkXchg, MarkCmov, StoreViaR12, MarkXchgShort, MarkPartialXor,
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
     // neighbours and unrelated writes that must NOT be refused
@@ -300,6 +300,8 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkIndexStore: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4C, 0x89, 0x24, 0xC1 }); break;                              // mov [rcx+rax*8],r12, rax marked
     case Clobber::MarkXchg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x87, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;                  // xchg rcx,rax
     case Clobber::MarkCmov: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x0F, 0x44, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;            // cmovz rcx,rax
+    case Clobber::MarkXchgShort: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                    // xchg rcx,rax (short form)
+    case Clobber::MarkPartialXor: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0x31, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;            // xor ax,ax: a partial zero
     case Clobber::StoreViaR12: c.b({ 0x4D, 0x89, 0x6C, 0x24, 0x90 }); break;                                                    // mov [r12-70h],r13
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
@@ -953,7 +955,8 @@ void RegionRules()
     // review 3, M1/L3: the mark follows two-register forms, survives partial writes, merges and loops, and a pre-save lea
     for (Clobber k : { Clobber::MarkAddSource, Clobber::MarkPartialAl, Clobber::MarkPartialAx, Clobber::MarkPartialMovAx, Clobber::MarkPartialLoadAl,
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
-                       Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov })
+                       Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
+                       Clobber::MarkXchgShort, Clobber::MarkPartialXor })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));

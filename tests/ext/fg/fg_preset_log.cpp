@@ -323,7 +323,7 @@ void Runtime31016Confirmation()
         r.Feed(Applying(3), 1);
         r.Feed(Ngx("EndpointConfiguration::ReadRegkeys:171", "Disabling FG Lite due to private flag override."), 2);
         const auto s = r.Snapshot();
-        CHECK(s.flagOverride && !s.blockedByFlags && s.confirmed);
+        CHECK(s.flagOverride && !s.blockedByFlags && s.confirmed); // confirmed by the Applying line, not by the flag note
         CHECK(Confirm(r, 3) == Effect::Applied);
         CHECK(r.Confirm(3).uir == Uir::Disabled); // from the Applying line; FG Lite does not change it
         Readout q;
@@ -360,6 +360,79 @@ void Runtime31016Confirmation()
         u.Feed(Unsupported(3), 1);
         CHECK(!PausesUiRecomposition(kPresetC, u.Confirm(3).effect, u.Confirm(3).uir));
     }
+}
+
+// ---- NGX's own override report (the maintainer's in-game log of 2026-10-20, lines 3533 and 12387) ----------------------------------
+const char* kOverride3 = "SL Log: [22-31-55][streamline][info][tid:41820][17s:979ms:467us]commonEntry.cpp:1368[ngxLog] [Unknown(32765)] [2026-10-20 22:31:55] [NGXOverrideStatusCallback:2189] Feature [FrameGeneration] Override Reported: ModelPreset, Value: 3, Requested: Yes, Applied: Yes, Is Latest: No";
+std::string Override(int value, const char* requested, const char* applied, const char* feature = "FrameGeneration")
+{
+    return std::string("SL Log: [22-33-40][streamline][info][tid:41820][122s:513ms:888us]commonEntry.cpp:1368[ngxLog] [Unknown(32765)] [2026-10-20 22:33:40] [NGXOverrideStatusCallback:2189] Feature [") + feature +
+           "] Override Reported: ModelPreset, Value: " + std::to_string(value) + ", Requested: " + requested + ", Applied: " + applied + ", Is Latest: No";
+}
+
+void NgxOverrideReport()
+{
+    {
+        const auto p = ParseLine(kOverride3);
+        CHECK_MSG(p.kind == LineKind::OverrideReport && p.recognised && p.hasValue && p.value == 3 && p.requested == 1 && p.applied == 1, "kind %d", static_cast<int>(p.kind));
+    }
+    {
+        const auto p = ParseLine(Override(1, "Yes", "No"));
+        CHECK(p.kind == LineKind::OverrideReport && p.recognised && p.value == 1 && p.requested == 1 && p.applied == 0);
+        const auto q = ParseLine(Override(2, "No", "No"));
+        CHECK(q.kind == LineKind::OverrideReport && q.recognised && q.requested == 0 && q.applied == 0);
+        const auto lower = ParseLine(Override(3, "yes", "yes"));
+        CHECK(lower.recognised && lower.applied == 1);
+        const auto broken = ParseLine(Override(3, "Yes", "Maybe"));
+        CHECK(broken.kind == LineKind::OverrideReport && !broken.recognised);
+    }
+    // other features report their own presets: not this line
+    CHECK(ParseLine(Override(1, "Yes", "Yes", "SuperSampling")).kind == LineKind::None);
+    CHECK(ParseLine(Override(1, "Yes", "Yes", "RayReconstruction")).kind == LineKind::None);
+    CHECK(ParseLine(Override(1, "Yes", "Yes", "DeepDVC")).kind != LineKind::OverrideReport); // only frame generation's own report counts
+    {
+        Readout w; // reported as applied although nobody asked for it: no confirmation
+        w.Feed(Override(3, "No", "Yes"), 1);
+        CHECK(Confirm(w, 3) == Effect::Unknown);
+    }
+    {   // confirming, and "did not apply" when NGX says Applied: No
+        Readout r;
+        r.Feed(kOverride3, 1);
+        CHECK(Confirm(r, 3) == Effect::Applied && Confirm(r, 1) == Effect::Unknown && r.Snapshot().confirmed);
+        CHECK(StatusSentence(3, Confirm(r, 3), true).find("In use") == 0);
+        CHECK(r.Confirm(3).uir == Uir::Unknown); // the line says nothing about the recomposition: C does not pause on it alone
+        CHECK(!PausesUiRecomposition(kPresetC, r.Confirm(3).effect, r.Confirm(3).uir));
+        Readout n;
+        n.Feed(Override(3, "Yes", "No"), 1);
+        CHECK(Confirm(n, 3) == Effect::NotApplied);
+        const auto s = StatusSentence(3, Confirm(n, 3), true);
+        CHECK(s.find("did not apply") != std::string::npos && s.find("In use") == std::string::npos);
+        Readout m; // Applied: No outranks an earlier Applying line
+        m.Feed(Applying(3), 1);
+        m.Feed(Override(3, "Yes", "No"), 2);
+        CHECK(Confirm(m, 3) == Effect::NotApplied);
+        Readout q; // a report about another preset says nothing about C
+        q.Feed(Override(1, "Yes", "No"), 1);
+        CHECK(Confirm(q, 3) == Effect::Unknown);
+        Readout b; // the final ReportOverrideStates still outranks a Yes
+        b.Feed(Override(3, "Yes", "Yes"), 1);
+        b.Feed(Report31016(3, 1), 2);
+        CHECK(Confirm(b, 3) == Effect::NotApplied);
+        r.BeginRequest();
+        CHECK(Confirm(r, 3) == Effect::Unknown && r.Snapshot().overrideValue == -1);
+    }
+}
+
+// review 3, L6: a report about another preset is a contradiction, not a confirmation; a flag note is not a preset line
+void ReadoutWording()
+{
+    Readout r;
+    r.Feed(Applying(3), 1);
+    r.Feed(Report31016(1, 1), 2);
+    CHECK(Confirm(r, 3) == Effect::Unknown);
+    Readout f;
+    f.Feed(Ngx("EndpointConfiguration::ReadRegkeys:176", "Disabling FG Lite due to private flag override."), 1);
+    CHECK(f.Snapshot().flagOverride && !f.Snapshot().confirmed);
 }
 
 void PauseRule()
@@ -411,6 +484,8 @@ int main()
     ConfirmedEffect();
     Runtime31016Lines();
     Runtime31016Confirmation();
+    NgxOverrideReport();
+    ReadoutWording();
     PauseRule();
     StatusSentences();
     if (g_failures)
