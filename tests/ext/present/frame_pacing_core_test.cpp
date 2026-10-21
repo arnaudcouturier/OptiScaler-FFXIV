@@ -3,9 +3,11 @@
 // time as an argument.
 #include "ext/present/FramePacingCore.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -295,10 +297,89 @@ void DecideTable()
     CHECK(DecisionLine(Reason::KeyOn, true, 2) == "Frame pacing trace: on (key true)");
     CHECK(DecisionLine(Reason::AutoOff, true, 2) == "Frame pacing trace: off (key unset, log level 2)");
 }
+
+// An atomic that counts how it is used: the trace asks "did the decision change?" at every scope (about 2000 times a second), so the
+// unchanged case must be a plain load and the locked exchange must only run when the key really changed.
+struct CountingAtomic
+{
+    int value;
+    int loads = 0;
+    int exchanges = 0;
+    int load(std::memory_order) { ++loads; return value; }
+    int exchange(int v, std::memory_order)
+    {
+        ++exchanges;
+        const int old = value;
+        value = v;
+        return old;
+    }
+};
+
+void AnnounceOnlyOnChange()
+{
+    CountingAtomic a { -1 };
+    const int off = AnnounceKey(Reason::AutoOff, true, 2);
+    CHECK(AnnounceChanged(a, off)); // the first decision is announced
+    CHECK(a.exchanges == 1);
+    int announcedAgain = 0;
+    for (int i = 0; i < 1000; ++i)
+        announcedAgain += AnnounceChanged(a, off) ? 1 : 0;
+    CHECK(announcedAgain == 0);
+    CHECK(a.exchanges == 1); // 1000 unchanged calls: loads only, no exchange
+    CHECK(a.loads == 1001);
+
+    const int on = AnnounceKey(Reason::KeyOn, true, 2); // the log level or the key changed in the menu: announced once more
+    CHECK(AnnounceChanged(a, on));
+    CHECK(!AnnounceChanged(a, on));
+    CHECK(AnnounceChanged(a, off)); // and back
+    CHECK(a.exchanges == 3);
+
+    // lost race, deterministic: this thread loaded the old key, another thread stored the new one before our exchange. The exchange hands
+    // back the new key, so this thread must NOT announce it again.
+    {
+        struct LostRace
+        {
+            int load(std::memory_order) { return -1; }
+            int exchange(int v, std::memory_order) { return v; }
+        } lost;
+        CHECK(!AnnounceChanged(lost, on));
+    }
+
+    // two threads see the same new key at once: exactly one of them announces it
+    for (int round = 0; round < 50; ++round)
+    {
+        std::atomic<int> last { -1 };
+        std::atomic<int> announced { 0 };
+        std::atomic<bool> go { false };
+        std::thread t[4];
+        for (auto& th : t)
+            th = std::thread([&] {
+                while (!go.load())
+                    std::this_thread::yield();
+                if (AnnounceChanged(last, on))
+                    announced.fetch_add(1);
+            });
+        go.store(true);
+        for (auto& th : t)
+            th.join();
+        CHECK(announced.load() == 1);
+        CHECK(last.load() == on);
+    }
+
+    // every (reason, file log, level) is its own key, so any change of the decision is announced
+    std::set<int> keys;
+    for (Reason r : { Reason::KeyOn, Reason::DebugLog, Reason::KeyOff, Reason::AutoOff, Reason::NotFfxiv })
+        for (bool toFile : { false, true })
+            for (int level : { 0, 1, 2, 3 })
+                keys.insert(AnnounceKey(r, toFile, level));
+    CHECK(keys.size() == 5u * 2u * 4u);
+    CHECK(AnnounceKey(Reason::KeyOn, false, 0) >= 0); // never equals the initial -1
+}
 } // namespace
 
 int main()
 {
+    AnnounceOnlyOnChange();
     AccumulatorThresholds();
     WindowTiming();
     WindowEdgeCases();

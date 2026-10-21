@@ -8,6 +8,7 @@
 // The line format and the phase names follow the reference build's trace; the thread id is added (its accumulators are per thread).
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -213,5 +214,22 @@ inline std::string ReasonText(Reason r, bool logToFile, int logLevel)
 inline std::string DecisionLine(Reason r, bool logToFile, int logLevel)
 {
     return "Frame pacing trace: " + ReasonText(r, logToFile, logLevel);
+}
+
+// One number for everything DecisionLine prints (reason, file log, level), never negative: a change of any of them is announced again.
+inline int AnnounceKey(Reason r, bool logToFile, int logLevel)
+{
+    return static_cast<int>(r) | (logToFile ? 0x10 : 0) | ((logLevel & 0xFF) << 8);
+}
+
+// True when `key` differs from the last announced one and this call recorded it (of several threads racing on the same new key exactly
+// one gets true). Every trace scope asks this, up to about 2000 times a second: the unchanged case is a plain load, the locked exchange
+// only runs when the key really changed. `last` is a std::atomic<int> (the test passes a counting stand-in).
+template <class AtomicInt>
+bool AnnounceChanged(AtomicInt& last, int key)
+{
+    if (last.load(std::memory_order_relaxed) == key)
+        return false;
+    return last.exchange(key, std::memory_order_relaxed) != key;
 }
 } // namespace ext::present

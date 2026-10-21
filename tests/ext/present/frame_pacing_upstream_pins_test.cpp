@@ -100,8 +100,13 @@ int main(int argc, char** argv)
     const auto chara = Normalize(Read(repo + "/OptiScaler/ext/ffxiv/chara/CharaNr.cpp"));
     const auto preset = Normalize(Read(repo + "/OptiScaler/ext/fg/dlssg/PresetSeams.cpp"));
     const auto guide = Normalize(Read(repo + "/OptiScaler/ext/fg/GuideSeams.cpp"));
+    const auto trace = Normalize(Read(repo + "/OptiScaler/ext/present/FramePacingTrace.cpp"));
     CHECK(bridge.size() > 1000 && wrapped.size() > 1000 && fgHooks.size() > 1000 && bridgeHdr.size() > 500 && nrPass.size() > 1000 &&
-          chara.size() > 1000 && preset.size() > 500 && guide.size() > 500); // the files were read
+          chara.size() > 1000 && preset.size() > 500 && guide.size() > 500 && trace.size() > 1000); // the files were read
+
+    // ---- trace-off cost: the "did the decision change" check of every scope is a load; the locked exchange only runs on a change -------
+    CHECK(Has(trace, "if (!AnnounceChanged(g_announced, AnnounceKey(d.reason, logToFile, level))) return;"));
+    CHECK(!Has(trace, "g_announced.exchange"));
 
     // ---- hidden present: the seam call, the flags variable and the failure warning stay as upstream had them ----------------------------
     {

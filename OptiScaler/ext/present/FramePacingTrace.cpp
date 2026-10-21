@@ -46,13 +46,13 @@ int ExeState()
     return s;
 }
 
-// The last decision that was announced (reason, file log and level folded into one number), so a change is announced again.
+// The last decision that was announced (AnnounceKey: reason, file log and level in one number), so a change is announced again.
+// Checked with a plain load at every scope; only a changed key reaches the locked exchange (AnnounceChanged).
 std::atomic<int> g_announced { -1 };
 
 void Announce(const Decision& d, bool logToFile, int level)
 {
-    const int key = static_cast<int>(d.reason) | (logToFile ? 0x10 : 0) | ((level & 0xFF) << 8);
-    if (g_announced.exchange(key, std::memory_order_relaxed) == key)
+    if (!AnnounceChanged(g_announced, AnnounceKey(d.reason, logToFile, level)))
         return;
     const std::string line = DecisionLine(d.reason, logToFile, level);
     LOG_INFO("{}", line);
