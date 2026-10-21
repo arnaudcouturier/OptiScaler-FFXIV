@@ -110,6 +110,12 @@ static HANDLE Dup(HANDLE h)
     return copy;
 }
 
+static bool Closed(HANDLE h)
+{
+    DWORD flags = 0;
+    return GetHandleInformation(h, &flags) == FALSE; // a closed handle value is no longer valid in this process
+}
+
 static void Reset()
 {
     g_origA = nullptr;
@@ -124,7 +130,9 @@ static void ADeadThreadFailsTheEnlistAndNothingIsHooked()
     HANDLE dead = MakeDeadThread();
     const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
     std::vector<HANDLE> threads { Dup(dead) };
+    const HANDLE given = threads[0];
     const auto result = transaction::RunHookTransaction(specs, 2, threads);
+    CHECK(Closed(given)); // closed on the failure path too, not leaked
     std::printf("probe: enlisting an exited thread -> error %ld at '%s'\n", result.error, retry::StageName(result.stage));
 
     CHECK(result.error != 0);
@@ -176,7 +184,9 @@ static void ASecondAttemptSucceedsAfterAFailureEvenOnAPoisonedTargetPointer()
     g_origB = reinterpret_cast<int (*)(int)>(static_cast<uintptr_t>(0x5678));
 
     std::vector<HANDLE> second { Dup(live.thread) };
+    const HANDLE givenSecond = second[0];
     const auto result = transaction::RunHookTransaction(specs, 2, second);
+    CHECK(Closed(givenSecond)); // and on the success path
     CHECK(result.error == 0);
     CHECK(g_origA != reinterpret_cast<int (*)(int)>(static_cast<uintptr_t>(0x1234)));
     CHECK(g_origA != reinterpret_cast<int (*)(int)>(&TargetA)); // the trampoline, not the raw address
@@ -351,6 +361,59 @@ static void AttemptHooksCallsARefusedAttachPermanent()
     StopParked(live);
 }
 
+static transaction::ThreadSnapshot FailingSnapshot()
+{
+    transaction::ThreadSnapshot snapshot;
+    snapshot.ok = false;
+    snapshot.error = 5;
+    snapshot.threadId = 9;
+    return snapshot;
+}
+
+static HANDLE g_deadForSnapshot = nullptr;
+static transaction::ThreadSnapshot SnapshotWithTheDeadThread()
+{
+    transaction::ThreadSnapshot snapshot;
+    snapshot.ok = true;
+    snapshot.threads.push_back(Dup(g_deadForSnapshot));
+    return snapshot;
+}
+
+static void AFailedSnapshotIsTransientNamesItsStageAndStartsNoTransaction()
+{
+    Reset();
+    Parked live = StartParked();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    const auto result = transaction::AttemptHooks(specs, 2, &FailingSnapshot);
+    CHECK(result.outcome == Outcome::Transient);
+    CHECK(result.stage == Stage::ThreadSnapshot);
+    CHECK(result.error == 5);
+    CHECK(result.threadId == 9);
+    CHECK(Unhooked());
+    // No transaction was left open by the failed attempt: the next attempt begins and installs.
+    const auto again = transaction::AttemptHooks(specs, 2);
+    CHECK(again.outcome == Outcome::Installed);
+    CHECK(Hooked());
+    Detach();
+    CHECK(Unhooked());
+    StopParked(live);
+}
+
+static void AttemptHooksUsesTheHandlesOfItsSnapshotAndReportsTheEnlistFailure()
+{
+    Reset();
+    g_deadForSnapshot = MakeDeadThread();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    const auto result = transaction::AttemptHooks(specs, 2, &SnapshotWithTheDeadThread);
+    CHECK(result.outcome == Outcome::Transient); // an exited thread is the transient race, never a refusal
+    CHECK(result.stage == Stage::EnlistThread);
+    CHECK(result.error == 5);
+    CHECK(result.threadId == GetThreadId(g_deadForSnapshot));
+    CHECK(Unhooked());
+    CloseHandle(g_deadForSnapshot);
+    g_deadForSnapshot = nullptr;
+}
+
 int main()
 {
     ADeadThreadFailsTheEnlistAndNothingIsHooked();
@@ -362,6 +425,8 @@ int main()
     AttemptHooksTakesAFreshSnapshotAndInstalls();
     AttemptHooksCallsAnotherComponentsOpenTransactionTransientThenInstalls();
     AttemptHooksCallsARefusedAttachPermanent();
+    AFailedSnapshotIsTransientNamesItsStageAndStartsNoTransaction();
+    AttemptHooksUsesTheHandlesOfItsSnapshotAndReportsTheEnlistFailure();
 
     if (g_failed != 0)
     {

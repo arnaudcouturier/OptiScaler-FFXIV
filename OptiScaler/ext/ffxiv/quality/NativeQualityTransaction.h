@@ -204,10 +204,11 @@ inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count,
 // One complete install attempt as the retry sees it: a FRESH thread snapshot every time (a thread that died since the last
 // attempt is no longer listed), then one transaction over it. A failed snapshot is transient; a failed transaction is
 // classified by the stage and the error code (retry::ClassifyDetours). The caller does the guards before and the success
-// work after.
-inline retry::StepResult AttemptHooks(const HookSpec* specs, size_t count)
+// work after. `snapshotThreads` is a parameter only so a test can make the snapshot fail or hand over chosen handles.
+inline retry::StepResult AttemptHooks(const HookSpec* specs, size_t count,
+                                      ThreadSnapshot (*snapshotThreads)() = &SnapshotLiveThreads)
 {
-    ThreadSnapshot snapshot = SnapshotLiveThreads();
+    ThreadSnapshot snapshot = snapshotThreads();
     if (!snapshot.ok)
         return { retry::Outcome::Transient, retry::Stage::ThreadSnapshot, snapshot.error, snapshot.threadId };
 
