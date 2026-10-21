@@ -48,7 +48,7 @@ struct IRenderGeometry
 struct INativeQuality
 {
     virtual ~INativeQuality() = default;
-    virtual bool EnsureHooks() = 0; // lazy, call_once
+    virtual bool EnsureHooks() = 0; // lazy, up to 3 attempts
     virtual bool Live() = 0;
     virtual bool DlaaRequired() = 0; // cached per frame
     // Signed to carry the oracle's -1 "game's choice" sentinel directly (finalised by the owning series, C1/C5:

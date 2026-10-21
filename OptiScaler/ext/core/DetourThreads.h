@@ -6,7 +6,8 @@
 // RAII enlistment of every other thread in the current process into a pending Detours
 // transaction, so DetourAttach/DetourDetach can relocate an instruction pointer that happens
 // to sit inside a patched prologue when the transaction commits. Extracted from the pattern in
-// ext::ffxiv::quality::FfxivNativeQualityHooks::DoInstall (that file still owns its own copy;
+// ext::ffxiv::quality::FfxivNativeQualityHooks (its thread snapshot now lives in
+// ext/ffxiv/quality/NativeQualityTransaction.h, which keeps its own copy because it must also skip exited threads;
 // this is shared with the sites in ext::ffxiv::companion::Native and
 // ext::ffxiv::lighting::FfxivLightingCapture, which patch the same widely-shared D3D11 vtable
 // slots while the game runs with multiple live threads).

@@ -95,7 +95,7 @@ bool ApplyForcedQuality(NVSDK_NGX_Parameter* params, unsigned int width, unsigne
                          unsigned int outHeight, int& pq)
 {
     // Unconditional and first: a user who never touches the preset setting still gets the native-quality hooks
-    // installed (lazy, call_once) as soon as the first feature is created, matching the oracle's
+    // installed (lazy, up to 3 attempts) as soon as the first feature is created, matching the oracle's
     // EnsureFfxivNativeQuality() at the top of SetInitParameters regardless of whether a preset is forced.
     if (auto* quality = game::Current().quality)
         quality->EnsureHooks();
