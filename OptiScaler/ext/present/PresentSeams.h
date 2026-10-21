@@ -39,10 +39,12 @@ namespace ext::present
 // Times the rest of the enclosing block as one call of `phase` (CPU time) and feeds the thread's 10 s window. Inactive (one call and a
 // few loads) unless the trace is on: see Decide() in FramePacingCore.h. Used by wrapped_swapchain.cpp LocalPresent (OutputPresent, its
 // first statement), FG_Hooks.cpp (ReflexSleep, directly before StreamlineProxy::ReflexSleep()) and DlssNr_Dx12::Dispatch (SceneNr).
+// `counts` false makes the scope inert (no clock, no sample, the trace is not even asked): LocalPresent passes it for
+// DXGI_PRESENT_TEST presents, which only ask whether a present would happen and would drag the output-present mean down.
 class PacingScope
 {
   public:
-    explicit PacingScope(Phase phase) noexcept;
+    explicit PacingScope(Phase phase, bool counts = true) noexcept;
     ~PacingScope();
     PacingScope(const PacingScope&) = delete;
     PacingScope& operator=(const PacingScope&) = delete;
