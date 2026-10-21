@@ -66,9 +66,18 @@ static bool Hooked() { return g_callA(2) == 1007 && g_callB(2) == 2012; }
 // ---- helper threads --------------------------------------------------------------------------------------------------------
 
 static DWORD WINAPI ExitAtOnce(LPVOID) { return 0; }
-static DWORD WINAPI ParkUntilEvent(LPVOID event)
+
+// The two events a parked helper uses. `parked` is signalled by the helper itself in the same kernel call that starts the
+// wait (SignalObjectAndWait), so once it is set the thread holds no user-mode lock (heap, loader) and may be suspended.
+struct ParkArgs
 {
-    WaitForSingleObject(static_cast<HANDLE>(event), INFINITE);
+    HANDLE parked;
+    HANDLE release;
+};
+static DWORD WINAPI ParkUntilEvent(LPVOID arg)
+{
+    const auto* events = static_cast<const ParkArgs*>(arg);
+    SignalObjectAndWait(events->parked, events->release, INFINITE, FALSE);
     return 0;
 }
 
@@ -84,13 +93,21 @@ struct Parked
 {
     HANDLE thread = nullptr;
     HANDLE release = nullptr;
+    HANDLE parked = nullptr; // set by the helper once it is inside its wait
+    ParkArgs* args = nullptr;
     DWORD id = 0;
 };
+// Returns only after the helper is inside its wait: a transaction that suspends a thread still in its start-up code could
+// catch it holding the process heap lock, and the next allocation Detours makes would then block forever.
 static Parked StartParked()
 {
     Parked p;
     p.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    p.thread = CreateThread(nullptr, 0, ParkUntilEvent, p.release, 0, &p.id);
+    p.parked = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    p.args = new ParkArgs { p.parked, p.release };
+    p.thread = CreateThread(nullptr, 0, ParkUntilEvent, p.args, 0, &p.id);
+    const DWORD reached = WaitForSingleObject(p.parked, 5000);
+    CHECK(reached == WAIT_OBJECT_0);
     return p;
 }
 static void StopParked(Parked& p)
@@ -99,8 +116,11 @@ static void StopParked(Parked& p)
     // Bounded: a thread that a failed transaction left suspended never finishes, and that must fail the test, not hang it.
     const DWORD waited = WaitForSingleObject(p.thread, 5000);
     CHECK(waited == WAIT_OBJECT_0);
+    if (waited == WAIT_OBJECT_0)
+        delete p.args; // the helper is gone; a stuck helper keeps its (tiny) argument block
     CloseHandle(p.thread);
     CloseHandle(p.release);
+    CloseHandle(p.parked);
     p = Parked {};
 }
 
@@ -281,6 +301,15 @@ static void AFailingAttachNamesItsStageAbortsAndLetsTheNextTransactionBegin()
     StopParked(live);
 }
 
+// The helper must have reached its wait (and so hold no heap or loader lock) before a transaction may suspend it: a thread
+// suspended while it still owns the process heap lock would block the allocation Detours makes next, and hang the test.
+static void AParkedHelperIsInsideItsWaitWhenStartParkedReturns()
+{
+    Parked live = StartParked();
+    CHECK(live.parked != nullptr && WaitForSingleObject(live.parked, 0) == WAIT_OBJECT_0);
+    StopParked(live);
+}
+
 static void TheSnapshotListsOtherLiveThreadsWithTheRightsTheTransactionNeeds()
 {
     Parked live = StartParked();
@@ -423,6 +452,7 @@ int main()
     ASecondAttemptSucceedsAfterAFailureEvenOnAPoisonedTargetPointer();
     ATransactionHeldByAnotherThreadIsReportedAndLeftAlone();
     AFailingAttachNamesItsStageAbortsAndLetsTheNextTransactionBegin();
+    AParkedHelperIsInsideItsWaitWhenStartParkedReturns();
     TheSnapshotListsOtherLiveThreadsWithTheRightsTheTransactionNeeds();
     AttemptHooksTakesAFreshSnapshotAndInstalls();
     AttemptHooksCallsAnotherComponentsOpenTransactionTransientThenInstalls();
