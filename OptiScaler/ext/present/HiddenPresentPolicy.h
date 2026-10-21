@@ -96,4 +96,20 @@ HRESULT Present(Policy& policy, bool keyOn, uint32_t callerFlags, PresentFn&& pr
         *report = r;
     return r.outcome == Outcome::Skipped ? S_OK : hr;
 }
+
+// The body of ext::present::HiddenPresent (FramePacingTrace.cpp), with its two outside dependencies injected so that a test compiles
+// exactly the code the game runs (tests/ext/present/hidden_present_seam_test.cpp). `chain` is anything with
+// Present(UINT syncInterval, UINT flags): IDXGISwapChain in the game, a fake in the test. `hooks.KeyOn()` reads the
+// [FramePacing] HiddenPresentDoNotWait key (once per present). `hooks.OnReport(report, hr)` feeds the trace counter and the log lines;
+// it must not throw. The sync interval is always 0, the flags and the result are the policy's: with the key off this is exactly
+// `chain->Present(0, callerFlags)` and its result.
+template <class Chain, class Hooks>
+HRESULT SeamPresent(Policy& policy, Chain* chain, UINT callerFlags, Hooks& hooks)
+{
+    const bool keyOn = hooks.KeyOn();
+    Report report;
+    const HRESULT hr = Present(policy, keyOn, callerFlags, [chain](UINT f) { return chain->Present(0, f); }, &report);
+    hooks.OnReport(report, hr);
+    return hr;
+}
 } // namespace ext::present::hidden

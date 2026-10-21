@@ -108,6 +108,14 @@ int main(int argc, char** argv)
     CHECK(Has(trace, "if (!AnnounceChanged(g_announced, AnnounceKey(d.reason, logToFile, level))) return;"));
     CHECK(!Has(trace, "g_announced.exchange"));
 
+    // ---- hidden-present seam (the body is hidden::SeamPresent, behaviour-tested by hidden_present_seam): the .cpp only supplies the key
+    // read and the report hook, opens the scope first, and makes no swapchain call of its own --------------------------------------------
+    CHECK(Has(trace, "bool KeyOn() const { return ext::Cfg().framePacing.hiddenPresentDoNotWait.value_or_default(); }"));
+    CHECK(Count(trace, "hiddenPresentDoNotWait.value_or_default()") == 2); // KeyOn and the "skipped k" column of the hidden-present line
+    CHECK(Has(trace, "HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags) { PacingScope scope(Phase::HiddenPresent); "));
+    CHECK(Has(trace, "HiddenHooks hooks { scope }; return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); }"));
+    CHECK(!Has(trace, "->Present(")); // the only swapchain call lives in the (tested) template
+
     // ---- hidden present: the seam call, the flags variable and the failure warning stay as upstream had them ----------------------------
     {
         const auto block = Between(bridge, "UINT realFlags = Flags;", "auto result = _fgSwapChain->Present(SyncInterval, Flags);");

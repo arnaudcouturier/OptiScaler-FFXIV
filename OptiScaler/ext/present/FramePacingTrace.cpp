@@ -181,28 +181,39 @@ void FgDispatchEnd()
         PacingReport(Phase::FgDispatch, us, now);
 }
 
+namespace
+{
+// The two outside dependencies of hidden::SeamPresent: the key, and what each present's report does (the trace's skipped counter and
+// the log lines). Nothing here throws into the caller.
+struct HiddenHooks
+{
+    const PacingScope& scope;
+
+    bool KeyOn() const { return ext::Cfg().framePacing.hiddenPresentDoNotWait.value_or_default(); }
+
+    void OnReport(const hidden::Report& report, HRESULT hr) const noexcept
+    {
+        try
+        {
+            if (report.outcome == hidden::Outcome::Skipped && scope.Active())
+                NoteSkipped(Phase::HiddenPresent);
+            if (report.latchedNow)
+                LOG_WARN("hidden DX11 present: DXGI rejected DO_NOT_WAIT ({:X}); the flag is switched off for this session", (UINT) hr);
+            if (report.episodeStarted)
+                LOG_INFO("hidden DX11 present: skipped {} presents in a row (the hidden swapchain is busy); {} skipped in total",
+                         report.consecutive, HiddenPolicy().Skipped());
+        }
+        catch (...)
+        {
+        }
+    }
+};
+} // namespace
+
 HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags)
 {
     PacingScope scope(Phase::HiddenPresent);
-    const bool keyOn = ext::Cfg().framePacing.hiddenPresentDoNotWait.value_or_default();
-
-    hidden::Report report;
-    const HRESULT hr =
-        hidden::Present(HiddenPolicy(), keyOn, flags, [swapChain](UINT f) { return swapChain->Present(0, f); }, &report);
-
-    try
-    {
-        if (report.outcome == hidden::Outcome::Skipped && scope.Active())
-            NoteSkipped(Phase::HiddenPresent);
-        if (report.latchedNow)
-            LOG_WARN("hidden DX11 present: DXGI rejected DO_NOT_WAIT ({:X}); the flag is switched off for this session", (UINT) hr);
-        if (report.episodeStarted)
-            LOG_INFO("hidden DX11 present: skipped {} presents in a row (the hidden swapchain is busy); {} skipped in total",
-                     report.consecutive, HiddenPolicy().Skipped());
-    }
-    catch (...)
-    {
-    }
-    return hr;
+    HiddenHooks hooks { scope };
+    return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks);
 }
 } // namespace ext::present
