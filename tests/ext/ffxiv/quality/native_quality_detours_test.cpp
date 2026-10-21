@@ -290,6 +290,67 @@ static void TheSnapshotListsOtherLiveThreadsWithTheRightsTheTransactionNeeds()
     StopParked(live);
 }
 
+static void AttemptHooksTakesAFreshSnapshotAndInstalls()
+{
+    Reset();
+    Parked live = StartParked();
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    const auto result = transaction::AttemptHooks(specs, 2);
+    CHECK(result.outcome == Outcome::Installed);
+    CHECK(result.stage == Stage::None);
+    CHECK(result.error == 0);
+    CHECK(Hooked());
+    Detach();
+    CHECK(Unhooked());
+    StopParked(live);
+}
+
+static void AttemptHooksCallsAnotherComponentsOpenTransactionTransientThenInstalls()
+{
+    Reset();
+    Parked live = StartParked();
+    Holder holder;
+    holder.ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    holder.go = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE holderThread = CreateThread(nullptr, 0, HoldATransaction, &holder, 0, nullptr);
+    WaitForSingleObject(holder.ready, INFINITE);
+
+    const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
+    const auto blocked = transaction::AttemptHooks(specs, 2);
+    CHECK(blocked.outcome == Outcome::Transient);
+    CHECK(blocked.stage == Stage::Begin);
+    CHECK(blocked.error == static_cast<long>(ERROR_INVALID_OPERATION));
+    CHECK(Unhooked());
+
+    SetEvent(holder.go);
+    WaitForSingleObject(holderThread, INFINITE);
+    CloseHandle(holderThread);
+    CloseHandle(holder.ready);
+    CloseHandle(holder.go);
+
+    const auto again = transaction::AttemptHooks(specs, 2); // the very next attempt, as the retry makes it
+    CHECK(again.outcome == Outcome::Installed);
+    CHECK(Hooked());
+    Detach();
+    CHECK(Unhooked());
+    StopParked(live);
+}
+
+static void AttemptHooksCallsARefusedAttachPermanent()
+{
+    Reset();
+    Parked live = StartParked();
+    HookSpec bad = MakeSpecA();
+    bad.rawAddress = nullptr;
+    const HookSpec specs[] = { bad, MakeSpecB() };
+    const auto result = transaction::AttemptHooks(specs, 2);
+    CHECK(result.outcome == Outcome::Permanent); // classified from the stage and the code, not assumed transient
+    CHECK(result.stage == Stage::AttachQuerySize);
+    CHECK(result.error != 0);
+    CHECK(Unhooked());
+    StopParked(live);
+}
+
 int main()
 {
     ADeadThreadFailsTheEnlistAndNothingIsHooked();
@@ -298,6 +359,9 @@ int main()
     ATransactionHeldByAnotherThreadIsReportedAndLeftAlone();
     AFailingAttachNamesItsStageAbortsAndLetsTheNextTransactionBegin();
     TheSnapshotListsOtherLiveThreadsWithTheRightsTheTransactionNeeds();
+    AttemptHooksTakesAFreshSnapshotAndInstalls();
+    AttemptHooksCallsAnotherComponentsOpenTransactionTransientThenInstalls();
+    AttemptHooksCallsARefusedAttachPermanent();
 
     if (g_failed != 0)
     {
