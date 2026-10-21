@@ -209,7 +209,12 @@ void Wiring(const std::string& repo)
     CHECK(attempts != std::string::npos && ask != std::string::npos && refresh != std::string::npos);
     CHECK(attempts < ask && ask < refresh);
     const size_t skipped = chara.find("return RunOutcome::Skipped;", ask);
-    CHECK(skipped != std::string::npos && skipped - ask < 200);
+    CHECK(skipped != std::string::npos && skipped - ask < 400);
+    // a paused run keeps the open window's stream alive: Maintain releases a stream whose lastLive is older than the linger
+    // time (5 s by default), so without this refresh any longer alt-tab would free the model and rebuild it on return
+    const size_t live = chara.find("m.table.At(openStream).lastLive = req.now;", ask);
+    CHECK(live != std::string::npos && skipped != std::string::npos && live < skipped);
+    CHECK(chara.find("if (const int openStream = m.table.Find(key); openStream != kNoStream)", ask) < live);
 
     // the key now covers the preview too, and the two places that describe it say so
     const std::string ini = ReadFile(repo + "/OptiScaler/ext/ini/DlssNr.ini");

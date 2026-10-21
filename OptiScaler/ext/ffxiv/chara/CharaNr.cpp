@@ -1089,7 +1089,11 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         ++m.table.At(known).attempts;
     // [DlssNr] DisableOnFocusLoss for the previews: while the game window is in the background the run is skipped (counted above, so no stale image).
     if (!ext::nr::FocusAllowsPreviewNr(Wanted() && ext::Cfg().nr.disableOnFocusLoss.value_or_default()))
+    {
+        if (const int openStream = m.table.Find(key); openStream != kNoStream)
+            m.table.At(openStream).lastLive = req.now; // the preview window is still open: Maintain must not release the model during a long alt-tab
         return RunOutcome::Skipped;
+    }
 
     ObserveRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
