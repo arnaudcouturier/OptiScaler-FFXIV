@@ -155,6 +155,15 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("In use") == std::string::npos);
     CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).") != std::string::npos);
     CHECK(menu.find("Runtime report: preset requested %d, in force %d") != std::string::npos);
+    // PRESET-BOOT phase 1: a boot with only "Applying settings for render preset N." (no ReportOverrideStates, no Override Reported)
+    // is a normal, confirmed state. Every line that talks about a report, a refusal or "ignored" hangs on a field that only a line of
+    // the runtime sets; the absence of a line draws nothing.
+    CHECK(menu.find("if (view.hasReport && view.reportNew) ImGui::Text(\"Runtime report: preset requested %d, in force %d\"") != std::string::npos);
+    CHECK(menu.find("else if (view.hasReport) ImGui::Text(\"Runtime report: preset %llu") != std::string::npos);
+    CHECK(menu.find("if (view.unsupportedId >= 0) ImGui::TextWrapped(\"The runtime does not act on preset id %d.\"") != std::string::npos);
+    CHECK(menu.find("if (view.blockedByFlags) ImGui::TextWrapped(\"The runtime ignores presets because of private flags set in the driver.\");") != std::string::npos);
+    CHECK(Count(menu, "ignore") == 2); // only these two lines (unsupported id, private flags) and nothing about a missing report
+    CHECK(menu.find("not reported") == std::string::npos && menu.find("missing") == std::string::npos && menu.find("no report") == std::string::npos);
     CHECK(menu.find("The runtime does not act on preset id %d.") != std::string::npos);
     CHECK(menu.find("A private flag set in the driver forces UI recomposition or FG Lite off.") != std::string::npos);
     CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);

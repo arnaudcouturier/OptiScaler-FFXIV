@@ -476,6 +476,83 @@ void StatusSentences()
     CHECK(has(StatusSentence(kPresetC, Effect::Unknown, true), "Preset C"));
 }
 
+// ---- the boot of 2026-10-22 (PRESET-BOOT phase 1, item 1): lines copied from builds\game-logs-20261021-probe\OptiScaler.log ------------
+// Boot with [DLSSG] RenderPreset = 3: the runtime logged "Applying settings for render preset 3." (line 2171) and NOTHING else about the
+// preset: no "ReportOverrideStates: render preset (...)" and no "Override Reported: ModelPreset" (those two only showed up in the earlier
+// run in which the DLSS override id was answered on). The payloads below are what the logger hands to the relay sink: the file prefix
+// "[hh:mm:ss.uuuuuu] [I] " is the log pattern and is not part of the payload.
+const char* kRealApplying3 =
+    "SL Log: [10-31-35][streamline][info][tid:19444][21s:053ms:194us]commonEntry.cpp:1369[ngxLog] [FrameGeneration] [2026-10-22 10:31:35] "
+    "[tid:19444][EndpointConfiguration::ApplyRenderPreset:337] Applying settings for render preset 3.";
+const char* kRealInit =
+    "SL Log: [10-31-16][streamline][info][tid:19444][2s:220ms:806us]commonEntry.cpp:1368[ngxLog] [FrameGeneration] [2026-10-22 10:31:16] "
+    "[tid:19444][NGXInitLog:216] Built with APP_NAME = endpoint";
+const char* kRealMultiFrame =
+    "SL Log: [10-31-16][streamline][info][tid:19444][2s:492ms:192us]dlss_gEntry.cpp:1504[slOnPluginStartup] Multi-frame supported, max generated frames 5 "
+    "(SL Plugin supports 5, NGX feature supports 5)";
+const char* kRealOurQuery =
+    "DLSS-G render preset: the runtime asked the driver for its preset (id 0x10E41DF1), answered 3 (Preset C) (the driver profile has no such setting); "
+    "the DLSS override id 0x10E41E03 is passed through to the driver";
+
+void BootReadoutStates()
+{
+    auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
+    // The relay feeds every message; the lines around the preset line must not matter.
+    auto feedBoot = [&](Readout& r, bool applying)
+    {
+        r.NoteDriverQuery(true);
+        r.Feed(kRealInit, 1);
+        r.Feed(kRealOurQuery, 2); // our own text is never mistaken for an NVIDIA preset line
+        r.Feed(kRealMultiFrame, 3);
+        if (applying)
+            r.Feed(kRealApplying3, 4);
+    };
+
+    {   // 1) only "Applying settings for render preset 3." seen (the boot with the preset id answered alone)
+        Readout r;
+        feedBoot(r, true);
+        const auto p = ParseLine(kRealApplying3);
+        CHECK_MSG(p.kind == LineKind::Applying && p.recognised && p.value == 3, "real line: kind %d", static_cast<int>(p.kind));
+        CHECK(Confirm(r, 3) == Effect::Applied && r.Confirm(3).uir == Uir::Disabled);
+        CHECK(Confirm(r, 1) == Effect::Unknown && Confirm(r, 2) == Effect::Unknown);
+        const auto s = r.Snapshot();
+        CHECK(s.confirmed && s.appliedLine == 3 && s.queried);
+        // nothing that the menu draws as a failure, a refusal or "ignored" is set by the absence of the two reports
+        CHECK(!s.hasReport && !s.reportNew && s.unsupportedId == -1 && !s.blockedByFlags && !s.flagOverride);
+        CHECK(s.overrideValue == -1 && s.overrideRequested == -1 && s.overrideApplied == -1);
+        const auto sentence = StatusSentence(3, Confirm(r, 3), true);
+        CHECK(sentence == "In use: Preset C (confirmed by the runtime)");
+        CHECK(PausesUiRecomposition(kPresetC, r.Confirm(3).effect, r.Confirm(3).uir));
+    }
+    {   // 2) the live path: Applying plus the final report (and NGX's own override report): same verdict, more detail
+        Readout r;
+        feedBoot(r, true);
+        r.Feed(Report31016(3, 3), 5);
+        r.Feed(kOverride3, 6);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+        const auto s = r.Snapshot();
+        CHECK(s.hasReport && s.reportNew && s.requested == 3 && s.effective == 3 && s.overrideValue == 3 && s.overrideApplied == 1);
+        CHECK(StatusSentence(3, Confirm(r, 3), true) == "In use: Preset C (confirmed by the runtime)");
+    }
+    {   // 3) nothing seen: unconfirmed, said as such, never "in use", never "did not apply"
+        Readout r;
+        feedBoot(r, false);
+        CHECK(Confirm(r, 3) == Effect::Unknown);
+        const auto s = r.Snapshot();
+        CHECK(!s.confirmed && s.lastLine.empty() && s.appliedLine == -1 && !s.hasReport && s.unsupportedId == -1);
+        const auto sentence = StatusSentence(3, Confirm(r, 3), true);
+        CHECK(has(sentence, "waiting for the runtime to confirm") && !has(sentence, "In use") && !has(sentence, "did not apply"));
+        CHECK(!PausesUiRecomposition(kPresetC, r.Confirm(3).effect, r.Confirm(3).uir));
+    }
+    {   // the real line belongs to the request it names only
+        Readout r;
+        feedBoot(r, true);
+        CHECK(!has(StatusSentence(1, Confirm(r, 1), true), "In use"));
+        r.BeginRequest(); // a live switch forgets the boot line
+        CHECK(Confirm(r, 3) == Effect::Unknown && r.Snapshot().queried);
+    }
+}
+
 } // namespace
 
 int main()
@@ -492,6 +569,7 @@ int main()
     ReadoutWording();
     PauseRule();
     StatusSentences();
+    BootReadoutStates();
     if (g_failures)
     {
         std::printf("fg_preset_log: %d check(s) failed\n", g_failures);
