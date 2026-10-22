@@ -51,6 +51,9 @@ enum class Clobber
     // pointer tracking: a register that may hold a frame address (lea of a frame location, a copy of it, arithmetic on it)
     AliasViaMov, AliasViaArithmetic, AliasKilledByLoad, AliasKilledByCall, AliasKeptInCalleeSaved, NegDispUntainted, IndexedOtherBase,
     MovImmRbp, // mov ebp,1: writes rbp without reading it (no modrm byte, nothing else flags it)
+    // review 3, M1/L3: the frame-address mark through two-register forms, partial writes, merges, loops, and what it must not lose
+    MarkAddSource, MarkPartialAl, MarkPartialAx, MarkPartialMovAx, MarkPartialLoadAl, MarkBranchMerge, MarkLoopCarry, MarkKeptInR15, MarkKeptInRsi,
+    MarkLeaFromBase, MarkLeaFromIndex, MarkMov8B, MarkIndexStore, MarkXchg, MarkCmov, StoreViaR12, MarkXchgShort, MarkPartialXor,
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
     // neighbours and unrelated writes that must NOT be refused
@@ -110,6 +113,8 @@ struct Spec
     bool callIntoTail = false;         // call whose target is inside create, after the read call (not in the region)
     int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
+    bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
+    bool chainedOdd = false;           // the chained fragment's unwind info has an odd number of codes
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
     bool hiddenCopySetup = false;      // the second copy site's "mov rdx,[rip+g]" is only bytes inside an immediate
     bool chainedPointer = false;       // a cold fragment chained to create through the low-bit pointer form
@@ -272,6 +277,32 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::NegDispUntainted: c.b({ 0x4C, 0x89, 0x67, 0xF0 }); break;  // mov [rdi-10h],r12: rdi never held a frame address
     case Clobber::IndexedOtherBase: c.b({ 0x4C, 0x89, 0x24, 0xC1 }); break;  // mov [rcx+rax*8],r12
     case Clobber::MovImmRbp: c.b({ 0xBD, 0x01, 0x00, 0x00, 0x00 }); break;   // mov ebp,1
+    case Clobber::MarkAddSource: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x03, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break; // lea rax / xor ecx,ecx / add rcx,rax / mov [rcx-70h],r12
+    case Clobber::MarkPartialAl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0xB0, 0x10, 0x4C, 0x89, 0x60, 0x90 }); break;                  // lea rax / mov al,10h / mov [rax-70h],r12
+    case Clobber::MarkPartialAx: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0xB8, 0x34, 0x12, 0x4C, 0x89, 0x60, 0x90 }); break;      // mov ax,1234h
+    case Clobber::MarkPartialMovAx: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0x89, 0xC8, 0x4C, 0x89, 0x60, 0x90 }); break;          // mov ax,cx
+    case Clobber::MarkPartialLoadAl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x8A, 0x01, 0x4C, 0x89, 0x60, 0x90 }); break;               // mov al,[rcx]
+    case Clobber::MarkBranchMerge: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4D, 0x85, 0xC0, 0x74, 0x02, 0x33, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break; // jz over xor eax,eax
+    case Clobber::MarkLoopCarry: c.b({ 0x4C, 0x89, 0x60, 0x90, 0x48, 0x8D, 0x45, 0xD0, 0x74, 0xF6 }); break;                  // store through rax, lea rax, jz back
+    case Clobber::MarkKeptInR15:
+        c.b({ 0x4C, 0x8D, 0x7D, 0xD0, 0xFF, 0x15 });
+        c.rip(kImport);                                                                                                           // lea r15 / call
+        c.b({ 0x4D, 0x89, 0x67, 0x90 });                                                                                          // mov [r15-70h],r12
+        break;
+    case Clobber::MarkKeptInRsi:
+        c.b({ 0x48, 0x8D, 0x75, 0xD0, 0xFF, 0x15 });
+        c.rip(kImport);
+        c.b({ 0x4C, 0x89, 0x66, 0x90 });                                                                                          // mov [rsi-70h],r12
+        break;
+    case Clobber::MarkLeaFromBase: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8D, 0x48, 0x08, 0x4C, 0x89, 0x61, 0x90 }); break;     // lea rcx,[rax+8]
+    case Clobber::MarkLeaFromIndex: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8D, 0x0C, 0x02, 0x4C, 0x89, 0x61, 0x90 }); break;    // lea rcx,[rdx+rax]
+    case Clobber::MarkMov8B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8B, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                 // mov rcx,rax (8B form)
+    case Clobber::MarkIndexStore: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4C, 0x89, 0x24, 0xC1 }); break;                              // mov [rcx+rax*8],r12, rax marked
+    case Clobber::MarkXchg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x87, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;                  // xchg rcx,rax
+    case Clobber::MarkCmov: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x0F, 0x44, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;            // cmovz rcx,rax
+    case Clobber::MarkXchgShort: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                    // xchg rcx,rax (short form)
+    case Clobber::MarkPartialXor: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0x31, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;            // xor ax,ax: a partial zero
+    case Clobber::StoreViaR12: c.b({ 0x4D, 0x89, 0x6C, 0x24, 0x90 }); break;                                                    // mov [r12-70h],r13
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -355,6 +386,8 @@ Fake Build(const Spec& s)
         toEpilogue.push_back(c.at);
         c.i32(0);
     }
+    if (s.lea12BeforeSave)
+        c.b({ 0x4C, 0x8D, 0x65, 0xD0 }); // lea r12,[rbp-30h]
     if (s.rdxWrittenBeforeSave)
         c.b({ 0x33, 0xD2 }); // xor edx,edx
     if (s.pushBeforeSave)
@@ -554,7 +587,7 @@ Fake Build(const Spec& s)
     if (s.leavingJump != 0)
     {
         c.b({ 0xE9 });
-        c.rel32(s.leavingJump == 1 ? kDefaults + 8 : kDefaults); // inside another function / the start of a function (tail call)
+        c.rel32(s.leavingJump == 1 ? kDefaults + 8 : (s.leavingJump == 2 ? kDefaults : kReadFn)); // inside another function / its start / the read function
     }
     if (s.jumpToSave)
     {
@@ -610,10 +643,10 @@ Fake Build(const Spec& s)
         const uint32_t unwind = kPdataVa + 0x800;
         const uint32_t cold[3] = { 0x3000, 0x3040, unwind };
         std::memcpy(&im[p], cold, 12);
-        const uint8_t info[4] = { 0x21, 0, 0, 0 };
+        const uint8_t info[4] = { 0x21, 0, static_cast<uint8_t>(s.chainedOdd ? 3 : 0), 0 };
         std::memcpy(&im[unwind], info, 4);
         const uint32_t parent[3] = { kCreate, f.createEnd, 0 };
-        std::memcpy(&im[unwind + 4], parent, 12);
+        std::memcpy(&im[unwind + 4 + (s.chainedOdd ? 8 : 0)], parent, 12); // after the codes, padded to an even count
     }
     if (s.chainedPointer)
     {
@@ -908,12 +941,36 @@ void RegionRules()
     for (Clobber k : { Clobber::AliasStore, Clobber::SlotLeaAt60, Clobber::SlotLeaAt64, Clobber::SlotDwordAt5D, Clobber::SlotIndexedStore,
                        Clobber::SlotLeaIndexed, Clobber::WriteRbp, Clobber::StoreRspToMem, Clobber::MovqXmmRsp, Clobber::LeaRbpIndex })
         CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register case, clobber %d: %s", static_cast<int>(k), WhyText(scan(Spec {}, Where::R13, k).why));
+    // string and bit-string stores write where a register says, which matters for a frame slot only (the registers they change are
+    // caught as writes): accepted for a context kept in a callee-saved register that they do not change
     for (Clobber k : { Clobber::StringStore, Clobber::BtsMem })
-        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::CreateContext, "register case, store %d", static_cast<int>(k));
+    {
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register case, store %d", static_cast<int>(k));
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::CreateContext, "slot case, store %d", static_cast<int>(k));
+    }
     // pointer tracking: a frame address copied or computed on keeps pointing into the frame; overwritten or lost in a call it does not
     for (Clobber k : { Clobber::AliasViaMov, Clobber::AliasViaArithmetic, Clobber::AliasKeptInCalleeSaved })
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::CreateContext, "alias clobber %d", static_cast<int>(k));
-    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::IndexedOtherBase).why == Why::CreateContext);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::IndexedOtherBase).why == Why::Ok); // neither base nor index holds a frame address
+    // review 3, M1/L3: the mark follows two-register forms, survives partial writes, merges and loops, and a pre-save lea
+    for (Clobber k : { Clobber::MarkAddSource, Clobber::MarkPartialAl, Clobber::MarkPartialAx, Clobber::MarkPartialMovAx, Clobber::MarkPartialLoadAl,
+                       Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
+                       Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
+                       Clobber::MarkXchgShort, Clobber::MarkPartialXor })
+    {
+        const Located l = scan(Shape31016(), Where::SlotRsp, k);
+        CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register mode, image %d: %s", static_cast<int>(k), WhyText(scan(Spec {}, Where::R13, k).why));
+    }
+    {
+        Spec s = Shape31016();
+        s.lea12BeforeSave = true;
+        s.clobber = Clobber::StoreViaR12;
+        CHECK_MSG(Scan(s).why == Why::CreateContext, "a frame address built before the save and used in the region: %s", WhyText(Scan(s).why));
+        Spec t = Shape31016();
+        t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
+        CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
+    }
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
     CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
     CHECK(scan(Spec {}, Where::R13, Clobber::IndexedOtherBase).why == Why::Ok);
@@ -939,7 +996,9 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.callIntoFunction = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the function (slot %d)", slot); }
         { Spec s = base(); s.callIntoTail = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the tail of the function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
-        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of a function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the start of another function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 3; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the settings read function itself (slot %d)", slot); }
+        { Spec s = base(); s.chainedFragment = true; s.chainedOdd = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a chained fragment with an odd number of unwind codes (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
         { Spec s = base(); s.chainedPointer = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained through a pointer (slot %d)", slot); }
     }
@@ -1074,6 +1133,8 @@ void KnownHashes()
     // the maintainer's build, checked in full on the real DLL (manual recipe fg_preset_guards_dll)
     const char* label31016 = KnownHashLabel("8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7");
     CHECK(label31016 != nullptr && std::string(label31016).find("310.9.16") != std::string::npos);
+    const char* labelStore = KnownHashLabel("cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72");
+    CHECK(labelStore != nullptr && std::string(labelStore).find("model-store") != std::string::npos);
     // version gate: 310.8 and 310.9 families only
     CHECK(VersionAccepted(310, 9) && VersionAccepted(310, 8));
     CHECK(!VersionAccepted(310, 7) && !VersionAccepted(310, 10) && !VersionAccepted(311, 9) && !VersionAccepted(0, 0));

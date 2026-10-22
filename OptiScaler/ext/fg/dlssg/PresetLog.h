@@ -18,6 +18,7 @@
 
 #include <cctype>
 #include <climits>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -37,9 +38,11 @@ enum class LineKind : uint8_t
     Selected,       // "Preset A selected, disabling UIR."
     UirNote,        // "Enabling/Disabling bUIRecompositionSupported due to preset override."
     BlockedByFlags, // "Not parsing presets due to private flag overrides."
+    OverrideReport, // NGX itself: "Feature [FrameGeneration] Override Reported: ModelPreset, Value: N, Requested: Yes, Applied: Yes, ..."
     FlagOverride,   // 310.9.16: "Disabling UI recomposition / FG Lite due to private flag override." (the preset is still applied)
     Applying,       // 310.9.16: "Applying settings for render preset N."
     Unsupported,    // 310.9.16: "Warning: Ignoring unsupported render preset ID N."
+    NvidiaCopy,     // NGX init line of the frame generation feature: "Built with APP_NAME = nvapp_override" (NVIDIA's model-store copy)
     Candidate       // mentions a preset, no rule claims it
 };
 
@@ -204,11 +207,53 @@ inline ParsedLine ParseLine(std::string_view line)
 
     const std::string low = detail::Lower(line);
     using detail::Has;
+    // NGX's init line of the frame generation feature: "[FrameGeneration] ... [NGXInitLog:216] Built with APP_NAME = <name>". The local
+    // runtime (OptiScaler/nvngx_dlssg.dll) logs "endpoint"; "nvapp_override" is NVIDIA's own copy from its model store (seen in the
+    // run in which the DLSS override id was answered on: max generated frames 1). Not a preset line, so it is looked at before the
+    // "preset" filter below. The other features print their own app names ("default", "app_transformer_dlssd"); they were skipped above.
+    if (Has(low, "[framegeneration]") && Has(low, "built with app_name") && Has(low, "app_name = nvapp_override"))
+    {
+        out.kind = LineKind::NvidiaCopy;
+        out.recognised = true;
+        return out;
+    }
     if (!Has(low, "preset") && !Has(low, "private flag override"))
         return out;
 
     // 310.9.16: "Applying settings for render preset N." (written by ApplyRenderPreset when ReadRegkeys acts on 1, 2 or 3). The
     // recomposition follows the preset the way ReadRegkeys stores it: 1 (A) and 3 (C) turn it off, 2 (B) turns it on.
+    // NGX's own report (NGXOverrideStatusCallback): "Feature [FrameGeneration] Override Reported: ModelPreset, Value: N, Requested: Yes,
+    // Applied: Yes, Is Latest: No". The other features (super resolution, ray reconstruction) print their own, so the feature is required.
+    if (Has(low, "override reported") && Has(low, "modelpreset") && Has(low, "[framegeneration]"))
+    {
+        out.kind = LineKind::OverrideReport;
+        int64_t n = 0;
+        int number = -1;
+        const bool value = detail::NumberAfter(low, "value", n) && n >= 0 && detail::ToInt(n, number);
+        auto yesNo = [&](std::string_view key) -> int
+        {
+            const size_t at = low.find(key);
+            if (at == std::string::npos)
+                return -1;
+            size_t i = at + key.size();
+            while (i < low.size() && (low[i] == ' ' || low[i] == ':' || low[i] == '='))
+                ++i;
+            if (low.compare(i, 3, "yes") == 0 || low.compare(i, 4, "true") == 0)
+                return 1;
+            if (low.compare(i, 2, "no") == 0 || low.compare(i, 5, "false") == 0)
+                return 0;
+            return -1;
+        };
+        out.requested = yesNo("requested");
+        out.applied = yesNo("applied");
+        if (value)
+        {
+            out.value = static_cast<uint64_t>(number);
+            out.hasValue = true;
+        }
+        out.recognised = value && out.requested >= 0 && out.applied >= 0;
+        return out;
+    }
     if (Has(low, "applying settings for render preset"))
     {
         out.kind = LineKind::Applying;
@@ -336,11 +381,16 @@ class Readout
         int applied = -1;
         uint64_t value = 0;
         bool blockedByFlags = false; // "Not parsing presets due to private flag overrides"
+        int overrideValue = -1, overrideRequested = -1, overrideApplied = -1; // NGX Override Reported: ModelPreset
         bool flagOverride = false;   // 310.9.16: a private flag overrides the recomposition or FG Lite setting; the preset is still applied
         bool reportNew = false;      // the report is in the 310.9.16 wording: `requested` is the preset number, `effective` the one in force
         int effective = -1;
+        bool nvidiaCopy = false;     // NGX init line "Built with APP_NAME = nvapp_override": NVIDIA's own copy of the runtime is loaded
         int appliedLine = -1;        // "Applying settings for render preset N."
         int unsupportedId = -1;      // "Ignoring unsupported render preset ID N."
+        // Arrival order of the statements that can contradict each other (0 = not seen since the last request), so that the latest one
+        // about a request is the one that counts: see Confirm.
+        uint32_t order = 0, overrideOrder = 0, reportOrder = 0, appliedOrder = 0;
     };
 
     void NoteDriverQuery(bool queried)
@@ -360,8 +410,25 @@ class Readout
     {
         std::lock_guard lock(mutex_);
         const bool queried = state_.queried;
+        const bool nvidiaCopy = state_.nvidiaCopy; // the module is loaded once per process: a new request does not unload it
         state_ = {};
         state_.queried = queried;
+        state_.nvidiaCopy = nvidiaCopy;
+    }
+
+    // NVIDIA's own copy of the runtime was seen loading (the NGX init line). Cheap, for the menu every frame.
+    bool NvidiaCopyLoaded() const
+    {
+        std::lock_guard lock(mutex_);
+        return state_.nvidiaCopy;
+    }
+
+    // True once, the first time the copy was seen: the caller logs the warning (the log sink must not log itself).
+    bool TakeNvidiaCopyWarning()
+    {
+        if (!warnPending_.load(std::memory_order_acquire))
+            return false;
+        return warnPending_.exchange(false, std::memory_order_acq_rel);
     }
 
     View Snapshot() const
@@ -385,8 +452,14 @@ class Readout
         out.uir = state_.uir;
         if (state_.unsupportedId == request)
             out.effect = Effect::NotApplied; // 310.9.16: "Ignoring unsupported render preset ID N."
+        else if (state_.overrideValue == request && state_.overrideApplied == 0 && !SaysInForceAfterOverride(request))
+            out.effect = Effect::NotApplied; // NGX itself: "Override Reported: ModelPreset, Value: N, ..., Applied: No" (nothing later says otherwise)
         else if (state_.hasReport && state_.reportNew && state_.requested == request)
             out.effect = (state_.effective == request) ? Effect::Applied : Effect::NotApplied; // 310.9.16 report: the final word
+        else if (state_.hasReport && state_.reportNew)
+        {
+            // the report is about another preset than the one asked for: a contradiction, no claim either way
+        }
         else if (state_.hasReport && !state_.reportNew && state_.value == static_cast<uint64_t>(request))
         {
             if (state_.applied > 0)
@@ -394,6 +467,8 @@ class Readout
             else if (state_.requested > 0)
                 out.effect = Effect::NotApplied;
         }
+        else if (state_.overrideValue == request && state_.overrideApplied == 1 && state_.overrideRequested != 0)
+            out.effect = Effect::Applied; // NGX itself: "Override Reported: ModelPreset, Value: N, Requested: Yes, Applied: Yes"
         else if (state_.appliedLine == request)
             out.effect = Effect::Applied; // 310.9.16: "Applying settings for render preset N."
         else if (state_.selected != 0 && state_.selected - 'A' + 1 == request)
@@ -409,6 +484,15 @@ class Readout
             return false;
 
         std::lock_guard lock(mutex_);
+        if (p.kind == LineKind::NvidiaCopy) // not a preset line: no last line for the menu, no "confirmed" mark
+        {
+            if (!state_.nvidiaCopy)
+            {
+                state_.nvidiaCopy = true;
+                warnPending_.store(true, std::memory_order_release);
+            }
+            return false;
+        }
         state_.lastLine = Clean(line);
         switch (p.kind)
         {
@@ -421,6 +505,7 @@ class Readout
                 state_.applied = p.applied;
                 state_.effective = p.effective;
                 state_.value = p.hasValue ? p.value : 0;
+                state_.reportOrder = ++state_.order;
                 if (p.newFormat && p.uir != Uir::Unknown)
                     state_.uir = p.uir;
             }
@@ -429,6 +514,7 @@ class Readout
             if (p.recognised)
             {
                 state_.appliedLine = static_cast<int>(p.value);
+                state_.appliedOrder = ++state_.order;
                 if (p.uir != Uir::Unknown)
                     state_.uir = p.uir;
             }
@@ -453,6 +539,15 @@ class Readout
         case LineKind::BlockedByFlags:
             state_.blockedByFlags = true;
             break;
+        case LineKind::OverrideReport:
+            if (p.recognised)
+            {
+                state_.overrideValue = static_cast<int>(p.value > INT_MAX ? INT_MAX : p.value);
+                state_.overrideRequested = p.requested;
+                state_.overrideApplied = p.applied;
+                state_.overrideOrder = ++state_.order;
+            }
+            break;
         case LineKind::FlagOverride:
             state_.flagOverride = true;
             if (p.uir != Uir::Unknown)
@@ -470,12 +565,30 @@ class Readout
             lastCandidateLog_ = nowMs;
             return true;
         }
-        if (p.recognised)
+        if (p.recognised && p.kind != LineKind::FlagOverride) // a private-flag note is not a preset line
             state_.confirmed = true;
         return false;
     }
 
   private:
+    // The latest statement about a request wins. NGX's "Applied: No" (what it means is unverified: no log has one yet, only Yes) does not
+    // outrank a LATER line that says this request is the preset in force: the final ReportOverrideStates (requested = N, effective = N; or
+    // the older wording with applied > 0 and value N) or "Applying settings for render preset N.". A later report about another preset
+    // is no evidence for this request. Called with the mutex held.
+    bool SaysInForceAfterOverride(int request) const
+    {
+        if (state_.overrideOrder == 0)
+            return false;
+        if (state_.hasReport && state_.reportOrder > state_.overrideOrder)
+        {
+            if (state_.reportNew && state_.requested == request && state_.effective == request)
+                return true;
+            if (!state_.reportNew && state_.value == static_cast<uint64_t>(request) && state_.applied > 0)
+                return true;
+        }
+        return state_.appliedLine == request && state_.appliedOrder > state_.overrideOrder;
+    }
+
     static std::string Clean(std::string_view line)
     {
         std::string out(line.substr(0, kMaxLineChars));
@@ -489,6 +602,7 @@ class Readout
 
     mutable std::mutex mutex_;
     View state_;
+    std::atomic<bool> warnPending_ { false };
     int candidateLogs_ = 0;
     uint64_t lastCandidateLog_ = 0;
 };

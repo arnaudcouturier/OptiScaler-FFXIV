@@ -42,14 +42,14 @@ void Names()
 
 void DriverQueryAnswers()
 {
-    // Restart path: only an explicit A/B/C request changes the answer. The preset id gets the number, the override id
-    // gets "on". Auto leaves the driver's own answer alone, whatever the baseline is.
+    // Restart path: only an explicit A/B/C request changes the answer, and only for the preset id. The DLSS override id
+    // (NGX_DLSS_FG_OVERRIDE_ID) is passed through to the driver: answering it "on" made NGX load the model-store module at boot
+    // (proven in game 2026-10-22, PRESET-BOOT). Auto leaves the driver's own answer alone, whatever the baseline is.
     for (int r : { 1, 2, 3 })
     {
         const auto p = AnswerDriverQuery(kRenderPresetSettingId, r);
         CHECK(p.handled && p.found && p.value == (uint32_t) r);
-        const auto o = AnswerDriverQuery(kOverrideSettingId, r);
-        CHECK(o.handled && o.found && o.value == kOverrideOn);
+        CHECK(!AnswerDriverQuery(kOverrideSettingId, r).handled);
     }
     CHECK(!AnswerDriverQuery(kRenderPresetSettingId, 0).handled);
     CHECK(!AnswerDriverQuery(kOverrideSettingId, 0).handled);
@@ -188,10 +188,14 @@ void DriverQuerySeam()
         CHECK(s.Base().kind == Baseline::Kind::NotFound);
     }
     {
-        RequestState s; // the override-on id follows the request but is not the preset query
-        s.InitOnce(kPresetB);
-        const auto e = HandleDriverReply(s, kOverrideSettingId, false, false, 0);
-        CHECK(e.replace && e.value == kOverrideOn);
+        RequestState s; // the override id is passed through for every request, found or not, and is not the preset query
+        for (int r : { 1, 2, 3 })
+        {
+            s.Commit(r);
+            CHECK(!HandleDriverReply(s, kOverrideSettingId, false, false, 0).replace);
+            CHECK(!HandleDriverReply(s, kOverrideSettingId, true, true, 0).replace);
+            CHECK(!HandleDriverReply(s, kOverrideSettingId, true, true, 1).replace);
+        }
         CHECK(!s.QuerySeen() && s.Base().kind == Baseline::Kind::Unknown);
     }
     {

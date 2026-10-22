@@ -45,6 +45,28 @@ size_t Count(const std::string& hay, const std::string& needle)
     return n;
 }
 
+// The adjacent string literals that follow `marker` in `source`, joined (what the compiler makes of them). Escapes are not needed here.
+std::string JoinedLiterals(const std::string& source, const std::string& marker)
+{
+    std::string out;
+    size_t i = source.find(marker);
+    if (i == std::string::npos)
+        return out;
+    i += marker.size();
+    for (;;)
+    {
+        while (i < source.size() && (source[i] == ' ' || source[i] == '\t' || source[i] == '\r' || source[i] == '\n'))
+            ++i;
+        if (i >= source.size() || source[i] != '"')
+            return out;
+        const size_t end = source.find('"', i + 1);
+        if (end == std::string::npos)
+            return out;
+        out += source.substr(i + 1, end - i - 1);
+        i = end + 1;
+    }
+}
+
 bool Before(const std::string& text, const std::string& first, const std::string& second)
 {
     const size_t a = text.find(first), b = text.find(second);
@@ -115,6 +137,49 @@ void AutoCostsNothing(const std::string& repo)
     CHECK(Count(mod, "g_installFailed = true;") == 1);
 }
 
+// PRESET-BOOT fix round (L6): the log line PresetDrs.cpp writes for the preset-id answer is the proof recipe of the in-game check, so its
+// text is pinned here, filled with the values of the real boot of 2026-10-22 (probe: answered 3, the driver profile had no such setting).
+void DrsLogLine(const std::string& repo)
+{
+    const std::string raw = ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetDrs.cpp");
+    const std::string format = JoinedLiterals(raw, "LOG_INFO(");
+    CHECK(!format.empty());
+    // fill the placeholders in order: {:X} {} {} {} {:X}
+    const char* args[] = { "10E41DF1", "3", "Preset C", " (the driver profile has no such setting)", "10E41E03" };
+    std::string line;
+    size_t used = 0;
+    for (size_t at = 0; at < format.size();)
+    {
+        if (format[at] == '{')
+        {
+            const size_t close = format.find('}', at);
+            CHECK(close != std::string::npos && used < 5);
+            if (close == std::string::npos || used >= 5)
+                break;
+            line += args[used++];
+            at = close + 1;
+            continue;
+        }
+        line += format[at++];
+    }
+    CHECK(used == 5);
+    CHECK_MSG(line ==
+                  "DLSS-G render preset: the runtime asked the driver for its preset (id 0x10E41DF1), answered 3 (Preset C) (the driver profile has no such "
+                  "setting); the DLSS override id 0x10E41E03 is passed through to the driver",
+              "%s", line.c_str());
+    const std::string code = Flat(raw);
+    // L5: the hook admits the preset id ONLY; the override id never reaches the decision code (its behaviour is pinned in fg_preset_drs
+    // OverrideOnId; this text pin is the only test that fails when the id is admitted again, because the decision code ignores it anyway)
+    CHECK(code.find("if (settingId != kRenderPresetSettingId || setting == nullptr) return status;") != std::string::npos);
+    CHECK(code.find("settingId != kOverrideSettingId") == std::string::npos);
+    // LOW-7: after that early return settingId is always the preset id, so no branch tests it again
+    CHECK(code.find("settingId == kRenderPresetSettingId") == std::string::npos);
+    CHECK(code.find("ReadoutState().NoteDriverQuery(true);") != std::string::npos);
+    // the arguments are the ids and the answer, in the order of the placeholders
+    CHECK(code.find("kRenderPresetSettingId, edit.value, Name(request), found ? \"\" : \" (the driver profile has no such setting)\", kOverrideSettingId);") !=
+          std::string::npos);
+}
+
 void RequestStatePins(const std::string& repo)
 {
     const std::string req = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetRequest.h"));
@@ -142,6 +207,31 @@ void UiRecompositionPause(const std::string& repo)
     CHECK(relay.find("if (request != kPresetA && request != kPresetC) return false;") != std::string::npos);
 }
 
+// M2: the relay sink only reads (it must never log); the one WARN line is written from FlushCandidateLines, before its early exit
+void NvidiaCopyWarn(const std::string& repo)
+{
+    const std::string relay = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.cpp"));
+    CHECK(relay.find("#include \"ext/fg/dlssg/PresetMenuText.h\"") != std::string::npos);
+    CHECK(relay.find("if (ReadoutState().TakeNvidiaCopyWarning()) LOG_WARN(\"DLSS-G: {}\", NvidiaCopySentence());") != std::string::npos);
+    CHECK(Before(relay, "TakeNvidiaCopyWarning()", "if (!g_queued.load(std::memory_order_acquire)) return;"));
+    CHECK(Count(relay, "LOG_WARN(") == 1);
+    const size_t sink = relay.find("void sink_it_(");
+    const size_t sinkEnd = relay.find("void flush_()");
+    CHECK(sink != std::string::npos && sinkEnd != std::string::npos);
+    CHECK(relay.substr(sink, sinkEnd - sink).find("LOG_") == std::string::npos); // the sink never logs
+}
+
+// PB review L3: the failed target is published with the restart state, and GetStatus drops a restart that belongs to another target than
+// the live selector
+void StaleRestartPins(const std::string& repo)
+{
+    const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetSeams.cpp"));
+    CHECK(Count(seams, "status.failedTarget = switcher.FailedRequest();") == 2); // before the early exit and after the switch attempt
+    CHECK(Before(seams, "status.failedTarget = switcher.FailedRequest();", "Publish(status);")); // set before the first publish
+    CHECK(Before(seams, "copy.configured = ext::Cfg().fg.renderPreset.value_or_default();", "DropStaleRestart(copy);"));
+    CHECK(Before(seams, "DropStaleRestart(copy);", "return copy;"));
+}
+
 void MenuText(const std::string& repo)
 {
     const std::string menu = Flat(ReadFile(repo + "/OptiScaler/ext/fg/MenuFgPreset.cpp"));
@@ -149,17 +239,55 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("Driver queried the setting: %s") != std::string::npos);
     CHECK(menu.find("NVIDIA preset line: %s") != std::string::npos);
     CHECK(menu.find("confirmed: the line has a known format") != std::string::npos);
-    CHECK(menu.find("Restart needed: %s. %s stays in use until the next start, then the saved choice applies.") != std::string::npos);
+    // PRESET-BOOT phase 1: the choice-versus-in-use sentences come from PresetMenuText.h (tested in fg_preset_menu_text), the menu only
+    // draws them; the control-off reason is the same function
+    CHECK(menu.find("#include \"ext/fg/dlssg/PresetMenuText.h\"") != std::string::npos);
+    CHECK(menu.find("DifferenceSentence(status.configured, status.active, confirmed.effect, status.restartNeeded, status.fail)") != std::string::npos);
+    CHECK(menu.find("UnavailableSentence(preset, status.unavailable)") != std::string::npos);
+    CHECK(Before(menu, "UnavailableSentence(preset, status.unavailable)", "DifferenceSentence(status.configured"));
+    CHECK(Before(menu, "DifferenceSentence(status.configured", "StatusSentence(status.active"));
+    CHECK(menu.find("Restart needed: %s.") == std::string::npos && menu.find("is chosen; the change is made") == std::string::npos);
+    // M2: the warning for NVIDIA's own copy of the runtime is drawn in the same section as the status, after the control-off return (with
+    // the control off the runtime is not NVIDIA's DLSS-G in the first place), and from the sentence of PresetMenuText.h
+    CHECK(menu.find("if (ReadoutState().NvidiaCopyLoaded())") != std::string::npos);
+    CHECK(menu.find("NvidiaCopySentence().c_str()") != std::string::npos);
+    CHECK(Before(menu, "UnavailableSentence(preset, status.unavailable)", "NvidiaCopySentence()"));
+    CHECK(Before(menu, "StatusSentence(status.active", "NvidiaCopySentence()"));
+    CHECK(Before(menu, "NvidiaCopySentence()", "DrawReadout(status);"));
+    // the selector stays visible (only disabled when the control is off), the tooltip names the NVIDIA-profile exception
+    CHECK(menu.find("ImGui::Combo(\"DLSS-G render preset\", &preset,") != std::string::npos);
+    CHECK(menu.find("If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of") != std::string::npos);
+    // L7: "can", not a fact: no log has a real profile value; and the tooltip says the menu warns when the log shows NVIDIA's copy
+    CHECK(menu.find("the runtime can be loaded instead of this one, whatever is chosen here. That is inferred, not seen with a real profile;") != std::string::npos);
+    CHECK(menu.find("the menu warns when the log shows NVIDIA's copy loaded.") != std::string::npos);
+    CHECK(menu.find("the runtime is loaded instead of this one") == std::string::npos);
+    const std::string menuText = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetMenuText.h"));
+    CHECK(menuText.find("\"Restart needed: \"") != std::string::npos);
+    CHECK(menuText.find("out += stays + \" stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).\"") != std::string::npos);
+    CHECK(menuText.find("std::string stays = InUseLabel(active, effect);") != std::string::npos);
+    CHECK(menuText.find("stays in use") == std::string::npos && menuText.find("the saved choice applies") == std::string::npos);
+    CHECK(menuText.find("The change is made when frame generation runs next.") != std::string::npos);
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
     CHECK(menu.find("In use") == std::string::npos);
-    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).") != std::string::npos);
+    // L7: that C turns the recomposition off is read from the preset number, not reported by the runtime: said so
+    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off and FG Lite on: inferred from the preset number; the runtime does not state it).") != std::string::npos);
     CHECK(menu.find("Runtime report: preset requested %d, in force %d") != std::string::npos);
+    // PRESET-BOOT phase 1: a boot with only "Applying settings for render preset N." (no ReportOverrideStates, no Override Reported)
+    // is a normal, confirmed state. Every line that talks about a report, a refusal or "ignored" hangs on a field that only a line of
+    // the runtime sets; the absence of a line draws nothing.
+    CHECK(menu.find("if (view.hasReport && view.reportNew) ImGui::Text(\"Runtime report: preset requested %d, in force %d\"") != std::string::npos);
+    CHECK(menu.find("else if (view.hasReport) ImGui::Text(\"Runtime report: preset %llu") != std::string::npos);
+    CHECK(menu.find("if (view.unsupportedId >= 0) ImGui::TextWrapped(\"The runtime does not act on preset id %d.\"") != std::string::npos);
+    CHECK(menu.find("if (view.blockedByFlags) ImGui::TextWrapped(\"The runtime ignores presets because of private flags set in the driver.\");") != std::string::npos);
+    // (no count of the word "ignore": the Preset C note and the private-flags line both use it, and rewording the note is harmless;
+    // the four pins above are the protection: each report or refusal line hangs on a field that only a runtime line sets)
+    CHECK(menu.find("not reported") == std::string::npos && menu.find("missing") == std::string::npos && menu.find("no report") == std::string::npos);
     CHECK(menu.find("The runtime does not act on preset id %d.") != std::string::npos);
-    CHECK(menu.find("A private flag set in the driver overrides part of the preset (UI recomposition or FG Lite).") != std::string::npos);
+    CHECK(menu.find("A private flag set in the driver forces UI recomposition or FG Lite off.") != std::string::npos);
     CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);
     CHECK(menu.find("Preset B or Auto brings it back.") != std::string::npos);
-    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.") != std::string::npos);
+    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it applied C; it is then taken to be off (inferred from the preset number; the runtime does not state it).") != std::string::npos);
     CHECK(menu.find("Preset A and C turn off") == std::string::npos);
     CHECK(menu.find("ImGui::BeginDisabled(off);") != std::string::npos);
     CHECK(Count(menu, "ImGui::BeginDisabled(") == Count(menu, "ImGui::EndDisabled();"));
@@ -177,6 +305,9 @@ int main(int argc, char** argv)
     AutoCostsNothing(repo);
     UiRecompositionPause(repo);
     RequestStatePins(repo);
+    DrsLogLine(repo);
+    NvidiaCopyWarn(repo);
+    StaleRestartPins(repo);
     MenuText(repo);
     if (g_failures)
     {

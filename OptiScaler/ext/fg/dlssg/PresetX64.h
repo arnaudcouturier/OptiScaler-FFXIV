@@ -84,7 +84,7 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
     Insn out;
     out.at = at;
     size_t i = 0;
-    bool rep = false;
+    bool repF3 = false, repF2 = false;
 
     // legacy prefixes (at most 4): operand size, rep, lock, and the ignored segment overrides (cs/ds/es/ss)
     for (;; ++i)
@@ -94,8 +94,10 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
         const uint8_t b = p[i];
         if (b == 0x66)
             out.opsize16 = true;
-        else if (b == 0xF2 || b == 0xF3)
-            rep = true;
+        else if (b == 0xF3)
+            repF3 = true;
+        else if (b == 0xF2)
+            repF2 = true;
         else if (b == 0xF0 || b == 0x2E || b == 0x3E || b == 0x26 || b == 0x36)
         {
         }
@@ -160,7 +162,7 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
             modrm = true;
             switch (op)
             {
-            case 0x0D: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: // prefetch, hint nops
+            case 0x0D: case 0x18: case 0x19: case 0x1C: case 0x1D: case 0x1E: case 0x1F: // prefetch, hint nops (0F 1E only as endbr, below)
                 break;
             case 0x10: case 0x12: case 0x14: case 0x15: case 0x16: // movups/movsd/movlps/unpck/movhps loads
                 break;
@@ -176,7 +178,9 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
                 wReg = true;
                 break;
             case 0x7E: // movd/movq r/m, xmm  (66 0F 7E) ; movq xmm, xmm/m64 (F3 0F 7E)
-                if (rep) // F3 0F 7E loads an XMM register
+                if (repF2 || (repF3 && out.opsize16)) // not a defined form: nothing is guessed
+                    return fail();
+                if (repF3) // F3 0F 7E loads an XMM register
                     break;
                 wRm = true;
                 break;
@@ -587,6 +591,12 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
             if (out.mod != 3 || out.ext < 5)
                 return fail();
         }
+        else if (op == 0x1E)
+        {
+            // endbr32 / endbr64 (F3 0F 1E FB / FA) are the only forms: the others include rdssp, which writes a register
+            if (!(out.mod == 3 && out.ext == 7 && (out.rm == 2 || out.rm == 3)))
+                return fail();
+        }
         else if (op == 0xAB || op == 0xB3 || op == 0xBB)
             out.aliasStore = (out.mod != 3); // bts/btr/btc r/m, reg: the bit offset in the register picks the address
         else if (op == 0x71 || op == 0x72 || op == 0x73)
@@ -702,14 +712,15 @@ inline bool Decode(const uint8_t* p, size_t avail, uint32_t at, Insn& in)
             const bool intOp = (op >= 0x40 && op <= 0x4F) || (op >= 0x90 && op <= 0x9F) || (op >= 0xA3 && op <= 0xBF && op != 0xA2 && op != 0xAE) || op == 0xC0 || op == 0xC1 || op == 0xC3;
             // rm is a general-purpose register for the integer ops, 66 0F 7E (movd/movq r/m, xmm), 0F 6E (movd/movq xmm, r/m),
             // 0F 2A (cvtsi2ss/sd) and 0F C4 (pinsrw)
-            gprRm = intOp || (op == 0x7E && !rep) || op == 0x6E || op == 0x2A || op == 0xC4;
+            gprRm = intOp || (op == 0x7E && !repF3) || op == 0x6E || op == 0x2A || op == 0xC4;
             gprReg = (intOp && !(op >= 0x90 && op <= 0x9F) && op != 0xBA) || op == 0x2C || op == 0x2D || op == 0x50 || op == 0xD7 || op == 0xC5;
         }
         // without a REX prefix the byte registers 4..7 are ah, ch, dh, bh, not rsp/rbp/rsi/rdi
         auto isFrame = [&](uint8_t r) { return (r == RSP || r == RBP) && !(is8 && !out.hasRex); };
         if ((out.mod == 3 && gprRm && isFrame(out.rm)) || (gprReg && isFrame(out.reg)))
             out.readsFrameRegAsValue = true;
-    }    if (out.mem.present && !out.mem.ripRel && (out.mem.index == RSP || out.mem.index == RBP))
+    }
+    if (out.mem.present && !out.mem.ripRel && (out.mem.index == RSP || out.mem.index == RBP))
         out.readsFrameRegAsValue = true;
     in = out;
     return true;

@@ -47,8 +47,9 @@ struct Expect
     const char* what;
     uint32_t reader, readFn, create, defaults, copy, site0, site1, global;
 };
-// RVAs read with a decompiler (REA, Ghidra 12.1.4) for 310.9.1.0 and 310.9.16, and with the structural scan run by hand for 310.8.0.
+// RVAs read with a decompiler (REA, Ghidra 12.1.4) for 310.9.1.0 and the Streamline 2.14.16 build of 310.9.16; the structural scan for 310.8.0 and the model-store build.
 const Expect kExpect[] = {
+    { "cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72", "310.9.16 model-store build (scanner; reader, create and copy equal the addresses in the in-game log)", 0x14000, 0x344F0, 0x36330, 0x34BD0, 0x35BE0, 0x36A10, 0x36A95, 0x66AA20 },
     { "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7", "310.9.16 (Streamline 2.14.16 SDK)", 0x13FF0, 0x344D0, 0x36310, 0x34BB0, 0x35BC0, 0x369F0, 0x36A75, 0x66AA20 },
     { "5d5cbf14d2727d47f93fd10bf77bd91708ae122482a6f86fd564971641ebd47b", "310.8.0 (structural scan, cross-checked with a second implementation)", 0x13E80, 0x33E80, 0x35B70, 0x34530, 0x35460, 0x3624E, 0x362D5, 0x6679E0 },
     { "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82", "310.9.1.0", 0x13EF0, 0x340E0, 0x35DD0, 0x34790, 0x356C0, 0x364AE, 0x36535, 0x6689E0 },
