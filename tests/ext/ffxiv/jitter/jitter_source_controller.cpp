@@ -576,33 +576,8 @@ void TestMissWithoutRecordIsNotStoodDown()
     CHECK(res.active && !res.standDown);
     CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == 0.4f && r.env.floats[Param::JitterY] == -0.2f);
     CHECK(r.controller.Totals().unpaired == 1 && r.controller.Totals().toldFromRecord == 0 && !r.controller.FellBack());
-    // a record that is older than a second is no record (the same raw pair comes round again every cycle)
-    Rig q;
-    q.Frame();
-    q.Step();
-    SmallRawFrame(q, true, false);
-    q.env.now += kMaxSampleAgeMs + 10;
-    {
-        // the generator keeps running (another frame, recorded now), but the record of THIS block's raw pair is a second old
-        Generated g2;
-        g2.outX = 0.111f;
-        g2.outY = 0.222f;
-        g2.expectedX = 0.0666f;
-        g2.expectedY = 0.1332f;
-        g2.strength = 0.6f;
-        g2.phases = 32;
-        g2.renderW = 1920;
-        g2.renderH = 1080;
-        g2.outW = 3840;
-        g2.outH = 2160;
-        g2.normalized = true;
-        g2.timeMs = q.env.now;
-        q.state.RecordGenerated(g2, PlanWhy::Normalize);
-    }
-    const float rx = q.env.floats[Param::JitterX];
-    const int qWrites = q.env.Writes();
-    const StepResult qres = q.Step();
-    CHECK(qres.active && !qres.standDown && q.env.Writes() == qWrites && q.env.floats[Param::JitterX] == rx);
+    // F3 (changed deliberately, round 3): a record older than a second is STILL a record. The same raw pair means the same phase index and the
+    // same strength, so the same expected value; the pair comes round again every cycle. It is told (see TestMissTellsAStaleRecord).
     // a record that was not normalised (the generator left that call alone: the frame was drawn the old way) is not told either
     Rig n;
     n.Frame();
@@ -623,29 +598,170 @@ void TestMissWithoutRecordIsNotStoodDown()
     CHECK(nres.active && !nres.standDown && n.env.Writes() == nWrites);
 }
 
-// M1, "never half of each": a generator-divided value the engine cannot scale (above its 0.55 px limit) that no record explains cannot be told
-// sensibly: the fix falls back at once (both detours off together) instead of passing up to 0.83 px through.
-void TestUntellableFallsBackAtOnce()
+// F3: a miss with a record is told whatever the age of the record. The same raw pair is the same phase and the same strength, so the same
+// expected value: a record of the previous cycle (or of a render-thread hitch of more than a second) gives the identical offset.
+void TestMissTellsAStaleRecord()
 {
-    Rig r;
-    r.Frame();
-    r.Step();
-    r.Frame(true, false, false);
-    r.env.floats[Param::JitterX] = 0.8f;
-    r.env.floats[Param::JitterY] = 0.1f;
-    const StepResult res = r.Step();
-    CHECK(r.controller.FellBack() && !r.state.Enabled());
-    CHECK(!res.active && !res.standDown);
-    CHECK(r.env.Count("Jitter source: fell back to the old behaviour") == 1 && r.env.Logged("cannot be told"));
-    // the Y axis alone counts too
     Rig q;
     q.Frame();
     q.Step();
-    q.Frame(true, false, false);
-    q.env.floats[Param::JitterX] = 0.1f;
-    q.env.floats[Param::JitterY] = -0.7f;
+    SmallRawFrame(q, true, false);
+    const std::optional<Generated> rec = q.state.FindGenerated(q.rawX, q.rawY);
+    CHECK(rec.has_value());
+    q.env.now += 10 * kMaxSampleAgeMs; // the record is ten seconds old
+    {
+        Generated g2; // the generator keeps running: a newer record of ANOTHER raw pair
+        g2.outX = 0.111f;
+        g2.outY = 0.222f;
+        g2.expectedX = 0.0666f;
+        g2.expectedY = 0.1332f;
+        g2.strength = 0.6f;
+        g2.phases = 32;
+        g2.renderW = 1920;
+        g2.renderH = 1080;
+        g2.outW = 3840;
+        g2.outH = 2160;
+        g2.normalized = true;
+        g2.timeMs = q.env.now;
+        q.state.RecordGenerated(g2, PlanWhy::Normalize);
+    }
+    const StepResult res = q.Step();
+    CHECK(res.active && res.standDown && !q.controller.FellBack());
+    CHECK(rec && q.env.floats[Param::JitterX] == rec->expectedX && q.env.floats[Param::JitterY] == rec->expectedY);
+    CHECK(q.controller.Totals().toldFromRecord == 1 && q.controller.Totals().untellable == 0);
+    // a LARGE value (above the engine's limit) with a stale record is told too, and never counted as untellable
+    Rig t;
+    t.Frame();
+    t.Step();
+    do
+    {
+        t.Frame(true, true, false);
+    } while (std::fabs(t.rawX) <= 0.6f && std::fabs(t.rawY) <= 0.6f);
+    t.env.now += 5 * kMaxSampleAgeMs;
+    {
+        Generated g3; // the generator keeps running: a newer record of another raw pair keeps it "recent"
+        g3.outX = 0.111f;
+        g3.outY = 0.222f;
+        g3.expectedX = 0.0666f;
+        g3.expectedY = 0.1332f;
+        g3.strength = 0.6f;
+        g3.phases = 32;
+        g3.renderW = 1920;
+        g3.renderH = 1080;
+        g3.outW = 3840;
+        g3.outH = 2160;
+        g3.normalized = true;
+        g3.timeMs = t.env.now;
+        t.state.RecordGenerated(g3, PlanWhy::Normalize);
+    }
+    const StepResult tres = t.Step();
+    CHECK(tres.active && tres.standDown && !t.controller.FellBack() && t.controller.Totals().untellable == 0);
+    CHECK(std::fabs(t.env.floats[Param::JitterX] - t.drawnX) < 1e-5f && std::fabs(t.env.floats[Param::JitterY] - t.drawnY) < 1e-5f);
+}
+
+// One evaluate whose block holds a generator-divided value above the engine's limit that no record explains.
+StepResult UntellableEvaluate(Rig& r, float x = 0.8f, float y = 0.1f)
+{
+    r.Frame(true, true, false); // the generator keeps running (a record of ANOTHER raw pair); the block then holds a pair no record explains
+    r.env.floats[Param::JitterX] = x;
+    r.env.floats[Param::JitterY] = y;
+    return r.Step();
+}
+
+// F3 (round 3; replaces TestUntellableFallsBackAtOnce, which pinned the one-shot latch): a generator-divided value above the engine's 0.55 px limit
+// with no record at all is counted. One is left to the engine like the small-raw case (nothing written, the engine is not stood down), and only
+// three within a second latch the fall-back for the session.
+void TestUntellableNeedsThreeEvaluates()
+{
+    CHECK(kUntellableLimit == 3 && kUntellableWindowMs == 1000);
+    Rig r;
+    r.Frame();
+    r.Step();
+    const int writes = r.env.Writes();
+    StepResult res = UntellableEvaluate(r);
+    CHECK(!r.controller.FellBack() && r.state.Enabled());
+    CHECK(res.active && !res.standDown && r.env.Writes() == writes); // left to the engine, nothing written
+    CHECK(r.controller.Totals().untellable == 1 && r.controller.Totals().unpaired == 1);
+    CHECK(r.env.Count("Jitter source: fell back") == 0);
+    res = UntellableEvaluate(r);
+    CHECK(!r.controller.FellBack() && r.state.Enabled() && !res.standDown && r.controller.Totals().untellable == 2);
+    res = UntellableEvaluate(r);
+    CHECK(r.controller.FellBack() && !r.state.Enabled());
+    CHECK(!res.active && !res.standDown && r.env.Writes() == writes);
+    CHECK(r.env.Count("Jitter source: fell back to the old behaviour") == 1 && r.env.Logged("cannot be told"));
+    CHECK(r.controller.Totals().untellable == 3);
+
+    // the Y axis alone counts too, and so does a negative value
+    Rig q;
+    q.Frame();
     q.Step();
+    UntellableEvaluate(q, 0.1f, -0.7f);
+    UntellableEvaluate(q, -0.9f, 0.0f);
+    CHECK(!q.controller.FellBack() && q.controller.Totals().untellable == 2);
+    UntellableEvaluate(q, 0.1f, 0.6f);
     CHECK(q.controller.FellBack());
+
+    // a value the engine can scale (<= 0.55 px) is never untellable, however many
+    Rig sm;
+    sm.Frame();
+    sm.Step();
+    for (int i = 0; i < 20; ++i)
+        UntellableEvaluate(sm, 0.5f, -0.5f);
+    CHECK(!sm.controller.FellBack() && sm.controller.Totals().untellable == 0);
+
+    // three, but spread over more than a second: the window restarts, no latch
+    Rig w;
+    w.Frame();
+    w.Step();
+    UntellableEvaluate(w);
+    w.env.now += 600;
+    UntellableEvaluate(w);
+    w.env.now += 600; // 1200 ms after the first
+    UntellableEvaluate(w);
+    CHECK(!w.controller.FellBack() && w.controller.Totals().untellable == 3);
+    // the third started a new window: two more quickly are 3 in it
+    UntellableEvaluate(w);
+    CHECK(!w.controller.FellBack());
+    UntellableEvaluate(w);
+    CHECK(w.controller.FellBack());
+
+    // the counter resets after a good paired frame (a checked frame ...)
+    Rig g;
+    g.Frame();
+    g.Step();
+    UntellableEvaluate(g);
+    UntellableEvaluate(g);
+    g.Frame();
+    CHECK(g.Step().standDown);
+    UntellableEvaluate(g);
+    UntellableEvaluate(g);
+    CHECK(!g.controller.FellBack());
+    UntellableEvaluate(g);
+    CHECK(g.controller.FellBack());
+    // ... and so does a paired frame the generator did not record (unverified)
+    Rig u;
+    u.Frame();
+    u.Step();
+    UntellableEvaluate(u);
+    UntellableEvaluate(u);
+    u.Frame(false, false, true);
+    CHECK(u.Step().standDown && u.controller.Totals().unverified == 1);
+    UntellableEvaluate(u);
+    UntellableEvaluate(u);
+    CHECK(!u.controller.FellBack());
+    // a miss told from a record is neither untellable nor a reset: two untellable, a record-told miss, one more untellable latches
+    Rig m;
+    m.Frame();
+    m.Step();
+    UntellableEvaluate(m);
+    UntellableEvaluate(m);
+    do
+    {
+        m.Frame(true, true, false);
+    } while (std::fabs(m.rawX) <= 0.6f && std::fabs(m.rawY) <= 0.6f);
+    CHECK(m.Step().standDown && m.controller.Totals().toldFromRecord == 1 && !m.controller.FellBack());
+    UntellableEvaluate(m);
+    CHECK(m.controller.FellBack());
     // a large value WITH a record is simply told
     Rig t;
     t.Frame();
@@ -1029,7 +1145,8 @@ int main()
     TestSetFailureRestoresX();
     TestMissTellsTheRecordedValue();
     TestMissWithoutRecordIsNotStoodDown();
-    TestUntellableFallsBackAtOnce();
+    TestMissTellsAStaleRecord();
+    TestUntellableNeedsThreeEvaluates();
     TestHeldPairIsNotAMiss();
     TestSeenObjectsLine();
     TestWorldLearnedButNeverSeenLine();

@@ -337,13 +337,63 @@ void TestWatchdog()
         rec.ToldFromRecord();
     }
     CHECK(rec.Verdict() == Fallback::Unpaired && rec.totals().toldFromRecord == kUnpairedLimit && rec.totals().unpaired == kUnpairedLimit);
-    // a value that cannot be told at all falls back at once, whatever the run
+    // a value that cannot be told or scaled falls back only when it repeats: kUntellableLimit within kUntellableWindowMs (F3; it used to latch at once)
+    CHECK(kUntellableLimit == 3 && kUntellableWindowMs == 1000);
     Watchdog cannot;
     CHECK(cannot.Verdict() == Fallback::None);
-    cannot.Untellable();
-    CHECK(cannot.Verdict() == Fallback::Untellable && cannot.totals().untellable == 1);
-    cannot.Reset();
+    cannot.Untellable(1000);
+    CHECK(cannot.Verdict() == Fallback::None && cannot.totals().untellable == 1);
+    cannot.Untellable(1100);
     CHECK(cannot.Verdict() == Fallback::None);
+    cannot.Untellable(1200);
+    CHECK(cannot.Verdict() == Fallback::Untellable && cannot.totals().untellable == 3);
+    cannot.Reset();
+    CHECK(cannot.Verdict() == Fallback::None && cannot.totals().untellable == 0);
+    // the window edge: three where the third is exactly the window after the first still latch, one millisecond later restarts the count
+    Watchdog edge2;
+    edge2.Untellable(5000);
+    edge2.Untellable(5500);
+    edge2.Untellable(5000 + kUntellableWindowMs);
+    CHECK(edge2.Verdict() == Fallback::Untellable);
+    Watchdog late;
+    late.Untellable(5000);
+    late.Untellable(5500);
+    late.Untellable(5000 + kUntellableWindowMs + 1);
+    CHECK(late.Verdict() == Fallback::None);
+    late.Untellable(5000 + kUntellableWindowMs + 2);
+    CHECK(late.Verdict() == Fallback::None);
+    late.Untellable(5000 + kUntellableWindowMs + 3);
+    CHECK(late.Verdict() == Fallback::Untellable);
+    // a clock that goes backwards counts as no time passed
+    Watchdog back;
+    back.Untellable(9000);
+    back.Untellable(8000);
+    back.Untellable(7000);
+    CHECK(back.Verdict() == Fallback::Untellable);
+    // a paired evaluate (checked or unverified) ends the run
+    Watchdog reset1, reset2;
+    reset1.Untellable(100);
+    reset1.Untellable(200);
+    reset1.Checked(0.0f);
+    reset1.Untellable(300);
+    reset1.Untellable(400);
+    CHECK(reset1.Verdict() == Fallback::None);
+    reset1.Untellable(500);
+    CHECK(reset1.Verdict() == Fallback::Untellable);
+    reset2.Untellable(100);
+    reset2.Untellable(200);
+    reset2.Unverified();
+    reset2.Untellable(300);
+    reset2.Untellable(400);
+    CHECK(reset2.Verdict() == Fallback::None);
+    // a record-told miss is not a pair and not untellable: it neither counts nor resets
+    Watchdog rt;
+    rt.Untellable(100);
+    rt.Untellable(200);
+    rt.Unpaired();
+    rt.ToldFromRecord();
+    rt.Untellable(300);
+    CHECK(rt.Verdict() == Fallback::Untellable);
     // Deviation is the larger axis error
     Generated g;
     g.expectedX = 0.3f;
@@ -550,7 +600,7 @@ void TestText()
     const std::string f = FormatFellBack(Fallback::OutsideTolerance, t);
     CHECK(Has(f, "fell back to the old behaviour") && Has(f, "disabled together") && Has(f, "differs from the generator's Halton value"));
     CHECK(Has(FormatFellBack(Fallback::Unpaired, t), "no camera sample matched"));
-    CHECK(Has(FormatFellBack(Fallback::Untellable, t), "cannot be told"));
+    CHECK(Has(FormatFellBack(Fallback::Untellable, t), "cannot be told") && Has(FormatFellBack(Fallback::Untellable, t), "three evaluates within a second"));
     CHECK(Has(FormatSizeDisagreement(3840, 2160, 2560, 1440), "3840x2160") && Has(FormatSizeDisagreement(3840, 2160, 2560, 1440), "2560x1440"));
 }
 

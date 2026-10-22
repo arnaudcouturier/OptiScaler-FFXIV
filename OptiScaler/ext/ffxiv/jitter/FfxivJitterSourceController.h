@@ -9,9 +9,10 @@
 //     normalising). Active: the Jitter.Offset pair of THIS evaluate is replaced by the projected offset of the camera sample it belongs to
 //     (X then Y, the raw pair read before the write), and the calibrate-and-scale engine stands down for this evaluate (`standDown`).
 //   - a pairing miss is counted. It never writes a guess (no arithmetic on the pair): when the generator recorded the frame (matched by its raw
-//     pair, younger than a second, normalised) the record's own Halton value is told; otherwise nothing is written and the engine is NOT
-//     stood down (it scales as today); a generator-divided value above the engine's 0.55 px limit that no record explains cannot be told
-//     sensibly and makes the fix fall back at once.
+//     pair, normalised, of ANY age: the same raw pair is the same phase and strength, so the same value) the record's own Halton value is told;
+//     otherwise nothing is written and the engine is NOT stood down (it scales as today). A generator-divided value above the engine's 0.55 px
+//     limit that no record explains is counted as untellable, and only kUntellableLimit of them within kUntellableWindowMs make the fix fall
+//     back (a single one is left to the engine like a small value).
 //   - a block that still holds the pair this controller wrote is already told: no pairing, no miss counted, no write, the engine stays out.
 //   - frames already drawn on the full lattice are told what was drawn even when the fix has just been switched off (kDrainMs), so a frame is
 //     never half of each.
@@ -188,10 +189,10 @@ template <class Env> class Controller
     // What the told-offset step did with this evaluate's pair.
     enum class Told : std::uint8_t
     {
-        Nothing,    // nothing written, nothing held (not active and no frame to drain; or active and nothing sensible to tell)
+        Nothing,    // nothing written, nothing held (not active and no frame to drain; or active and nothing to tell: left to the engine)
         Written,    // the pair was replaced
         Held,       // the block still holds the pair this controller wrote: already told
-        Untellable  // active, a miss, no record, a value the engine cannot scale: the fix falls back
+        Untellable  // active, a miss, no record, a value the engine cannot scale: counted (the fix falls back after kUntellableLimit of them)
     };
 
     struct LastTold
@@ -240,17 +241,17 @@ template <class Env> class Controller
         return Told::Written;
     }
 
-    // An active evaluate whose pair matched no camera sample. Counted. Told the generator record's value when there is one (never arithmetic on
-    // the pair); otherwise nothing is written: a small value is the old behaviour's and the engine scales it as today, a divided value the
-    // engine cannot scale has no sensible telling and the fix falls back.
+    // An active evaluate whose pair matched no camera sample. Counted. Told the generator record's value when there is one, of any age (never
+    // arithmetic on the pair; the same raw pair means the same phase index and strength, hence the same expected value); otherwise nothing is
+    // written: a small value is the old behaviour's and the engine scales it as today, a divided value the engine cannot scale is counted as
+    // untellable and left to the engine too (the fix falls back only when that repeats, see Watchdog::Untellable).
     Told TellMiss(Env& env, SharedState& state, std::uint64_t now, const std::optional<float>& ngxX, const std::optional<float>& ngxY)
     {
         _watchdog.Unpaired();
         if (!ngxX || !ngxY)
             return Told::Nothing;
         const std::optional<Generated> record = state.FindGenerated(*ngxX, *ngxY);
-        const bool fresh = record && now >= record->timeMs && now - record->timeMs < kMaxSampleAgeMs;
-        if (record && record->normalized && fresh)
+        if (record && record->normalized)
         {
             _watchdog.ToldFromRecord();
             WritePair(env, record->expectedX, record->expectedY, *ngxX);
@@ -258,7 +259,7 @@ template <class Env> class Controller
         }
         if (std::fabs(*ngxX) > kMaxReportedPixels || std::fabs(*ngxY) > kMaxReportedPixels)
         {
-            _watchdog.Untellable();
+            _watchdog.Untellable(now);
             return Told::Untellable;
         }
         return Told::Nothing;

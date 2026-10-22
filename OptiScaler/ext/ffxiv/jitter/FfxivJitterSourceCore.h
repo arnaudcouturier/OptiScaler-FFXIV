@@ -254,13 +254,18 @@ inline std::optional<Match> PairSample(const Ring<Observed, kRingSize>& ring, fl
 inline constexpr float kVerifyTolerancePx = 0.005f;    // projected offset against the generator's own Halton value, per axis
 inline constexpr unsigned kOutsideToleranceLimit = 90; // consecutive checked frames outside the tolerance that make the fix fall back
 inline constexpr unsigned kUnpairedLimit = 90;         // consecutive evaluates with no matching camera sample that make the fix fall back (a miss is never harmless)
+// A divided value above the engine's limit that no generator record explains is counted; one alone is left to the engine like a small value. The
+// fall-back needs this many of them inside the window (about 60 evaluates at 60 fps): a real broken pairing repeats on every evaluate, a hitch of
+// the render thread does not, and one evaluate must not give up the fix for the whole session.
+inline constexpr unsigned kUntellableLimit = 3;
+inline constexpr std::uint64_t kUntellableWindowMs = 1000;
 
 enum class Fallback : std::uint8_t
 {
     None,
     OutsideTolerance, // what was drawn is not what the generator produced: the strength or the game's formula is not the one we know
     Unpaired,         // the evaluates stopped matching any camera sample
-    Untellable        // a generator-divided value no record explains and the engine cannot scale: nothing sensible can be told (at once)
+    Untellable        // generator-divided values no record explains and the engine cannot scale, repeatedly: nothing sensible can be told
 };
 
 // Counts what the boundary saw. `Checked` = a normalised frame whose drawn offset was compared with the generator's value.
@@ -281,6 +286,7 @@ class Watchdog
         ++_totals.checked;
         _totals.maxDeviation = std::max(_totals.maxDeviation, deviation);
         _unpairedRun = 0;
+        _untellableRun = 0;
         if (deviation > kVerifyTolerancePx)
         {
             ++_totals.outside;
@@ -294,6 +300,7 @@ class Watchdog
     {
         ++_totals.unverified;
         _unpairedRun = 0;
+        _untellableRun = 0;
     }
     void Unpaired()
     {
@@ -303,11 +310,22 @@ class Watchdog
     // An unpaired evaluate that was told the generator record's value (counted in `unpaired` as well: a pairing that is broken for good must
     // still fall back, however well the record path hides it).
     void ToldFromRecord() { ++_totals.toldFromRecord; }
-    // An unpaired evaluate whose value cannot be told or scaled: the verdict is a fall-back at once.
-    void Untellable()
+    // An unpaired evaluate whose value cannot be told (no generator record at all) or scaled (above the engine's limit). One is left to the
+    // engine; kUntellableLimit of them inside kUntellableWindowMs (counted from the first of the run; a clock that goes back counts as no time
+    // passed) make the verdict a fall-back. A paired evaluate (Checked / Unverified) ends the run; a record-told miss neither counts nor ends it.
+    void Untellable(std::uint64_t nowMs)
     {
         ++_totals.untellable;
-        _untellable = true;
+        const std::uint64_t since = nowMs >= _untellableFirstMs ? nowMs - _untellableFirstMs : 0;
+        if (_untellableRun == 0 || since > kUntellableWindowMs)
+        {
+            _untellableRun = 1;
+            _untellableFirstMs = nowMs;
+        }
+        else
+            ++_untellableRun;
+        if (_untellableRun >= kUntellableLimit)
+            _untellable = true;
     }
     Fallback Verdict() const
     {
@@ -324,7 +342,8 @@ class Watchdog
 
   private:
     Totals _totals;
-    unsigned _outsideRun = 0, _unpairedRun = 0;
+    unsigned _outsideRun = 0, _unpairedRun = 0, _untellableRun = 0;
+    std::uint64_t _untellableFirstMs = 0;
     bool _untellable = false;
 };
 
@@ -473,7 +492,7 @@ constexpr const char* FallbackText(Fallback f)
     {
     case Fallback::OutsideTolerance: return "the drawn offset differs from the generator's Halton value for the same frame";
     case Fallback::Unpaired: return "no camera sample matched the NGX jitter of the evaluate";
-    case Fallback::Untellable: return "a jitter value divided by the generator hook cannot be told or scaled (no generator record, above the 0.55 px the scaling accepts)";
+    case Fallback::Untellable: return "a jitter value divided by the generator hook cannot be told or scaled (three evaluates within a second with no generator record and above the 0.55 px the scaling accepts)";
     case Fallback::None: break;
     }
     return "none";
