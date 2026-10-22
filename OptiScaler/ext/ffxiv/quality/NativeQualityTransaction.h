@@ -139,15 +139,10 @@ struct TransactionResult
     unsigned threadId = 0; // the thread an enlist failure was about
 };
 
-// Begin, enlist the calling thread and every handle in `threads`, attach every spec, commit; abort on any failure before the
-// commit. Takes ownership of the handles (closed on every path, after Detours has resumed the threads through them).
-// Who owns the transaction after a failing Begin (read from the vendored detours.lib): Begin answers
-// ERROR_INVALID_OPERATION (4317) exactly when it did NOT take the process-wide transaction, because another thread (or this
-// thread, in an outer transaction) already has one open. That one is not ours and is left alone: no Abort. Any other failure
-// comes after Begin took ownership (it makes the trampoline regions writable first and returns the result of that), so the
-// transaction is open and must be aborted here, or every later Begin in the process answers 4317 for the rest of the session.
-// Everything between a successful DetourTransactionBegin and the Commit or Abort that ends the transaction. `at` always names
-// the step being run, so a caller that has to give up half way can say where.
+// Everything between a successful DetourTransactionBegin and the Commit or Abort that ends the transaction: enlist the calling
+// thread and every handle in `threads`, attach every spec, commit, and Abort on any failure before the commit. It does not
+// call Begin and does not own the handles (RunHookTransaction does both). `at` always names the step being run, so a caller
+// that has to give up half way can say where.
 inline void RunWindow(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads, TransactionResult& out, retry::Stage& at)
 {
     at = retry::Stage::EnlistCurrent;
@@ -181,6 +176,11 @@ inline void RunWindow(const HookSpec* specs, size_t count, std::vector<HANDLE>& 
     }
     if (result == NO_ERROR)
     {
+        // Detours' own Commit allocates nothing, so no C++ exception can come out of it by itself. One that does arrive here
+        // (only a third-party hook on a Win32 call Commit makes could throw it; the project has none) is NOT undone cleanly:
+        // the guard answers it with Abort, and Abort frees the trampolines of targets that may already be patched. That is
+        // still the lesser evil. Passing the exception on instead would reach the retry layer's catch (...), which would
+        // swallow it and leave every enlisted thread suspended.
         at = retry::Stage::Commit;
         result = DetourTransactionCommit();
         if (result != NO_ERROR)
@@ -205,8 +205,10 @@ inline int OnlyCppExceptions(unsigned long code)
 // never throw and, optimised (/O2, with or without /GL), drops a catch that only guards them. That was measured with the
 // product's flags: a plain try/catch, and even a noinline noexcept(false) wrapper around each call, compile to no handler at
 // all and the exception ends the process (/EHs, which the project does not use, would keep it). A __try/__except block is not
-// subject to that assumption; the detours test is built with the product's optimisation flags to keep proving it. Any other kind of exception
-// is not understood here and keeps propagating. No object with a destructor lives in this function (C2712).
+// subject to that assumption; the detours test is built with the product's optimisation flags to keep proving it. Any other
+// kind of exception is not understood here and keeps propagating. What the guard can undo is a failure while enlisting or
+// attaching; an exception during the Commit step is not cleanly recoverable (see the comment at that step). No object with a
+// destructor lives in this function (C2712).
 inline bool RunWindowGuarded(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads, TransactionResult& out,
                              retry::Stage& at)
 {
@@ -220,6 +222,16 @@ inline bool RunWindowGuarded(const HookSpec* specs, size_t count, std::vector<HA
         return false;
     }
 }
+
+// One hook transaction: Begin, then the window (RunWindowGuarded). Takes ownership of the handles in `threads`: they are closed
+// on every path, after Detours has resumed the threads through them, and the vector is left empty.
+// Who owns the transaction after a failing Begin (read from the vendored detours.lib): Begin answers
+// ERROR_INVALID_OPERATION (4317) exactly when it did NOT take the process-wide transaction, because another thread (or this
+// thread, in an outer transaction) already has one open. That one is not ours and is left alone: no Abort. Any other failure
+// comes after Begin took ownership (it makes the trampoline regions writable first and returns the result of that), so the
+// transaction is open and must be aborted here, or every later Begin in the process answers 4317 for the rest of the session.
+// A C++ exception escaping the window (std::bad_alloc from the operator new inside DetourUpdateThread / DetourAttach) is
+// answered with Abort, which resumes every enlisted thread, and reported as ERROR_NOT_ENOUGH_MEMORY at the step in progress.
 inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count, std::vector<HANDLE>& threads)
 {
     TransactionResult out;
@@ -250,6 +262,7 @@ inline TransactionResult RunHookTransaction(const HookSpec* specs, size_t count,
     threads.clear();
     return out;
 }
+
 // One complete install attempt as the retry sees it: a FRESH thread snapshot every time (a thread that died since the last
 // attempt is no longer listed), then one transaction over it. A failed snapshot is transient; a failed transaction is
 // classified by the stage and the error code (retry::ClassifyDetours). The caller does the guards before and the success

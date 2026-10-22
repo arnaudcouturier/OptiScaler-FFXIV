@@ -233,24 +233,20 @@ inline uintptr_t ObserveQuery(const unsigned int* display, unsigned int* optimal
     return result;
 }
 
-// The thread enlistment and the hook transaction this note is about now live in NativeQualityTransaction.h; the note applies
-// unchanged to every install attempt, retries included (at most three per session).
-// Known, accepted risk (reviewed, not an oversight): THREAD_SUSPEND_RESUME (requested on
-// OpenThread, below) is only an access right -- it does not suspend anything by itself. The
-// actual suspension happens inside the DetourUpdateThread calls further down, each of which may
-// allocate its own per-thread bookkeeping while earlier threads in the same call are already
-// suspended; DetourAttach and DetourTransactionCommit can allocate too, all before the
-// transaction resumes anyone. Whether that bookkeeping comes from the CRT heap (hazardous:
-// another suspended thread could hold its lock) or elsewhere is not verified: this repo vendors
-// only detours.h and a prebuilt detours.lib, no source, so Detours' internal allocator cannot be
-// inspected here. Trampolines themselves are conventionally VirtualAlloc'd, but that is a
-// different allocation path and is not a mitigation for this one. Deliberately not restructured:
-// changing the suspend/attach ordering to address an unverified hazard risks introducing a real
-// bug in exchange for a theoretical one. The same note applies to ext::core::DetourThreadScope
-// (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
-// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and
-// ext::ffxiv::lighting::FfxivLightingCapture).
-// One install attempt. The guards below are deterministic for a given exe, so a refusal there is Permanent (never retried)
+// The thread enlistment and the hook transaction this note is about live in NativeQualityTransaction.h; the note applies
+// unchanged to every install attempt, retries included (at most three per session, so a retry repeats the exposure at most
+// twice more).
+// Known, accepted risk (reviewed, not an oversight): THREAD_SUSPEND_RESUME (requested on OpenThread in SnapshotLiveThreads) is
+// only an access right -- it does not suspend anything by itself. The actual suspension happens inside the DetourUpdateThread
+// calls, each of which allocates its own per-thread record while earlier threads in the same call are already suspended;
+// DetourAttach allocates one record per hook too, all before the transaction resumes anyone. Verified in the vendored
+// detours.lib (disassembly): those allocations are the CRT's operator new (a 16-byte thread record, a 48-byte operation
+// record), so the hazard is real, not hypothetical: a suspended thread that holds the process heap lock would block the next
+// allocation. Trampolines are VirtualAlloc'd, a different path that does not mitigate it; DetourTransactionCommit and Abort
+// allocate nothing (they only free with operator delete). Deliberately not restructured: the allocations happen inside Detours
+// and the window lasts a few milliseconds (the game log shows the whole first install in 58 ms). The same note applies to
+// ext::core::DetourThreadScope (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
+// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and ext::ffxiv::lighting::FfxivLightingCapture).// One install attempt. The guards below are deterministic for a given exe, so a refusal there is Permanent (never retried)
 // and keeps the one warning it always logged. The Detours half (thread snapshot + one hook transaction) is
 // transaction::AttemptHooks (NativeQualityTransaction.h), whose failures it classifies as transient or permanent. Nothing
 // is logged between a transaction's begin and end; the retry logging happens in InstallLog, after the threads run again.
