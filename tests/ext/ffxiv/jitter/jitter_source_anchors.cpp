@@ -2,6 +2,7 @@
 
 #include "ext/ffxiv/jitter/FfxivJitterSourceAnchors.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -35,7 +36,8 @@ const Recorded kRecorded[] = {
       "4180f802740683782c02750f" },
     { "phases", 0x25f721,
       "488b0568ed6a020f57f6488b9f78020000baffffffff488b8828040000488bf18bc148c1ee20f3480f2af04180f8027433488b05a7856a020f57c0f30f100d3ce7eb01"
-      "8b888c000000f3480f2ac1f30f5ec6e88865b801f30f5905bce6ee01f3480f2cd0448b4b104c8d430489542420" },
+      "8b888c000000f3480f2ac1f30f5ec6e88865b801f30f5905bce6ee01f3480f2cd0448b4b104c8d430489542420"
+      "488d4c2430488bd3" },
     { "strength", 0x25f799,
       "e8f2c50800488b0debec6a024c8d45d0488b03488d575048894424380fb78100070000660f6ec80fb78104070000488b8f780200000f5bc9660f6ec0488b0594ec6a02"
       "0f5bc0f30f105078f30f5c1578e5eb01f30f5ec80f57c0f30f59484cf3480f2ac6f30f59c9f30f59d1f30f581557e5eb01f30f58d20f28caf30f5954243cf30f594c24"
@@ -208,6 +210,18 @@ void TestOffsetsAreInTheBytes()
     // the DLSS-mode branch and the counter / arguments of the generator call: cmp r8b,2 ; je ; mov r9d,[rbx+0x10] ; lea r8,[rbx+4] ; mov [rsp+0x20],edx
     CHECK(Contains(phases, { 0x41, 0x80, 0xf8, 0x02, 0x74 }));
     CHECK(Contains(phases, { 0x44, 0x8b, 0x4b, 0x10, 0x4c, 0x8d, 0x43, 0x04, 0x89, 0x54, 0x24, 0x20 }));
+    // F10: the block runs up to the strength block with no gap: it ends with the generator's remaining arguments, lea rcx,[rsp+0x30] (the
+    // opaque argument) and mov rdx,rbx (the generator's x output = the jitter object P, the pointer the world tie compares). The bytes at
+    // 0x25f791..0x25f798 were read from the executable: 48 8d 4c 24 30 48 8b d3, and the strength block (the generator call) follows at once.
+    {
+        const Anchor& a = *Find(anchors, "phases");
+        const Anchor& next = *Find(anchors, "strength");
+        CHECK(b.phasesRva + a.size == b.strengthRva && a.rva + a.size == next.rva);
+        const std::vector<std::uint8_t> gap { 0x48, 0x8d, 0x4c, 0x24, 0x30, 0x48, 0x8b, 0xd3 };
+        const bool endsWithGap = phases.size() >= gap.size() && std::equal(gap.begin(), gap.end(), phases.end() - gap.size());
+        CHECK(endsWithGap);
+        CHECK(Contains(phases, { 0x48, 0x8b, 0xd3 })); // mov rdx,rbx
+    }
     // device output width: mov ecx,[rax+0x8c]
     {
         std::vector<std::uint8_t> p { 0x8b, 0x88 };
