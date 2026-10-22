@@ -571,6 +571,71 @@ std::string RealOverrideNo() // the same real line with the answer flipped: no l
     return s;
 }
 
+// ---- PRESET-BOOT fix round, item 2: NVIDIA's model-store copy of the runtime, from NGX's init line ---------------------------------------
+// Real payloads. nvapp_override: builds\game-logs-20261021-bisect2 line 1141 (the run in which the DLSS override id was answered on, NGX
+// loaded the model-store module, max generated frames 1). endpoint: the probe run (local OptiScaler/nvngx_dlssg.dll, max 5), kRealInit above.
+// The other two init lines of the same boots belong to the super resolution feature (APP_NAME = default / app_transformer_dlssd).
+const char* kRealInitNvapp =
+    "SL Log: [10-39-43][streamline][info][tid:26056][1s:966ms:897us]commonEntry.cpp:1368[ngxLog] [FrameGeneration] [2026-10-21 10:39:43] "
+    "[tid:26056][NGXInitLog:216] Built with APP_NAME = nvapp_override";
+const char* kRealInitSrDefault =
+    "SL Log: [10-39-43][streamline][info][tid:26056][1s:675ms:129us]commonEntry.cpp:1368[ngxLog] [SuperSampling] [2026-10-21 10:39:43] "
+    "[tid:26056][NGXInitLog:216] Built with APP_NAME = default";
+const char* kRealInitSrTransformer =
+    "SL Log: [10-39-43][streamline][info][tid:26056][2s:091ms:867us]commonEntry.cpp:1368[ngxLog] [SuperSampling] [2026-10-21 10:39:43] "
+    "[tid:26056][NGXInitLog:216] Built with APP_NAME = app_transformer_dlssd";
+const char* kRealMultiFrameOne =
+    "SL Log: [10-39-43][streamline][info][tid:26056][2s:219ms:072us]dlss_gEntry.cpp:1504[slOnPluginStartup] Multi-frame not supported, max generated "
+    "frames 1 (SL Plugin supports 5, NGX feature supports 1)";
+
+void ModelStoreCopy()
+{
+    // only the frame generation feature's init line with the model-store app name is the signal
+    {
+        const auto p = ParseLine(kRealInitNvapp);
+        CHECK_MSG(p.kind == LineKind::NvidiaCopy && p.recognised, "kind %d", static_cast<int>(p.kind));
+    }
+    CHECK(ParseLine(kRealInit).kind == LineKind::None);            // FrameGeneration, APP_NAME = endpoint (the local runtime)
+    CHECK(ParseLine(kRealInitSrDefault).kind == LineKind::None);   // other features, other app names
+    CHECK(ParseLine(kRealInitSrTransformer).kind == LineKind::None);
+    CHECK(ParseLine(kRealMultiFrameOne).kind == LineKind::None);
+    // the same app name printed by another feature (super resolution) is not about frame generation
+    std::string sr = kRealInitNvapp;
+    sr.replace(sr.find("[FrameGeneration]"), 17, "[SuperSampling]");
+    CHECK(ParseLine(sr).kind == LineKind::None);
+    CHECK(ParseLine("DLSS-G note: Built with APP_NAME = nvapp_override").kind == LineKind::None); // not a relayed NVIDIA line
+
+    // the readout
+    for (const char* other : { kRealInit, kRealInitSrDefault, kRealInitSrTransformer, kRealMultiFrameOne })
+    {
+        Readout r;
+        r.Feed(other, 1);
+        CHECK(!r.Snapshot().nvidiaCopy && !r.TakeNvidiaCopyWarning() && !r.NvidiaCopyLoaded());
+    }
+    Readout r;
+    r.Feed(kRealInit, 1);
+    r.Feed(kRealApplying3, 2);
+    CHECK(!r.NvidiaCopyLoaded());
+    CHECK(!r.Feed(kRealInitNvapp, 3)); // never a "candidate line"
+    CHECK(r.NvidiaCopyLoaded() && r.Snapshot().nvidiaCopy);
+    // it is not an NVIDIA preset line: the menu's last line and the "confirmed" mark are those of the preset lines
+    const auto s = r.Snapshot();
+    CHECK(s.lastLine.find("Applying settings for render preset 3.") != std::string::npos && s.lastLine.find("APP_NAME") == std::string::npos);
+    Readout alone;
+    alone.Feed(kRealInitNvapp, 1);
+    const auto a = alone.Snapshot();
+    CHECK(a.nvidiaCopy && a.lastLine.empty() && !a.confirmed && a.appliedLine == -1 && !a.hasReport);
+    CHECK(alone.Confirm(3).effect == Effect::Unknown); // the line says nothing about a preset
+    // the module is loaded once per process: the next request must not forget it
+    r.BeginRequest();
+    CHECK(r.NvidiaCopyLoaded() && r.Snapshot().nvidiaCopy && r.Snapshot().lastLine.empty());
+    // one warning, however often the line comes
+    CHECK(r.TakeNvidiaCopyWarning());
+    CHECK(!r.TakeNvidiaCopyWarning());
+    r.Feed(kRealInitNvapp, 4);
+    CHECK(!r.TakeNvidiaCopyWarning() && r.NvidiaCopyLoaded());
+}
+
 void ConfirmationPrecedence()
 {
     CHECK(ParseLine(kRealReport33).kind == LineKind::Report && ParseLine(kRealReport33).newFormat && ParseLine(kRealReport33).recognised);
@@ -646,6 +711,7 @@ int main()
     Runtime31016Confirmation();
     NgxOverrideReport();
     ConfirmationPrecedence();
+    ModelStoreCopy();
     ReadoutWording();
     PauseRule();
     StatusSentences();

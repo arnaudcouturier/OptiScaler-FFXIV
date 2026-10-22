@@ -142,6 +142,15 @@ void DrawRenderPresetSection()
         ImGui::TextWrapped("%s%s", StatusSentence(status.active, confirmed.effect, ReplyReadable()).c_str(),
                            status.switches > 0 && status.active == kAuto ? " (changed while the game ran)" : "");
 
+    // the log shows NVIDIA's own copy of the runtime (an NVIDIA profile or the NVIDIA app's override may be the reason): the status above can
+    // still say "confirmed" because that copy also applies the preset, so this is said on its own line
+    if (ReadoutState().NvidiaCopyLoaded())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s", NvidiaCopySentence().c_str());
+        ImGui::PopStyleColor();
+    }
+
     // HUD-less recomposition and the presets: A turns the runtime's own UI recomposition off (ui_free mode is not affected)
     const bool involved =
         status.configured == kPresetA || status.active == kPresetA || status.configured == kPresetC || status.active == kPresetC;

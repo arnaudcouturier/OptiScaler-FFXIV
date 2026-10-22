@@ -204,6 +204,20 @@ void UiRecompositionPause(const std::string& repo)
     CHECK(relay.find("if (request != kPresetA && request != kPresetC) return false;") != std::string::npos);
 }
 
+// M2: the relay sink only reads (it must never log); the one WARN line is written from FlushCandidateLines, before its early exit
+void NvidiaCopyWarn(const std::string& repo)
+{
+    const std::string relay = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.cpp"));
+    CHECK(relay.find("#include \"ext/fg/dlssg/PresetMenuText.h\"") != std::string::npos);
+    CHECK(relay.find("if (ReadoutState().TakeNvidiaCopyWarning()) LOG_WARN(\"DLSS-G: {}\", NvidiaCopySentence());") != std::string::npos);
+    CHECK(Before(relay, "TakeNvidiaCopyWarning()", "if (!g_queued.load(std::memory_order_acquire)) return;"));
+    CHECK(Count(relay, "LOG_WARN(") == 1);
+    const size_t sink = relay.find("void sink_it_(");
+    const size_t sinkEnd = relay.find("void flush_()");
+    CHECK(sink != std::string::npos && sinkEnd != std::string::npos);
+    CHECK(relay.substr(sink, sinkEnd - sink).find("LOG_") == std::string::npos); // the sink never logs
+}
+
 void MenuText(const std::string& repo)
 {
     const std::string menu = Flat(ReadFile(repo + "/OptiScaler/ext/fg/MenuFgPreset.cpp"));
@@ -219,6 +233,13 @@ void MenuText(const std::string& repo)
     CHECK(Before(menu, "UnavailableSentence(preset, status.unavailable)", "DifferenceSentence(status.configured"));
     CHECK(Before(menu, "DifferenceSentence(status.configured", "StatusSentence(status.active"));
     CHECK(menu.find("Restart needed: %s.") == std::string::npos && menu.find("is chosen; the change is made") == std::string::npos);
+    // M2: the warning for NVIDIA's own copy of the runtime is drawn in the same section as the status, after the control-off return (with
+    // the control off the runtime is not NVIDIA's DLSS-G in the first place), and from the sentence of PresetMenuText.h
+    CHECK(menu.find("if (ReadoutState().NvidiaCopyLoaded())") != std::string::npos);
+    CHECK(menu.find("NvidiaCopySentence().c_str()") != std::string::npos);
+    CHECK(Before(menu, "UnavailableSentence(preset, status.unavailable)", "NvidiaCopySentence()"));
+    CHECK(Before(menu, "StatusSentence(status.active", "NvidiaCopySentence()"));
+    CHECK(Before(menu, "NvidiaCopySentence()", "DrawReadout(status);"));
     // the selector stays visible (only disabled when the control is off), the tooltip names the NVIDIA-profile exception
     CHECK(menu.find("ImGui::Combo(\"DLSS-G render preset\", &preset,") != std::string::npos);
     CHECK(menu.find("If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of") != std::string::npos);
@@ -267,6 +288,7 @@ int main(int argc, char** argv)
     UiRecompositionPause(repo);
     RequestStatePins(repo);
     DrsLogLine(repo);
+    NvidiaCopyWarn(repo);
     MenuText(repo);
     if (g_failures)
     {

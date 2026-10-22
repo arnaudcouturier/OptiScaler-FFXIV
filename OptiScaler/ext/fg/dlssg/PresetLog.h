@@ -18,6 +18,7 @@
 
 #include <cctype>
 #include <climits>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -41,6 +42,7 @@ enum class LineKind : uint8_t
     FlagOverride,   // 310.9.16: "Disabling UI recomposition / FG Lite due to private flag override." (the preset is still applied)
     Applying,       // 310.9.16: "Applying settings for render preset N."
     Unsupported,    // 310.9.16: "Warning: Ignoring unsupported render preset ID N."
+    NvidiaCopy,     // NGX init line of the frame generation feature: "Built with APP_NAME = nvapp_override" (NVIDIA's model-store copy)
     Candidate       // mentions a preset, no rule claims it
 };
 
@@ -205,6 +207,16 @@ inline ParsedLine ParseLine(std::string_view line)
 
     const std::string low = detail::Lower(line);
     using detail::Has;
+    // NGX's init line of the frame generation feature: "[FrameGeneration] ... [NGXInitLog:216] Built with APP_NAME = <name>". The local
+    // runtime (OptiScaler/nvngx_dlssg.dll) logs "endpoint"; "nvapp_override" is NVIDIA's own copy from its model store (seen in the
+    // run in which the DLSS override id was answered on: max generated frames 1). Not a preset line, so it is looked at before the
+    // "preset" filter below. The other features print their own app names ("default", "app_transformer_dlssd"); they were skipped above.
+    if (Has(low, "[framegeneration]") && Has(low, "built with app_name") && Has(low, "app_name = nvapp_override"))
+    {
+        out.kind = LineKind::NvidiaCopy;
+        out.recognised = true;
+        return out;
+    }
     if (!Has(low, "preset") && !Has(low, "private flag override"))
         return out;
 
@@ -373,6 +385,7 @@ class Readout
         bool flagOverride = false;   // 310.9.16: a private flag overrides the recomposition or FG Lite setting; the preset is still applied
         bool reportNew = false;      // the report is in the 310.9.16 wording: `requested` is the preset number, `effective` the one in force
         int effective = -1;
+        bool nvidiaCopy = false;     // NGX init line "Built with APP_NAME = nvapp_override": NVIDIA's own copy of the runtime is loaded
         int appliedLine = -1;        // "Applying settings for render preset N."
         int unsupportedId = -1;      // "Ignoring unsupported render preset ID N."
         // Arrival order of the statements that can contradict each other (0 = not seen since the last request), so that the latest one
@@ -397,8 +410,25 @@ class Readout
     {
         std::lock_guard lock(mutex_);
         const bool queried = state_.queried;
+        const bool nvidiaCopy = state_.nvidiaCopy; // the module is loaded once per process: a new request does not unload it
         state_ = {};
         state_.queried = queried;
+        state_.nvidiaCopy = nvidiaCopy;
+    }
+
+    // NVIDIA's own copy of the runtime was seen loading (the NGX init line). Cheap, for the menu every frame.
+    bool NvidiaCopyLoaded() const
+    {
+        std::lock_guard lock(mutex_);
+        return state_.nvidiaCopy;
+    }
+
+    // True once, the first time the copy was seen: the caller logs the warning (the log sink must not log itself).
+    bool TakeNvidiaCopyWarning()
+    {
+        if (!warnPending_.load(std::memory_order_acquire))
+            return false;
+        return warnPending_.exchange(false, std::memory_order_acq_rel);
     }
 
     View Snapshot() const
@@ -454,6 +484,15 @@ class Readout
             return false;
 
         std::lock_guard lock(mutex_);
+        if (p.kind == LineKind::NvidiaCopy) // not a preset line: no last line for the menu, no "confirmed" mark
+        {
+            if (!state_.nvidiaCopy)
+            {
+                state_.nvidiaCopy = true;
+                warnPending_.store(true, std::memory_order_release);
+            }
+            return false;
+        }
         state_.lastLine = Clean(line);
         switch (p.kind)
         {
@@ -563,6 +602,7 @@ class Readout
 
     mutable std::mutex mutex_;
     View state_;
+    std::atomic<bool> warnPending_ { false };
     int candidateLogs_ = 0;
     uint64_t lastCandidateLog_ = 0;
 };

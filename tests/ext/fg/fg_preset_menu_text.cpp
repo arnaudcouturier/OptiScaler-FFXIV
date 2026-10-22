@@ -106,6 +106,16 @@ void InUseOnlyForConfirmedOrAuto()
                     CHECK_MSG(!Has(s, "stays in use"), "%s", s.c_str());
                 }
 }
+// M2: the warning when the log shows NVIDIA's own copy of the runtime. It says what the log shows and what may be the reason (hedged), not a fact
+void NvidiaCopyWarning()
+{
+    CHECK(NvidiaCopySentence() ==
+          "The log shows NVIDIA's own copy of the DLSS-G runtime loaded instead of this one (APP_NAME = nvapp_override). An NVIDIA profile or the "
+          "NVIDIA app's DLSS override may be the reason. In the run where this was measured (one RTX 4090 setup) it gave no 3x/4x unlock and lower fps.");
+    const auto s = NvidiaCopySentence();
+    // hedged: "may", not "is"; it never claims a preset is in use and never speaks of a missing report
+    CHECK(Has(s, "may be the reason") && !Has(s, "In use") && !Has(s, "in use") && !Has(s, "missing") && !Has(s, "not reported"));
+}
 } // namespace
 
 int main()
@@ -116,6 +126,7 @@ int main()
     BlockedChange();
     UnavailableControl();
     InUseOnlyForConfirmedOrAuto();
+    NvidiaCopyWarning();
     if (g_failures)
     {
         std::printf("fg_preset_menu_text: %d check(s) failed\n", g_failures);

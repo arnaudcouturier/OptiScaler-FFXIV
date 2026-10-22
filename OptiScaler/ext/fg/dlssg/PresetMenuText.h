@@ -53,6 +53,16 @@ inline std::string DifferenceSentence(int chosen, int active, Effect effect, boo
     return out;
 }
 
+// The log shows NVIDIA's own copy of the runtime (NGX init line "Built with APP_NAME = nvapp_override"). Says what the log shows and what may
+// be the reason; the reason itself is inferred (no log has a real user profile value). The one measured case: the run in which this tool
+// answered the DLSS override id on (RTX 4090, max generated frames 1, about 47 fps against about 74).
+inline std::string NvidiaCopySentence()
+{
+    return "The log shows NVIDIA's own copy of the DLSS-G runtime loaded instead of this one (APP_NAME = nvapp_override). An NVIDIA profile or "
+           "the NVIDIA app's DLSS override may be the reason. In the run where this was measured (one RTX 4090 setup) it gave no 3x/4x unlock "
+           "and lower fps.";
+}
+
 // The control is off (companion runtime, replacement runtime, other output): a chosen preset is not in use, and the reason follows.
 inline std::string UnavailableSentence(int chosen, Unavailable why)
 {

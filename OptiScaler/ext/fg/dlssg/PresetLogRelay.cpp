@@ -2,6 +2,8 @@
 
 #include "PresetLogRelay.h"
 
+#include "ext/fg/dlssg/PresetMenuText.h"
+
 #include <Config.h>
 
 #include <spdlog/sinks/base_sink.h>
@@ -129,6 +131,9 @@ bool UiRecompositionPaused()
 
 void FlushCandidateLines()
 {
+    // once per process: the sink only noted that NGX's init line named NVIDIA's own copy of the runtime
+    if (ReadoutState().TakeNvidiaCopyWarning())
+        LOG_WARN("DLSS-G: {}", NvidiaCopySentence());
     if (!g_queued.load(std::memory_order_acquire))
         return;
     std::vector<std::string> lines;
