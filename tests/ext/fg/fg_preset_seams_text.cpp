@@ -45,6 +45,28 @@ size_t Count(const std::string& hay, const std::string& needle)
     return n;
 }
 
+// The adjacent string literals that follow `marker` in `source`, joined (what the compiler makes of them). Escapes are not needed here.
+std::string JoinedLiterals(const std::string& source, const std::string& marker)
+{
+    std::string out;
+    size_t i = source.find(marker);
+    if (i == std::string::npos)
+        return out;
+    i += marker.size();
+    for (;;)
+    {
+        while (i < source.size() && (source[i] == ' ' || source[i] == '\t' || source[i] == '\r' || source[i] == '\n'))
+            ++i;
+        if (i >= source.size() || source[i] != '"')
+            return out;
+        const size_t end = source.find('"', i + 1);
+        if (end == std::string::npos)
+            return out;
+        out += source.substr(i + 1, end - i - 1);
+        i = end + 1;
+    }
+}
+
 bool Before(const std::string& text, const std::string& first, const std::string& second)
 {
     const size_t a = text.find(first), b = text.find(second);
@@ -113,6 +135,42 @@ void AutoCostsNothing(const std::string& repo)
     // only a refusal by the checks is final for a module; an unmapped module is just not a candidate
     CHECK(mod.find("seen[i].refused = true;") != std::string::npos);
     CHECK(Count(mod, "g_installFailed = true;") == 1);
+}
+
+// PRESET-BOOT fix round (L6): the log line PresetDrs.cpp writes for the preset-id answer is the proof recipe of the in-game check, so its
+// text is pinned here, filled with the values of the real boot of 2026-10-22 (probe: answered 3, the driver profile had no such setting).
+void DrsLogLine(const std::string& repo)
+{
+    const std::string raw = ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetDrs.cpp");
+    const std::string format = JoinedLiterals(raw, "LOG_INFO(");
+    CHECK(!format.empty());
+    // fill the placeholders in order: {:X} {} {} {} {:X}
+    const char* args[] = { "10E41DF1", "3", "Preset C", " (the driver profile has no such setting)", "10E41E03" };
+    std::string line;
+    size_t used = 0;
+    for (size_t at = 0; at < format.size();)
+    {
+        if (format[at] == '{')
+        {
+            const size_t close = format.find('}', at);
+            CHECK(close != std::string::npos && used < 5);
+            if (close == std::string::npos || used >= 5)
+                break;
+            line += args[used++];
+            at = close + 1;
+            continue;
+        }
+        line += format[at++];
+    }
+    CHECK(used == 5);
+    CHECK_MSG(line ==
+                  "DLSS-G render preset: the runtime asked the driver for its preset (id 0x10E41DF1), answered 3 (Preset C) (the driver profile has no such "
+                  "setting); the DLSS override id 0x10E41E03 is passed through to the driver",
+              "%s", line.c_str());
+    // the arguments are the ids and the answer, in the order of the placeholders
+    const std::string code = Flat(raw);
+    CHECK(code.find("kRenderPresetSettingId, edit.value, Name(request), found ? \"\" : \" (the driver profile has no such setting)\", kOverrideSettingId);") !=
+          std::string::npos);
 }
 
 void RequestStatePins(const std::string& repo)
@@ -202,6 +260,7 @@ int main(int argc, char** argv)
     AutoCostsNothing(repo);
     UiRecompositionPause(repo);
     RequestStatePins(repo);
+    DrsLogLine(repo);
     MenuText(repo);
     if (g_failures)
     {
