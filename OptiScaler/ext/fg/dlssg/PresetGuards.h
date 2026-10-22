@@ -421,8 +421,17 @@ struct ContextFacts
 //  frame lea, its copies, two-register arithmetic / cmov / xchg with a marked source, arithmetic on it; a mark is dropped only by a
 //  full-width overwrite or by a call for the volatile registers; computed by a forward may-analysis over the whole region, entry run
 //  included, with merges at jump targets and a fixed point for loops), when an index register is marked, and in every slot case for
-//  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored. NOT tracked: a
-//  frame address stored to memory and read back, an xmm carrier; hand-made code only.
+//  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored.
+//  NOT tracked (all of it is hand-made code that no compiler emits; the shipped feature does not depend on any of it):
+//   * a frame address stored to memory and read back, or carried in an xmm register;
+//   * a marked register handed to a callee as an argument, or a callee that returns it in rax (the call only clears the volatile
+//     registers; the callee itself is outside the model);
+//   * a copy of rsp or rbp made before the save by anything but a mov (add/or/adc into a zeroed register, say): in the entry run only
+//     the mov forms count, because the stack cookie's "xor rax,rsp" names rsp as a value there in every build;
+//   * the byte moves (88 / 8A) and the byte cmpxchg 0F B0 (a byte moves no address: they neither carry nor drop a mark); a 32-bit form
+//     is treated like the 64-bit one (conservative: it carries);
+//   * the value of a marked register: any displacement through it is refused, even one that cannot reach the slot (a compiler that
+//     hoists "lea rsi,[rbp+40h]" and writes a field through it much later would get "restart needed"; none of the four known builds does).
 inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<Function>& fns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
 {
     using namespace x64;
@@ -553,8 +562,10 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<F
 
     // Registers that may hold a frame address before each instruction, computed from the end of the prologue (so a frame lea in the
     // entry run counts) to the reload: a forward may-analysis, union at jump targets, repeated to a fixed point (loops). A frame
-    // location's address taken with lea marks its register; so do mov / lea / two-register add-sub-or-xor-and-adc-sbb-imul-cmov-xchg-xadd
-    // with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
+    // location's address taken with lea marks its register; so do mov (and a mov from rsp or rbp itself) / lea, the two-register
+    // add-sub-or-xor-and-adc-sbb forms, the register forms of imul (0F AF and the three-operand 6B / 69), movsxd, cmov, xchg (87 and
+    // the short forms 90..97, 90 only with REX.B), xadd, cmpxchg (0F B1: source to destination, destination to rax) and shld / shrd,
+    // all with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
     // by a FULL-WIDTH overwrite (a 64/32-bit mov from an unmarked register or from memory or an immediate, movzx/movsx, pop, a zero
     // idiom, lea of unmarked registers) and, for the volatile registers, by a call; 8- and 16-bit writes keep it.
     const size_t regionLen = static_cast<size_t>(iReload - iStart + 1);
