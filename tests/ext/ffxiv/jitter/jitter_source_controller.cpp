@@ -829,6 +829,55 @@ void TestHeldPairIsNotAMiss()
     CHECK(k.env.clockReads == clocks); // once the block differs the key-off path is as cheap as before
 }
 
+// F8: pairing runs BEFORE the held check. A fresh game pair that has a camera sample and equals the pair this controller last wrote bit for bit
+// (strength 1: raw == drawn == told) is a paired, written, verified frame, not "already told". Held-first would skip the sample and the check.
+void TestPairingRunsBeforeTheHeldCheck()
+{
+    Rig r;
+    r.strength = 1.0f;
+    for (int i = 0; i < 5; ++i)
+    {
+        r.Frame();
+        r.Step();
+    }
+    const float tx = r.env.floats[Param::JitterX], ty = r.env.floats[Param::JitterY];
+    CHECK(tx != 0.0f && ty != 0.0f);
+    const int writes = r.env.Writes();
+    const std::uint64_t checked = r.controller.Totals().checked;
+    const std::uint64_t unpaired = r.controller.Totals().unpaired;
+    // the next frame's raw pair is bit for bit the pair that was last told; it has its own camera sample and its own normalised generator record
+    r.env.now += 8;
+    Observed o;
+    o.rawX = tx;
+    o.rawY = ty;
+    o.ndcX = 2.0f * tx / static_cast<float>(r.renderW);
+    o.ndcY = -(2.0f * ty) / static_cast<float>(r.renderH);
+    o.width = r.renderW;
+    o.height = r.renderH;
+    o.timeMs = r.env.now;
+    r.state.RecordObserved(o);
+    Generated g;
+    g.outX = tx;
+    g.outY = ty;
+    g.expectedX = tx;
+    g.expectedY = ty;
+    g.strength = 1.0f;
+    g.phases = r.phases;
+    g.renderW = r.renderW;
+    g.renderH = r.renderH;
+    g.outW = r.outW;
+    g.outH = r.outH;
+    g.normalized = true;
+    g.timeMs = r.env.now;
+    r.state.RecordGenerated(g, PlanWhy::Normalize);
+    CHECK(r.env.floats[Param::JitterX] == tx && r.env.floats[Param::JitterY] == ty); // the block is bit-equal to the held pair
+    const StepResult res = r.Step();
+    CHECK(res.active && res.standDown);
+    CHECK(r.env.Writes() == writes + 2);                           // written (paired), not held
+    CHECK(r.controller.Totals().checked == checked + 1);           // verified: Checked incremented by one
+    CHECK(r.controller.Totals().unpaired == unpaired);
+}
+
 // M0: the one diagnostic line about the objects the generator's call site is reached with. Written from the evaluate thread (never from a
 // detour), after the first sighting has had time to settle, and again (budgeted) whenever a NEW object shows up, so a second camera that opens
 // minutes later is not missed.
@@ -1148,6 +1197,7 @@ int main()
     TestMissTellsAStaleRecord();
     TestUntellableNeedsThreeEvaluates();
     TestHeldPairIsNotAMiss();
+    TestPairingRunsBeforeTheHeldCheck();
     TestSeenObjectsLine();
     TestWorldLearnedButNeverSeenLine();
     TestIdleReasonSaysWhichCause();
