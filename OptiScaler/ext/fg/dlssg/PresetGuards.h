@@ -426,10 +426,10 @@ struct ContextFacts
 //   * a frame address stored to memory and read back, or carried in an xmm register;
 //   * a marked register handed to a callee as an argument, or a callee that returns it in rax (the call only clears the volatile
 //     registers; the callee itself is outside the model);
-//   * a copy of rsp or rbp made before the save by anything but a mov (add/or/adc into a zeroed register, say): in the entry run only
-//     the mov forms count, because the stack cookie's "xor rax,rsp" names rsp as a value there in every build;
-//   * the byte moves (88 / 8A) and the byte cmpxchg 0F B0 (a byte moves no address: they neither carry nor drop a mark); a 32-bit form
-//     is treated like the 64-bit one (conservative: it carries);
+//   * a copy of rsp or rbp made before the save by anything but a mov or a frame lea (add/or/adc into a zeroed register, say): in the
+//     entry run only those count, because the stack cookie's "xor rax,rsp" names rsp as a value there in every build;
+//   * the byte moves (88 / 8A) and the byte cmpxchg 0F B0 (a byte moves no address: they neither carry nor drop a mark); 41 90, the
+//     32-bit xchg r8d,eax, which truncates both registers (accepted on purpose; the other 32-bit forms, mov / 87 / 91-97, still carry);
 //   * the value of a marked register: any displacement through it is refused, even one that cannot reach the slot (a compiler that
 //     hoists "lea rsi,[rbp+40h]" and writes a field through it much later would get "restart needed"; none of the four known builds does).
 inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<Function>& fns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
@@ -606,8 +606,9 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<F
                 if (kill)
                     next = static_cast<uint16_t>(next & ~n.gprWrites);
                 // xchg r, rax (short form 91..97, and 90 with REX.B = xchg r8,rax: the decoder reports both registers in gprWrites; a plain
-                // nop / pause has none): both may hold either value. The 32-bit form (41 90) carries too, like every 32-bit copy here.
-                if (!n.twoByte && n.opcode >= 0x90 && n.opcode <= 0x97 && (cur & n.gprWrites) != 0)
+                // nop / pause has none): both may hold either value. 41 90 (no REX.W) is the 32-bit xchg r8d,eax: it truncates both
+                // registers to a 32-bit number, so it is not a carrier of a 64-bit frame address and is left out on purpose.
+                if (!n.twoByte && n.opcode >= 0x90 && n.opcode <= 0x97 && (n.opcode > 0x90 || n.rexW) && (cur & n.gprWrites) != 0)
                     next = static_cast<uint16_t>(next | n.gprWrites);
                 return next;
             }

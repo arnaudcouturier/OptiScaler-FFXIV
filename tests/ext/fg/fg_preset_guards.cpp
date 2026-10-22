@@ -1023,7 +1023,7 @@ void RegionRules()
     for (Clobber k : { Clobber::MarkAddSource, Clobber::MarkPartialAl, Clobber::MarkPartialAx, Clobber::MarkPartialMovAx, Clobber::MarkPartialLoadAl,
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
-                       Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB, Clobber::MarkXchg32RexB,
+                       Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB,
                        Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl,
                        Clobber::MarkMovsxd })
     {
@@ -1040,8 +1040,10 @@ void RegionRules()
         t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
         CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
     }
-    // a plain nop is not an exchange: r8 never held the address (`49 90` is xchg rax,r8, `41 90` the 32-bit form, which this model treats
-    // like every 32-bit copy: the mark goes with it, conservatively)
+    // a plain nop is not an exchange: r8 never held the address. `49 90` is xchg rax,r8 (refused above); `41 90` is the 32-bit xchg r8d,eax,
+    // which truncates both registers to 32-bit numbers: accepted on purpose (the pin says what it does; 32-bit mov / 87 / 91-97 still carry)
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MarkXchg32RexB).why == Why::Ok);
+    CHECK(scan(Spec {}, Where::R13, Clobber::MarkXchg32RexB).why == Why::Ok);
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NopNoMark).why == Why::Ok);
     CHECK(scan(Spec {}, Where::R13, Clobber::NopNoMark).why == Why::Ok);
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkImul6B).why == Why::Ok); // a three-operand imul of an unmarked register marks nothing
