@@ -596,6 +596,8 @@ void TestText()
     t.untellable = 0;
     t.toldFromRecord = 2;
     CHECK(Has(FormatVerified(t, empty.Summary(), 32), "(2 told the generator's recorded value, 0 left to the correction engine, 0 of them above"));
+    t.toldFromRecord = 3; // cannot happen (a record-told miss is also an unpaired one); the line must not print a huge unsigned number
+    CHECK(Has(FormatVerified(t, empty.Summary(), 32), "(3 told the generator's recorded value, 0 left to the correction engine, 0 of them above"));
     t.toldFromRecord = 0;
     // L5: "equals" only when nothing was outside the tolerance
     CHECK(Has(v, "drawn offset equals the generator's value") && !Has(v, "differs"));
