@@ -1,5 +1,5 @@
 // Appended by prepare_dynamic_mfg_config.ps1 to the CustomOptional slice of the real Config.h: just enough of Config for
-// FgConfig.cpp (the three upstream members its Bind and PostLoad touch).
+// FgConfig.cpp (the four upstream members its Bind and PostLoad touch).
 enum class LowLatencyInput : uint32_t
 {
     None,
@@ -29,6 +29,7 @@ class Config
 {
   public:
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<float> FramerateLimit { 0.0f }; // [Framerate] FramerateLimit, as declared in Config.h
     CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto };
     CustomOptional<LowLatencyMode> LowLatencyOutput { LowLatencyMode::Auto };
 

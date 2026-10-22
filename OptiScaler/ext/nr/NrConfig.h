@@ -39,6 +39,10 @@ struct NrConfig
     // Experimental: pause the NR pass while the game window is not the foreground window or is minimised (the plain
     // upscaler output is shown), resume when focus returns. Does not change `enabled`. Decision logic: NrFocusGate.h.
     CustomOptional<bool> disableOnFocusLoss { false };
+    // Another name for disableOnFocusLoss used by another build, read so that a copied ini keeps working. No menu control,
+    // never read by the NR pass: PostLoad moves its value into disableOnFocusLoss (unless that is set) and clears it
+    // (NrFocusKey.h). Declared without a default, like the other ini-only aliases, so an explicit value is kept until then.
+    CustomOptional<bool, NoDefault> pauseOnFocusLoss;
     // How much of the model's edit reaches the frame (luminance part).
     CustomOptional<float> transferStrength { 1.0f };
     // How much of the model's colour shift reaches the frame.

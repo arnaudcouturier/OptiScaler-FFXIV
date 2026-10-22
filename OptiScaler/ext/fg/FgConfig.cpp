@@ -3,6 +3,7 @@
 #include "ext/fg/FgConfig.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/fg/FrameLimitSanity.h"
 
 #include <cmath>
 
@@ -66,5 +67,13 @@ void FgConfig::PostLoad()
     if (xefgMaxInterpolatedFrames.has_value() &&
         (xefgMaxInterpolatedFrames.value() < 1 || xefgMaxInterpolatedFrames.value() > kXeFgMaxInterpolations))
         xefgMaxInterpolatedFrames.reset();
+
+    // QS: upstream's [Framerate] FramerateLimit accepts whatever the ini parses (nan, inf, -5). The limiter converts
+    // 1e6 / limit to an unsigned integer, which is undefined for those. Unset means "no cap" and Save writes `auto`.
+    // This covers ini-borne values only (this runs at load): the VRR calculator's "Set as FPS Limit" assigns the value at run
+    // time and is not sanitised here (see FrameLimitSanity.h).
+    auto& limit = Config::Instance()->FramerateLimit;
+    if (limit.has_value() && !present::IsUsableFrameLimit(limit.value()))
+        limit.reset();
 }
 } // namespace ext

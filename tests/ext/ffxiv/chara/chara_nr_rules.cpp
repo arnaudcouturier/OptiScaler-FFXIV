@@ -732,6 +732,31 @@ void TestFallbackTally()
     CHECK(t.all == 3 && t.production == 2);
     t.Note(false);
     CHECK(t.all == 4 && t.production == 2 && t.production <= t.all);
+
+    // The real outcomes. A run is no fallback, and a focus pause (DisableOnFocusLoss for the previews) is none either: it is on purpose,
+    // it is not a failure to run, and the focus gate reports it with its own episode lines. Every other outcome that leaves the plain
+    // image is counted. (Only counting differs: the outcome is "not a result" for every consumer, see ProductionProduced.)
+    struct Row
+    {
+        RunOutcome outcome;
+        bool counted;
+    };
+    const Row rows[] = {
+        { RunOutcome::Failed, true },  { RunOutcome::Ran, false },     { RunOutcome::Preparing, true },
+        { RunOutcome::NotAvailable, true }, { RunOutcome::Skipped, true }, { RunOutcome::Paused, false },
+    };
+    for (const Row& r : rows)
+        for (const Placement p : { Placement::BringUp, Placement::PostSr, Placement::PreSr })
+        {
+            CHECK(CountsAsFallback(r.outcome) == r.counted);
+            FallbackTally real;
+            const RunOutcome o = CountedCall(real, p, [&] { return r.outcome; }, [](RunOutcome o2) { return !CountsAsFallback(o2); });
+            CHECK(o == r.outcome); // the answer passes through unchanged
+            const uint64_t want = r.counted ? 1 : 0;
+            CHECK(real.all == want);
+            CHECK(real.production == (r.counted && p == Placement::PostSr ? 1u : 0u));
+            CHECK(real.preSr == (r.counted && p == Placement::PreSr ? 1u : 0u));
+        }
 }
 
 

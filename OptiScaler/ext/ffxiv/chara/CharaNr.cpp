@@ -8,6 +8,7 @@
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/nr/DlssNr.h"
+#include "ext/nr/NrFocus.h"
 #include "ext/nr/native/DlssNrNative.h"
 #include "ext/nr/pass/DlssNr_Dx12.h"
 #include "ext/present/PresentSeams.h"
@@ -1088,6 +1089,14 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     const uintptr_t key = reinterpret_cast<uintptr_t>(req.native);
     if (const int known = m.table.Find(key); known != kNoStream)
         ++m.table.At(known).attempts;
+    // [DlssNr] DisableOnFocusLoss for the previews: while the game window is in the background the run ends as Paused (attempt counted above, so no stale
+    // image; not counted as a fallback, see CountsAsFallback).
+    if (!ext::nr::FocusAllowsPreviewNr(Wanted() && ext::Cfg().nr.disableOnFocusLoss.value_or_default()))
+    {
+        if (const int openStream = m.table.Find(key); openStream != kNoStream)
+            m.table.At(openStream).lastLive = req.now; // the preview window is still open: Maintain must not release the model during a long alt-tab
+        return RunOutcome::Paused;
+    }
 
     ObserveRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
@@ -1202,7 +1211,7 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
 static RunOutcome RunCore(const RunRequest& req, const ProductionRequest* production, Placement placement)
 {
     return CountedCall(M().fallbacks, placement, [&] { return RunCoreSteps(req, production, placement); },
-                       [](RunOutcome outcome) { return outcome == RunOutcome::Ran; });
+                       [](RunOutcome outcome) { return !CountsAsFallback(outcome); });
 }
 
 // One call of either entry. A call that ends without a run breaks the stream's chain (the late variant must not show a result from before

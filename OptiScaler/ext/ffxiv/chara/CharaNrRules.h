@@ -280,7 +280,16 @@ enum class RunOutcome : uint8_t
     Preparing,    // the model is being built; the native image stays for now
     NotAvailable, // preview NR is off, latched or its prerequisites are missing
     Skipped,      // no stream or list was free this time; nothing changed
+    Paused,       // [DlssNr] DisableOnFocusLoss: the game window is in the background; on purpose, nothing changed (appended last: the values above stay)
 };
+
+// Whether a call that ended with `outcome` counts as a render that kept the image (FallbackTally). A run is not one, and neither is a focus
+// pause: it is on purpose, not a failure to run, and the focus gate reports it with its own episode lines (so it is also not logged under the
+// generic cause text of the entries). Every consumer treats Paused like any other outcome without a result (ProductionProduced, NoteBringUpEnded).
+constexpr bool CountsAsFallback(RunOutcome outcome)
+{
+    return outcome != RunOutcome::Ran && outcome != RunOutcome::Paused;
+}
 
 // What kind of result a stream holds right now.
 enum class ResultKind : uint8_t

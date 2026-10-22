@@ -250,6 +250,10 @@ const std::vector<Fragment> kDlss = {
     { "const uint32_t outW = in.width * ngx::kOutputScale, outH = in.height * ngx::kOutputScale;", 1, "the production colour is the SR output size" },
     { "request.base.width = outW;", 1, "the production stream's size is the colour image's" },
     { "request.colour = g.output.texture.Get();", 1, "the production colour is the SR output" },
+    // A focus pause (RunOutcome::Paused) is on purpose, not a fallback: it is neither counted (CountsAsFallback) nor logged under the generic cause text of the
+    // two entries (the focus gate writes its own episode lines).
+    { "if (nr::CountsAsFallback(result.outcome) && g_productionCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a pause is not logged as a production cause" },
+    { "if (nr::CountsAsFallback(result.outcome) && g_preSrCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a pause is not logged as a pre-SR cause" },
 };
 
 // Order. Counts alone keep every fragment present when a statement is moved: each chain below occurs once per step, in this order, in the
@@ -318,6 +322,7 @@ const std::vector<Fragment> kNr = {
     { "ColourFormatFor(placement, static_cast<uint32_t>(nativeFormat))", 1, "the colour image has the placement's format" },
     { "m.timerRing.NoteSubmitted(out.done, placement);", 1, "the timer attributes a measurement to the placement" },
     { "CountedCall(M().fallbacks, placement,", 1, "a call without a result is counted for its own placement" },
+    { "[](RunOutcome outcome) { return !CountsAsFallback(outcome); }", 1, "a call that ended in a focus pause is not counted as a render that kept the image" },
     { "RunCopiedImpl(request, Placement::PostSr)", 1, "the production entry runs the post-SR placement" },
     { "RunCopiedImpl(request, Placement::PreSr)", 1, "the pre-SR entry runs the pre-SR placement" },
     { "!ResultTextureServes(ResultKindOf(st))", 1, "the dump is not offered a result it cannot label" },

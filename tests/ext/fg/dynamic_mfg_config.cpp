@@ -93,6 +93,46 @@ void PostLoadRangeChecks()
     }
 }
 
+// [Framerate] FramerateLimit is an upstream key; PostLoad only sanitises what the ini brought. A NaN, infinite or
+// non-positive cap would reach an unsigned cast in the limiter, so it becomes unset (no cap; Save writes `auto`).
+void PostLoadSanitisesTheFrameLimit()
+{
+    auto& limit = Config::Instance()->FramerateLimit;
+    auto load = [&](float fromIni)
+    {
+        limit.reset();
+        limit.set_from_config(fromIni); // what Config::Reload does with the ini value
+        ext::FgConfig cfg;
+        cfg.PostLoad();
+    };
+
+    for (float bad : { std::nanf(""), -std::nanf(""), INFINITY, -INFINITY, -0.001f, -1.0f, -5.0f, -144.0f })
+    {
+        load(bad);
+        CHECK_MSG(!limit.has_value(), "FramerateLimit %g kept", (double) bad);
+        CHECK_MSG(limit.value_or_default() == 0.0f, "FramerateLimit %g still reaches the limiter", (double) bad);
+        CHECK_MSG(!limit.value_for_config().has_value(), "FramerateLimit %g would be saved back", (double) bad);
+    }
+    for (float good : { 1.0f, 30.0f, 59.94f, 60.5f, 144.0f, 1000.0f })
+    {
+        load(good);
+        CHECK_MSG(limit.has_value() && limit.value() == good, "FramerateLimit %g was dropped", (double) good);
+        CHECK(limit.value_for_config() == std::optional<float>(good));
+    }
+
+    // 0 is "no cap" already: the same effective value and the same saved line (`auto`).
+    load(0.0f);
+    CHECK(limit.value_or_default() == 0.0f && !limit.value_for_config().has_value());
+
+    // Not in the ini: stays unset.
+    limit.reset();
+    ext::FgConfig unset;
+    unset.PostLoad();
+    CHECK(!limit.has_value() && limit.value_or_default() == 0.0f);
+
+    limit.reset();
+}
+
 void IniFragmentDocumentsTheKeys(const std::string& repo)
 {
     const std::string ini = ReadFile(repo + "/OptiScaler/ext/ini/DLSSG.ini");
@@ -192,6 +232,7 @@ int main(int argc, char** argv)
 {
     KeysBindWithDefaults();
     PostLoadRangeChecks();
+    PostLoadSanitisesTheFrameLimit();
     IniFragmentDocumentsTheKeys(argc > 1 ? argv[1] : ".");
     VolatileWriteKeepsTheSavedValue();
     MenuCardKeepsTheCaveat(argc > 1 ? argv[1] : ".");
