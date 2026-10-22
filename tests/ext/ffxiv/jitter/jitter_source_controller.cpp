@@ -814,14 +814,20 @@ void TestVerifyLineCadence()
 void TestVerifyLineShowsTheLattice()
 {
     Rig r;
+    bool switched = false;
     for (int i = 0; i < 150; ++i)
     {
         r.Frame();
         r.Step();
+        if (!switched && r.env.Count("Jitter source: verified") == 1)
+        {
+            r.phases = 18; // a quality change right after the first line: the second window has its own pairs
+            switched = true;
+        }
     }
     CHECK(r.env.Count("Jitter source: verified") == 1);
     CHECK(r.env.Logged("32 distinct pairs") && r.env.Logged("phase count 32") && !r.env.Logged("more than"));
-    // the window restarts after each line: the next one (30 s later) has its own frames and the same 32 pairs
+    // the window restarts after each line: the next one (30 s later) has its own frames and its own pairs: 18, not the 32 of the first window.
     for (int s = 0; s < 40; ++s)
     {
         r.env.now += 1000;
@@ -830,7 +836,7 @@ void TestVerifyLineShowsTheLattice()
         r.Step();
     }
     CHECK(r.env.Count("Jitter source: verified") == 2);
-    CHECK(r.env.Count("32 distinct pairs") == 2);
+    CHECK(r.env.Count("32 distinct pairs") == 1 && r.env.Count("18 distinct pairs") == 1);
     // an unbounded pattern (the game's own phase count) is visible as the overflow marker
     Rig u;
     u.phases = 100000;
