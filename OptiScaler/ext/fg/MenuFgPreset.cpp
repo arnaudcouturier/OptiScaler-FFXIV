@@ -118,7 +118,8 @@ void DrawRenderPresetSection()
                        "Auto leaves the choice to the driver and the runtime. A, B and C are answered inside this process only;\n"
                        "no NVIDIA profile is written. Not every runtime build acts on all three: the lines below show what it reports.\n"
                        "If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of\n"
-                       "the runtime is loaded instead of this one, whatever is chosen here.");
+                       "the runtime can be loaded instead of this one, whatever is chosen here. That is inferred, not seen with a real profile;\n"
+                       "the menu warns when the log shows NVIDIA's copy loaded.");
 
     if (off)
     {
@@ -126,7 +127,7 @@ void DrawRenderPresetSection()
         return;
     }
     if (status.configured == kPresetC || status.active == kPresetC)
-        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).");
+        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off and FG Lite on: inferred from the preset number; the runtime does not state it).");
 
     const auto confirmed = ReadoutState().Confirm(status.active);
     // the choice and what the runtime was told differ: both are named, with the reason (PresetMenuText.h)
@@ -160,7 +161,7 @@ void DrawRenderPresetSection()
             ImGui::TextWrapped("UI recomposition of NVIDIA's runtime is paused by this preset: with the HUD-less recomposition mode the "
                                "interface is no longer kept out of the generated frames. Preset B or Auto brings it back.");
         else if (status.active == kPresetC)
-            ImGui::TextWrapped("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.");
+            ImGui::TextWrapped("Preset C: UI recomposition stays on until the runtime confirms that it applied C; it is then taken to be off (inferred from the preset number; the runtime does not state it).");
     }
 
     DrawReadout(status);

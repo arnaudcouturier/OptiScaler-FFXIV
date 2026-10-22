@@ -254,7 +254,10 @@ void MenuText(const std::string& repo)
     // the selector stays visible (only disabled when the control is off), the tooltip names the NVIDIA-profile exception
     CHECK(menu.find("ImGui::Combo(\"DLSS-G render preset\", &preset,") != std::string::npos);
     CHECK(menu.find("If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of") != std::string::npos);
-    CHECK(menu.find("the runtime is loaded instead of this one, whatever is chosen here.") != std::string::npos);
+    // L7: "can", not a fact: no log has a real profile value; and the tooltip says the menu warns when the log shows NVIDIA's copy
+    CHECK(menu.find("the runtime can be loaded instead of this one, whatever is chosen here. That is inferred, not seen with a real profile;") != std::string::npos);
+    CHECK(menu.find("the menu warns when the log shows NVIDIA's copy loaded.") != std::string::npos);
+    CHECK(menu.find("the runtime is loaded instead of this one") == std::string::npos);
     const std::string menuText = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetMenuText.h"));
     CHECK(menuText.find("\"Restart needed: \"") != std::string::npos);
     CHECK(menuText.find("out += stays + \" stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).\"") != std::string::npos);
@@ -264,7 +267,8 @@ void MenuText(const std::string& repo)
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
     CHECK(menu.find("In use") == std::string::npos);
-    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).") != std::string::npos);
+    // L7: that C turns the recomposition off is read from the preset number, not reported by the runtime: said so
+    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off and FG Lite on: inferred from the preset number; the runtime does not state it).") != std::string::npos);
     CHECK(menu.find("Runtime report: preset requested %d, in force %d") != std::string::npos);
     // PRESET-BOOT phase 1: a boot with only "Applying settings for render preset N." (no ReportOverrideStates, no Override Reported)
     // is a normal, confirmed state. Every line that talks about a report, a refusal or "ignored" hangs on a field that only a line of
@@ -280,7 +284,7 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("A private flag set in the driver forces UI recomposition or FG Lite off.") != std::string::npos);
     CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);
     CHECK(menu.find("Preset B or Auto brings it back.") != std::string::npos);
-    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it acts on C and turns it off.") != std::string::npos);
+    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it applied C; it is then taken to be off (inferred from the preset number; the runtime does not state it).") != std::string::npos);
     CHECK(menu.find("Preset A and C turn off") == std::string::npos);
     CHECK(menu.find("ImGui::BeginDisabled(off);") != std::string::npos);
     CHECK(Count(menu, "ImGui::BeginDisabled(") == Count(menu, "ImGui::EndDisabled();"));
