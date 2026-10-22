@@ -155,6 +155,7 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
 // frame. Both cost one pointer test on a game without a source.
 PresentScope::PresentScope()
 {
+    ext::present::NativeBegin(); // PT: the whole bridge Present is one "native present" call
     if (game::Current().hudless)
         ffxiv::ui::OnPresentBegin();
     window::OnPresentBegin(); // window mode: present thread, frame generation off gate
@@ -167,6 +168,7 @@ PresentScope::~PresentScope()
     if (auto* hudless = game::Current().hudless)
         hudless->EndFrame();
     window::OnPresentEnd(); // window mode: gate count, deferred call and border fix run here
+    ext::present::NativeEnd();
 }
 
 void BeforeSharedCopy(Dx11wDx12SC& sc)

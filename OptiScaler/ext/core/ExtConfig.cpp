@@ -188,6 +188,12 @@ void MenuStyleConfig::Bind(config::Binder& b) { b.Add("Menu", "Style", look); }
 
 void NgxReleaseConfig::Bind(config::Binder& b) { b.Add("NgxRelease", "SkipReleaseSleep", skipReleaseSleep); }
 
+void FramePacingConfig::Bind(config::Binder& b)
+{
+    b.Add("FramePacing", "Trace", trace);
+    b.Add("FramePacing", "HiddenPresentDoNotWait", hiddenPresentDoNotWait);
+}
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -201,6 +207,7 @@ void ExtConfig::Bind(config::Binder& b)
     window.Bind(b);
     menuStyle.Bind(b);
     ngxRelease.Bind(b);
+    framePacing.Bind(b);
 }
 
 void ExtConfig::PostLoad()

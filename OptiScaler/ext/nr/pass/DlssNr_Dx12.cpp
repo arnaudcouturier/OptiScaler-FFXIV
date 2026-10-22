@@ -25,6 +25,7 @@
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 
 #include "ext/nr/pass/DlssNr_Dx12.h"
+#include "ext/present/PresentSeams.h"
 #include "ext/nr/presr/DlssNr_ActiveColor.h"
 #include "ext/nr/presr/DlssNr_Guides.h"
 #include "ext/nr/presr/DlssNr_SeamClock.h"
@@ -1673,6 +1674,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
 {
+    ext::present::PacingScope sceneNr(ext::present::Phase::SceneNr); // PT: scene NR recording time, lock wait included
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();

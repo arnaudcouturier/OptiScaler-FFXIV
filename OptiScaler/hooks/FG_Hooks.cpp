@@ -1396,6 +1396,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
         LOG_DEBUG("Calling ReflexSleep");
         ScopedOptiScalerReflex optiScalerCall {};
+        ext::present::PacingScope reflexSleep(ext::present::Phase::ReflexSleep); // ext: PT Reflex sleep time
         StreamlineProxy::ReflexSleep()(*localToken);
         ext::fg::MarkersNextFrame(fg->FrameCount() + 1); // ext: D2
     }
