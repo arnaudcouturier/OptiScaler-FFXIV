@@ -176,9 +176,16 @@ void Wiring(const std::string& repo)
     CHECK(cfg.find("nr::MigrateFocusAlias(disableOnFocusLoss, pauseOnFocusLoss);", postLoad) != std::string::npos);
     CHECK(cfg.find("#include \"ext/nr/NrFocusKey.h\"") != std::string::npos);
 
-    // nothing but the config reads the alias: the pass and the menu keep reading DisableOnFocusLoss
+    // nothing but the config reads the alias: the pass and the menu keep reading DisableOnFocusLoss. A pinned file that was
+    // moved or renamed reads as empty text, and the negative find would then pass silently: each file must be readable and
+    // non-empty first (the failure names the file).
     for (const char* file : { "nr/pass/DlssNr_Dx12.cpp", "nr/menu/DlssNr_Menu.cpp", "nr/NrFocus.cpp", "nr/NrFocusGate.h" })
-        CHECK(ReadFile(extDir + file).find("pauseOnFocusLoss") == std::string::npos);
+    {
+        const std::string text = ReadFile(extDir + file);
+        Check(!text.empty(), (std::string("pinned file is readable and not empty: ") + file).c_str(), __LINE__);
+        Check(text.find("pauseOnFocusLoss") == std::string::npos,
+              (std::string("the alias is not read by: ") + file).c_str(), __LINE__);
+    }
     CHECK(Count(cfg, "pauseOnFocusLoss") == 2); // the binder line and the one migration call
 
     // the ini line and its words
