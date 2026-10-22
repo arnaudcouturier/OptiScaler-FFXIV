@@ -604,7 +604,9 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                 if (op == 0x89 || op == 0x8B) // mov
                 {
                     const uint8_t dst = (op == 0x89) ? n.rm : n.reg, src = (op == 0x89) ? n.reg : n.rm;
-                    if (holds(src))
+                    // rsp and rbp are frame addresses themselves: a copy of either (made before the save too, where nothing marks them)
+                    // is marked. Only here: other forms name them as a value legitimately (the stack cookie's "xor rax,rsp").
+                    if (holds(src) || src == RSP || src == RBP)
                         next = static_cast<uint16_t>(next | (1u << dst));
                     else if (!narrow)
                         next = static_cast<uint16_t>(next & ~(1u << dst));

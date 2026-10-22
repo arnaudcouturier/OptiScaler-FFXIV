@@ -62,6 +62,7 @@ enum class Clobber
     // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
     MarkXchgRexB, MarkXchg32RexB, NopNoMark, MarkImul6B, MarkImul69, NoMarkImul6B,
     MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
+    StoreViaR12OfRbp, StoreViaR12OfRsp, // mov [r12-0A0h],r13 / mov [r12+60h],r13: the slot, if r12 holds rbp / rsp
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -120,6 +121,7 @@ struct Spec
     int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
+    int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89)
     bool chainedOdd = false;           // the chained fragment's unwind info has an odd number of codes
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
     bool hiddenCopySetup = false;      // the second copy site's "mov rdx,[rip+g]" is only bytes inside an immediate
@@ -339,6 +341,8 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;          // shld rcx,rax,1 into a zeroed rcx
     case Clobber::MarkShrdCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rax,cl
     case Clobber::MarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                                // movsxd rcx,eax
+    case Clobber::StoreViaR12OfRbp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0xFF, 0xFF, 0xFF }); break;
+    case Clobber::StoreViaR12OfRsp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0x00, 0x00, 0x00 }); break;
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -424,6 +428,14 @@ Fake Build(const Spec& s)
     }
     if (s.lea12BeforeSave)
         c.b({ 0x4C, 0x8D, 0x65, 0xD0 }); // lea r12,[rbp-30h]
+    switch (s.copy12BeforeSave)
+    {
+    case 1: c.b({ 0x4C, 0x8B, 0xE5 }); break; // mov r12,rbp
+    case 2: c.b({ 0x4C, 0x8B, 0xE4 }); break; // mov r12,rsp
+    case 3: c.b({ 0x49, 0x89, 0xEC }); break; // mov r12,rbp (89 form)
+    case 4: c.b({ 0x49, 0x89, 0xE4 }); break; // mov r12,rsp (89 form)
+    default: break;
+    }
     if (s.rdxWrittenBeforeSave)
         c.b({ 0x33, 0xD2 }); // xor edx,edx
     if (s.pushBeforeSave)
@@ -1025,6 +1037,26 @@ void RegionRules()
     {
         CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "slot mode, full-width kill %d: %s", static_cast<int>(k), WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
         CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register mode, full-width kill %d", static_cast<int>(k));
+    }
+    // fix round 3 (M1 item 4): a copy of rbp or rsp made BEFORE the save is a frame address as well (both encodings of mov); the stack-cookie
+    // "xor rax,rsp" of the entry run must stay harmless, and a copy that is never used must not be refused
+    for (int copy = 1; copy <= 4; ++copy)
+    {
+        const Clobber store = (copy == 2 || copy == 4) ? Clobber::StoreViaR12OfRsp : Clobber::StoreViaR12OfRbp;
+        Spec s = Shape31016();
+        s.copy12BeforeSave = copy;
+        s.clobber = store;
+        CHECK_MSG(Scan(s).why == Why::CreateContext, "a frame register copied before the save and stored through (copy %d): %s", copy, WhyText(Scan(s).why));
+        Spec r;
+        r.copy12BeforeSave = copy;
+        r.clobber = store;
+        CHECK_MSG(Scan(r).why == Why::Ok, "the same bytes with the context in r13 (copy %d): %s", copy, WhyText(Scan(r).why));
+        Spec unused = Shape31016();
+        unused.copy12BeforeSave = copy;
+        CHECK_MSG(Scan(unused).why == Why::Ok, "the copy is never used (copy %d): %s", copy, WhyText(Scan(unused).why));
+        Spec noCopy = Shape31016();
+        noCopy.clobber = store;
+        CHECK_MSG(Scan(noCopy).why == Why::Ok, "the same store without the copy (copy %d): %s", copy, WhyText(Scan(noCopy).why));
     }
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
     CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
