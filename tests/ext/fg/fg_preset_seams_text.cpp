@@ -149,7 +149,22 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("Driver queried the setting: %s") != std::string::npos);
     CHECK(menu.find("NVIDIA preset line: %s") != std::string::npos);
     CHECK(menu.find("confirmed: the line has a known format") != std::string::npos);
-    CHECK(menu.find("Restart needed: %s. %s stays in use until the next start, then the saved choice applies.") != std::string::npos);
+    // PRESET-BOOT phase 1: the choice-versus-in-use sentences come from PresetMenuText.h (tested in fg_preset_menu_text), the menu only
+    // draws them; the control-off reason is the same function
+    CHECK(menu.find("#include \"ext/fg/dlssg/PresetMenuText.h\"") != std::string::npos);
+    CHECK(menu.find("DifferenceSentence(status.configured, status.active, confirmed.effect, status.restartNeeded, status.fail)") != std::string::npos);
+    CHECK(menu.find("UnavailableSentence(preset, status.unavailable)") != std::string::npos);
+    CHECK(Before(menu, "UnavailableSentence(preset, status.unavailable)", "DifferenceSentence(status.configured"));
+    CHECK(Before(menu, "DifferenceSentence(status.configured", "StatusSentence(status.active"));
+    CHECK(menu.find("Restart needed: %s.") == std::string::npos && menu.find("is chosen; the change is made") == std::string::npos);
+    // the selector stays visible (only disabled when the control is off), the tooltip names the NVIDIA-profile exception
+    CHECK(menu.find("ImGui::Combo(\"DLSS-G render preset\", &preset,") != std::string::npos);
+    CHECK(menu.find("If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of") != std::string::npos);
+    CHECK(menu.find("the runtime is loaded instead of this one, whatever is chosen here.") != std::string::npos);
+    const std::string menuText = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetMenuText.h"));
+    CHECK(menuText.find("\"Restart needed: \"") != std::string::npos);
+    CHECK(menuText.find("stays in use until the next start, then the saved choice applies.") != std::string::npos);
+    CHECK(menuText.find("The change is made when frame generation runs next.") != std::string::npos);
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
     CHECK(menu.find("In use") == std::string::npos);

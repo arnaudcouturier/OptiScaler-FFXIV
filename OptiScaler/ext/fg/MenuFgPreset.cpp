@@ -4,6 +4,7 @@
 #include "ext/core/MenuWidgets.h"
 #include "ext/fg/FgInternal.h"
 #include "ext/fg/dlssg/PresetLogRelay.h"
+#include "ext/fg/dlssg/PresetMenuText.h"
 #include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/hudless/HudlessEngine.h"
 
@@ -115,26 +116,28 @@ void DrawRenderPresetSection()
     ext::menu::Tooltip("Render preset of NVIDIA's frame generation, changed while the game runs: frame generation is switched off for a\n"
                        "moment, its resources are released and it resumes a few frames later with fresh history.\n"
                        "Auto leaves the choice to the driver and the runtime. A, B and C are answered inside this process only;\n"
-                       "no NVIDIA profile is written. Not every runtime build acts on all three: the lines below show what it reports.");
+                       "no NVIDIA profile is written. Not every runtime build acts on all three: the lines below show what it reports.\n"
+                       "If your own NVIDIA profile (or the NVIDIA app's DLSS override) switches the DLSS override on, NVIDIA's copy of\n"
+                       "the runtime is loaded instead of this one, whatever is chosen here.");
 
     if (off)
     {
-        ImGui::TextWrapped("%s", UnavailableText(status.unavailable));
+        ImGui::TextWrapped("%s", UnavailableSentence(preset, status.unavailable).c_str());
         return;
     }
     if (status.configured == kPresetC || status.active == kPresetC)
         ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off, FG Lite on).");
 
     const auto confirmed = ReadoutState().Confirm(status.active);
-    if (status.restartNeeded)
+    // the choice and what the runtime was told differ: both are named, with the reason (PresetMenuText.h)
+    if (const auto difference =
+            DifferenceSentence(status.configured, status.active, confirmed.effect, status.restartNeeded, status.fail);
+        !difference.empty())
     {
-        ImGui::TextWrapped("Restart needed: %s. %s stays in use until the next start, then the saved choice applies.",
-                           FailText(status.fail), Name(status.active));
-        if (!status.moduleText.empty() && status.fail == SwitchFail::Prepare)
+        ImGui::TextWrapped("%s", difference.c_str());
+        if (status.restartNeeded && !status.moduleText.empty() && status.fail == SwitchFail::Prepare)
             ImGui::TextWrapped("%s", status.moduleText.c_str());
     }
-    else if (status.configured != status.active)
-        ImGui::TextWrapped("%s is chosen; the change is made when frame generation runs next.", Name(status.configured));
     else
         ImGui::TextWrapped("%s%s", StatusSentence(status.active, confirmed.effect, ReplyReadable()).c_str(),
                            status.switches > 0 && status.active == kAuto ? " (changed while the game ran)" : "");
