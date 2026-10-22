@@ -313,6 +313,72 @@ void AutoNeedsAKnownOriginal()
     CHECK(kb.s.ReadCached(kRenderPresetSettingId).handled && !kb.s.ReadCached(kRenderPresetSettingId).found);
 }
 
+// PRESET-BOOT phase 1, item 3. The boot answers the preset id ONLY (the DLSS override id is never answered). The live switch needs
+// the driver's own answer as the baseline for going back to Auto after a boot on A/B/C; that baseline comes from the preset id's
+// reply alone, so nothing of the live switch relied on the old two-id answer. The sequence is driven through the real hook entry
+// (HandleDriverReply for both ids) and the state machine, with the in-game order: boot on C, C -> Auto -> A -> Auto.
+void BootOnAPresetThenLiveSwitches()
+{
+    struct Reply
+    {
+        bool ok, isNumber;
+        uint32_t value;
+        bool found; // the reader answers "found" with `value`
+    };
+    // what the driver says to the preset query: no such setting (the normal case on the maintainer's machine), a profile value, a 0
+    for (const Reply& driver : { Reply { false, false, 0, false }, Reply { true, true, 2, true }, Reply { true, true, 0, true } })
+        for (int bootPreset : { kPresetA, kPresetB, kPresetC })
+        {
+            Boot bs(bootPreset);
+            // boot: the runtime asks for the override id and for the preset id (either order); only the preset id is answered
+            CHECK(!HandleDriverReply(bs.s, kOverrideSettingId, false, false, 0).replace);
+            const auto edit = HandleDriverReply(bs.s, kRenderPresetSettingId, driver.ok, driver.isNumber, driver.value);
+            CHECK(edit.replace && edit.value == static_cast<uint32_t>(bootPreset));
+            CHECK(!HandleDriverReply(bs.s, kOverrideSettingId, true, true, 1).replace);
+            CHECK(bs.s.Boot() == bootPreset && bs.s.Active() == bootPreset);
+            CHECK(bs.s.Base().kind == (driver.found ? Baseline::Kind::Value : Baseline::Kind::NotFound));
+            CHECK(bs.s.CanReturnToAuto());
+
+            Switcher sw(bs.s);
+            Fake f;
+            Clock clock;
+            auto steps = f.Steps();
+            auto expectAuto = [&]
+            {
+                const auto a = bs.s.ReadCached(kRenderPresetSettingId);
+                CHECK(a.handled && a.found == driver.found && (!driver.found || a.value == driver.value));
+                CHECK(!bs.s.ReadCached(kOverrideSettingId).handled);
+            };
+            // C -> Auto: no refusal, the reader gets the driver's original back (a value, or "not found")
+            CHECK(Drive(sw, kAuto, steps, clock).result == SwitchResult::Switched);
+            CHECK(sw.LastFail() == SwitchFail::None && !sw.RestartNeeded(kAuto) && bs.s.Active() == kAuto);
+            expectAuto();
+            // Auto -> A (or B when the boot was A): the request is answered again
+            const int other = bootPreset == kPresetA ? kPresetB : kPresetA;
+            CHECK(Drive(sw, other, steps, clock).result == SwitchResult::Switched);
+            const auto live = bs.s.ReadCached(kRenderPresetSettingId);
+            CHECK(live.handled && live.found && live.value == static_cast<uint32_t>(other));
+            CHECK(!bs.s.ReadCached(kOverrideSettingId).handled);
+            // and Auto again: still the original, not the stale request
+            CHECK(Drive(sw, kAuto, steps, clock).result == SwitchResult::Switched);
+            CHECK(sw.LastFail() == SwitchFail::None && bs.s.Active() == kAuto);
+            expectAuto();
+            CHECK(sw.Generation() == 3 && f.activated == 3);
+        }
+
+    // the driver was never asked (an old runtime, or the query came before the hook): Auto cannot be restored live, as before
+    Boot never(kPresetC);
+    Switcher sw(never.s);
+    Fake f;
+    Clock clock;
+    auto steps = f.Steps();
+    CHECK(sw.Apply(kAuto, steps, clock.Tick()) == SwitchResult::RestartNeeded);
+    CHECK(sw.LastFail() == SwitchFail::CannotRestoreAuto && f.calls.empty() && never.s.Active() == kPresetC);
+    // the override id alone never counts as "the driver was asked"
+    HandleDriverReply(never.s, kOverrideSettingId, true, true, 1);
+    CHECK(!never.s.CanReturnToAuto() && !never.s.QuerySeen());
+}
+
 void InvalidRequestIsRejected()
 {
     Boot bs(kPresetA);
@@ -371,6 +437,7 @@ int main()
     AThrowingStepIsAFailure();
     AMissingStepFailsClosed();
     AutoNeedsAKnownOriginal();
+    BootOnAPresetThenLiveSwitches();
     InvalidRequestIsRejected();
     ASequenceOfSwitches();
     AvailabilityReasons();

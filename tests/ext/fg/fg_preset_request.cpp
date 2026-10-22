@@ -43,8 +43,8 @@ void Names()
 void DriverQueryAnswers()
 {
     // Restart path: only an explicit A/B/C request changes the answer, and only for the preset id. The DLSS override id
-    // (NGX_DLSS_FG_OVERRIDE_ID) is passed through to the driver: answering it "on" is suspected to make NGX load the model-store
-    // module at boot (PRESET-BOOT probe). Auto leaves the driver's own answer alone, whatever the baseline is.
+    // (NGX_DLSS_FG_OVERRIDE_ID) is passed through to the driver: answering it "on" made NGX load the model-store module at boot
+    // (proven in game 2026-10-22, PRESET-BOOT). Auto leaves the driver's own answer alone, whatever the baseline is.
     for (int r : { 1, 2, 3 })
     {
         const auto p = AnswerDriverQuery(kRenderPresetSettingId, r);

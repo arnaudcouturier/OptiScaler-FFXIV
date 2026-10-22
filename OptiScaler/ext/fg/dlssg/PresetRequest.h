@@ -63,8 +63,10 @@ struct Answer
 };
 
 // Restart path. Only an explicit A/B/C request changes the driver's answer, and only for the preset id, which gets the number.
-// The DLSS override id (kOverrideSettingId) is NOT answered: with both ids answered at boot, NGX was seen loading NVIDIA's
-// model-store module instead of the local one (game logs 2026-10-21); this probe finds out whether the override id is the cause.
+// The DLSS override id (kOverrideSettingId) is NEVER answered: answering it "on" made NGX load NVIDIA's model-store module
+// (APP_NAME = nvapp_override, unpatched: no multi-frame unlock, about a third fewer fps) instead of the local one. Proven in game
+// 2026-10-22: with only the preset id answered the local module loads (APP_NAME = endpoint, max 5) and "Applying settings for
+// render preset N." follows.
 // Auto, an invalid request and every other id are left alone.
 constexpr Answer AnswerDriverQuery(uint32_t settingId, int request)
 {
