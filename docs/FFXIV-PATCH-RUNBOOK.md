@@ -146,7 +146,7 @@ Use a copy of the game folder and the fork build with the edited `GameBuild.h`. 
 
 - `Matched supported FFXIV build for game-module seams`
 - no `FFXIV probe: unsupported executable instructions; settings read disabled`
-- no `FFXIV native quality: instruction mismatch; hooks disabled`, `... update instruction mismatch; hooks disabled`, `... unable to enlist game threads; hooks disabled`
+- no `FFXIV native quality: instruction mismatch; hooks disabled`, `... update instruction mismatch; hooks disabled`, and no `FFXIV native quality: install attempt N/3 failed at <stage>, error <code>, thread <id>; giving up; native quality selection stays off for this session` (an `install attempt N/3 failed ... retrying` line is allowed when `installed on attempt N` follows; the line `FFXIV native quality v2: hook transaction result=0 (0=installed); native scene updates enabled` must appear exactly once)
 - `FFXIV lighting: native exposure hooks ready`
 - `Companion native submissions: queue chain module=0x... renderer=0x... queue=0x...` with plausible values, then `Companion native submissions: guarded batch hooks ready; substitution off until requested`
 - no `Companion native submissions: unsupported executable; no batch hooks installed`, `... batch byte guards rejected; native drawing unchanged`, `... queue hook byte guards rejected`

@@ -196,6 +196,11 @@ Dynamic MFG on RTX 40 adds no seam. It rides on three existing ones, all in `ext
 | `ext::present::ResolveCompositionHandle(HWND&) -> bool proceed` | decision | `wrapped_swapchain.cpp` `Present`, `Present1`; guarded by `if (_composition)` | E5 | per-frame (composition chains only) | One bool test elsewhere. **W5 E5 (placed):** body in `ext/present/CompositionSwapchain.cpp` (declared in `ext/present/PresentSeams.h`, included by `Seams.h`): `if (!IsCompositionWindow(handle)) handle = FindCompositionWindow(); return handle != nullptr;`. Host: 2 lines in each of `Present` and `Present1`, right after the local-mutex lock and before `HRESULT result;` (as in the oracle): `if (_composition && !ext::present::ResolveCompositionHandle(_handle)) return _real->Present(...)` / `_real1->Present1(...)`, i.e. a plain present while no unambiguous window exists. `IsCompositionWindow` / `FindCompositionWindow` (the oracle's `DxgiSwapchainSizing.h` KEEP half) live in `ext/present/CompositionWindow.h`, namespace `ext::present`. |
 | `ext::present::BeforeOverlay(IDXGISwapChain*, ID3D12CommandQueue*, bool isD3D11)` | hook | `wrapped_swapchain.cpp` `LocalPresent`, before `MenuOverlayDx::Present` | C11, C8 | per-frame (each real and generated frame) | General pre-overlay slot (SEAMS 5). The HUD-less engine's UI paste is the first user: `UiPaste::Paste` when `[HudLess] Mode = ui_free`, DLSS-G is the output and upstream's Show Detected UI compare view is off. Inline wrapper in `ext/hudless/HudlessSeams.h` (feature bit `F::Hudless`, null queue / D3D11 chain return at once); body `HudlessEngine.cpp`. **S10 (placed):** 1 upstream line. |
 | `ext::present::FrameInterval(uint32_t cap, bool fgActive) -> optional<ns>` | decision | `FrameLimit.cpp` `sleep` | D5, D1 | per-frame | NVIDIA FG cap counts generated frames; returns nullopt when cap is 0. The waitable-timer and clock fixes in the same file are `[UP]` (section a). Whole-file `[UP]` is the alternative (e). |
+| `ext::present::PacingScope(Phase)` | RAII | `wrapped_swapchain.cpp` `LocalPresent`, first statement (output present); `FG_Hooks.cpp`, directly before `StreamlineProxy::ReflexSleep()` (Reflex sleep); `ext/nr/pass/DlssNr_Dx12.cpp` `Dispatch`, first statement (scene NR recording) | PT | per-frame | Times one place of the present path for the frame-pacing trace. With the trace off it is a few loads and no lock. 2 upstream lines. Header `ext/present/PresentSeams.h`, body `FramePacingTrace.cpp`. |
+| `ext::present::HiddenPresent(IDXGISwapChain*, UINT flags) -> HRESULT` | decision | `with_dx12/dx11_with_dx12_sc.cpp`, replaces `_real->Present(0, realFlags)` | PT | per-frame | Times the hidden DX11 present and hosts the `HiddenPresentDoNotWait` switch. With the key off it forwards the identical call and flags. The body is the template `hidden::SeamPresent` in `HiddenPresentPolicy.h`. 1 modified upstream line. |
+| `ext::present::NativeBegin()` / `NativeEnd()` | hook | `ext/hdr/BridgeHdr.cpp` `PresentScope` (bridge present) | PT | per-frame | Times the whole DX11 bridge Present (native present). Fork file, 0 upstream lines. |
+| `ext::present::FgDispatchBegin()` / `FgDispatchEnd()` | hook | `ext/fg/dlssg/PresetSeams.cpp` `PresetSwitchTick` (Begin, first statement) and `ext/fg/GuideSeams.cpp` `PostDispatch` (End, first statement) | PT | per-frame | Times the FG dispatch. Fork files, 0 upstream lines. |
+| `ext::present::RecordSample(Phase, ...)` | hook | `ext/ffxiv/chara/CharaNr.cpp` `Run`, after the CPU cost is added | PT | per preview run | Records the preview NR run in the same trace. Fork file. |
 
 Inline (marked `// ext: E5`): `WrappedIDXGISwapChain4` `_composition` flag (ctor parameter `isComposition`, member, and `!_composition &&` in the two `OverrideVsync` conditions of `ResizeBuffers`/`ResizeBuffers1`). **W5 E5 (placed):** header 3 lines (the ctor declaration gains a defaulted `bool isComposition = false`, split over two lines, plus the member `_composition`), `.cpp` 1 line to take the parameter (the signature line) and 1 body line `_composition = isComposition;` (assigned in the body rather than the init list so the existing init-list line stays untouched), the two `!_composition &&` edits, and `#include "ext/Seams.h"` (the file had no fork include before). Nothing sets the flag until the factory hook (`HookFactoryComposition`) lands. Not carried: E5 0x0-to-window resolve, `FinalizeSizedDesc`, "Overlay call!" log decorations, `_device2`, D6 (nightly `State::frameCount` is the epoch).
 
@@ -300,7 +305,7 @@ Interface contracts (implemented only by `ext/ffxiv/FfxivModule`; consumed by se
 | Interface | Methods | Consumed by seam | Owner IDs |
 |---|---|---|---|
 | `IRenderGeometry` | `ResolveRenderExtent(unsigned int paramW, unsigned int paramH, unsigned int& w, unsigned int& h) -> bool` (S7 C2/C3: signature refined from the placeholder `Extent&` out-param, owner-finalised like `INativeQuality::Request`), `ColorIsDisplayAllocation(unsigned int renderWidth, unsigned int renderHeight, uint64_t allocWidth, unsigned int allocHeight, unsigned int subrectWidth, unsigned int subrectHeight) -> bool` (S7 C4: refined from the placeholder zero-arg stub the same way; the generic seam reads the real D3D12 resource desc and the NGX subrect and hands plain integers in, so the interface never sees an NGX type; `allocWidth` is `uint64_t` to match `D3D12_RESOURCE_DESC::Width` exactly) | `upscaler::ResolveRenderGeometry`, `dx11bridge::PrepareUpscalerColor` | C2, C3, C4 |
-| `INativeQuality` | `EnsureHooks` (lazy, `call_once`), `Live`, `DlaaRequired` (per-frame cached; the oracle does two `ReadProcessMemory` per call), `Request(int preset)` | `upscaler::ApplyForcedQuality`, `ResolveRenderGeometry`, `EffectivePerfQuality`, menu card `forced_quality` | C1, C5 |
+| `INativeQuality` | `EnsureHooks` (lazy, up to 3 attempts), `Live`, `DlaaRequired` (per-frame cached; the oracle does two `ReadProcessMemory` per call), `Request(int preset)` | `upscaler::ApplyForcedQuality`, `ResolveRenderGeometry`, `EffectivePerfQuality`, menu card `forced_quality` | C1, C5 |
 | `ISceneLighting` | `OnUpscaleBoundary(ID3D11DeviceContext*, ID3D11Resource* color, bool hdr)`, `ConsumeHistoryReset(uint64_t& cursor)`, `Status()` (`LightingStatus`, the NR menu's lighting-scan text) | `dx11bridge::OnUpscaleBoundary`, `fg::DispatchResetHistory`; NR (A3, PreSR) calls `ConsumeHistoryReset` directly | B6, A3 |
 | `INrQuirks` | `BridgedNativeDx11` | NR internals: history reset on disable, split frame work, motion-onset sampling, exposure scan off (was `gameExe == "ffxiv_dx11.exe"`) | A1-A8, B5 |
 | `ISceneHdr` | `Open(ID3D12Device*, UINT, UINT, bool) -> SceneInput`, `WouldSupplyScene(UINT, UINT) -> bool` (side-effect-free twin of `Open(presentation=true)`, S10 F), `PublishReconstructed(SceneInput&&)`, `EndFrame()` | `hdr::DlssEvalScope`, `dx11bridge::ConvertCopySource`, `dx11bridge::PresentScope` | C10 |
@@ -343,7 +348,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | dx11bridge | 20 | 2 RAII |
 | nr | 10 | 2 RAII |
 | fg | 29 | 0 |
-| present | 6 | 0 |
+| present | 11 | 1 RAII |
 | restrack | 8 | 3 inline-guarded |
 | streamline | 7 | 0 |
 | gpu | 2 | 0 |
@@ -353,7 +358,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
-| **Total** | **125** | |
+| **Total** | **130** | |
 
 # (a) `[UP]` fix list
 
