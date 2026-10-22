@@ -116,9 +116,6 @@ int main(int argc, char** argv)
     CHECK(Has(trace, "HiddenHooks hooks { scope }; return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); }"));
     CHECK(!Has(trace, "->Present(")); // the only swapchain call lives in the (tested) template
 
-    // ---- a scope built with counts == false is inert: it never asks the trace, so it takes no clock and records no sample --------------
-    CHECK(Has(trace, "PacingScope::PacingScope(Phase phase, bool counts) noexcept : _phase(phase), _startUs(0), _active(false) { if (counts && TraceOn())"));
-
     // ---- hidden present: the seam call, the flags variable and the failure warning stay as upstream had them ----------------------------
     {
         const auto block = Between(bridge, "UINT realFlags = Flags;", "auto result = _fgSwapChain->Present(SyncInterval, Flags);");
@@ -136,9 +133,7 @@ int main(int argc, char** argv)
     {
         const auto head = Between(wrapped, "static HRESULT LocalPresent(IDXGISwapChain* pSwapChain", "if (State::Instance().isShuttingDown)");
         CHECK(!head.empty());
-        // DXGI_PRESENT_TEST presents (they only ask "would this present?") are not output-present samples: the argument is the whole
-        // reason for the 2-argument form, and the ctor honours it (checked below)
-        CHECK(Has(head, "bool isUWP) { ext::present::PacingScope outputPresent(ext::present::Phase::OutputPresent, (Flags & DXGI_PRESENT_TEST) == 0); "));
+        CHECK(Has(head, "bool isUWP) { ext::present::PacingScope outputPresent(ext::present::Phase::OutputPresent); "));
         CHECK(Count(wrapped, "ext::present::PacingScope") == 1);
     }
 

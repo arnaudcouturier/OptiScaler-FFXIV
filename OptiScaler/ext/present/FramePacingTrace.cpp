@@ -116,9 +116,9 @@ hidden::Policy& HiddenPolicy()
 }
 } // namespace
 
-PacingScope::PacingScope(Phase phase, bool counts) noexcept : _phase(phase), _startUs(0), _active(false)
+PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _active(false)
 {
-    if (counts && TraceOn())
+    if (TraceOn())
     {
         _active = true;
         _startUs = NowUs();
