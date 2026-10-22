@@ -478,8 +478,8 @@ void StatusSentences()
 
 // ---- the boot of 2026-10-22 (PRESET-BOOT phase 1, item 1): lines copied from builds\game-logs-20261021-probe\OptiScaler.log ------------
 // Boot with [DLSSG] RenderPreset = 3: the runtime logged "Applying settings for render preset 3." (line 2171) and NOTHING else about the
-// preset: no "ReportOverrideStates: render preset (...)" and no "Override Reported: ModelPreset" (those two only showed up in the earlier
-// run in which the DLSS override id was answered on). The payloads below are what the logger hands to the relay sink: the file prefix
+// preset: no "ReportOverrideStates: render preset (...)" and no "Override Reported: ModelPreset" (those two only showed up in the runs in
+// which the DLSS override id was answered on, i.e. NGX loaded NVIDIA's model-store module; the live path of bisect3 prints none either). The payloads below are what the logger hands to the relay sink: the file prefix
 // "[hh:mm:ss.uuuuuu] [I] " is the log pattern and is not part of the payload.
 const char* kRealApplying3 =
     "SL Log: [10-31-35][streamline][info][tid:19444][21s:053ms:194us]commonEntry.cpp:1369[ngxLog] [FrameGeneration] [2026-10-22 10:31:35] "
@@ -524,7 +524,8 @@ void BootReadoutStates()
         CHECK(sentence == "In use: Preset C (confirmed by the runtime)");
         CHECK(PausesUiRecomposition(kPresetC, r.Confirm(3).effect, r.Confirm(3).uir));
     }
-    {   // 2) the live path: Applying plus the final report (and NGX's own override report): same verdict, more detail
+    {   // 2) a run that ALSO prints the reports: that is the override-on / model-store run of 2026-10-21 (bisect2); the good boots and the
+        //    live path of bisect3 print only the Applying line. Applying plus the final report and NGX's own override report: same verdict
         Readout r;
         feedBoot(r, true);
         r.Feed(Report31016(3, 3), 5);
