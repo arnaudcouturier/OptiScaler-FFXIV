@@ -687,12 +687,21 @@ void TestHeldPairIsNotAMiss()
     CHECK(!res.active && !res.standDown && r.env.Writes() == writes);
     res = r.Step();
     CHECK(!res.standDown); // the memory of the told pair is gone with the first different block
+    // both axes must equal the told pair: one axis alone is a different block (a miss)
+    Rig h;
+    h.Frame();
+    h.Step();
+    h.env.floats[Param::JitterY] = 0.123f;
+    h.Step();
+    CHECK(h.controller.Totals().unpaired == 1);
     // the key goes off while the block holds the told pair: kept out for that evaluate, then free
     Rig k;
     k.Frame();
     k.Step();
     k.env.key = false;
     CHECK(k.Step().standDown);
+    k.env.now += kDrainMs + 10;      // the drain is over, the block still holds the told pair: still kept out
+    CHECK(k.Step().standDown && k.controller.Totals().unpaired == 0);
     k.Frame(false, true, true);
     CHECK(!k.Step().standDown);
     k.env.now += kDrainMs + 10;
