@@ -23,11 +23,8 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
         return status;
 
     const bool isNumber = found && setting->settingType == NVDRS_DWORD_TYPE;
-    if (settingId == kRenderPresetSettingId)
-    {
-        ReadoutState().NoteDriverQuery(true); // the runtime asked, whatever the answer
-        module::ObserveDriverQuery(caller);   // possible provider of the live path
-    }
+    ReadoutState().NoteDriverQuery(true); // the runtime asked, whatever the answer
+    module::ObserveDriverQuery(caller);   // possible provider of the live path
 
     const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0,
                                        CurrentAvailability() == Unavailable::None);
@@ -44,16 +41,13 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
     setting->isCurrentPredefined = 0;
     setting->u32CurrentValue = edit.value;
 
-    if (settingId == kRenderPresetSettingId)
-    {
-        static std::atomic<int> reported { -1 };
-        const int request = Requests().Active();
-        if (reported.exchange(request) != request)
-            LOG_INFO("DLSS-G render preset: the runtime asked the driver for its preset (id 0x{:X}), answered {} ({}){}; the DLSS "
-                     "override id 0x{:X} is passed through to the driver",
-                     kRenderPresetSettingId, edit.value, Name(request),
-                     found ? "" : " (the driver profile has no such setting)", kOverrideSettingId);
-    }
+    static std::atomic<int> reported { -1 };
+    const int request = Requests().Active();
+    if (reported.exchange(request) != request)
+        LOG_INFO("DLSS-G render preset: the runtime asked the driver for its preset (id 0x{:X}), answered {} ({}){}; the DLSS "
+                 "override id 0x{:X} is passed through to the driver",
+                 kRenderPresetSettingId, edit.value, Name(request),
+                 found ? "" : " (the driver profile has no such setting)", kOverrideSettingId);
     return NVAPI_OK;
 }
 } // namespace ext::fg::preset

@@ -172,6 +172,9 @@ void DrsLogLine(const std::string& repo)
     // OverrideOnId; this text pin is the only test that fails when the id is admitted again, because the decision code ignores it anyway)
     CHECK(code.find("if (settingId != kRenderPresetSettingId || setting == nullptr) return status;") != std::string::npos);
     CHECK(code.find("settingId != kOverrideSettingId") == std::string::npos);
+    // LOW-7: after that early return settingId is always the preset id, so no branch tests it again
+    CHECK(code.find("settingId == kRenderPresetSettingId") == std::string::npos);
+    CHECK(code.find("ReadoutState().NoteDriverQuery(true);") != std::string::npos);
     // the arguments are the ids and the answer, in the order of the placeholders
     CHECK(code.find("kRenderPresetSettingId, edit.value, Name(request), found ? \"\" : \" (the driver profile has no such setting)\", kOverrideSettingId);") !=
           std::string::npos);
