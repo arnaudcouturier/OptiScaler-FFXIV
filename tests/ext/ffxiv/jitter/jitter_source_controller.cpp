@@ -581,10 +581,20 @@ void TestSeenObjectsLine()
     q.Frame();
     q.Step();
     q.state.NoteCallSiteObject(0x1000);
+    q.Frame();
+    q.Step();
     q.env.now += 20000;
     q.Frame();
     q.Step();
     CHECK(q.env.Count("distinct jitter object") == 0);
+    q.state.LearnWorldObject(0x1000); // once the world camera is known the settling time starts
+    q.Frame();
+    q.Step();
+    CHECK(q.env.Count("distinct jitter object") == 0);
+    q.env.now += 5000;
+    q.Frame();
+    q.Step();
+    CHECK(q.env.Count("reached with 1 distinct jitter object") == 1);
 }
 
 // The verification line: the first after 120 checked frames, then every 30 s for five lines, then every five minutes (a session of hours stays
