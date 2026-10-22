@@ -563,7 +563,8 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<F
     // Registers that may hold a frame address before each instruction, computed from the end of the prologue (so a frame lea in the
     // entry run counts) to the reload: a forward may-analysis, union at jump targets, repeated to a fixed point (loops). A frame
     // location's address taken with lea marks its register; so do mov (and a mov from rsp or rbp itself) / lea, the two-register
-    // add-sub-or-xor-and-adc-sbb forms, the register forms of imul (0F AF and the three-operand 6B / 69), movsxd, cmov, xchg (87 and
+    // add-sub-or-xor-and-adc-sbb forms, the register forms of imul (0F AF and the three-operand 6B / 69), the one-operand mul / imul /
+    // div / idiv (F7 /4../7: rax and rdx, register or memory operand), movsxd, cmov, xchg (87 and
     // the short forms 90..97, 90 only with REX.B), xadd, cmpxchg (0F B1: source to destination, destination to rax) and shld / shrd,
     // all with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
     // by a FULL-WIDTH overwrite (a 64/32-bit mov from an unmarked register or from memory or an immediate, movzx/movsx, pop, a zero
@@ -588,6 +589,17 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<F
                     next = static_cast<uint16_t>(next | (1u << n.reg));
                 else if (!narrow)
                     next = static_cast<uint16_t>(next & ~(1u << n.reg));
+                return next;
+            }
+            if (!n.twoByte && n.opcode == 0xF7 && n.ext >= 4 && n.hasModrm)
+            {
+                // one-operand mul / imul (/4, /5: rdx:rax = rax * r/m) and div / idiv (/6, /7: rax = rdx:rax / r/m, rdx = the remainder).
+                // Register or memory operand; n.ext is the opcode extension here (n.reg is not a register in a group opcode). rax and rdx
+                // can both carry an input: a product with 1 or -1 is the address (or one below it), a remainder by a larger divisor is
+                // the dividend itself. 32-bit and 16-bit forms carry too, like the 32-bit mov. The byte forms (F6) move no address.
+                const bool dividend = n.ext >= 6 && holds(RDX);
+                if ((n.mod == 3 && holds(n.rm)) || holds(RAX) || dividend)
+                    next = static_cast<uint16_t>(next | (1u << RAX) | (1u << RDX));
                 return next;
             }
             if (!n.hasModrm || n.mod != 3)

@@ -62,6 +62,8 @@ enum class Clobber
     // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
     MarkXchgRexB, MarkXchg32RexB, NopNoMark, MarkImul6B, MarkImul69, NoMarkImul6B,
     MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
+    // fix round 4 (LOW-1): the one-operand mul / imul / div / idiv (F7 /4../7) read rax and a register or memory operand and write rax:rdx
+    MarkMul, MarkImul1, MarkMulHigh, MarkDivRem, MarkIdivRem, MarkDivMem, NoMarkMul,
     StoreViaR12OfRbp, StoreViaR12OfRsp, // mov [r12-0A0h],r13 / mov [r12+60h],r13: the slot, if r12 holds rbp / rsp
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
@@ -341,6 +343,20 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;          // shld rcx,rax,1 into a zeroed rcx
     case Clobber::MarkShrdCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rax,cl
     case Clobber::MarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                                // movsxd rcx,eax
+    // fix round 4 (LOW-1): lea <reg>,[rbp-30h], then a one-operand multiply or divide moves the address into rax or rdx; the store hits the slot
+    case Clobber::MarkMul: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // lea rcx / mov eax,1 / mul rcx (rax = address) / mov [rax-70h],r12
+    case Clobber::MarkImul1: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE9, 0x4C, 0x89, 0x60, 0x90 }); break; // the same with imul rcx
+    case Clobber::MarkMulHigh:                                                                                                              // lea rax / mov rcx,-1 / mul rcx (rdx = address - 1) / mov [rdx-6Fh],r12
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x62, 0x91 });
+        break;
+    case Clobber::MarkDivRem:                                                                                                               // lea rax / mov rcx,-1 / xor edx,edx / div rcx (rdx = address) / mov [rdx-70h],r12
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x33, 0xD2, 0x48, 0xF7, 0xF1, 0x4C, 0x89, 0x62, 0x90 });
+        break;
+    case Clobber::MarkIdivRem:                                                                                                              // the same with idiv by 7FFF..FFh
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xB9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x33, 0xD2, 0x48, 0xF7, 0xF9, 0x4C, 0x89, 0x62, 0x90 });
+        break;
+    case Clobber::MarkDivMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xD2, 0x48, 0xF7, 0x33, 0x4C, 0x89, 0x62, 0x90 }); break;                  // lea rax / xor edx,edx / div qword [rbx] (a big divisor: rdx = address) / store via rdx
+    case Clobber::NoMarkMul: c.b({ 0x48, 0x8D, 0x55, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // only rdx held the address, and mul rcx does not read it
     case Clobber::StoreViaR12OfRbp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0xFF, 0xFF, 0xFF }); break;
     case Clobber::StoreViaR12OfRsp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0x00, 0x00, 0x00 }); break;
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
@@ -1025,7 +1041,8 @@ void RegionRules()
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
                        Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB,
                        Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl,
-                       Clobber::MarkMovsxd })
+                       Clobber::MarkMovsxd, Clobber::MarkMul, Clobber::MarkImul1, Clobber::MarkMulHigh, Clobber::MarkDivRem, Clobber::MarkIdivRem,
+                       Clobber::MarkDivMem })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
@@ -1049,6 +1066,7 @@ void RegionRules()
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkImul6B).why == Why::Ok); // a three-operand imul of an unmarked register marks nothing
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkCmpxchg).why == Why::Ok); // a cmpxchg between unmarked registers marks nothing
     CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkCmpxchg).why == Why::Ok);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkMul).why == Why::Ok); // mul rcx reads rax and rcx only: a marked rdx stays out of it
     // fix round 3 (L2): the accepting direction. Each image takes the frame address into rax, overwrites rax at full width and stores through it:
     // not a store to the slot any more. A mutant that never drops a mark refuses these (a silent "restart needed" on a real build).
     // (pop is not here: any pop in the region is refused as a stack write, so it can never be the kill that saves an image.)
