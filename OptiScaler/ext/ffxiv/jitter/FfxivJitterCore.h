@@ -102,7 +102,9 @@ class Engine
     // that returned before that place proves nothing (the status line is built on sample ticks only, the steps between the ticks do not
     // reach it).
     // `manualScale` is [FFXIV] JitterScaleOverride (0 = off), read by the wrapper at every evaluate like the two keys; only used while `correct`.
-    template <class Env> void Step(Env& env, bool probe, bool correct, float manualScale = 0.0f)
+    // `source` describes the source-level jitter fix at this evaluate (SourceNote): the wrapper passes correct = false while it is active, so the
+    // engine never scales on top of the told offset; the probe uses the larger object bound and says so in its line.
+    template <class Env> void Step(Env& env, bool probe, bool correct, float manualScale = 0.0f, const SourceNote& source = {})
     {
         // Both keys off: this is the whole cost (the wrapper adds a null test and the config reads). No lock, no build lookup, no clock,
         // no parameter read, no memory read, no log, no state touched.
@@ -113,7 +115,7 @@ class Engine
         _stage = Stage::Start;
         try
         {
-            Run(env, probe, correct, manualScale);
+            Run(env, probe, correct, manualScale, source);
             if (_stage >= _thrownAt)
                 _exceptions.Event(false); // a step that got past the place that threw ends the episode of exceptions
         }
@@ -173,7 +175,7 @@ class Engine
         }
     }
 
-    template <class Env> void Run(Env& env, bool probe, bool correct, float manualScale)
+    template <class Env> void Run(Env& env, bool probe, bool correct, float manualScale, const SourceNote& source)
     {
         if (!correct)
             ForgetCorrectionState();
@@ -231,7 +233,7 @@ class Engine
         _stage = Stage::Decide;
         auto reader = [&env](std::uintptr_t address, void* out, std::size_t bytes) { return env.ReadMemory(address, out, bytes); };
         RawObject object;
-        const Guard readGuard = ReadChain(reader, build, env.ModuleBase(), object);
+        const Guard readGuard = ReadChain(reader, build, env.ModuleBase(), object, source.active ? source.maxJitter : 0.5f);
         const Analysis analysis = readGuard == Guard::None ? Analyse(object, size) : Analysis {};
         const NgxMatch match = readGuard == Guard::None ? CompareNgx(object, ngxX, ngxY) : NgxMatch::Unavailable;
 
@@ -256,7 +258,7 @@ class Engine
                 if (_sampleLines < kMaxSampleLines)
                 {
                     ++_sampleLines;
-                    env.Log(FormatSample(analysis, match, ngxX, ngxY, ctx));
+                    env.Log(FormatSample(analysis, match, ngxX, ngxY, ctx, source.active));
                     if (_sampleLines == kMaxSampleLines)
                         env.Log(FormatSampleBudgetUsedUp(kMaxSampleLines));
                 }

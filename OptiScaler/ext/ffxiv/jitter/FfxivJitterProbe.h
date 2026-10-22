@@ -91,8 +91,10 @@ struct RawObject
 };
 
 // `read(address, out, size)` returns false when any byte is unreadable. `build` is MatchCurrentProcess()'s answer (null = no match).
+// `maxJitter` is the largest |jx|, |jy| the object may hold: 0.5 (the game's own range) unless the source-level jitter fix divides the generator output by
+// the native strength, which lets the object reach 0.5 / strength (SourceNote).
 template <class Reader>
-Guard ReadChain(Reader&& read, const GameBuild* build, std::uintptr_t moduleBase, RawObject& out)
+Guard ReadChain(Reader&& read, const GameBuild* build, std::uintptr_t moduleBase, RawObject& out, float maxJitter = 0.5f)
 {
     if (build == nullptr)
         return Guard::BuildMismatch;
@@ -142,7 +144,7 @@ Guard ReadChain(Reader&& read, const GameBuild* build, std::uintptr_t moduleBase
     field(b.ndcYOffset, o.ndcY);
     field(b.counterOffset, o.counter);
 
-    if (!std::isfinite(o.jx) || !std::isfinite(o.jy) || std::fabs(o.jx) > 0.5f || std::fabs(o.jy) > 0.5f)
+    if (!std::isfinite(o.jx) || !std::isfinite(o.jy) || std::fabs(o.jx) > maxJitter || std::fabs(o.jy) > maxJitter)
         return Guard::JitterOutOfRange;
     if (!std::isfinite(o.ndcX) || !std::isfinite(o.ndcY) || std::fabs(o.ndcX) > 1.0f || std::fabs(o.ndcY) > 1.0f)
         return Guard::NdcOutOfRange;
@@ -385,6 +387,15 @@ class LineDecimator
     std::uint64_t _last = 0;
 };
 
+// The source-level jitter fix ([FFXIV] JitterSource, FfxivJitterSourceController.h) next to this engine: while it is active the generator output
+// is divided by the native strength, so the camera object holds up to 0.5 / strength instead of 0.5. The wrapper passes `active` and the larger bound;
+// the probe then reads the object and says so (reported jx/jy is the generator value before the game's multiplier, rx/ry is that multiplier).
+struct SourceNote
+{
+    bool active = false;
+    float maxJitter = 0.5f;
+};
+
 // ---- text ----------------------------------------------------------------------------------------------------------------------
 
 struct Context
@@ -419,37 +430,43 @@ inline std::string ContextText(const Context& c)
                        number(c.forcedQuality), size(c.answeredRenderW, c.answeredRenderH), size(c.answeredDisplayW, c.answeredDisplayH));
 }
 
-inline std::string VerdictText(const Analysis& a)
+inline std::string VerdictText(const Analysis& a, bool sourceActive = false)
 {
     auto scale = [](bool have, float s) { return have ? std::format("{:.3f}", s) : std::string("n/a"); };
     const std::string values = std::format("implied s = {}/{}", scale(a.haveRx, a.ImpliedScaleX()), scale(a.haveRy, a.ImpliedScaleY()));
     switch (a.verdict)
     {
     case Verdict::Consistent: return values + " (consistent)";
-    case Verdict::Differ: return values + " (reported and applied jitter differ)";
+    case Verdict::Differ:
+        return values + (sourceActive ? " (applied = native strength * reported, as the fix intends)" : " (reported and applied jitter differ)");
     default: return values + " (undetermined: " + (a.haveApplied ? "jitter too small this sample" : "render size unknown") + ")";
     }
 }
 
 inline std::string FormatSample(const Analysis& a, NgxMatch ngx, const std::optional<float>& ngxX, const std::optional<float>& ngxY,
-                                const Context& ctx)
+                                const Context& ctx, bool sourceActive = false)
 {
     std::string ngxText;
-    switch (ngx)
+    switch (sourceActive ? NgxMatch::Unavailable : ngx)
     {
     case NgxMatch::Same: ngxText = "NGX saw the same values"; break;
     case NgxMatch::Different:
         ngxText = std::format("NGX saw different values ({:.4f}/{:.4f}: the object belongs to another frame or the values changed on the way)",
                               ngxX.value_or(0.0f), ngxY.value_or(0.0f));
         break;
-    default: ngxText = "NGX jitter not available at this seam"; break;
+    default:
+        ngxText = sourceActive ? std::format("jitter source fix active: reported jx/jy is the generator value before the game's multiplier, rx/ry is that "
+                                             "multiplier, NGX is told the drawn offset ({:.4f}/{:.4f} now)",
+                                             ngxX.value_or(0.0f), ngxY.value_or(0.0f))
+                               : std::string("NGX jitter not available at this seam");
+        break;
     }
     auto ratio = [](bool have, float r) { return have ? std::format("{:.3f}", r) : std::string("n/a"); };
     return std::format("Game jitter: counter {}, reported jx/jy {:.4f}/{:.4f}, ndc {:.6f}/{:.6f}, render {}x{} ({}), applied ax/ay {:.4f}/{:.4f}, "
                        "ratio rx/ry {}/{}, signs {}, {}, {}; {}",
                        a.object.counter, a.object.jx, a.object.jy, a.object.ndcX, a.object.ndcY, a.size.width, a.size.height, a.size.source,
                        a.ax, a.ay, ratio(a.haveRx, a.rx), ratio(a.haveRy, a.ry),
-                       a.signMismatchX || a.signMismatchY ? std::string("MISMATCH") : std::string("ok"), VerdictText(a), ngxText,
+                       a.signMismatchX || a.signMismatchY ? std::string("MISMATCH") : std::string("ok"), VerdictText(a, sourceActive), ngxText,
                        ContextText(ctx));
 }
 
