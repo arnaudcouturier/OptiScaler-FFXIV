@@ -485,7 +485,7 @@ const char* kRealApplying3 =
     "SL Log: [10-31-35][streamline][info][tid:19444][21s:053ms:194us]commonEntry.cpp:1369[ngxLog] [FrameGeneration] [2026-10-22 10:31:35] "
     "[tid:19444][EndpointConfiguration::ApplyRenderPreset:337] Applying settings for render preset 3.";
 const char* kRealInit =
-    "SL Log: [10-31-16][streamline][info][tid:19444][2s:220ms:806us]commonEntry.cpp:1368[ngxLog] [FrameGeneration] [2026-10-22 10:31:16] "
+    "SL Log: [10-31-16][streamline][info][tid:19444][2s:220ms:791us]commonEntry.cpp:1368[ngxLog] [FrameGeneration] [2026-10-22 10:31:16] "
     "[tid:19444][NGXInitLog:216] Built with APP_NAME = endpoint";
 const char* kRealMultiFrame =
     "SL Log: [10-31-16][streamline][info][tid:19444][2s:492ms:192us]dlss_gEntry.cpp:1504[slOnPluginStartup] Multi-frame supported, max generated frames 5 "
@@ -688,12 +688,24 @@ void ConfirmationPrecedence()
         aboutAnother.Feed(Report31016(1, 1), 2);
         CHECK(Confirm(aboutAnother, 3) == Effect::NotApplied);
     }
-    {   // a new request forgets the order together with the lines
-        Readout r;
-        r.Feed(kRealReport33, 1);
-        r.BeginRequest();
-        r.Feed(RealOverrideNo(), 2);
-        CHECK(Confirm(r, 3) == Effect::NotApplied);
+    {   // a new request forgets the lines AND the order: what the earlier endpoint reported must not survive BeginRequest
+        Readout reported;
+        reported.Feed(kRealReport33, 1);
+        CHECK(Confirm(reported, 3) == Effect::Applied && reported.Snapshot().hasReport);
+        reported.BeginRequest();
+        CHECK_MSG(Confirm(reported, 3) == Effect::Unknown, "effect %d", static_cast<int>(Confirm(reported, 3)));
+        CHECK(!reported.Snapshot().hasReport && !reported.Snapshot().confirmed);
+        reported.Feed(RealOverrideNo(), 2);
+        CHECK(Confirm(reported, 3) == Effect::NotApplied);
+
+        Readout overridden; // a stale Applied: No must not survive either
+        overridden.Feed(RealOverrideNo(), 1);
+        CHECK(Confirm(overridden, 3) == Effect::NotApplied);
+        overridden.BeginRequest();
+        CHECK_MSG(Confirm(overridden, 3) == Effect::Unknown, "effect %d", static_cast<int>(Confirm(overridden, 3)));
+        CHECK(!overridden.Snapshot().confirmed);
+        overridden.Feed(kRealApplying3, 2);
+        CHECK(Confirm(overridden, 3) == Effect::Applied);
     }
 }
 
