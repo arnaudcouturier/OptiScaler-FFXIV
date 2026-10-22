@@ -63,7 +63,7 @@ enum class Clobber
     MarkXchgRexB, MarkXchg32RexB, NopNoMark, MarkImul6B, MarkImul69, NoMarkImul6B,
     MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
     // fix round 4 (LOW-1): the one-operand mul / imul / div / idiv (F7 /4../7) read rax and a register or memory operand and write rax:rdx
-    MarkMul, MarkImul1, MarkMulHigh, MarkDivRem, MarkIdivRem, MarkDivMem, NoMarkMul,
+    MarkMul, MarkImul1, MarkMulHigh, MarkDivRem, MarkIdivRem, MarkDivMem, MarkDivDividend, NoMarkMul,
     StoreViaR12OfRbp, StoreViaR12OfRsp, // mov [r12-0A0h],r13 / mov [r12+60h],r13: the slot, if r12 holds rbp / rsp
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
@@ -356,6 +356,9 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
         c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xB9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x33, 0xD2, 0x48, 0xF7, 0xF9, 0x4C, 0x89, 0x62, 0x90 });
         break;
     case Clobber::MarkDivMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xD2, 0x48, 0xF7, 0x33, 0x4C, 0x89, 0x62, 0x90 }); break;                  // lea rax / xor edx,edx / div qword [rbx] (a big divisor: rdx = address) / store via rdx
+    case Clobber::MarkDivDividend:                                                                                                          // lea rdx / xor eax,eax / mov rcx,-1 / div rcx (rdx:rax = A * 2^64, 2^64 = 1 mod 2^64-1: rax = rdx = A) / store via rax
+        c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x33, 0xC0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0xF7, 0xF1, 0x4C, 0x89, 0x60, 0x90 });
+        break;
     case Clobber::NoMarkMul: c.b({ 0x48, 0x8D, 0x55, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // only rdx held the address, and mul rcx does not read it
     case Clobber::StoreViaR12OfRbp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0xFF, 0xFF, 0xFF }); break;
     case Clobber::StoreViaR12OfRsp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0x00, 0x00, 0x00 }); break;
@@ -1042,7 +1045,7 @@ void RegionRules()
                        Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB,
                        Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl,
                        Clobber::MarkMovsxd, Clobber::MarkMul, Clobber::MarkImul1, Clobber::MarkMulHigh, Clobber::MarkDivRem, Clobber::MarkIdivRem,
-                       Clobber::MarkDivMem })
+                       Clobber::MarkDivMem, Clobber::MarkDivDividend })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
