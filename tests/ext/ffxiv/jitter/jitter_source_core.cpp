@@ -97,18 +97,24 @@ void TestNormalize()
     y = -0.5f;
     CHECK(NormalizeHalton(x, y, 0.6f));
     CHECK(std::fabs(x * 0.6f - 0.5f) < 1e-6f);
-    // strength 1: nothing to do
+    // strength 1: nothing to divide, and the frame counts as normalised (the phase count is replaced for it; one predicate for both decisions,
+    // changed deliberately from the first version, which reported false and left the fix "inactive")
     x = 0.25f;
     y = 0.25f;
-    CHECK(!NormalizeHalton(x, y, 1.0f));
+    CHECK(NormalizeHalton(x, y, 1.0f));
     CHECK(x == 0.25f && y == 0.25f);
+    CHECK(NormalizeHalton(x, y, 1.0f + 5e-7f) && x == 0.25f);
+    CHECK(NormalizeHalton(x, y, 1.0f + 1e-5f) && x < 0.25f); // just outside the equality window: divided
+    x = 0.7f; // an out-of-range output at strength 1 is still refused
+    CHECK(!NormalizeHalton(x, y, 1.0f) && x == 0.7f);
+    x = y = 0.25f;
     // not a Halton value, or an unusable strength: unchanged
     for (float bad : { 0.6f, 0.0f, 0.1f, 5.0f, NAN, INFINITY })
     {
         x = 0.3f;
         y = 0.3f;
         const bool changed = NormalizeHalton(x, y, bad);
-        const bool expect = bad >= 0.125f && bad <= 4.0f && std::fabs(bad - 1.0f) >= 1e-6f && std::isfinite(bad);
+        const bool expect = bad >= 0.125f && bad <= 4.0f && std::isfinite(bad);
         CHECK(changed == expect);
         if (!expect)
             CHECK(x == 0.3f && y == 0.3f);

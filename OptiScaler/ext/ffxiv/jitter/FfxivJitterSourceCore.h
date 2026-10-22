@@ -66,15 +66,17 @@ inline std::optional<float> NativeStrength(float amount, float scale, std::uint1
     return strength;
 }
 
-// Divides the generator output by the strength so that the game's multiplication leaves the generator's own value. Changes nothing (false)
-// when the output is not a Halton value in [-0.5, 0.5] (plus float noise), when the strength is outside its range, or when the strength is 1.
+// Divides the generator output by the strength so that the game's multiplication leaves the generator's own value. true = the frame is drawn on
+// the generator's own lattice: the output was divided, or the strength is within 1e-6 of 1 and there is nothing to divide (the output is already
+// what the game will draw; the phase count was replaced all the same, so the call must count as normalised). false, output unchanged, when the
+// output is not a Halton value in [-0.5, 0.5] (plus float noise) or the strength is outside its range.
 inline bool NormalizeHalton(float& x, float& y, float strength)
 {
     if (!std::isfinite(x) || !std::isfinite(y) || std::fabs(x) > 0.501f || std::fabs(y) > 0.501f || !std::isfinite(strength) ||
         strength < kMinStrength || strength > kMaxStrength)
         return false;
     if (std::fabs(strength - 1.0f) < 1e-6f)
-        return false;
+        return true;
     x /= strength;
     y /= strength;
     return true;
@@ -374,7 +376,7 @@ constexpr const char* ReasonText(Reason r)
     case Reason::GuardFailed: return "instruction guard failed";
     case Reason::HooksNotInstalled: return "hooks not installed";
     case Reason::FellBack: return "fell back after the verification failed";
-    case Reason::GeneratorIdle: return "the game's generator is not being normalised (not in DLSS mode, native strength not valid, or not running)";
+    case Reason::GeneratorIdle: return "the game's generator is not being normalised (not in DLSS mode, native strength not valid, the world camera not known yet, or not running)";
     }
     return "unknown";
 }
@@ -405,12 +407,66 @@ struct GeneratorStatus
     std::uint32_t phases = 0, renderW = 0, renderH = 0, outW = 0, outH = 0; // of the last normalised call
 };
 
+// The distinct jitter objects (output pointers) the generator's camera call site has been called with, and how often. A second one means a second
+// jittered camera reaches the call site; the fix only ever touches the world camera's (the one the NGX packet producer reads).
+inline constexpr std::size_t kMaxSeenObjects = 8;
+
+struct SeenObject
+{
+    std::uintptr_t pointer = 0;
+    std::uint64_t calls = 0;
+};
+
+struct SeenObjects
+{
+    std::array<SeenObject, kMaxSeenObjects> items {};
+    std::size_t count = 0;   // distinct pointers stored (at most kMaxSeenObjects)
+    bool overflow = false;   // more distinct pointers than the table holds
+};
+
 class SharedState
 {
   public:
     // The switch both detours check first. false = both are pass-through (the generator is not touched, the camera getter is not sampled).
-    void Enable(bool on) { _enabled.store(on, std::memory_order_release); }
+    // Switching on forgets the world camera's object: it is learned again from the producer (the camera may have been rebuilt while the hooks were
+    // passive), and until then the generator is left alone.
+    void Enable(bool on)
+    {
+        const bool was = _enabled.exchange(on, std::memory_order_acq_rel);
+        if (on && !was)
+            _world.store(0, std::memory_order_release);
+    }
     bool Enabled() const { return _enabled.load(std::memory_order_acquire); }
+
+    // The jitter object of the world camera = the pointer the camera getter returns to the world-scene NGX packet producer ([camera + 0x278], the
+    // same pointer the camera update passes to the generator as its output). 0 = not known yet; a null pointer is never learned.
+    void LearnWorldObject(std::uintptr_t object)
+    {
+        if (object != 0)
+            _world.store(object, std::memory_order_release);
+    }
+    std::uintptr_t WorldObject() const { return _world.load(std::memory_order_acquire); }
+
+    // The generator's camera call site was reached with this output pointer (before any decision about it).
+    void NoteCallSiteObject(std::uintptr_t object)
+    {
+        std::lock_guard lock(_mutex);
+        for (std::size_t i = 0; i < _seen.count; ++i)
+            if (_seen.items[i].pointer == object)
+            {
+                ++_seen.items[i].calls;
+                return;
+            }
+        if (_seen.count < kMaxSeenObjects)
+            _seen.items[_seen.count++] = { object, 1 };
+        else
+            _seen.overflow = true;
+    }
+    SeenObjects Seen() const
+    {
+        std::lock_guard lock(_mutex);
+        return _seen;
+    }
 
     void RecordObserved(const Observed& o)
     {
@@ -465,11 +521,15 @@ class SharedState
         _observed.Clear();
         _generated.Clear();
         _status = GeneratorStatus {};
+        _seen = SeenObjects {};
+        _world.store(0, std::memory_order_release);
     }
 
   private:
     mutable std::mutex _mutex;
     std::atomic<bool> _enabled { false };
+    std::atomic<std::uintptr_t> _world { 0 };
+    SeenObjects _seen;
     Ring<Observed, kRingSize> _observed;
     Ring<Generated, kRingSize> _generated;
     GeneratorStatus _status;
@@ -510,6 +570,26 @@ inline std::string FormatFellBack(Fallback f, const Watchdog::Totals& t)
     return std::format("Jitter source: fell back to the old behaviour, generator hook and told-offset write disabled together ({}; checked {}, "
                        "outside tolerance {}, unpaired {})",
                        FallbackText(f), t.checked, t.outside, t.unpaired);
+}
+
+// The one diagnostic of the world-camera tie: the distinct objects the generator's call site was reached with. More than one = a second jittered
+// object exists; the fix leaves it alone (it is not the world camera the NGX packet producer reads).
+inline std::string FormatSeenObjects(const SeenObjects& seen, std::uintptr_t world)
+{
+    std::string list;
+    for (std::size_t i = 0; i < seen.count; ++i)
+    {
+        if (i != 0)
+            list += ", ";
+        list += std::format("{:#x} ({} calls{})", seen.items[i].pointer, seen.items[i].calls, seen.items[i].pointer == world ? ", world camera" : "");
+    }
+    if (seen.overflow)
+        list += ", more";
+    std::string text = std::format("Jitter source: the generator's camera call site was reached with {} distinct jitter object{}: {}", seen.count,
+                                   seen.count == 1 ? "" : "s", list);
+    if (seen.count > 1 || seen.overflow)
+        text += "; a second jittered object exists, it is left alone (only the world camera's is normalised)";
+    return text;
 }
 
 inline std::string FormatSizeDisagreement(std::uint32_t gameW, std::uint32_t gameH, std::uint32_t ngxW, std::uint32_t ngxH)

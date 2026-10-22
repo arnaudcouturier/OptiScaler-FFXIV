@@ -537,6 +537,56 @@ void TestNoGuessWritten()
     CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == rx);
 }
 
+// M0: the one diagnostic line about the objects the generator's call site is reached with. Written from the evaluate thread (never from a
+// detour), after the first sighting has had time to settle, and again (budgeted) whenever a NEW object shows up, so a second camera that opens
+// minutes later is not missed.
+void TestSeenObjectsLine()
+{
+    Rig r;
+    r.Frame();
+    r.Step(); // the detours are enabled by the controller (switching on forgets a world object learned before)
+    CHECK(r.env.Count("distinct jitter object") == 0);
+    r.state.NoteCallSiteObject(0x1000);
+    r.state.LearnWorldObject(0x1000);
+    r.Frame();
+    r.Step();
+    CHECK(r.env.Count("distinct jitter object") == 0); // not yet: the sighting has to settle
+    r.env.now += 5000;
+    r.Frame();
+    r.Step();
+    CHECK(r.env.Count("reached with 1 distinct jitter object: 0x1000 (") == 1 && r.env.Logged("world camera"));
+    for (int i = 0; i < 200; ++i)
+    {
+        r.state.NoteCallSiteObject(0x1000);
+        r.Frame();
+        r.Step();
+    }
+    CHECK(r.env.Count("distinct jitter object") == 1); // once
+    // a second object, minutes later: a new line naming both
+    r.env.now += 300000;
+    r.state.NoteCallSiteObject(0x2000);
+    r.Frame();
+    r.Step();
+    CHECK(r.env.Count("distinct jitter object") == 2 && r.env.Count("reached with 2 distinct jitter objects") == 1 && r.env.Logged("a second jittered object exists"));
+    // a bounded number of lines, however many objects appear
+    for (std::uintptr_t p = 0x3000; p < 0x3000 + 0x100; p += 0x10)
+    {
+        r.state.NoteCallSiteObject(p);
+        r.Frame();
+        r.Step();
+    }
+    CHECK(r.env.Count("distinct jitter object") <= 6);
+    // no world camera known yet: nothing is said (there is nothing to mark), however long
+    Rig q;
+    q.Frame();
+    q.Step();
+    q.state.NoteCallSiteObject(0x1000);
+    q.env.now += 20000;
+    q.Frame();
+    q.Step();
+    CHECK(q.env.Count("distinct jitter object") == 0);
+}
+
 // The verification line: the first after 120 checked frames, then every 30 s for five lines, then every five minutes (a session of hours stays
 // readable, and the 20-line budget covers the first hour and a half).
 void TestVerifyLineCadence()
@@ -609,6 +659,7 @@ int main()
     TestOutputSizeDisagreement();
     TestSetFailureRestoresX();
     TestNoGuessWritten();
+    TestSeenObjectsLine();
     TestVerifyLineCadence();
     TestLogBudgets();
     return TEST_RESULT("jitter_source_controller");

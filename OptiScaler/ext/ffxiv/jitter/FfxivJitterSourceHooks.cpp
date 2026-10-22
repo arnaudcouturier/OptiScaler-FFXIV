@@ -5,6 +5,7 @@
 #include "ext/core/ProcessMemory.h"
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/jitter/FfxivJitterSourceAnchors.h"
+#include "ext/ffxiv/jitter/FfxivJitterSourceDetours.h"
 #include "ext/ffxiv/quality/NativeQualityRetry.h"
 #include "ext/ffxiv/quality/NativeQualityTransaction.h"
 
@@ -72,92 +73,42 @@ bool ReadInputs(const JitterSourceBuild& b, std::uint32_t phases, GeneratorInput
     return true;
 }
 
-// The detour of the jitter generator. The return address is read FIRST (before anything that could change the frame): only the camera update's
-// call is touched; every other caller, and every call while the fix is off, goes straight to the game's function.
+// The detour of the jitter generator. The return address is read FIRST (before anything that could change the frame) and handed to the body in
+// FfxivJitterSourceDetours.h (RunGenerate), which touches only the camera update's call for the world camera's jitter object.
 std::uintptr_t Generate(std::uintptr_t opaque, float* x, float* y, unsigned frame, unsigned phases)
 {
-    const std::uintptr_t caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-    if (!State().Enabled() || x == nullptr || y == nullptr || g_build == nullptr || caller != g_base + g_build->generatorCallReturnRva)
-        return g_generator(opaque, x, y, frame, phases);
-
-    GeneratorInputs in;
-    GeneratorPlan plan;
-    bool planned = false;
-    try
-    {
-        if (ReadInputs(*g_build, phases, in))
-        {
-            plan = PlanGenerate(in);
-            planned = true;
-        }
-    }
-    catch (...)
-    {
-    }
-    if (!planned || plan.why != PlanWhy::Normalize)
-    {
-        State().NoteLeftAlone(planned ? plan.why : PlanWhy::StrengthInvalid);
-        return g_generator(opaque, x, y, frame, phases);
-    }
-
-    const std::uintptr_t result = g_generator(opaque, x, y, frame, plan.phases);
-    try
-    {
-        Generated g;
-        g.expectedX = *x;
-        g.expectedY = *y;
-        g.normalized = NormalizeHalton(*x, *y, plan.strength);
-        g.outX = *x;
-        g.outY = *y;
-        g.strength = plan.strength;
-        g.phases = plan.phases;
-        g.renderW = in.renderW;
-        g.renderH = in.renderH;
-        g.outW = in.outW;
-        g.outH = in.outH;
-        g.timeMs = GetTickCount64();
-        State().RecordGenerated(g, PlanWhy::Normalize);
-    }
-    catch (...)
-    {
-    }
-    return result;
+    GenerateArgs args;
+    args.caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    args.expectedCaller = g_build != nullptr ? g_base + g_build->generatorCallReturnRva : 0;
+    args.opaque = opaque;
+    args.x = x;
+    args.y = y;
+    args.frame = frame;
+    args.phases = phases;
+    return RunGenerate(
+        State(), args, [](std::uintptr_t o, float* gx, float* gy, unsigned f, unsigned p) { return g_generator(o, gx, gy, f, p); },
+        [](std::uint32_t p, GeneratorInputs& in) { return g_build != nullptr && ReadInputs(*g_build, p, in); }, [] { return GetTickCount64(); });
 }
 
-// The detour of the camera getter: observe only. The world-scene NGX packet producer is the one caller sampled (its return address is
+// The detour of the camera getter: observe only (RunObserve). The world-scene NGX packet producer is the one caller sampled (its return address is
 // exe+0x374122); the pointer it gets is the game's own, unchanged.
 void* Observe(std::uintptr_t camera)
 {
-    const std::uintptr_t caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-    void* result = g_getter(camera);
-    if (result == nullptr || !State().Enabled() || g_build == nullptr || caller != g_base + g_build->producerReturnRva)
-        return result;
-    try
-    {
-        // the jitter object { jx, jy, ndcX, ndcY }: read twice, a torn read (the game writing it) is not recorded
-        float a[4] {}, b[4] {};
-        std::uintptr_t renderer = 0;
-        std::uint32_t size[2] {};
-        if (ReadBytes(reinterpret_cast<std::uintptr_t>(result), a, sizeof(a)) && ReadBytes(reinterpret_cast<std::uintptr_t>(result), b, sizeof(b)) &&
-            std::memcmp(a, b, sizeof(a)) == 0 && ReadValue(g_base + g_build->rendererPointerRva, renderer) && renderer != 0 &&
-            ReadBytes(renderer + g_build->rendererSceneSizeOffset, size, sizeof(size)))
+    ObserveArgs args;
+    args.caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    args.expectedCaller = g_build != nullptr ? g_base + g_build->producerReturnRva : 0;
+    args.camera = camera;
+    return RunObserve(
+        State(), args, [](std::uintptr_t c) { return g_getter(c); },
+        [](const void* object, float* out)
+        { return ReadBytes(reinterpret_cast<std::uintptr_t>(object), out, 4 * sizeof(float)); },
+        [](std::uint32_t* size)
         {
-            Observed o;
-            o.rawX = a[0];
-            o.rawY = a[1];
-            o.ndcX = a[2];
-            o.ndcY = a[3];
-            o.width = size[0];
-            o.height = size[1];
-            o.timeMs = GetTickCount64();
-            if (ProjectOffset(o))
-                State().RecordObserved(o);
-        }
-    }
-    catch (...)
-    {
-    }
-    return result;
+            std::uintptr_t renderer = 0;
+            return g_build != nullptr && ReadValue(g_base + g_build->rendererPointerRva, renderer) && renderer != 0 &&
+                   ReadBytes(renderer + g_build->rendererSceneSizeOffset, size, 2 * sizeof(std::uint32_t));
+        },
+        [] { return GetTickCount64(); });
 }
 
 const GameBuild* Matched()
