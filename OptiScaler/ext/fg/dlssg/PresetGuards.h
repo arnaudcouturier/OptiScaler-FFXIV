@@ -583,7 +583,8 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<F
                 next = static_cast<uint16_t>(next & ~kVolatile);
             if (n.isLea && n.mem.present)
             {
-                const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP);
+                // rsp or rbp as the base or as the index (lea r12,[rbx+rbp]): either way the result is a frame address plus something
+                const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP || n.mem.index == RSP || n.mem.index == RBP);
                 const bool derived = frame || holds(n.mem.ripRel ? kNoReg : n.mem.base) || holds(n.mem.index);
                 if (derived)
                     next = static_cast<uint16_t>(next | (1u << n.reg));

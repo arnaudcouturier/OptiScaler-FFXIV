@@ -123,6 +123,7 @@ struct Spec
     int leavingJump = 0;               // jmp out of create: 1 to a place that is no function start, 2 to the defaults function, 3 to the read function, 4 to an unrelated function (a tail call), 5 into the middle of it, 6 to the copy function, 7 to the cached-settings reader
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
+    int lea12IndexBeforeSave = 0;      // after xor ebx,ebx, before the save: 1 lea r12,[rbx+rbp] (rbp as the INDEX: a frame address), 2 lea r12,[rbx+rcx] (control, no frame register)
     int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89)
     bool chainedOdd = false;           // the chained fragment's unwind info has an odd number of codes
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
@@ -447,6 +448,11 @@ Fake Build(const Spec& s)
     }
     if (s.lea12BeforeSave)
         c.b({ 0x4C, 0x8D, 0x65, 0xD0 }); // lea r12,[rbp-30h]
+    if (s.lea12IndexBeforeSave != 0)
+    {
+        c.b({ 0x33, 0xDB });                                                   // xor ebx,ebx: a known zero base
+        c.b({ 0x4C, 0x8D, 0x24, s.lea12IndexBeforeSave == 1 ? 0x2B : 0x0B }); // lea r12,[rbx+rbp] / lea r12,[rbx+rcx]
+    }
     switch (s.copy12BeforeSave)
     {
     case 1: c.b({ 0x4C, 0x8B, 0xE5 }); break; // mov r12,rbp
@@ -1059,6 +1065,25 @@ void RegionRules()
         Spec t = Shape31016();
         t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
         CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
+    }
+    // fix round 4 (LOW-5): rbp as an INDEX register of a pre-save lea (xor ebx,ebx / lea r12,[rbx+rbp]) is a frame address as well; in the
+    // region the same lea is refused by readsFrameRegAsValue, before the save nothing else notices it
+    {
+        Spec s = Shape31016();
+        s.lea12IndexBeforeSave = 1;
+        s.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(s).why == Why::CreateContext, "a frame address built from rbp as an index before the save: %s", WhyText(Scan(s).why));
+        Spec r;
+        r.lea12IndexBeforeSave = 1;
+        r.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(r).why == Why::Ok, "the same bytes with the context in r13: %s", WhyText(Scan(r).why));
+        Spec unused = Shape31016();
+        unused.lea12IndexBeforeSave = 1;
+        CHECK_MSG(Scan(unused).why == Why::Ok, "the lea is never used: %s", WhyText(Scan(unused).why));
+        Spec other = Shape31016();
+        other.lea12IndexBeforeSave = 2; // lea r12,[rbx+rcx]: no frame register in it
+        other.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(other).why == Why::Ok, "a lea of two ordinary registers: %s", WhyText(Scan(other).why));
     }
     // a plain nop is not an exchange: r8 never held the address. `49 90` is xchg rax,r8 (refused above); `41 90` is the 32-bit xchg r8d,eax,
     // which truncates both registers to 32-bit numbers: accepted on purpose (the pin says what it does; 32-bit mov / 87 / 91-97 still carry)
