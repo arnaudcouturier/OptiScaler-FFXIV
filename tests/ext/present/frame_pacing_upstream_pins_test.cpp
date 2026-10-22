@@ -112,9 +112,12 @@ int main(int argc, char** argv)
     // read and the report hook, opens the scope first, and makes no swapchain call of its own --------------------------------------------
     CHECK(Has(trace, "bool KeyOn() const { return ext::Cfg().framePacing.hiddenPresentDoNotWait.value_or_default(); }"));
     CHECK(Count(trace, "hiddenPresentDoNotWait.value_or_default()") == 2); // KeyOn and the "skipped k" column of the hidden-present line
-    CHECK(Has(trace, "HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags) { PacingScope scope(Phase::HiddenPresent); "));
-    CHECK(Has(trace, "HiddenHooks hooks { scope }; return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); }"));
+    // ONE contiguous statement sequence: nothing can be inserted between the scope, the hooks and the call (a changed flags or swapchain
+    // argument computed in between would defeat "key off = exactly Present(0, callerFlags)", which the seam test checks only for the
+    // template). Whitespace and comments are normalised away, nothing else may sit between the pieces.
+    CHECK(Has(trace, "HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags) { PacingScope scope(Phase::HiddenPresent); HiddenHooks hooks { scope }; return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); }"));
     CHECK(!Has(trace, "->Present(")); // the only swapchain call lives in the (tested) template
+    CHECK(!Has(trace, ".Present(")); // nor through a dereference spelled another way
 
     // ---- hidden present: the seam call, the flags variable and the failure warning stay as upstream had them ----------------------------
     {
