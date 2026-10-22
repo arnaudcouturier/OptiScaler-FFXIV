@@ -702,6 +702,7 @@ void TestHeldPairIsNotAMiss()
     CHECK(k.Step().standDown);
     k.env.now += kDrainMs + 10;      // the drain is over, the block still holds the told pair: still kept out
     CHECK(k.Step().standDown && k.controller.Totals().unpaired == 0);
+    CHECK(k.Step().standDown); // and on the evaluates after that (the early return of a key that is off must not skip a held block)
     k.Frame(false, true, true);
     CHECK(!k.Step().standDown);
     k.env.now += kDrainMs + 10;
