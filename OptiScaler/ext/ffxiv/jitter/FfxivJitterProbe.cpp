@@ -2,6 +2,7 @@
 
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/jitter/FfxivJitterCore.h"
+#include "ext/ffxiv/jitter/FfxivJitterSourceHooks.h"
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
@@ -11,6 +12,7 @@
 #include <State.h>
 #include <framegen/IFGFeature_Dx12.h>
 
+#include <atomic>
 #include <mutex>
 
 namespace ext::ffxiv::jitter
@@ -112,21 +114,68 @@ struct NgxEnvironment
     }
     // State::activeFgInput by its config name (Upscaler, DLSSG, NoFG, ...): only the Upscaler input reads the replaced pair from the block.
     std::string FrameGenerationInput() { return EnumToCode(::State::Instance().activeFgInput); }
+
+    // The source-level jitter fix (FfxivJitterSourceController.h): its key, and the hooks' state (asking installs them when the key is on).
+    bool KeyOn() { return ext::Cfg().ffxiv.jitterSource.value_or_default(); }
+    source::HooksView Hooks() { return source::hooks::View(); }
 };
+
+// The source-level jitter fix's side of the evaluate. Its own lock, never held while the engine runs (the engine takes S().mutex).
+struct SourceGlue
+{
+    std::mutex mutex;
+    source::Controller<NgxEnvironment> controller;
+};
+
+SourceGlue& G()
+{
+    static SourceGlue glue;
+    return glue;
+}
+
+// Set once the key has been on in this session: after that the controller is asked at every evaluate so that it can switch the fix off cleanly
+// (and tell the frames that were already drawn on the full lattice) when the key goes off. Never set with the key off all session.
+std::atomic<bool> g_sourceEverOn { false };
+
+// One step of the source fix. The result says whether the calibrate-and-scale engine must stand down for this evaluate.
+source::StepResult RunSourceFix(NgxEnvironment& env, bool sourceKey, bool correct)
+{
+    if (sourceKey)
+        g_sourceEverOn.store(true, std::memory_order_relaxed);
+    SourceGlue& g = G();
+    std::lock_guard lock(g.mutex);
+    try
+    {
+        return g.controller.Step(env, source::hooks::State(), correct);
+    }
+    catch (...)
+    {
+        // The controller threw (a parameter write failed): it may have written the first half of the pair. The engine stays out of this evaluate if
+        // the fix was active; the controller's own put-back already restored the game's X.
+        source::StepResult r;
+        r.standDown = r.active = g.controller.WasActive();
+        return r;
+    }
+}
 } // namespace
 
 void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
 {
     try
     {
-        // Both keys off: this is all it costs (the core repeats the key gate, which a test pins, so it never runs on its own either).
+        // All keys off, and the source fix never switched on: this is all it costs (the core repeats the key gate, which a test pins, so it never
+        // runs on its own either).
         const auto& cfg = ext::Cfg().ffxiv;
         const bool probe = cfg.jitterProbe.value_or_default();
         const bool correct = cfg.jitterCorrection.value_or_default();
-        if ((!probe && !correct) || parameters == nullptr)
+        const bool sourceKey = cfg.jitterSource.value_or_default();
+        if ((!probe && !correct && !sourceKey && !g_sourceEverOn.load(std::memory_order_relaxed)) || parameters == nullptr)
             return;
         NgxEnvironment env { parameters };
-        S().engine.Step(env, probe, correct, cfg.jitterScaleOverride.value_or_default());
+        // The source fix first: while it is active it owns the pair, and the calibrate-and-scale engine stands down for this evaluate.
+        const source::StepResult src = RunSourceFix(env, sourceKey, correct);
+        const bool correctNow = correct && !src.standDown;
+        S().engine.Step(env, probe, correctNow, cfg.jitterScaleOverride.value_or_default(), SourceNote { src.active, src.maxJitter });
     }
     catch (...)
     {

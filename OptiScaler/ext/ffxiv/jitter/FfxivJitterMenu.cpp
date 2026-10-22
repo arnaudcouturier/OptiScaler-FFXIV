@@ -8,7 +8,7 @@
 
 #include <imgui/imgui.h>
 
-// "Game jitter (FFXIV)" card (tab FFXIV, after the FFXIV HDR10 card; position: ext/core/MenuLayout.h): the two [FFXIV] jitter keys as live switches.
+// "Game jitter (FFXIV)" card (tab FFXIV, after the FFXIV HDR10 card; position: ext/core/MenuLayout.h): the [FFXIV] jitter keys as live switches.
 // The hook (FfxivJitterProbe.cpp) reads both keys at every DLSS evaluate, so a tick applies at once; like every other menu
 // setting it is stored in the ini only when the settings are saved. Nothing else lives here: the decisions are in
 // FfxivJitterCore.h (tested).
@@ -30,6 +30,17 @@ void Draw(ext::menu::Ctx&)
         cfg.jitterProbe = probe;
     ext::menu::Tooltip("Read-only. Writes a line to the log every few seconds that compares the jitter the game\n"
                        "reports to DLSS with the jitter it really applied to the picture. Changes nothing.");
+
+    bool source = cfg.jitterSource.value_or_default();
+    if (ImGui::Checkbox("Fix the game's jitter at the source (experimental)", &source))
+        cfg.jitterSource = source;
+    ext::menu::Tooltip("Changes what the game draws, not only what DLSS is told: the full +-0.5 pixel jitter (the game applies only about 60% of it)\n"
+                       "on NVIDIA's repeating cycle (32 phases at Performance, 18 at Quality), and DLSS and frame generation are told\n"
+                       "exactly the offset that was drawn.\n\n"
+                       "While it is on, the correction below stands down. The log line \"Jitter source: active ...\" says it is working and\n"
+                       "\"Jitter source: verified ...\" confirms that the picture is drawn the way the log says. If anything does not match the game\n"
+                       "it switches itself off and the correction takes over.\n\n"
+                       "Takes effect on the next frame. Look at the picture with frame generation off first and compare with it off.");
 
     bool correct = cfg.jitterCorrection.value_or_default();
     if (ImGui::Checkbox("Correct the game's jitter (experimental)", &correct))

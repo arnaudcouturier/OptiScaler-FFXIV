@@ -88,6 +88,16 @@ int main(int argc, char** argv)
     CHECK(Count(code, "if(ImGui::Checkbox(\"\",&probe))cfg.jitterProbe=probe;") == 1);
     CHECK(Count(code, "boolcorrect=cfg.jitterCorrection.value_or_default();") == 1);
     CHECK(Count(code, "if(ImGui::Checkbox(\"\",&correct))cfg.jitterCorrection=correct;") == 1);
+    // the source-fix switch: read from and written back to its own checkbox, once, with plain-English text
+    CHECK(Count(code, "boolsource=cfg.jitterSource.value_or_default();") == 1);
+    CHECK(Count(code, "if(ImGui::Checkbox(\"\",&source))cfg.jitterSource=source;") == 1);
+    CHECK(Count(code, "cfg.jitterSource=") == 1);
+    CHECK(raw.find("\"Fix the game's jitter at the source (experimental)\"") != std::string::npos);
+    CHECK(raw.find("full +-0.5 pixel jitter") != std::string::npos && raw.find("repeating cycle (32 phases at Performance") != std::string::npos);
+    CHECK(raw.find("exactly the offset that was drawn") != std::string::npos);
+    CHECK(raw.find("the correction below stands down") != std::string::npos && raw.find("switches itself off") != std::string::npos);
+    CHECK(raw.find("Jitter source: active") != std::string::npos && raw.find("Jitter source: verified") != std::string::npos);
+    CHECK(raw.find("Takes effect on the next frame") != std::string::npos);
     // no other writes to the keys
     CHECK(Count(code, "cfg.jitterProbe=") == 1);
     CHECK(Count(code, "cfg.jitterCorrection=") == 1);
@@ -121,7 +131,17 @@ int main(int argc, char** argv)
 
     // the wrapper hands the engine the value of the manual-scale key at every evaluate (read like the two switches, so the menu acts at once)
     const std::string wrapper = Squash(Strip(ReadFile(repo + "/OptiScaler/ext/ffxiv/jitter/FfxivJitterProbe.cpp")));
-    CHECK(Count(wrapper, "S().engine.Step(env,probe,correct,cfg.jitterScaleOverride.value_or_default());") == 1);
+    CHECK(Count(wrapper, "S().engine.Step(env,probe,correctNow,cfg.jitterScaleOverride.value_or_default(),SourceNote{src.active,src.maxJitter});") == 1);
+    // the source fix runs first, and it alone decides whether the correction runs in this evaluate
+    CHECK(Count(wrapper, "constsource::StepResultsrc=RunSourceFix(env,sourceKey,correct);") == 1);
+    CHECK(Count(wrapper, "constboolcorrectNow=correct&&!src.standDown;") == 1);
+    CHECK(wrapper.find("RunSourceFix(env,sourceKey,correct)") < wrapper.find("engine.Step("));
+    CHECK(Count(wrapper, "controller.Step(env,source::hooks::State(),correct)") == 1);
+    // all keys off, and the fix never switched on: the early return is the whole cost
+    CHECK(Count(wrapper, "if((!probe&&!correct&&!sourceKey&&!g_sourceEverOn.load(std::memory_order_relaxed))||parameters==nullptr)return;") == 1);
+    CHECK(Count(wrapper, "constboolsourceKey=cfg.jitterSource.value_or_default();") == 1);
+    // an exception inside the controller leaves the engine out of an evaluate the fix may have touched
+    CHECK(Count(wrapper, "r.standDown=r.active=g.controller.WasActive();") == 1);
     CHECK(Count(wrapper, "engine.Step(") == 1);
 
     // the stripper itself: a pin kept alive only by a comment or a string must not count

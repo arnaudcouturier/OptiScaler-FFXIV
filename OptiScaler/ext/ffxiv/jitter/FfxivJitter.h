@@ -9,7 +9,13 @@
 //   failed guard passes the game's values through unchanged. The game's camera memory is never written, in either mode; the only
 //   write is into the parameter block (the bridge's own NVSDK_NGX_Parameter table), and only with the correction on.
 //
-// With both keys off the cost is two loads of a config flag and a branch. Never throws.
+// [FFXIV] JitterSource (default off, experimental): the source-level fix (FfxivJitterSource*.h, FfxivJitterSourceHooks.cpp). Hooks the game's jitter
+//   generator so the game DRAWS the full +-0.5 pixel lattice on NVIDIA's repeating cycle, observes the camera object the NGX packet is built from, and
+//   here replaces the Jitter.Offset.X/Y of THIS evaluate by the offset that was drawn. It runs before the correction and, while it is active,
+//   the correction stands down for the evaluate (it never scales on top). Any failed guard, a failed verification or the key off passes the game's
+//   values through, and the correction works exactly as without it.
+//
+// With all keys off the cost is three loads of a config flag and a branch. Never throws.
 
 struct NVSDK_NGX_Parameter;
 
