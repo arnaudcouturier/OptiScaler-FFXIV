@@ -500,6 +500,14 @@ static void TheDetoursErrorTable()
     CHECK(ClassifyDetours(Stage::AttachRendererUpdate, 9) == Outcome::Permanent);
     CHECK(ClassifyDetours(Stage::AttachQuerySize, 6) == Outcome::Permanent);     // ERROR_INVALID_HANDLE at an attach
     CHECK(ClassifyDetours(Stage::AttachRendererUpdate, 6) == Outcome::Permanent);
+    // the two attach stages of the jitter-source hooks classify like the others: a refusal to attach is deterministic, anything else is retried
+    CHECK(ClassifyDetours(Stage::AttachJitterGenerator, 9) == Outcome::Permanent);
+    CHECK(ClassifyDetours(Stage::AttachJitterGenerator, 6) == Outcome::Permanent);
+    CHECK(ClassifyDetours(Stage::AttachCameraGetter, 9) == Outcome::Permanent);
+    CHECK(ClassifyDetours(Stage::AttachCameraGetter, 6) == Outcome::Permanent);
+    CHECK(ClassifyDetours(Stage::AttachJitterGenerator, 4317) == Outcome::Transient);
+    CHECK(ClassifyDetours(Stage::AttachCameraGetter, 8) == Outcome::Transient);
+    CHECK(ClassifyDetours(Stage::AttachCameraGetter, 99999) == Outcome::Transient);
     CHECK(ClassifyDetours(Stage::EnlistThread, 9) == Outcome::Transient);        // the same codes elsewhere mean something else
     CHECK(ClassifyDetours(Stage::Commit, 6) == Outcome::Transient);
     CHECK(ClassifyDetours(Stage::Begin, 6) == Outcome::Transient);
@@ -518,7 +526,8 @@ static void StageNamesAreDistinctAndNonEmpty()
 {
     const Stage all[] = { Stage::None,          Stage::Guard,           Stage::ThreadSnapshot, Stage::Begin,
                           Stage::EnlistCurrent, Stage::EnlistThread,    Stage::AttachQuerySize,
-                          Stage::AttachRendererUpdate, Stage::Commit,   Stage::Exception };
+                          Stage::AttachRendererUpdate, Stage::AttachJitterGenerator, Stage::AttachCameraGetter,
+                          Stage::Commit,   Stage::Exception };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
     {
         CHECK(StageName(all[i])[0] != '\0');

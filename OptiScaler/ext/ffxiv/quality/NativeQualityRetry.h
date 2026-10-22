@@ -32,6 +32,8 @@ enum class Stage
     EnlistThread,   // DetourUpdateThread on another game thread
     AttachQuerySize,
     AttachRendererUpdate,
+    AttachJitterGenerator, // the jitter-source hooks (FfxivJitterSourceHooks.cpp)
+    AttachCameraGetter,
     Commit,
     Exception, // the step threw
 };
@@ -56,6 +58,10 @@ inline const char* StageName(Stage stage)
         return "attach size query";
     case Stage::AttachRendererUpdate:
         return "attach renderer update";
+    case Stage::AttachJitterGenerator:
+        return "attach jitter generator";
+    case Stage::AttachCameraGetter:
+        return "attach camera getter";
     case Stage::Commit:
         return "commit";
     case Stage::Exception:
@@ -91,7 +97,8 @@ inline Outcome ClassifyDetours(Stage stage, long error)
 {
     if (error == 0)
         return Outcome::Installed;
-    const bool attach = stage == Stage::AttachQuerySize || stage == Stage::AttachRendererUpdate;
+    const bool attach = stage == Stage::AttachQuerySize || stage == Stage::AttachRendererUpdate || stage == Stage::AttachJitterGenerator ||
+                        stage == Stage::AttachCameraGetter;
     if (attach && (error == kErrorInvalidBlock || error == kErrorInvalidHandle))
         return Outcome::Permanent;
     return Outcome::Transient;
