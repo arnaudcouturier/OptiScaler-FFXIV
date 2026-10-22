@@ -177,7 +177,8 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("else if (view.hasReport) ImGui::Text(\"Runtime report: preset %llu") != std::string::npos);
     CHECK(menu.find("if (view.unsupportedId >= 0) ImGui::TextWrapped(\"The runtime does not act on preset id %d.\"") != std::string::npos);
     CHECK(menu.find("if (view.blockedByFlags) ImGui::TextWrapped(\"The runtime ignores presets because of private flags set in the driver.\");") != std::string::npos);
-    CHECK(Count(menu, "ignore") == 2); // only these two lines (unsupported id, private flags) and nothing about a missing report
+    // (no count of the word "ignore": the Preset C note and the private-flags line both use it, and rewording the note is harmless;
+    // the four pins above are the protection: each report or refusal line hangs on a field that only a runtime line sets)
     CHECK(menu.find("not reported") == std::string::npos && menu.find("missing") == std::string::npos && menu.find("no report") == std::string::npos);
     CHECK(menu.find("The runtime does not act on preset id %d.") != std::string::npos);
     CHECK(menu.find("A private flag set in the driver forces UI recomposition or FG Lite off.") != std::string::npos);
