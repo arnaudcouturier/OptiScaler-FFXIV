@@ -59,6 +59,8 @@ enum class Clobber
     // fix round 3 (L2): a full-width overwrite drops the mark, so a store through the register is no longer a store to the slot (accepted)
     KillMovImm, KillMovImmC7, KillMov8B, KillMov89, KillMov32, KillXorZero, KillSubZero, KillMovzxReg, KillMovzxMem, KillMovsxReg, KillMovsxdMem, KillLea,
     KillMerge,
+    // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
+    MarkXchgRexB, MarkXchg32RexB, NopNoMark,
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -322,6 +324,9 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::KillMerge:                                                                                                                   // both paths overwrite rax
         c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4D, 0x85, 0xC0, 0x74, 0x04, 0x33, 0xC0, 0xEB, 0x05, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 });
         break;                                                                                                                                 // test r8,r8 / jz L1 / xor eax,eax / jmp L2 / L1: mov eax,1 / L2: store
+    case Clobber::MarkXchgRexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x49, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                      // xchg rax,r8 (REX.W+B 90) / mov [r8-70h],r12
+    case Clobber::MarkXchg32RexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x41, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                    // xchg r8d,eax (32-bit form)
+    case Clobber::NopNoMark: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                               // nop / mov [r8-70h],r12: r8 never held a frame address
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -975,7 +980,7 @@ void RegionRules()
     for (Clobber k : { Clobber::MarkAddSource, Clobber::MarkPartialAl, Clobber::MarkPartialAx, Clobber::MarkPartialMovAx, Clobber::MarkPartialLoadAl,
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
-                       Clobber::MarkXchgShort, Clobber::MarkPartialXor })
+                       Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB, Clobber::MarkXchg32RexB })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
@@ -990,6 +995,10 @@ void RegionRules()
         t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
         CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
     }
+    // a plain nop is not an exchange: r8 never held the address (`49 90` is xchg rax,r8, `41 90` the 32-bit form, which this model treats
+    // like every 32-bit copy: the mark goes with it, conservatively)
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NopNoMark).why == Why::Ok);
+    CHECK(scan(Spec {}, Where::R13, Clobber::NopNoMark).why == Why::Ok);
     // fix round 3 (L2): the accepting direction. Each image takes the frame address into rax, overwrites rax at full width and stores through it:
     // not a store to the slot any more. A mutant that never drops a mark refuses these (a silent "restart needed" on a real build).
     // (pop is not here: any pop in the region is refused as a stack write, so it can never be the kill that saves an image.)

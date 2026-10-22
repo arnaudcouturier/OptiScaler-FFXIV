@@ -591,7 +591,9 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                     kill = !narrow;
                 if (kill)
                     next = static_cast<uint16_t>(next & ~n.gprWrites);
-                if (!n.twoByte && n.opcode >= 0x91 && n.opcode <= 0x97 && (cur & n.gprWrites) != 0) // xchg r, rax (short form): both may hold either value
+                // xchg r, rax (short form 91..97, and 90 with REX.B = xchg r8,rax: the decoder reports both registers in gprWrites; a plain
+                // nop / pause has none): both may hold either value. The 32-bit form (41 90) carries too, like every 32-bit copy here.
+                if (!n.twoByte && n.opcode >= 0x90 && n.opcode <= 0x97 && (cur & n.gprWrites) != 0)
                     next = static_cast<uint16_t>(next | n.gprWrites);
                 return next;
             }
