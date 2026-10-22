@@ -136,6 +136,13 @@ std::vector<std::string> Problems(const std::string& text)
     }
     if (Count(counters, Squash("\"NR windows: %u active")) != 1 || Count(all, Squash("\"NR windows: %u active")) != 1)
         bad("the NR counters are not only in DrawNrCounters");
+    // The fallback figures leave out the renders a focus pause kept on the plain image (RunOutcome::Paused is not counted, see
+    // CountsAsFallback): the three lines that show such a count say so.
+    for (const std::string& label : { Squash("renders kept the native or plain DLSS image (focus pauses not counted)"),
+                                      Squash("renders kept the plain DLSS image (focus pauses not counted)"),
+                                      Squash("renders used the plain picture (focus pauses not counted)") })
+        if (Count(counters, label) != 1)
+            bad("a fallback figure of the NR counters does not say that focus pauses are not counted: " + label);
     if (Count(all, "DrawNrCounters(cfg);") != 1 || Count(dbg, "DrawNrCounters(cfg);") != 1)
         bad("DrawNrCounters is not called exactly once, from the fold section");
     if (Count(dbg, "if(!inert&&aa&&") != 1)
@@ -202,6 +209,9 @@ int main(int argc, char** argv)
     CHECK(!Problems(Replace(text, "\"Character preview\", DrawCharaCard", "\"Character preview (experimental)\", DrawCharaCard")).empty());
     CHECK(!Problems(Replace(text, "return ext::game::Current().lighting != nullptr;", "return true;")).empty());
     CHECK(!Problems(Replace(text, "    DrawNrCounters(cfg);\n\n    bool tint", "    bool tint")).empty());
+    CHECK(!Problems(Replace(text, "renders kept the native or plain DLSS image (focus pauses not counted)", "renders kept the native or plain DLSS image")).empty());
+    CHECK(!Problems(Replace(text, "renders kept the plain DLSS image (focus pauses not counted)", "renders kept the plain DLSS image")).empty());
+    CHECK(!Problems(Replace(text, "renders used the plain picture (focus pauses not counted)", "renders used the plain picture")).empty());
     CHECK(!Problems(Replace(text, "if (!inert && aa &&", "if (aa &&")).empty());
     CHECK(!Problems(Replace(text, "    if (inert)\n        ImGui::TextWrapped(\"Character preview is off",
                             "    if (false)\n        ImGui::TextWrapped(\"Character preview is off")).empty());

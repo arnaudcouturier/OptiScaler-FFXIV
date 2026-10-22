@@ -178,15 +178,15 @@ struct Status
     uint32_t streams = 0;      // streams that exist
     uint32_t liveStreams = 0;  // streams whose preview was drawn in the last 250 ms
     uint64_t runs = 0;         // successful NR runs (both modes)
-    uint64_t fallbacks = 0;    // renders that kept the native image or the super-resolution output (not available, preparing, skipped, failed)
+    uint64_t fallbacks = 0;    // renders that kept the native image or the super-resolution output (not available, preparing, skipped, failed); a focus pause (DlssNr DisableOnFocusLoss) is NOT counted (CountsAsFallback)
     double lastGpuMs = 0.0;    // GPU time of the last run, from the module's own timestamps (0 = not measured)
     double lastCpuMs = 0.0;    // CPU time of recording and submitting the last run
     uint64_t productionRuns = 0;      // ... of which production runs
-    uint64_t productionFallbacks = 0; // production calls that left the super-resolution output as it was
+    uint64_t productionFallbacks = 0; // production calls that left the super-resolution output as it was (a focus pause is not counted)
     double productionGpuMs = 0.0;     // GPU time of the last production run (0 = none measured yet)
     double productionCpuMs = 0.0;
     uint64_t preSrRuns = 0;           // ... of which pre-SR runs (NR before the SR evaluate)
-    uint64_t preSrFallbacks = 0;      // pre-SR calls that left the SR evaluate on the plain colour
+    uint64_t preSrFallbacks = 0;      // pre-SR calls that left the SR evaluate on the plain colour (a focus pause is not counted)
     double preSrGpuMs = 0.0;          // GPU time of the last pre-SR run (0 = none measured yet)
     double preSrCpuMs = 0.0;
     bool preSrLatched = false;        // the SR evaluate refused the NR image: NR before SR is off for the session

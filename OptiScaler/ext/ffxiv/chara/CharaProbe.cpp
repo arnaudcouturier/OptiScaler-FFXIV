@@ -618,6 +618,9 @@ std::string BuildState(uint64_t now)
         t.Add("nr.streams", ns.streams);
         t.Add("nr.liveStreams", ns.liveStreams);
         t.Add("nr.runs", ns.runs);
+        // nr.fallbacks and nr.production.fallbacks count renders that kept the plain image because no NR result was produced (not available, preparing,
+        // skipped, failed, not offered). Renders paused by [DlssNr] DisableOnFocusLoss are NOT counted: while the game window is in the background neither
+        // nr.runs nor these keys move, so runs + fallbacks is not the number of preview renders. The key names stay as they are.
         t.Add("nr.fallbacks", ns.fallbacks);
         t.Add("nr.lastGpuMicroseconds", static_cast<uint64_t>(ns.lastGpuMs * 1000.0));
         t.Add("nr.videoMemoryMb", ns.videoMemoryMb);

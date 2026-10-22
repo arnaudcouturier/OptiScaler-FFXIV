@@ -998,7 +998,7 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr };
     if (nr::ProductionProduced(answer))
         return { std::move(result.view), answer };
-    if (nr::CountsAsFallback(result.outcome) && g_productionCauses.First(static_cast<unsigned>(result.outcome))) // a focus pause logs its own episode lines
+    if (result.outcome != nr::RunOutcome::Paused && g_productionCauses.First(static_cast<unsigned>(result.outcome))) // a pause logs its own episode lines; Ran without an image keeps its safety-net line
         LOG_INFO("CharaView NR: production NR kept the super-resolution output of a render: {} (counted; this cause is logged once)",
                  ProductionCauseText(result.outcome));
     if (diag::TraceEnabled())
@@ -1052,7 +1052,7 @@ PreSrCall RunNrPreSrInner(const DrawView& view, const SlotGpu& g, const SlotStat
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr && result.texture != nullptr };
     if (nr::ProductionProduced(answer))
         return { std::move(result.texture), answer };
-    if (nr::CountsAsFallback(result.outcome) && g_preSrCauses.First(static_cast<unsigned>(result.outcome))) // a focus pause logs its own episode lines
+    if (result.outcome != nr::RunOutcome::Paused && g_preSrCauses.First(static_cast<unsigned>(result.outcome))) // a pause logs its own episode lines; Ran without an image keeps its safety-net line
         LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: {} (counted; this cause is logged once)", ProductionCauseText(result.outcome));
     if (diag::TraceEnabled())
         diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR pre-SR outcome {} for {}x{}", static_cast<int>(result.outcome), in.width, in.height));

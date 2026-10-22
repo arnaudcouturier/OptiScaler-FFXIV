@@ -252,8 +252,11 @@ const std::vector<Fragment> kDlss = {
     { "request.colour = g.output.texture.Get();", 1, "the production colour is the SR output" },
     // A focus pause (RunOutcome::Paused) is on purpose, not a fallback: it is neither counted (CountsAsFallback) nor logged under the generic cause text of the
     // two entries (the focus gate writes its own episode lines).
-    { "if (nr::CountsAsFallback(result.outcome) && g_productionCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a pause is not logged as a production cause" },
-    { "if (nr::CountsAsFallback(result.outcome) && g_preSrCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a pause is not logged as a pre-SR cause" },
+    // The test is "not Paused", NOT CountsAsFallback: Ran without an image (the module's own "cannot happen" case) is not counted either, but it must keep its
+    // once-per-cause safety-net line.
+    { "if (result.outcome != nr::RunOutcome::Paused && g_productionCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a missing image is logged as a production cause for every outcome but a pause" },
+    { "if (result.outcome != nr::RunOutcome::Paused && g_preSrCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a missing image is logged as a pre-SR cause for every outcome but a pause" },
+    { "CountsAsFallback(result.outcome) && g_", 0, "the cause-log conditions do not use the counting predicate (Ran without an image would be silenced)" },
 };
 
 // Order. Counts alone keep every fragment present when a statement is moved: each chain below occurs once per step, in this order, in the

@@ -802,6 +802,9 @@ class TimerRing
 // image (bring-up) or the plain super-resolution image (production). Counted ONCE per call, at the one place a call ends (the module's
 // RunCore wrapper, its failure handlers and NoteProductionDeclined): inner steps pass their outcome up without counting. `production`
 // counts the calls of the production entry (a subset of `all`).
+// Not counted: a focus pause (RunOutcome::Paused, [DlssNr] DisableOnFocusLoss). That render also keeps the plain image, but on purpose and not
+// for a failure or a missing resource (CountsAsFallback), so `runs + fallbacks` is NOT the number of preview renders while the game window is in
+// the background.
 struct FallbackTally
 {
     std::atomic<uint64_t> all { 0 };
