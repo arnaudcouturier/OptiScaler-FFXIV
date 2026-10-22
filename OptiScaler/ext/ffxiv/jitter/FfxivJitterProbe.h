@@ -394,6 +394,8 @@ struct SourceNote
 {
     bool active = false;
     float maxJitter = 0.5f;
+    bool standDown = false; // the fix owns this evaluate's pair (active, or finishing frames drawn on the full lattice): the engine was told correct = false for that reason only,
+                            // so it must not forget what it learned (it forgets only when the correction key itself is off)
 };
 
 // ---- text ----------------------------------------------------------------------------------------------------------------------

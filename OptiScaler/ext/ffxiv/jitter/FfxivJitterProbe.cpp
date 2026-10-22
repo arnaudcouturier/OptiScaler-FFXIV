@@ -173,9 +173,12 @@ void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
             return;
         NgxEnvironment env { parameters };
         // The source fix first: while it is active it owns the pair, and the calibrate-and-scale engine stands down for this evaluate.
-        const source::StepResult src = RunSourceFix(env, sourceKey, correct);
+        // Asked only when the key is on or has been on this session: with the key off all session the controller is never reached.
+        source::StepResult src;
+        if (sourceKey || g_sourceEverOn.load(std::memory_order_relaxed))
+            src = RunSourceFix(env, sourceKey, correct);
         const bool correctNow = correct && !src.standDown;
-        S().engine.Step(env, probe, correctNow, cfg.jitterScaleOverride.value_or_default(), SourceNote { src.active, src.maxJitter });
+        S().engine.Step(env, probe, correctNow, cfg.jitterScaleOverride.value_or_default(), SourceNote { src.active, src.maxJitter, src.standDown });
     }
     catch (...)
     {

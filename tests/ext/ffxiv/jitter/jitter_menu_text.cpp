@@ -131,11 +131,13 @@ int main(int argc, char** argv)
 
     // the wrapper hands the engine the value of the manual-scale key at every evaluate (read like the two switches, so the menu acts at once)
     const std::string wrapper = Squash(Strip(ReadFile(repo + "/OptiScaler/ext/ffxiv/jitter/FfxivJitterProbe.cpp")));
-    CHECK(Count(wrapper, "S().engine.Step(env,probe,correctNow,cfg.jitterScaleOverride.value_or_default(),SourceNote{src.active,src.maxJitter});") == 1);
+    CHECK(Count(wrapper, "S().engine.Step(env,probe,correctNow,cfg.jitterScaleOverride.value_or_default(),SourceNote{src.active,src.maxJitter,src.standDown});") == 1);
     // the source fix runs first, and it alone decides whether the correction runs in this evaluate
-    CHECK(Count(wrapper, "constsource::StepResultsrc=RunSourceFix(env,sourceKey,correct);") == 1);
+    // asked only when the key is on or has been on: with the key off all session the controller is never reached (the cost is the early return)
+    CHECK(Count(wrapper, "source::StepResultsrc;") == 1);
+    CHECK(Count(wrapper, "if(sourceKey||g_sourceEverOn.load(std::memory_order_relaxed))src=RunSourceFix(env,sourceKey,correct);") == 1);
     CHECK(Count(wrapper, "constboolcorrectNow=correct&&!src.standDown;") == 1);
-    CHECK(wrapper.find("RunSourceFix(env,sourceKey,correct)") < wrapper.find("engine.Step("));
+    CHECK(wrapper.find("src=RunSourceFix(env,sourceKey,correct)") < wrapper.find("engine.Step("));
     CHECK(Count(wrapper, "controller.Step(env,source::hooks::State(),correct)") == 1);
     // all keys off, and the fix never switched on: the early return is the whole cost
     CHECK(Count(wrapper, "if((!probe&&!correct&&!sourceKey&&!g_sourceEverOn.load(std::memory_order_relaxed))||parameters==nullptr)return;") == 1);

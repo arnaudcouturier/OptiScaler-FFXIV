@@ -108,6 +108,45 @@ void TestStandDownWritesNothingAndKeepsTheRatio()
     CHECK(Near(o.sets[0].value, 0.18) && Near(o.sets[1].value, -0.12)); // 0.3 * 0.6, -0.2 * 0.6
 }
 
+void TestProbeOnStandDownKeepsTheRatio()
+{
+    // the same as above with the PROBE on: a stood-down evaluate must not make the engine forget what it learned (the fall-back takes over at once)
+    FakeEnv e = MakeEnv();
+    Engine engine;
+    std::uint64_t t = 0;
+    int counter = 100;
+    for (int i = 0; i < 12; ++i)
+    {
+        t += 16;
+        Evaluate(e, engine, At(++counter, 1.2f, t, 0.1f + 0.03f * i, -0.2f + 0.02f * i), true, true);
+    }
+    t += 16;
+    Outcome o = Evaluate(e, engine, At(++counter, 1.2f, t, 0.3f, -0.2f), true, true);
+    CHECK(o.sets.size() == 2); // adopted
+    // active: the fix owns the pair; the correction key is on but the engine is told to stand down
+    for (int i = 0; i < 50; ++i)
+    {
+        t += 16;
+        o = Evaluate(e, engine, Divided(0.4f, -0.3f, 0.6f, ++counter, t), true, false, 0.0f, SourceNote { true, 0.9f, true });
+        CHECK(o.sets.empty());
+    }
+    // a drain frame: the fix is no longer active but still owns this evaluate's pair
+    t += 16;
+    o = Evaluate(e, engine, Divided(0.4f, -0.3f, 0.6f, ++counter, t), true, false, 0.0f, SourceNote { false, 0.5f, true });
+    CHECK(o.sets.empty());
+    // the fix is gone: the first evaluate of the correction is scaled at once with the ratio it had
+    t += 16;
+    o = Evaluate(e, engine, At(++counter, 1.2f, t, 0.3f, -0.2f), true, true);
+    CHECK(o.sets.size() == 2 && Near(o.sets[0].value, 0.18) && Near(o.sets[1].value, -0.12));
+    // the correction key itself off (not a stand-down): the state IS dropped, and learning starts again when it is switched back on
+    t += 16;
+    Evaluate(e, engine, At(++counter, 1.2f, t, 0.3f, -0.2f), true, false);
+    t += 16;
+    o = Evaluate(e, engine, At(++counter, 1.2f, t, 0.3f, -0.2f), true, true);
+    CHECK(o.sets.empty()); // learning: the game's pair passes through
+}
+
+
 void TestStandDownWithTheProbeOnlyNeverScales()
 {
     // the probe stays on while the correction stands down: samples are logged, nothing is ever written
@@ -131,6 +170,7 @@ int main()
     TestReadChainBound();
     TestProbeWithTheFixActive();
     TestStandDownWritesNothingAndKeepsTheRatio();
+    TestProbeOnStandDownKeepsTheRatio();
     TestStandDownWithTheProbeOnlyNeverScales();
     return TEST_RESULT("jitter_source_engine");
 }

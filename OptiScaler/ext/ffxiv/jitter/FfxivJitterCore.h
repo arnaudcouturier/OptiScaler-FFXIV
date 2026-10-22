@@ -177,7 +177,7 @@ class Engine
 
     template <class Env> void Run(Env& env, bool probe, bool correct, float manualScale, const SourceNote& source)
     {
-        if (!correct)
+        if (!correct && !source.standDown)
             ForgetCorrectionState();
 
         const GameBuild* build = env.Build();
