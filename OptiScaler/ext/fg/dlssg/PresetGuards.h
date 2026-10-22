@@ -626,6 +626,12 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                         next = static_cast<uint16_t>(next | (1u << dst));
                     return next;
                 }
+                if (op == 0x6B || op == 0x69) // imul r, r/m, imm: the source reaches the destination
+                {
+                    if (holds(n.rm))
+                        next = static_cast<uint16_t>(next | (1u << n.reg));
+                    return next;
+                }
                 if (op == 0xC7 && n.ext == 0) // mov r, imm
                 {
                     if (!narrow)
