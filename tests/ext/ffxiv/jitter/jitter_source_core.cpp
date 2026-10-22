@@ -428,8 +428,8 @@ void TestToldLattice()
             l.Add(Halton(i, 2), Halton(i, 3));
     r = l.Summary();
     CHECK(r.frames == 96 && r.distinct == 32 && !r.overflow);
-    CHECK(r.minX >= -0.5f && r.maxX <= 0.5f && r.maxX > 0.45f && r.minX < 0.0f + 1e-6f + 0.0f);
-    CHECK(std::fabs(r.maxY - Halton(1, 3) * 0 - r.maxY) < 1e-9f);
+    // NVIDIA's 32-phase lattice stays inside +-0.49 px on both axes (the review's figure for the log: max about 0.488)
+    CHECK(r.maxX > 0.45f && r.maxX < 0.49f && r.maxY > 0.45f && r.maxY < 0.49f && r.minX > -0.49f && r.minX < -0.2f && r.minY > -0.49f && r.minY < -0.2f);
     float maxX = -1, maxY = -1, minX = 1, minY = 1;
     for (unsigned i = 1; i <= 32; ++i)
     {
