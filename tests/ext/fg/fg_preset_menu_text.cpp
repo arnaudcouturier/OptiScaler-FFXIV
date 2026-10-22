@@ -51,13 +51,26 @@ void BlockedChange()
     {
         const auto s = DifferenceSentence(kPresetA, kPresetC, Effect::Applied, true, fail);
         CHECK_MSG(Has(s, "Chosen: Preset A, in use: Preset C.") && Has(s, FailText(fail)), "fail %d: %s", static_cast<int>(fail), s.c_str());
-        CHECK(Has(s, "Restart needed: ") && Has(s, "Preset C stays in use until the next start, then the saved choice applies."));
+        CHECK(Has(s, "Restart needed: ") && Has(s, "Preset C stays until the next start; then the value in the ini applies (Save Settings stores the chosen one)."));
     }
     // the wording the maintainer will meet: booted on C, back to Auto when the driver's own answer was never seen
     const auto s = DifferenceSentence(kAuto, kPresetC, Effect::Applied, true, SwitchFail::CannotRestoreAuto);
     CHECK(s ==
           "Chosen: Auto, in use: Preset C. Restart needed: the driver's own answer was not seen at start-up, so Auto cannot be restored while the "
-          "game runs. Preset C stays in use until the next start, then the saved choice applies.");
+          "game runs. Preset C stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).");
+    // M1: the tail follows what the runtime confirmed, never "<Preset> stays in use" for a preset that is unconfirmed or was not applied
+    // (whole sentences for the three effects)
+    CHECK(DifferenceSentence(kAuto, kPresetC, Effect::Unknown, true, SwitchFail::CannotRestoreAuto) ==
+          "Chosen: Auto, in use: Preset C (not confirmed by the runtime yet). Restart needed: the driver's own answer was not seen at start-up, "
+          "so Auto cannot be restored while the game runs. Preset C (not confirmed by the runtime yet) stays until the next start; then the "
+          "value in the ini applies (Save Settings stores the chosen one).");
+    CHECK(DifferenceSentence(kAuto, kPresetC, Effect::NotApplied, true, SwitchFail::CannotRestoreAuto) ==
+          "Chosen: Auto, in use: the runtime's own default (Preset C was not applied). Restart needed: the driver's own answer was not seen at "
+          "start-up, so Auto cannot be restored while the game runs. The runtime's own default (Preset C was not applied) stays until the next "
+          "start; then the value in the ini applies (Save Settings stores the chosen one).");
+    // no reason recorded, a preset chosen over Auto in use: the tail names Auto
+    CHECK(DifferenceSentence(kPresetB, kAuto, Effect::Applied, true, SwitchFail::None) ==
+          "Chosen: Preset B, in use: Auto. Restart needed. Auto stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).");
     // restartNeeded without a recorded reason still says it
     CHECK(Has(DifferenceSentence(kPresetB, kAuto, Effect::Applied, true, SwitchFail::None), "Restart needed"));
 }
@@ -89,6 +102,8 @@ void InUseOnlyForConfirmedOrAuto()
                     if (active == kAuto)
                         continue;
                     CHECK_MSG(!Has(s, "in use: Preset A.") && !Has(s, "in use: Preset B.") && !Has(s, "in use: Preset C."), "%s", s.c_str());
+                    // M1: and the restart tail never calls it "in use" either
+                    CHECK_MSG(!Has(s, "stays in use"), "%s", s.c_str());
                 }
 }
 } // namespace

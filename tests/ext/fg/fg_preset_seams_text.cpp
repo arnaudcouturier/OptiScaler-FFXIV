@@ -225,7 +225,9 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("the runtime is loaded instead of this one, whatever is chosen here.") != std::string::npos);
     const std::string menuText = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetMenuText.h"));
     CHECK(menuText.find("\"Restart needed: \"") != std::string::npos);
-    CHECK(menuText.find("stays in use until the next start, then the saved choice applies.") != std::string::npos);
+    CHECK(menuText.find("out += stays + \" stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).\"") != std::string::npos);
+    CHECK(menuText.find("std::string stays = InUseLabel(active, effect);") != std::string::npos);
+    CHECK(menuText.find("stays in use") == std::string::npos && menuText.find("the saved choice applies") == std::string::npos);
     CHECK(menuText.find("The change is made when frame generation runs next.") != std::string::npos);
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);

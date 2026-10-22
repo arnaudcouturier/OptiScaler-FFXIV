@@ -7,6 +7,7 @@
 #include "ext/fg/dlssg/PresetLog.h"
 #include "ext/fg/dlssg/PresetSwitch.h"
 
+#include <cctype>
 #include <string>
 
 namespace ext::fg::preset
@@ -40,7 +41,12 @@ inline std::string DifferenceSentence(int chosen, int active, Effect effect, boo
             out += std::string("Restart needed: ") + FailText(fail) + ". ";
         else
             out += "Restart needed. ";
-        out += std::string(Name(active)) + " stays in use until the next start, then the saved choice applies.";
+        // The tail says what stays, with the same label as the head: a preset the runtime did not confirm is never "in use" here, and
+        // "Chosen" is the selector (unsaved until Save Settings), so what applies at the next start is the value in the ini.
+        std::string stays = InUseLabel(active, effect);
+        if (!stays.empty())
+            stays[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(stays[0]))); // starts the sentence
+        out += stays + " stays until the next start; then the value in the ini applies (Save Settings stores the chosen one).";
     }
     else
         out += "The change is made when frame generation runs next.";
