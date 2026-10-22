@@ -12,6 +12,7 @@
 
 using ext::nr::FocusConsumer;
 using ext::nr::FocusGate;
+using ext::nr::PauseEpisodes;
 using ext::nr::WindowSample;
 
 namespace
@@ -170,6 +171,64 @@ void LateSwitchOn()
     CHECK(!t.Allows(kPreview, true, now + FocusGate::kPauseAfterMs + 100));
 }
 
+// The episode log of the preview (FocusAllowsPreviewNr writes one line per event): silent while the answer stays the same, one event
+// when it flips each way, again for a second episode. First the bare state, then fed by the tracker the way NrFocus.cpp does.
+void Episodes()
+{
+    using Event = PauseEpisodes::Event;
+    PauseEpisodes e;
+    CHECK(e.Note(true) == Event::None); // focused from the start: nothing to say
+    CHECK(e.Note(true) == Event::None);
+    CHECK(e.Note(false) == Event::Paused);
+    CHECK(e.Note(false) == Event::None); // one line per episode
+    CHECK(e.Note(false) == Event::None);
+    CHECK(e.Note(true) == Event::Resumed);
+    CHECK(e.Note(true) == Event::None);
+    CHECK(e.Note(false) == Event::Paused); // a second episode
+    CHECK(e.Note(true) == Event::Resumed);
+
+    // Through the tracker: the preview is asked every 16 ms; the window leaves and returns twice.
+    FakeWindow w;
+    Tracker t { Sampler { &w } };
+    PauseEpisodes episodes;
+    int paused = 0, resumed = 0;
+    uint64_t pausedAt = 0, resumedAt = 0, now = 0;
+    const auto runUntil = [&](uint64_t until, bool switchOn)
+    {
+        for (; now < until; now += 16)
+        {
+            switch (episodes.Note(t.Allows(kPreview, switchOn, now)))
+            {
+            case Event::Paused: ++paused; pausedAt = now; break;
+            case Event::Resumed: ++resumed; resumedAt = now; break;
+            case Event::None: break;
+            }
+        }
+    };
+    runUntil(500, true);
+    CHECK(paused == 0 && resumed == 0); // focused: silence
+    w.focused = false;
+    const uint64_t lost = now;
+    runUntil(3000, true);
+    CHECK(paused == 1 && resumed == 0);
+    CHECK(pausedAt - lost >= FocusGate::kPauseAfterMs && pausedAt - lost < FocusGate::kPauseAfterMs + 100); // when the gate pauses, not before
+    w.focused = true;
+    const uint64_t back = now;
+    runUntil(4000, true);
+    CHECK(paused == 1 && resumed == 1);
+    CHECK(resumedAt - back >= FocusGate::kResumeAfterMs);
+    w.focused = false;
+    runUntil(7000, true);
+    w.focused = true;
+    runUntil(8000, true);
+    CHECK(paused == 2 && resumed == 2); // the second episode speaks again
+
+    // The switch off (preview NR not wanted, or DisableOnFocusLoss off) while the window is away: nothing to report.
+    w.focused = false;
+    runUntil(12000, false);
+    CHECK(paused == 2 && resumed == 2);
+}
+
 std::string ReadFile(const std::string& path)
 {
     std::ifstream in(path, std::ios::binary);
@@ -193,9 +252,22 @@ void Wiring(const std::string& repo)
     CHECK(source.find("#include \"ext/nr/NrFocusTracker.h\"") != std::string::npos);
     CHECK(source.find("Tracker().Allows(FocusConsumer::Scene, switchOn, GetTickCount64())") != std::string::npos);
     CHECK(source.find("Tracker().Allows(FocusConsumer::Preview, switchOn, GetTickCount64())") != std::string::npos);
-    // one episode, one line, each way
+    // one episode, one line, each way: the flip is PauseEpisodes::Note (tested above); the line follows the event it names
     CHECK(source.find("LOG_INFO(\"CharaView NR: paused, window not focused\");") != std::string::npos);
     CHECK(source.find("LOG_INFO(\"CharaView NR: resumed\");") != std::string::npos);
+    std::string compact; // white space removed: the pins below are about order, not layout
+    for (const char c : source)
+        if (c != ' ' && c != '\t' && c != '\n')
+            compact += c;
+    CHECK(compact.find("staticPauseEpisodesepisodes;") != std::string::npos);
+    CHECK(compact.find("switch(episodes.Note(allowed))") != std::string::npos);
+    CHECK(source.find("case PauseEpisodes::Event::Paused:") != std::string::npos);
+    CHECK(source.find("case PauseEpisodes::Event::Resumed:") != std::string::npos);
+    const size_t casePaused = source.find("case PauseEpisodes::Event::Paused:");
+    const size_t caseResumed = source.find("case PauseEpisodes::Event::Resumed:");
+    const size_t linePaused = source.find("LOG_INFO(\"CharaView NR: paused, window not focused\");");
+    const size_t lineResumed = source.find("LOG_INFO(\"CharaView NR: resumed\");");
+    CHECK(casePaused < linePaused && linePaused < caseResumed && caseResumed < lineResumed); // each line sits under the event it names
 
     // the preview run: the question comes after the attempt is counted (a paused run still counts as an attempt, so the stale
     // result is not shown for it) and before the availability, the stream table and every GPU step
@@ -242,6 +314,7 @@ int main(int argc, char** argv)
     BothOn();
     SharedSample();
     LateSwitchOn();
+    Episodes();
     Wiring(argc > 1 ? argv[1] : ".");
 
     if (failures == 0)

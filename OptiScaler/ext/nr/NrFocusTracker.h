@@ -59,4 +59,31 @@ template <class Sampler> class FocusTracker
     uint64_t _sampledAt = 0;
     bool _haveSample = false;
 };
+
+// One log line per pause episode, each way: fed with a consumer's answer on every call, it reports the call on which the answer flipped
+// (allowed -> paused, paused -> allowed) and nothing while it stays the same. Pure so the flip is unit-tested (the log line itself is
+// written by NrFocus.cpp). The caller serialises the calls.
+class PauseEpisodes
+{
+  public:
+    enum class Event
+    {
+        None,
+        Paused,
+        Resumed,
+    };
+
+    Event Note(bool allowed)
+    {
+        if (allowed == _paused)
+        {
+            _paused = !allowed;
+            return _paused ? Event::Paused : Event::Resumed;
+        }
+        return Event::None;
+    }
+
+  private:
+    bool _paused = false;
+};
 } // namespace ext::nr

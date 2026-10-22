@@ -105,17 +105,20 @@ bool FocusAllowsNr(bool switchOn)
 
 bool FocusAllowsPreviewNr(bool switchOn)
 {
-    static bool paused = false; // under the mutex: one log line per episode, each way
+    static PauseEpisodes episodes; // under the mutex: one log line per episode, each way
 
     std::lock_guard lock(TrackerMutex());
     const bool allowed = Tracker().Allows(FocusConsumer::Preview, switchOn, GetTickCount64());
-    if (allowed == paused)
+    switch (episodes.Note(allowed))
     {
-        paused = !allowed;
-        if (paused)
-            LOG_INFO("CharaView NR: paused, window not focused");
-        else
-            LOG_INFO("CharaView NR: resumed");
+    case PauseEpisodes::Event::Paused:
+        LOG_INFO("CharaView NR: paused, window not focused");
+        break;
+    case PauseEpisodes::Event::Resumed:
+        LOG_INFO("CharaView NR: resumed");
+        break;
+    case PauseEpisodes::Event::None:
+        break;
     }
     return allowed;
 }
