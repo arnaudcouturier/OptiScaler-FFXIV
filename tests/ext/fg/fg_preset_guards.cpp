@@ -22,7 +22,7 @@ constexpr uint32_t kTextVa = 0x1000, kTextSize = 0x3000;
 constexpr uint32_t kDataVa = 0x4000, kDataSize = 0x1000; // not executable: the shared configuration global, a cookie, an import
 constexpr uint32_t kPdataVa = 0x5000, kPdataSize = 0x1000;
 
-constexpr uint32_t kReader = 0x1100, kReadFn = 0x1200, kCreate = 0x1400, kDefaults = 0x2800, kCopy = 0x2900;
+constexpr uint32_t kReader = 0x1100, kReadFn = 0x1200, kCreate = 0x1400, kDefaults = 0x2800, kCopy = 0x2900, kOther = 0x2A00; // kOther: an unrelated function (.pdata entry only when a test asks for it)
 constexpr uint32_t kGlobal = 0x4100, kCookie = 0x4200, kImport = 0x4300;
 
 // where the entry rdx (the context argument) is kept, and where it is reloaded from
@@ -118,7 +118,7 @@ struct Spec
     bool branchBeforeSave = false;     // test eax,eax / jz far, before the save
     bool callIntoFunction = false;     // call whose target is inside create (the middle of the region)
     bool callIntoTail = false;         // call whose target is inside create, after the read call (not in the region)
-    int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
+    int leavingJump = 0;               // jmp out of create: 1 to a place that is no function start, 2 to the defaults function, 3 to the read function, 4 to an unrelated function (a tail call), 5 into the middle of it, 6 to the copy function, 7 to the cached-settings reader
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
     int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89)
@@ -635,7 +635,19 @@ Fake Build(const Spec& s)
     if (s.leavingJump != 0)
     {
         c.b({ 0xE9 });
-        c.rel32(s.leavingJump == 1 ? kDefaults + 8 : (s.leavingJump == 2 ? kDefaults : kReadFn)); // inside another function / its start / the read function
+        uint32_t target = kReadFn;
+        switch (s.leavingJump)
+        {
+        case 1: target = kDefaults + 8; break; // inside another function
+        case 2: target = kDefaults; break;     // the start of the defaults function
+        case 3: target = kReadFn; break;       // the read function
+        case 4: target = kOther; break;        // the start of an unrelated function (a tail call)
+        case 5: target = kOther + 4; break;    // the middle of it
+        case 6: target = kCopy; break;         // the configuration copy function
+        case 7: target = kReader; break;       // the cached-settings reader
+        default: break;
+        }
+        c.rel32(target);
     }
     if (s.jumpToSave)
     {
@@ -677,6 +689,11 @@ Fake Build(const Spec& s)
     std::vector<Fn> fns = { { kReader, kReader + 0x100 }, { kReadFn, kReadFn + 0x100 }, { kCreate, f.createEnd }, { kDefaults, kDefaults + 0x40 } };
     if (s.copyInsideOtherFunction)
         fns.push_back({ kCopy - 4, kCopy + 0x40 });
+    if (s.leavingJump == 4 || s.leavingJump == 5)
+    {
+        im[kOther] = 0xC3; // ret: an unrelated function
+        fns.push_back({ kOther, kOther + 0x40 });
+    }
     uint32_t p = kPdataVa;
     for (const auto& fn : fns)
     {
@@ -1083,8 +1100,13 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.callIntoFunction = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the function (slot %d)", slot); }
         { Spec s = base(); s.callIntoTail = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the tail of the function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
-        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the start of another function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the start of the defaults function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 3; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the settings read function itself (slot %d)", slot); }
+        // fix round 3 (L1): only a jump that can reach the read call without the reload is refused; a tail call to an unrelated function never returns here
+        { Spec s = base(); s.leavingJump = 4; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of an unrelated function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.leavingJump = 5; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump into the middle of an unrelated function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 6; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the configuration copy function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 7; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the cached-settings reader (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; s.chainedOdd = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a chained fragment with an odd number of unwind codes (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
         { Spec s = base(); s.chainedPointer = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained through a pointer (slot %d)", slot); }

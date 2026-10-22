@@ -414,15 +414,16 @@ struct ContextFacts
 //     taken, no copy of rsp/rbp as a value, no push/pop or other move of rsp/rbp);
 //  4. control flow: no jump from outside [save, reload] lands in it, no jump lands anywhere in (reload, call] and none lands on the
 //     entry run, every direct jump target inside create is an instruction start, there is no indirect jump, no call into create
-//     itself, no jump out of create at all (the three real builds have none; a call out returns), and no cold fragment of the
-//     exception table is chained to create: the only way to the call is through the save and then the reload.
+//     itself, a jump out of create only as a tail call to the start of another function (the real builds have none; a call out
+//     returns; Locate also refuses a tail call to the read function, the cached-settings reader, defaults or copy), and no cold
+//     fragment of the exception table is chained to create: the only way to the call is through the save and then the reload.
 //  A frame slot is also refused when a store in the region goes through a register that may hold a frame address ("marked": a
 //  frame lea, its copies, two-register arithmetic / cmov / xchg with a marked source, arithmetic on it; a mark is dropped only by a
 //  full-width overwrite or by a call for the volatile registers; computed by a forward may-analysis over the whole region, entry run
 //  included, with merges at jump targets and a fixed point for loops), when an index register is marked, and in every slot case for
 //  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored. NOT tracked: a
 //  frame address stored to memory and read back, an xmm carrier; hand-made code only.
-inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
+inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<Function>& fns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
 {
     using namespace x64;
     const int iCall = InsnIndex(insns, readCall);
@@ -526,8 +527,10 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
             continue;
         if (b.target < create || b.target >= createEnd)
         {
-            // leaving create: a call comes back; a jump out would reach the read function, the copy or the defaults without the reload
-            if (b.flow != Flow::Call)
+            // leaving create: a call comes back. A jump out never does: it is allowed only as a tail call to the START of another
+            // function (it cannot enter create again, and Locate refuses the starts that lead to the read call: the read function, the
+            // cached-settings reader, defaults and copy); a jump to anywhere else could reach them without the reload
+            if (b.flow != Flow::Call && (b.target < 0 || StartOf(fns, static_cast<uint32_t>(b.target)) == nullptr))
             {
                 failAt = b.at;
                 return Why::CreateContext;
@@ -892,7 +895,7 @@ inline Located Locate(const ImageView& view)
     ContextFacts ctx;
     {
         uint32_t failAt = 0;
-        const Why proof = ProveContext(insns, create, frame, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
+        const Why proof = ProveContext(insns, fns, create, frame, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
         if (proof != Why::Ok)
         {
             fail.failAt = failAt;
@@ -953,6 +956,18 @@ inline Located Locate(const ImageView& view)
     // defaults is a normal function; copy is a leaf (no exception-table entry) but must not sit inside another function
     if (StartOf(fns, defaults) == nullptr || InsideFunction(fns, copy))
         return no(Why::NotFunctionStart);
+    // a tail call out of create (allowed by the proof of the context) must not go to a function that leads to the read call
+    for (const x64::Insn& b : insns)
+    {
+        if ((b.flow != x64::Flow::Jump && b.flow != x64::Flow::CondJump) || (b.target >= create && b.target < createEnd))
+            continue;
+        const uint32_t t = static_cast<uint32_t>(b.target);
+        if (t == readerTarget || t == readFn || t == defaults || t == copy)
+        {
+            fail.failAt = b.at;
+            return no(Why::CreateContext);
+        }
+    }
 
     Located ok;
     ok.why = Why::Ok;
