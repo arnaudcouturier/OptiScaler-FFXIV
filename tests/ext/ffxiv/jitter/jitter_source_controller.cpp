@@ -253,25 +253,23 @@ void TestNoStandDownLineWithoutCorrection()
     CHECK(r.env.Count("Jitter source: active") == 1 && r.env.Count("stands down") == 0);
 }
 
-void TestPairingMissPassesThrough()
+// M1 (changed deliberately: the first version passed every miss through with the engine stood down). A miss while active no longer leaves the
+// generator-divided raw value untold: it tells the generator record's own value when one exists for that raw pair; see TestMiss* below. The
+// counting of the misses is unchanged.
+void TestPairingMissIsCounted()
 {
     Rig r;
     r.Frame();
     r.Step();
-    const int before = r.env.Writes();
-    // a frame whose camera sample was never recorded: no write, the pair stays the game's own, the engine still stands down
+    // a frame whose camera sample was never recorded: counted as a miss (the generator record exists, so it is told, see TestMissTellsTheRecordedValue)
     r.Frame(true, true, false);
-    const float rx = r.env.floats[Param::JitterX], ry = r.env.floats[Param::JitterY];
     StepResult res = r.Step();
     CHECK(res.active && res.standDown);
-    CHECK(r.env.Writes() == before);
-    CHECK(r.env.floats[Param::JitterX] == rx && r.env.floats[Param::JitterY] == ry);
     CHECK(r.controller.Totals().unpaired == 1);
     // a stale sample (older than a second) is a miss too
     r.Frame();
     r.env.now += kMaxSampleAgeMs + 10;
     r.Frame(true, true, false);
-    r.env.now -= 0;
     res = r.Step();
     CHECK(r.controller.Totals().unpaired == 2);
     // sizes that do not match the sample
@@ -285,8 +283,9 @@ void TestPairingMissPassesThrough()
     r.env.uints[Param::SubrectWidth] = 1920;
     r.Frame();
     r.env.floats.erase(Param::JitterX);
-    r.Step();
+    res = r.Step();
     CHECK(r.controller.Totals().unpaired == 4);
+    CHECK(!res.standDown); // nothing to tell and nothing for the engine to scale: it is not stood down
 }
 
 void TestUnpairedRunFallsBack()
@@ -397,9 +396,14 @@ void TestGeneratorIdle()
     r.env.now += kRecentMs + 50;
     r.state.NoteLeftAlone(PlanWhy::StrengthInvalid);
     const int before = r.env.Writes();
-    const StepResult res = r.Step();
-    CHECK(!res.active && !res.standDown && r.env.Writes() == before);
+    StepResult res = r.Step();
+    // changed deliberately (M2): the block still holds the pair the fix itself told, so the engine is kept out of it (it used to scale the told pair once)
+    CHECK(!res.active && res.standDown && r.env.Writes() == before);
     CHECK(r.env.Count("Jitter source: inactive (the game's generator is not being normalised") == 1);
+    // a block the game refreshed is the old behaviour's: the engine owns it
+    r.Frame(false, true, true);
+    res = r.Step();
+    CHECK(!res.active && !res.standDown && r.env.Writes() == before);
     CHECK(r.state.Enabled()); // the detours stay in place, ready for the generator to come back
     // it comes back
     r.Frame();
@@ -524,17 +528,179 @@ void TestSetFailureRestoresX()
     CHECK(r.env.floats[Param::JitterX] == original); // X was put back
 }
 
-void TestNoGuessWritten()
+// A frame whose raw pair is small enough for the engine to scale (<= kMaxReportedPixels) whatever the Halton index.
+void SmallRawFrame(Rig& r, bool generated, bool observed)
 {
-    // a pair that matches nothing is never "corrected" by arithmetic: raw * strength is not written
+    do
+    {
+        r.Frame(true, generated, observed);
+    } while (std::fabs(r.rawX) > 0.5f || std::fabs(r.rawY) > 0.5f);
+}
+
+// M1, the record path. Changed deliberately from TestNoGuessWritten, which pinned "a miss writes nothing": a pair that matches no camera
+// sample is still never "corrected" by ARITHMETIC (raw * strength), but when the generator recorded the frame (matched by its raw pair) the
+// recorded Halton value, which the verification proves equals the drawn offset, is what NGX is told.
+void TestMissTellsTheRecordedValue()
+{
     Rig r;
     r.Frame();
     r.Step();
-    r.Frame(true, true, false);
-    const float rx = r.env.floats[Param::JitterX];
-    const int writes = r.env.Writes();
+    SmallRawFrame(r, true, false);
+    const StepResult res = r.Step();
+    CHECK(res.active && res.standDown);
+    CHECK(std::fabs(r.env.floats[Param::JitterX] - r.drawnX) < 1e-5f && std::fabs(r.env.floats[Param::JitterY] - r.drawnY) < 1e-5f);
+    // the value written is the generator's own expected value, not raw * strength computed here
+    const std::optional<Generated> rec = r.state.FindGenerated(r.rawX, r.rawY);
+    CHECK(rec.has_value());
+    if (rec)
+        CHECK(r.env.floats[Param::JitterX] == rec->expectedX && r.env.floats[Param::JitterY] == rec->expectedY);
+    CHECK(r.controller.Totals().unpaired == 1 && r.controller.Totals().toldFromRecord == 1);
+    // X then Y
+    const Op& wx = r.env.ops[r.env.ops.size() - 2];
+    const Op& wy = r.env.ops[r.env.ops.size() - 1];
+    CHECK(wx.set && wx.param == Param::JitterX && wy.set && wy.param == Param::JitterY);
+}
+
+// M1, no record: nothing sensible can be told. A small raw value is the old behaviour's (a frame drawn before the fix was switched on, the
+// character preview): not stood down, the engine scales it as today.
+void TestMissWithoutRecordIsNotStoodDown()
+{
+    Rig r;
+    r.Frame();
     r.Step();
-    CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == rx);
+    r.Frame(true, false, false);
+    r.env.floats[Param::JitterX] = 0.4f;
+    r.env.floats[Param::JitterY] = -0.2f;
+    const int writes = r.env.Writes();
+    const StepResult res = r.Step();
+    CHECK(res.active && !res.standDown);
+    CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == 0.4f && r.env.floats[Param::JitterY] == -0.2f);
+    CHECK(r.controller.Totals().unpaired == 1 && r.controller.Totals().toldFromRecord == 0 && !r.controller.FellBack());
+    // a record that is older than a second is no record (the same raw pair comes round again every cycle)
+    Rig q;
+    q.Frame();
+    q.Step();
+    SmallRawFrame(q, true, false);
+    q.env.now += kMaxSampleAgeMs + 10;
+    {
+        // the generator keeps running (another frame, recorded now), but the record of THIS block's raw pair is a second old
+        Generated g2;
+        g2.outX = 0.111f;
+        g2.outY = 0.222f;
+        g2.expectedX = 0.0666f;
+        g2.expectedY = 0.1332f;
+        g2.strength = 0.6f;
+        g2.phases = 32;
+        g2.renderW = 1920;
+        g2.renderH = 1080;
+        g2.outW = 3840;
+        g2.outH = 2160;
+        g2.normalized = true;
+        g2.timeMs = q.env.now;
+        q.state.RecordGenerated(g2, PlanWhy::Normalize);
+    }
+    const float rx = q.env.floats[Param::JitterX];
+    const int qWrites = q.env.Writes();
+    const StepResult qres = q.Step();
+    CHECK(qres.active && !qres.standDown && q.env.Writes() == qWrites && q.env.floats[Param::JitterX] == rx);
+    // a record that was not normalised (the generator left that call alone: the frame was drawn the old way) is not told either
+    Rig n;
+    n.Frame();
+    n.Step();
+    n.Frame(false, true, false);
+    n.env.floats[Param::JitterX] = 0.4f;
+    n.env.floats[Param::JitterY] = -0.2f;
+    Generated g;
+    g.outX = 0.4f;
+    g.outY = -0.2f;
+    g.expectedX = 0.123f;
+    g.expectedY = 0.456f;
+    g.normalized = false;
+    g.timeMs = n.env.now;
+    n.state.RecordGenerated(g, PlanWhy::Normalize);
+    const int nWrites = n.env.Writes();
+    const StepResult nres = n.Step();
+    CHECK(nres.active && !nres.standDown && n.env.Writes() == nWrites);
+}
+
+// M1, "never half of each": a generator-divided value the engine cannot scale (above its 0.55 px limit) that no record explains cannot be told
+// sensibly: the fix falls back at once (both detours off together) instead of passing up to 0.83 px through.
+void TestUntellableFallsBackAtOnce()
+{
+    Rig r;
+    r.Frame();
+    r.Step();
+    r.Frame(true, false, false);
+    r.env.floats[Param::JitterX] = 0.8f;
+    r.env.floats[Param::JitterY] = 0.1f;
+    const StepResult res = r.Step();
+    CHECK(r.controller.FellBack() && !r.state.Enabled());
+    CHECK(!res.active && !res.standDown);
+    CHECK(r.env.Count("Jitter source: fell back to the old behaviour") == 1 && r.env.Logged("cannot be told"));
+    // the Y axis alone counts too
+    Rig q;
+    q.Frame();
+    q.Step();
+    q.Frame(true, false, false);
+    q.env.floats[Param::JitterX] = 0.1f;
+    q.env.floats[Param::JitterY] = -0.7f;
+    q.Step();
+    CHECK(q.controller.FellBack());
+    // a large value WITH a record is simply told
+    Rig t;
+    t.Frame();
+    t.Step();
+    do
+    {
+        t.Frame(true, true, false);
+    } while (std::fabs(t.rawX) <= 0.6f && std::fabs(t.rawY) <= 0.6f);
+    const StepResult tres = t.Step();
+    CHECK(tres.active && tres.standDown && !t.controller.FellBack());
+    CHECK(std::fabs(t.env.floats[Param::JitterX] - t.drawnX) < 1e-5f);
+}
+
+// M2: a block that still holds the pair this controller itself wrote is already told: no pairing attempt, no miss counted, no write, and the
+// engine stays out (it must not scale the told pair once).
+void TestHeldPairIsNotAMiss()
+{
+    Rig r;
+    r.Frame();
+    r.Step();
+    const int writes = r.env.Writes();
+    const float tx = r.env.floats[Param::JitterX], ty = r.env.floats[Param::JitterY];
+    // the game re-evaluates with a block it did not refresh, for far more evaluates than the unpaired limit
+    for (unsigned i = 0; i < 4 * kUnpairedLimit; ++i)
+    {
+        const StepResult res = r.Step();
+        CHECK(res.active && res.standDown);
+    }
+    CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == tx && r.env.floats[Param::JitterY] == ty);
+    CHECK(r.controller.Totals().unpaired == 0 && !r.controller.FellBack());
+    // a stall long enough for the generator to look idle: the fix is inactive, the block still holds the told pair, the engine is kept out
+    r.env.now += kRecentMs + 50;
+    r.state.NoteLeftAlone(PlanWhy::StrengthInvalid);
+    StepResult res = r.Step();
+    CHECK(!res.active && res.standDown && r.env.Writes() == writes);
+    // the game refreshes the block with a pair of the old behaviour: the engine is back in charge
+    r.Frame(false, true, true);
+    res = r.Step();
+    CHECK(!res.active && !res.standDown && r.env.Writes() == writes);
+    res = r.Step();
+    CHECK(!res.standDown); // the memory of the told pair is gone with the first different block
+    // the key goes off while the block holds the told pair: kept out for that evaluate, then free
+    Rig k;
+    k.Frame();
+    k.Step();
+    k.env.key = false;
+    CHECK(k.Step().standDown);
+    k.Frame(false, true, true);
+    CHECK(!k.Step().standDown);
+    k.env.now += kDrainMs + 10;
+    k.Step();
+    const int clocks = k.env.clockReads;
+    k.Step();
+    k.Step();
+    CHECK(k.env.clockReads == clocks); // once the block differs the key-off path is as cheap as before
 }
 
 // M0: the one diagnostic line about the objects the generator's call site is reached with. Written from the evaluate thread (never from a
@@ -656,7 +822,7 @@ int main()
     TestKeyOffCost();
     TestActiveWritesDrawnOffset();
     TestNoStandDownLineWithoutCorrection();
-    TestPairingMissPassesThrough();
+    TestPairingMissIsCounted();
     TestUnpairedRunFallsBack();
     TestDriftFallsBack();
     TestNotMatchedAndGuards();
@@ -668,7 +834,10 @@ int main()
     TestUnverifiedFrameIsStillTold();
     TestOutputSizeDisagreement();
     TestSetFailureRestoresX();
-    TestNoGuessWritten();
+    TestMissTellsTheRecordedValue();
+    TestMissWithoutRecordIsNotStoodDown();
+    TestUntellableFallsBackAtOnce();
+    TestHeldPairIsNotAMiss();
     TestSeenObjectsLine();
     TestVerifyLineCadence();
     TestLogBudgets();

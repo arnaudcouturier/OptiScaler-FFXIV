@@ -253,13 +253,14 @@ inline std::optional<Match> PairSample(const Ring<Observed, kRingSize>& ring, fl
 
 inline constexpr float kVerifyTolerancePx = 0.005f;    // projected offset against the generator's own Halton value, per axis
 inline constexpr unsigned kOutsideToleranceLimit = 90; // consecutive checked frames outside the tolerance that make the fix fall back
-inline constexpr unsigned kUnpairedLimit = 600;        // consecutive evaluates with no matching camera sample that make the fix fall back
+inline constexpr unsigned kUnpairedLimit = 90;         // consecutive evaluates with no matching camera sample that make the fix fall back (a miss is never harmless)
 
 enum class Fallback : std::uint8_t
 {
     None,
     OutsideTolerance, // what was drawn is not what the generator produced: the strength or the game's formula is not the one we know
-    Unpaired          // the evaluates stopped matching any camera sample
+    Unpaired,         // the evaluates stopped matching any camera sample
+    Untellable        // a generator-divided value no record explains and the engine cannot scale: nothing sensible can be told (at once)
 };
 
 // Counts what the boundary saw. `Checked` = a normalised frame whose drawn offset was compared with the generator's value.
@@ -269,6 +270,8 @@ class Watchdog
     struct Totals
     {
         std::uint64_t checked = 0, outside = 0, unverified = 0, unpaired = 0;
+        std::uint64_t toldFromRecord = 0; // of the unpaired evaluates, those told the generator record's own value
+        std::uint64_t untellable = 0;
         float maxDeviation = 0.0f;
     };
 
@@ -297,8 +300,19 @@ class Watchdog
         ++_totals.unpaired;
         ++_unpairedRun;
     }
+    // An unpaired evaluate that was told the generator record's value (counted in `unpaired` as well: a pairing that is broken for good must
+    // still fall back, however well the record path hides it).
+    void ToldFromRecord() { ++_totals.toldFromRecord; }
+    // An unpaired evaluate whose value cannot be told or scaled: the verdict is a fall-back at once.
+    void Untellable()
+    {
+        ++_totals.untellable;
+        _untellable = true;
+    }
     Fallback Verdict() const
     {
+        if (_untellable)
+            return Fallback::Untellable;
         if (_outsideRun >= kOutsideToleranceLimit)
             return Fallback::OutsideTolerance;
         if (_unpairedRun >= kUnpairedLimit)
@@ -311,6 +325,7 @@ class Watchdog
   private:
     Totals _totals;
     unsigned _outsideRun = 0, _unpairedRun = 0;
+    bool _untellable = false;
 };
 
 inline float Deviation(const Pair& drawn, const Generated& g)
@@ -387,6 +402,7 @@ constexpr const char* FallbackText(Fallback f)
     {
     case Fallback::OutsideTolerance: return "the drawn offset differs from the generator's Halton value for the same frame";
     case Fallback::Unpaired: return "no camera sample matched the NGX jitter of the evaluate";
+    case Fallback::Untellable: return "a jitter value divided by the generator hook cannot be told or scaled (no generator record, above the 0.55 px the scaling accepts)";
     case Fallback::None: break;
     }
     return "none";
@@ -561,8 +577,9 @@ inline std::string FormatStandDown()
 inline std::string FormatVerified(const Watchdog::Totals& t)
 {
     return std::format("Jitter source: verified {} frames, drawn offset equals the generator's value (max deviation {:.5f} px, outside {:.3f} px: {}), "
-                       "{} frames without a generator record, {} evaluates without a camera sample (passed through)",
-                       t.checked, t.maxDeviation, kVerifyTolerancePx, t.outside, t.unverified, t.unpaired);
+                       "{} frames without a generator record, {} evaluates without a camera sample ({} told the generator's recorded value, {} passed through)",
+                       t.checked, t.maxDeviation, kVerifyTolerancePx, t.outside, t.unverified, t.unpaired, t.toldFromRecord,
+                       t.unpaired >= t.toldFromRecord ? t.unpaired - t.toldFromRecord : 0);
 }
 
 inline std::string FormatFellBack(Fallback f, const Watchdog::Totals& t)

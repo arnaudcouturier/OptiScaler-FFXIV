@@ -8,7 +8,11 @@
 //   - the fix is ACTIVE only when the decision table says so (FfxivJitterSourceCore.h: key, executable, guards, hooks, no fall-back, generator
 //     normalising). Active: the Jitter.Offset pair of THIS evaluate is replaced by the projected offset of the camera sample it belongs to
 //     (X then Y, the raw pair read before the write), and the calibrate-and-scale engine stands down for this evaluate (`standDown`).
-//   - a pairing miss passes the NGX pair through unchanged and is counted; it never writes a guess.
+//   - a pairing miss is counted. It never writes a guess (no arithmetic on the pair): when the generator recorded the frame (matched by its raw
+//     pair, younger than a second, normalised) the record's own Halton value is told; otherwise nothing is written and the engine is NOT
+//     stood down (it scales as today); a generator-divided value above the engine's 0.55 px limit that no record explains cannot be told
+//     sensibly and makes the fix fall back at once.
+//   - a block that still holds the pair this controller wrote is already told: no pairing, no miss counted, no write, the engine stays out.
 //   - frames already drawn on the full lattice are told what was drawn even when the fix has just been switched off (kDrainMs), so a frame is
 //     never half of each.
 //   - verification: for every paired frame whose generator record is known, the drawn offset is compared with the generator's own value; a
@@ -108,12 +112,13 @@ template <class Env> class Controller
 
         StepResult result;
         result.active = decision.active;
-        result.standDown = decision.active;
         if (decision.active)
             result.maxJitter = MaxObjectJitter(status.strength);
 
-        if (TellDrawnOffset(env, state, now, decision.active))
-            result.standDown = true;
+        // The engine is kept out only of an evaluate whose pair the fix owns: told (written or held). A miss with nothing sensible to tell leaves
+        // the pair to the engine, which scales it as today.
+        const Told told = TellDrawnOffset(env, state, now, decision.active);
+        result.standDown = told == Told::Written || told == Told::Held;
 
         if (decision.active)
         {
@@ -144,7 +149,7 @@ template <class Env> class Controller
     // the full lattice for kDrainMs.
     StepResult KeyOff(Env& env, SharedState& state)
     {
-        if (!_engaged && _drainUntilMs == 0 && !_wasActive && !_fellBack)
+        if (!_engaged && _drainUntilMs == 0 && !_wasActive && !_fellBack && !_lastTold.valid)
             return {};
         const std::uint64_t now = env.NowMs();
         if (_wasActive && _logs.transitions.Take())
@@ -155,14 +160,12 @@ template <class Env> class Controller
         _watchdog.Reset();
         SwitchOff(state, now);
         StepResult result;
-        if (_drainUntilMs == 0)
-            return result;
-        if (now >= _drainUntilMs)
-        {
+        if (_drainUntilMs != 0 && now >= _drainUntilMs)
             _drainUntilMs = 0;
+        if (_drainUntilMs == 0 && !_lastTold.valid)
             return result;
-        }
-        result.standDown = TellDrawnOffset(env, state, now, false);
+        const Told told = TellDrawnOffset(env, state, now, false);
+        result.standDown = told == Told::Written || told == Told::Held;
         return result;
     }
 
@@ -177,30 +180,50 @@ template <class Env> class Controller
         }
     }
 
-    // The told-offset write. Returns true when the pair was replaced. The NGX pair is read BEFORE the write; a pairing miss writes nothing.
-    // Not active: only a frame the generator normalised (drawn on the full lattice) inside the drain window is told, anything else is the
-    // old behaviour's.
-    bool TellDrawnOffset(Env& env, SharedState& state, std::uint64_t now, bool active)
+    // What the told-offset step did with this evaluate's pair.
+    enum class Told : std::uint8_t
     {
-        if (!active && now >= _drainUntilMs)
-            return false;
+        Nothing,    // nothing written, nothing held (not active and no frame to drain; or active and nothing sensible to tell)
+        Written,    // the pair was replaced
+        Held,       // the block still holds the pair this controller wrote: already told
+        Untellable  // active, a miss, no record, a value the engine cannot scale: the fix falls back
+    };
+
+    struct LastTold
+    {
+        bool valid = false;
+        float x = 0.0f, y = 0.0f;
+    };
+
+    // The told-offset write. The NGX pair is read BEFORE the write.
+    // Not active: only a frame the generator normalised (drawn on the full lattice) inside the drain window is told, anything else is the
+    // old behaviour's. A block that still holds the pair this controller wrote is "held" in every state: it is not a miss, it is never
+    // written again and the engine must not scale it (it would take the told pair for a game pair).
+    Told TellDrawnOffset(Env& env, SharedState& state, std::uint64_t now, bool active)
+    {
+        const bool holding = _lastTold.valid;
+        const bool draining = !active && now < _drainUntilMs;
+        if (!active && !draining && !holding)
+            return Told::Nothing;
         const std::optional<float> ngxX = env.GetFloat(Param::JitterX);
         const std::optional<float> ngxY = env.GetFloat(Param::JitterY);
         const RenderSize size = ResolveRenderSize(env.GetUInt(Param::SubrectWidth), env.GetUInt(Param::SubrectHeight), env.GetUInt(Param::Width),
                                                   env.GetUInt(Param::Height));
         std::optional<Match> match;
-        if (ngxX && ngxY && size.width != 0 && size.height != 0)
+        if ((active || draining) && ngxX && ngxY && size.width != 0 && size.height != 0)
             match = state.Pair(*ngxX, *ngxY, size.width, size.height, now);
-        if (!match)
+        if (!match && holding && ngxX && ngxY)
         {
-            if (active)
-                _watchdog.Unpaired();
-            return false;
+            if (*ngxX == _lastTold.x && *ngxY == _lastTold.y)
+                return Told::Held;
+            _lastTold.valid = false; // the game refreshed the block: the memory of our pair is gone
         }
+        if (!match)
+            return active ? TellMiss(env, state, now, ngxX, ngxY) : Told::Nothing;
         const std::optional<Generated> generated = state.FindGenerated(*ngxX, *ngxY);
         const bool drawnFull = generated && generated->normalized;
         if (!active && !drawnFull)
-            return false;
+            return Told::Nothing;
         if (active)
         {
             if (drawnFull)
@@ -208,23 +231,54 @@ template <class Env> class Controller
             else
                 _watchdog.Unverified();
         }
-        env.SetFloat(Param::JitterX, match->pixels.x);
+        WritePair(env, match->pixels.x, match->pixels.y, *ngxX);
+        return Told::Written;
+    }
+
+    // An active evaluate whose pair matched no camera sample. Counted. Told the generator record's value when there is one (never arithmetic on
+    // the pair); otherwise nothing is written: a small value is the old behaviour's and the engine scales it as today, a divided value the
+    // engine cannot scale has no sensible telling and the fix falls back.
+    Told TellMiss(Env& env, SharedState& state, std::uint64_t now, const std::optional<float>& ngxX, const std::optional<float>& ngxY)
+    {
+        _watchdog.Unpaired();
+        if (!ngxX || !ngxY)
+            return Told::Nothing;
+        const std::optional<Generated> record = state.FindGenerated(*ngxX, *ngxY);
+        const bool fresh = record && now >= record->timeMs && now - record->timeMs < kMaxSampleAgeMs;
+        if (record && record->normalized && fresh)
+        {
+            _watchdog.ToldFromRecord();
+            WritePair(env, record->expectedX, record->expectedY, *ngxX);
+            return Told::Written;
+        }
+        if (std::fabs(*ngxX) > kMaxReportedPixels || std::fabs(*ngxY) > kMaxReportedPixels)
+        {
+            _watchdog.Untellable();
+            return Told::Untellable;
+        }
+        return Told::Nothing;
+    }
+
+    // X then Y; the pair read before is `originalX`. A failed second write puts the game's X back. Remembers the pair as "ours".
+    void WritePair(Env& env, float x, float y, float originalX)
+    {
+        env.SetFloat(Param::JitterX, x);
         try
         {
-            env.SetFloat(Param::JitterY, match->pixels.y);
+            env.SetFloat(Param::JitterY, y);
         }
         catch (...)
         {
             try
             {
-                env.SetFloat(Param::JitterX, *ngxX); // a half-written pair is worse than the game's own
+                env.SetFloat(Param::JitterX, originalX); // a half-written pair is worse than the game's own
             }
             catch (...)
             {
             }
             throw;
         }
-        return true;
+        _lastTold = { true, x, y };
     }
 
     void Report(Env& env, std::uint64_t now, const Decision& decision, const GeneratorStatus& status, bool correctionKeyOn)
@@ -332,6 +386,7 @@ template <class Env> class Controller
     std::uint64_t _pendingSince = 0;
     bool _pendingShown = false;
     std::uint64_t _drainUntilMs = 0;
+    LastTold _lastTold;
     std::uint32_t _loggedPhases = 0;
     std::uint64_t _nextVerifyLogMs = 0;
     std::uint32_t _verifyLines = 0;

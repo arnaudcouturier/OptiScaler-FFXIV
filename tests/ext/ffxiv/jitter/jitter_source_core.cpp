@@ -327,6 +327,23 @@ void TestWatchdog()
     CHECK(u.Verdict() == Fallback::Unpaired && u.totals().unpaired == 2 * kUnpairedLimit - 1);
     u.Reset();
     CHECK(u.Verdict() == Fallback::None && u.totals().unpaired == 0);
+    // the limit is short: a miss is no longer harmless (it used to tell the divided raw value for up to 600 evaluates)
+    CHECK(kUnpairedLimit >= 60 && kUnpairedLimit <= 120);
+    // told from the generator's record: counted, but still a miss for the run (a pairing that is broken for good must fall back)
+    Watchdog rec;
+    for (unsigned i = 0; i < kUnpairedLimit; ++i)
+    {
+        rec.Unpaired();
+        rec.ToldFromRecord();
+    }
+    CHECK(rec.Verdict() == Fallback::Unpaired && rec.totals().toldFromRecord == kUnpairedLimit && rec.totals().unpaired == kUnpairedLimit);
+    // a value that cannot be told at all falls back at once, whatever the run
+    Watchdog cannot;
+    CHECK(cannot.Verdict() == Fallback::None);
+    cannot.Untellable();
+    CHECK(cannot.Verdict() == Fallback::Untellable && cannot.totals().untellable == 1);
+    cannot.Reset();
+    CHECK(cannot.Verdict() == Fallback::None);
     // Deviation is the larger axis error
     Generated g;
     g.expectedX = 0.3f;
@@ -413,11 +430,16 @@ void TestText()
     t.unverified = 3;
     t.unpaired = 2;
     const std::string v = FormatVerified(t);
+    t.toldFromRecord = 1;
+    const std::string v2 = FormatVerified(t);
+    CHECK(Has(v2, "2 evaluates without a camera sample (1 told the generator's recorded value, 1 passed through)"));
+    t.toldFromRecord = 0;
     CHECK(Has(v, "verified 600 frames") && Has(v, "max deviation 0.00012 px") && Has(v, "outside 0.005 px: 0") && Has(v, "3 frames without a generator record") &&
           Has(v, "2 evaluates without a camera sample"));
     const std::string f = FormatFellBack(Fallback::OutsideTolerance, t);
     CHECK(Has(f, "fell back to the old behaviour") && Has(f, "disabled together") && Has(f, "differs from the generator's Halton value"));
     CHECK(Has(FormatFellBack(Fallback::Unpaired, t), "no camera sample matched"));
+    CHECK(Has(FormatFellBack(Fallback::Untellable, t), "cannot be told"));
     CHECK(Has(FormatSizeDisagreement(3840, 2160, 2560, 1440), "3840x2160") && Has(FormatSizeDisagreement(3840, 2160, 2560, 1440), "2560x1440"));
 }
 
