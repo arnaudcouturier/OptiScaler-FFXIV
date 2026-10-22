@@ -72,7 +72,9 @@ template <class Env> class Controller
 {
   public:
     static constexpr std::uint64_t kFirstVerifyLogAt = 120;    // checked frames before the first verification line
-    static constexpr std::uint64_t kVerifyLogEveryMs = 30000;
+    static constexpr std::uint64_t kVerifyLogEveryMs = 30000;    // for the first kVerifyFastLines lines, then kVerifySlowEveryMs
+    static constexpr std::uint64_t kVerifySlowEveryMs = 300000;
+    static constexpr std::uint32_t kVerifyFastLines = 5;
     static constexpr std::uint64_t kInactiveDelayMs = 2000;    // a transitional reason (hooks not yet in, generator not yet running) is logged after this
 
     StepResult Step(Env& env, SharedState& state, bool correctionKeyOn)
@@ -250,7 +252,8 @@ template <class Env> class Controller
             const Watchdog::Totals& t = _watchdog.totals();
             if (t.checked >= kFirstVerifyLogAt && now >= _nextVerifyLogMs && _logs.verify.Take())
             {
-                _nextVerifyLogMs = now + kVerifyLogEveryMs;
+                ++_verifyLines;
+                _nextVerifyLogMs = now + (_verifyLines <= kVerifyFastLines ? kVerifyLogEveryMs : kVerifySlowEveryMs);
                 env.Log(FormatVerified(t));
             }
             return;
@@ -304,5 +307,6 @@ template <class Env> class Controller
     std::uint64_t _drainUntilMs = 0;
     std::uint32_t _loggedPhases = 0;
     std::uint64_t _nextVerifyLogMs = 0;
+    std::uint32_t _verifyLines = 0;
 };
 } // namespace ext::ffxiv::jitter::source

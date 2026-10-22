@@ -537,6 +537,42 @@ void TestNoGuessWritten()
     CHECK(r.env.Writes() == writes && r.env.floats[Param::JitterX] == rx);
 }
 
+// The verification line: the first after 120 checked frames, then every 30 s for five lines, then every five minutes (a session of hours stays
+// readable, and the 20-line budget covers the first hour and a half).
+void TestVerifyLineCadence()
+{
+    Rig r;
+    for (int i = 0; i < 150; ++i)
+    {
+        r.Frame();
+        r.Step();
+    }
+    CHECK(r.env.Count("Jitter source: verified") == 1);
+    // one frame per second for ten minutes: 30 s apart for five lines, then every five minutes
+    int lines = r.env.Count("Jitter source: verified");
+    std::uint64_t lastAt = r.env.now;
+    std::vector<std::uint64_t> gaps;
+    for (int s = 0; s < 3600; ++s)
+    {
+        r.env.now += 1000;
+        r.Frame();
+        r.env.now -= 8; // Frame() adds 8 ms itself
+        r.Step();
+        const int now = r.env.Count("Jitter source: verified");
+        if (now != lines)
+        {
+            gaps.push_back(r.env.now - lastAt);
+            lastAt = r.env.now;
+            lines = now;
+        }
+    }
+    CHECK(gaps.size() >= 8);
+    for (size_t i = 0; i < gaps.size() && i < 4; ++i)
+        CHECK(gaps[i] >= 30000 && gaps[i] < 32000);
+    for (size_t i = 5; i < gaps.size(); ++i)
+        CHECK(gaps[i] >= 300000 && gaps[i] < 302000);
+}
+
 void TestLogBudgets()
 {
     Rig r;
@@ -573,6 +609,7 @@ int main()
     TestOutputSizeDisagreement();
     TestSetFailureRestoresX();
     TestNoGuessWritten();
+    TestVerifyLineCadence();
     TestLogBudgets();
     return TEST_RESULT("jitter_source_controller");
 }
