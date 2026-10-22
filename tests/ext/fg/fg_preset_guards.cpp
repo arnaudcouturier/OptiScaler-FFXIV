@@ -60,8 +60,10 @@ enum class Clobber
     KillMovImm, KillMovImmC7, KillMov8B, KillMov89, KillMov32, KillXorZero, KillSubZero, KillMovzxReg, KillMovzxMem, KillMovsxReg, KillMovsxdMem, KillLea,
     KillMerge,
     // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
-    MarkXchgRexB, MarkXchg32RexB, NopNoMark, MarkImul6B, MarkImul69, NoMarkImul6B,
+    MarkXchgRexB, MarkXchg32RexB, NoMarkXchgRexB, NoMarkXchgShort, MarkImul6B, MarkImul69, NoMarkImul6B,
     MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
+    // fix round 4 (LOW-8): the accepting twins (an unmarked source marks nothing) and the other two shift opcodes
+    MarkShldCl, MarkShrdImm, NoMarkShld, NoMarkShrd, NoMarkMovsxd, NoMarkImul69,
     // fix round 4 (LOW-1): the one-operand mul / imul / div / idiv (F7 /4../7) read rax and a register or memory operand and write rax:rdx
     MarkMul, MarkImul1, MarkMulHigh, MarkDivRem, MarkIdivRem, MarkDivMem, MarkDivDividend, NoMarkMul,
     StoreViaR12OfRbp, StoreViaR12OfRsp, // mov [r12-0A0h],r13 / mov [r12+60h],r13: the slot, if r12 holds rbp / rsp
@@ -124,7 +126,9 @@ struct Spec
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
     int lea12IndexBeforeSave = 0;      // after xor ebx,ebx, before the save: 1 lea r12,[rbx+rbp] (rbp as the INDEX: a frame address), 2 lea r12,[rbx+rcx] (control, no frame register)
-    int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89)
+    int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89); 5 xor r12,rsp (NOT a copy: the stack-cookie idiom)
+    bool kill12AfterCopy = false;      // xor r12d,r12d right after that copy (a full-width kill before the save)
+    bool leavingCond = false;          // the leaving jump is a jz rel32 instead of a jmp rel32
     bool chainedOdd = false;           // the chained fragment's unwind info has an odd number of codes
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
     bool hiddenCopySetup = false;      // the second copy site's "mov rdx,[rip+g]" is only bytes inside an immediate
@@ -332,7 +336,9 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
         break;                                                                                                                                 // test r8,r8 / jz L1 / xor eax,eax / jmp L2 / L1: mov eax,1 / L2: store
     case Clobber::MarkXchgRexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x49, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                      // xchg rax,r8 (REX.W+B 90) / mov [r8-70h],r12
     case Clobber::MarkXchg32RexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x41, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                    // xchg r8d,eax (32-bit form)
-    case Clobber::NopNoMark: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                               // nop / mov [r8-70h],r12: r8 never held a frame address
+    // an exchange of two registers that both hold nothing marks nothing: a mutant without the "(cur & gprWrites) != 0" test of the xchg rule marks r8 / rcx here
+    case Clobber::NoMarkXchgRexB: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0x49, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                    // lea rcx / xchg rax,r8 (neither marked) / mov [r8-70h],r12
+    case Clobber::NoMarkXchgShort: c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                                   // lea rdx / xchg rcx,rax (neither marked) / mov [rcx-70h],r12
     case Clobber::MarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC8, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                              // imul rcx,rax,1 / mov [rcx-70h],r12
     case Clobber::MarkImul69: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x69, 0xC8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x61, 0x90 }); break;            // imul rcx,rax,1 (imm32)
     case Clobber::NoMarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC9, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                           // imul rcx,rcx,1: rcx never held the address
@@ -343,6 +349,13 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::NoMarkCmpxchg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x61, 0x90 }); break;            // rdx and rcx never held the address
     case Clobber::MarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;          // shld rcx,rax,1 into a zeroed rcx
     case Clobber::MarkShrdCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rax,cl
+    case Clobber::MarkShldCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA5, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shld rcx,rax,cl
+    case Clobber::MarkShrdImm: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAC, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;        // shrd rcx,rax,1
+    // the same four rules with an unmarked source (rdx): the destination must stay unmarked, the store through it is accepted
+    case Clobber::NoMarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xD1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;        // shld rcx,rdx,1
+    case Clobber::NoMarkShrd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xD1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rdx,cl
+    case Clobber::NoMarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xCA, 0x4C, 0x89, 0x61, 0x90 }); break;                              // movsxd rcx,edx
+    case Clobber::NoMarkImul69: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x69, 0xC9, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x61, 0x90 }); break;      // imul rcx,rcx,1 (imm32)
     case Clobber::MarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                                // movsxd rcx,eax
     // fix round 4 (LOW-1): lea <reg>,[rbp-30h], then a one-operand multiply or divide moves the address into rax or rdx; the store hits the slot
     case Clobber::MarkMul: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // lea rcx / mov eax,1 / mul rcx (rax = address) / mov [rax-70h],r12
@@ -459,8 +472,11 @@ Fake Build(const Spec& s)
     case 2: c.b({ 0x4C, 0x8B, 0xE4 }); break; // mov r12,rsp
     case 3: c.b({ 0x49, 0x89, 0xEC }); break; // mov r12,rbp (89 form)
     case 4: c.b({ 0x49, 0x89, 0xE4 }); break; // mov r12,rsp (89 form)
+    case 5: c.b({ 0x4C, 0x33, 0xE4 }); break; // xor r12,rsp: names rsp as a value like the stack cookie's "xor rax,rsp", but copies nothing
     default: break;
     }
+    if (s.kill12AfterCopy)
+        c.b({ 0x45, 0x33, 0xE4 }); // xor r12d,r12d
     if (s.rdxWrittenBeforeSave)
         c.b({ 0x33, 0xD2 }); // xor edx,edx
     if (s.pushBeforeSave)
@@ -659,7 +675,10 @@ Fake Build(const Spec& s)
     }
     if (s.leavingJump != 0)
     {
-        c.b({ 0xE9 });
+        if (s.leavingCond)
+            c.b({ 0x0F, 0x84 }); // jz rel32
+        else
+            c.b({ 0xE9 });
         uint32_t target = kReadFn;
         switch (s.leavingJump)
         {
@@ -1049,7 +1068,7 @@ void RegionRules()
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
                        Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB,
-                       Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl,
+                       Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl, Clobber::MarkShldCl, Clobber::MarkShrdImm,
                        Clobber::MarkMovsxd, Clobber::MarkMul, Clobber::MarkImul1, Clobber::MarkMulHigh, Clobber::MarkDivRem, Clobber::MarkIdivRem,
                        Clobber::MarkDivMem, Clobber::MarkDivDividend })
     {
@@ -1085,12 +1104,18 @@ void RegionRules()
         other.clobber = Clobber::StoreViaR12OfRbp;
         CHECK_MSG(Scan(other).why == Why::Ok, "a lea of two ordinary registers: %s", WhyText(Scan(other).why));
     }
-    // a plain nop is not an exchange: r8 never held the address. `49 90` is xchg rax,r8 (refused above); `41 90` is the 32-bit xchg r8d,eax,
-    // which truncates both registers to 32-bit numbers: accepted on purpose (the pin says what it does; 32-bit mov / 87 / 91-97 still carry)
+    // `49 90` is xchg rax,r8 (refused above); `41 90` is the 32-bit xchg r8d,eax, which zero-extends both registers: accepted on purpose,
+    // the one deliberate inconsistency with the other 32-bit carriers (32-bit mov / 87 / 91-97 / movsxd still carry); the pin says what it does
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MarkXchg32RexB).why == Why::Ok);
     CHECK(scan(Spec {}, Where::R13, Clobber::MarkXchg32RexB).why == Why::Ok);
-    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NopNoMark).why == Why::Ok);
-    CHECK(scan(Spec {}, Where::R13, Clobber::NopNoMark).why == Why::Ok);
+    // an exchange of two registers that hold nothing marks nothing (fix round 4, replaces NopNoMark, which could only fail if the DECODER gave a
+    // plain 90 a register write): a mutant that drops the "one of them is marked" test of the xchg rule refuses these
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkXchgRexB).why == Why::Ok);
+    CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkXchgRexB).why == Why::Ok);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkXchgShort).why == Why::Ok);
+    // the accepting twins of the shld / shrd / movsxd / imul-69 rules: with an unmarked source the destination stays unmarked
+    for (Clobber k : { Clobber::NoMarkShld, Clobber::NoMarkShrd, Clobber::NoMarkMovsxd, Clobber::NoMarkImul69 })
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "unmarked source, image %d: %s", static_cast<int>(k), WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkImul6B).why == Why::Ok); // a three-operand imul of an unmarked register marks nothing
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkCmpxchg).why == Why::Ok); // a cmpxchg between unmarked registers marks nothing
     CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkCmpxchg).why == Why::Ok);
@@ -1124,6 +1149,22 @@ void RegionRules()
         Spec noCopy = Shape31016();
         noCopy.clobber = store;
         CHECK_MSG(Scan(noCopy).why == Why::Ok, "the same store without the copy (copy %d): %s", copy, WhyText(Scan(noCopy).why));
+        // fix round 4 (LOW-8): a full-width kill between the copy and the save drops the mark, so the store goes through (regression pin: it
+        // has no mutant of its own, the kill itself is pinned by the Kill* images; this one pins the order copy -> kill -> store)
+        Spec killed = Shape31016();
+        killed.copy12BeforeSave = copy;
+        killed.kill12AfterCopy = true;
+        killed.clobber = store;
+        CHECK_MSG(Scan(killed).why == Why::Ok, "the copy is overwritten before the save (copy %d): %s", copy, WhyText(Scan(killed).why));
+    }
+    // fix round 4 (LOW-8): the mark of "mov r,rsp / rbp" must not be widened to the ALU branch. Every build has the stack cookie's
+    // "xor rax,rsp" in its entry run, but rax is reloaded and a call clears it before anything stores through it, so that image cannot show a
+    // widened rule. This one can: "xor r12,rsp" in the entry run, then a store through r12 (callee-saved, survives) must still be accepted.
+    {
+        Spec s = Shape31016();
+        s.copy12BeforeSave = 5;
+        s.clobber = Clobber::StoreViaR12OfRsp;
+        CHECK_MSG(Scan(s).why == Why::Ok, "xor r12,rsp is not a copy of rsp: %s", WhyText(Scan(s).why));
     }
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
     CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
@@ -1157,6 +1198,10 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.leavingJump = 5; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump into the middle of an unrelated function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 6; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the configuration copy function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 7; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the cached-settings reader (slot %d)", slot); }
+        // fix round 4 (LOW-8): a conditional leaving jump follows the same rule as a jmp
+        { Spec s = base(); s.leavingJump = 2; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a conditional jump to the defaults function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 4; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::Ok, "a conditional tail call to an unrelated function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.leavingJump = 5; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a conditional jump into the middle of an unrelated function (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; s.chainedOdd = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a chained fragment with an odd number of unwind codes (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
         { Spec s = base(); s.chainedPointer = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained through a pointer (slot %d)", slot); }
