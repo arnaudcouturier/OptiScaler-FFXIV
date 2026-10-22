@@ -143,6 +143,7 @@ template <class Env> class Controller
     bool FellBack() const { return _fellBack; }
     bool WasActive() const { return _wasActive; }
     const Watchdog::Totals& Totals() const { return _watchdog.totals(); }
+    ToldLattice::Result Lattice() const { return _lattice.Summary(); }
 
   private:
     // The key is off. If the fix was ever switched on: say so once, turn both detours off, and keep telling frames that were already drawn on
@@ -279,6 +280,7 @@ template <class Env> class Controller
             throw;
         }
         _lastTold = { true, x, y };
+        _lattice.Add(x, y);
     }
 
     void Report(Env& env, std::uint64_t now, const Decision& decision, const GeneratorStatus& status, bool correctionKeyOn)
@@ -310,7 +312,8 @@ template <class Env> class Controller
             {
                 ++_verifyLines;
                 _nextVerifyLogMs = now + (_verifyLines <= kVerifyFastLines ? kVerifyLogEveryMs : kVerifySlowEveryMs);
-                env.Log(FormatVerified(t));
+                env.Log(FormatVerified(t, _lattice.Summary(), status.phases));
+                _lattice.Reset(); // the next line shows its own window
             }
             return;
         }
@@ -387,6 +390,7 @@ template <class Env> class Controller
     bool _pendingShown = false;
     std::uint64_t _drainUntilMs = 0;
     LastTold _lastTold;
+    ToldLattice _lattice;
     std::uint32_t _loggedPhases = 0;
     std::uint64_t _nextVerifyLogMs = 0;
     std::uint32_t _verifyLines = 0;

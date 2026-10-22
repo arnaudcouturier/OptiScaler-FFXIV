@@ -417,6 +417,60 @@ void TestSharedState()
     CHECK(!st.Pair(0.5f, -0.25f, 1920, 1080, 1200) && !st.FindGenerated(0.5f, -0.25f) && !st.Status(1200).recent);
 }
 
+// M4: the told offsets over a window: extremes and the number of distinct pairs (the lattice the log shows).
+void TestToldLattice()
+{
+    ToldLattice l;
+    ToldLattice::Result r = l.Summary();
+    CHECK(r.frames == 0 && r.distinct == 0 && !r.overflow);
+    for (int round = 0; round < 3; ++round)
+        for (unsigned i = 1; i <= 32; ++i)
+            l.Add(Halton(i, 2), Halton(i, 3));
+    r = l.Summary();
+    CHECK(r.frames == 96 && r.distinct == 32 && !r.overflow);
+    CHECK(r.minX >= -0.5f && r.maxX <= 0.5f && r.maxX > 0.45f && r.minX < 0.0f + 1e-6f + 0.0f);
+    CHECK(std::fabs(r.maxY - Halton(1, 3) * 0 - r.maxY) < 1e-9f);
+    float maxX = -1, maxY = -1, minX = 1, minY = 1;
+    for (unsigned i = 1; i <= 32; ++i)
+    {
+        maxX = std::max(maxX, Halton(i, 2));
+        minX = std::min(minX, Halton(i, 2));
+        maxY = std::max(maxY, Halton(i, 3));
+        minY = std::min(minY, Halton(i, 3));
+    }
+    CHECK(r.maxX == maxX && r.minX == minX && r.maxY == maxY && r.minY == minY);
+    // the same pair again never adds; a pair that differs in one axis does; 0 and -0 are the same pair
+    l.Add(Halton(5, 2), Halton(5, 3));
+    CHECK(l.Summary().distinct == 32);
+    l.Add(Halton(5, 2), Halton(5, 3) + 0.01f);
+    CHECK(l.Summary().distinct == 33);
+    ToldLattice z;
+    z.Add(0.0f, 0.0f);
+    z.Add(-0.0f, -0.0f);
+    CHECK(z.Summary().distinct == 1);
+    // bounded: an unbounded pattern (every pair new) sets the overflow marker and the table stops at its size
+    ToldLattice u;
+    for (unsigned i = 1; i <= 3 * kMaxLatticePairs; ++i)
+        u.Add(Halton(i, 2), Halton(i, 3));
+    r = u.Summary();
+    CHECK(r.overflow && r.distinct == kMaxLatticePairs && r.frames == 3 * kMaxLatticePairs);
+    u.Reset();
+    r = u.Summary();
+    CHECK(r.frames == 0 && r.distinct == 0 && !r.overflow);
+    // the text
+    ToldLattice t;
+    for (unsigned i = 1; i <= 32; ++i)
+        t.Add(Halton(i, 2), Halton(i, 3));
+    const std::string good = FormatLattice(t.Summary(), 32);
+    CHECK(Has(good, "32 distinct pairs") && Has(good, "phase count 32") && Has(good, "x ") && Has(good, "y ") && !Has(good, "more than"));
+    const std::string over = FormatLattice(u.Summary(), 32);
+    CHECK(Has(over, "no told frames"));
+    ToldLattice w;
+    for (unsigned i = 1; i <= 3 * kMaxLatticePairs; ++i)
+        w.Add(Halton(i, 2), Halton(i, 3));
+    CHECK(Has(FormatLattice(w.Summary(), 32), "more than 128 distinct pairs"));
+}
+
 void TestText()
 {
     CHECK(FormatActive(0.6f, 32, 1920, 1080, 3840, 2160) == "Jitter source: active (strength 0.600, phases 32 for render 1920x1080 output 3840x2160)");
@@ -424,16 +478,23 @@ void TestText()
     CHECK(FormatInactive(Reason::KeyOff) == "Jitter source: inactive (key off)");
     CHECK(Has(FormatPhasesChanged(32, 18, 0.6f, 2560, 1440, 3840, 2160), "phases 32 -> 18"));
     CHECK(Has(FormatStandDown(), "jitter correction stands down"));
+    ToldLattice empty;
     Watchdog::Totals t;
     t.checked = 600;
     t.maxDeviation = 0.00012f;
     t.unverified = 3;
     t.unpaired = 2;
-    const std::string v = FormatVerified(t);
+    const std::string v = FormatVerified(t, empty.Summary(), 32);
     t.toldFromRecord = 1;
-    const std::string v2 = FormatVerified(t);
+    const std::string v2 = FormatVerified(t, empty.Summary(), 32);
     CHECK(Has(v2, "2 evaluates without a camera sample (1 told the generator's recorded value, 1 passed through)"));
     t.toldFromRecord = 0;
+    // L5: "equals" only when nothing was outside the tolerance
+    CHECK(Has(v, "drawn offset equals the generator's value") && !Has(v, "differs"));
+    t.outside = 4;
+    const std::string vo = FormatVerified(t, empty.Summary(), 32);
+    CHECK(!Has(vo, "equals") && Has(vo, "drawn offset differs from the generator's value in 4 frames") && Has(vo, "outside 0.005 px: 4"));
+    t.outside = 0;
     CHECK(Has(v, "verified 600 frames") && Has(v, "max deviation 0.00012 px") && Has(v, "outside 0.005 px: 0") && Has(v, "3 frames without a generator record") &&
           Has(v, "2 evaluates without a camera sample"));
     const std::string f = FormatFellBack(Fallback::OutsideTolerance, t);
@@ -497,6 +558,7 @@ int main()
     TestWatchdog();
     TestDecision();
     TestSharedState();
+    TestToldLattice();
     TestText();
     TestChain();
     return TEST_RESULT("jitter_source_core");

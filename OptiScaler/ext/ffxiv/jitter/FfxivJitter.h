@@ -15,7 +15,8 @@
 //   the correction stands down for the evaluate (it never scales on top). Any failed guard, a failed verification or the key off passes the game's
 //   values through, and the correction works exactly as without it.
 //
-// With all keys off the cost is three loads of a config flag and a branch. Never throws.
+// With all keys off, and the source fix never switched on, the cost is three loads of a config flag, one relaxed atomic load (whether the source
+// fix was ever on) and a branch. Never throws.
 
 struct NVSDK_NGX_Parameter;
 

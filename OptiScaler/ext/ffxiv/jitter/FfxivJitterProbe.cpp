@@ -163,7 +163,7 @@ void OnUpscaleBoundary(NVSDK_NGX_Parameter* parameters) noexcept
 {
     try
     {
-        // All keys off, and the source fix never switched on: this is all it costs (the core repeats the key gate, which a test pins, so it never
+        // All keys off, and the source fix never switched on: this is all it costs, three config flag loads and one relaxed atomic load (the core repeats the key gate, which a test pins, so it never
         // runs on its own either).
         const auto& cfg = ext::Cfg().ffxiv;
         const bool probe = cfg.jitterProbe.value_or_default();

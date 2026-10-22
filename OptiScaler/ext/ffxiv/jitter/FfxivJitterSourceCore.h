@@ -328,6 +328,60 @@ class Watchdog
     bool _untellable = false;
 };
 
+// The pairs NGX was told, over a window: their extremes and how many distinct pairs there were. At Performance that is at most 32 pairs with
+// |x|, |y| up to about 0.488 (NVIDIA's lattice), whatever the length of the window; an unbounded pattern (the game's own phase count) fills the
+// table and sets the overflow marker. This checks amplitude and period without trusting the strength decode.
+inline constexpr std::size_t kMaxLatticePairs = 128;
+
+class ToldLattice
+{
+  public:
+    struct Result
+    {
+        std::uint64_t frames = 0;
+        std::size_t distinct = 0;  // at most kMaxLatticePairs
+        bool overflow = false;     // more distinct pairs than the table holds
+        float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
+    };
+
+    void Add(float x, float y)
+    {
+        if (_frames == 0)
+            _r.minX = _r.maxX = x, _r.minY = _r.maxY = y;
+        else
+        {
+            _r.minX = std::min(_r.minX, x);
+            _r.maxX = std::max(_r.maxX, x);
+            _r.minY = std::min(_r.minY, y);
+            _r.maxY = std::max(_r.maxY, y);
+        }
+        ++_frames;
+        for (std::size_t i = 0; i < _count; ++i)
+            if (_pairs[i].x == x && _pairs[i].y == y) // value equality: 0 and -0 are one pair
+                return;
+        if (_count < kMaxLatticePairs)
+            _pairs[_count++] = { x, y };
+        else
+            _overflow = true;
+    }
+    Result Summary() const
+    {
+        Result r = _r;
+        r.frames = _frames;
+        r.distinct = _count;
+        r.overflow = _overflow;
+        return r;
+    }
+    void Reset() { *this = ToldLattice {}; }
+
+  private:
+    Result _r;
+    std::uint64_t _frames = 0;
+    std::array<Pair, kMaxLatticePairs> _pairs {};
+    std::size_t _count = 0;
+    bool _overflow = false;
+};
+
 inline float Deviation(const Pair& drawn, const Generated& g)
 {
     return std::max(std::fabs(drawn.x - g.expectedX), std::fabs(drawn.y - g.expectedY));
@@ -574,12 +628,24 @@ inline std::string FormatStandDown()
     return "Jitter source: jitter correction stands down while the source fix is active (NGX is told the drawn offset, no scaling)";
 }
 
-inline std::string FormatVerified(const Watchdog::Totals& t)
+// The told offsets over the window since the previous verification line.
+inline std::string FormatLattice(const ToldLattice::Result& l, std::uint32_t phases)
 {
-    return std::format("Jitter source: verified {} frames, drawn offset equals the generator's value (max deviation {:.5f} px, outside {:.3f} px: {}), "
-                       "{} frames without a generator record, {} evaluates without a camera sample ({} told the generator's recorded value, {} passed through)",
-                       t.checked, t.maxDeviation, kVerifyTolerancePx, t.outside, t.unverified, t.unpaired, t.toldFromRecord,
-                       t.unpaired >= t.toldFromRecord ? t.unpaired - t.toldFromRecord : 0);
+    if (l.frames == 0)
+        return "no told frames";
+    return std::format("told offsets over {} frames: x {:.3f}..{:.3f} px, y {:.3f}..{:.3f} px, {} distinct pairs (phase count {})", l.frames, l.minX,
+                       l.maxX, l.minY, l.maxY, l.overflow ? std::format("more than {}", l.distinct) : std::format("{}", l.distinct), phases);
+}
+
+inline std::string FormatVerified(const Watchdog::Totals& t, const ToldLattice::Result& lattice, std::uint32_t phases)
+{
+    // "equals" only when nothing was outside the tolerance
+    const std::string drawn = t.outside == 0 ? std::string("drawn offset equals the generator's value")
+                                             : std::format("drawn offset differs from the generator's value in {} frames", t.outside);
+    return std::format("Jitter source: verified {} frames, {} (max deviation {:.5f} px, outside {:.3f} px: {}), "
+                       "{} frames without a generator record, {} evaluates without a camera sample ({} told the generator's recorded value, {} passed through); {}",
+                       t.checked, drawn, t.maxDeviation, kVerifyTolerancePx, t.outside, t.unverified, t.unpaired, t.toldFromRecord,
+                       t.unpaired >= t.toldFromRecord ? t.unpaired - t.toldFromRecord : 0, FormatLattice(lattice, phases));
 }
 
 inline std::string FormatFellBack(Fallback f, const Watchdog::Totals& t)

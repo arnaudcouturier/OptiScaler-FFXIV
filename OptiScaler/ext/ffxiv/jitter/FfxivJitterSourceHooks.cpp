@@ -190,10 +190,14 @@ Installer& TheInstaller()
 }
 } // namespace
 
+// L8: heap-allocated and never destroyed (the idiom of ext/reshade/ReShadeAddon.cpp and ext/window/WindowModule.cpp). The detours stay in the
+// game for the whole session and a game thread can still be inside one when the process exits: a function-local static would have destroyed its
+// mutex by then. There is no reachable shutdown path to switch the hooks off (DLL_PROCESS_DETACH is in the upstream dllmain.cpp, which unhooks
+// nothing by design and runs under the loader lock), so the state simply outlives every caller.
 SharedState& State()
 {
-    static SharedState state;
-    return state;
+    static SharedState* state = new SharedState;
+    return *state;
 }
 
 HooksView View()

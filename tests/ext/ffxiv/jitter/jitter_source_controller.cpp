@@ -809,6 +809,55 @@ void TestVerifyLineCadence()
         CHECK(gaps[i] >= 300000 && gaps[i] < 302000);
 }
 
+// M4 part 1: the verification line carries the told offsets' extremes and the number of distinct pairs since the previous line, so the log itself
+// shows the lattice: at most the phase count (32 at Performance) however long the window, and the overflow marker for an unbounded pattern.
+void TestVerifyLineShowsTheLattice()
+{
+    Rig r;
+    for (int i = 0; i < 150; ++i)
+    {
+        r.Frame();
+        r.Step();
+    }
+    CHECK(r.env.Count("Jitter source: verified") == 1);
+    CHECK(r.env.Logged("32 distinct pairs") && r.env.Logged("phase count 32") && !r.env.Logged("more than"));
+    // the window restarts after each line: the next one (30 s later) has its own frames and the same 32 pairs
+    for (int s = 0; s < 40; ++s)
+    {
+        r.env.now += 1000;
+        r.Frame();
+        r.env.now -= 8;
+        r.Step();
+    }
+    CHECK(r.env.Count("Jitter source: verified") == 2);
+    CHECK(r.env.Count("32 distinct pairs") == 2);
+    // an unbounded pattern (the game's own phase count) is visible as the overflow marker
+    Rig u;
+    u.phases = 100000;
+    for (int i = 0; i < 150; ++i)
+    {
+        u.Frame();
+        u.Step();
+    }
+    CHECK(u.env.Logged("120 distinct pairs") && !u.env.Logged("more than")); // the first line covers 120 frames: all different, none over the table
+    for (int i = 0; i < 300; ++i)
+    {
+        u.Frame();
+        u.Step();
+    }
+    u.env.now += 31000;
+    u.Frame();
+    u.Step();
+    CHECK(u.env.Logged("more than 128 distinct pairs"));
+    // pairs told from a record count too; a held block is not a new told frame
+    Rig h;
+    h.Frame();
+    h.Step();
+    for (int i = 0; i < 10; ++i)
+        h.Step();
+    CHECK(h.controller.Lattice().frames == 1);
+}
+
 void TestLogBudgets()
 {
     Rig r;
@@ -850,6 +899,7 @@ int main()
     TestHeldPairIsNotAMiss();
     TestSeenObjectsLine();
     TestVerifyLineCadence();
+    TestVerifyLineShowsTheLattice();
     TestLogBudgets();
     return TEST_RESULT("jitter_source_controller");
 }
