@@ -239,6 +239,23 @@ std::string ReadFile(const std::string& path)
     return text;
 }
 
+// The text without // comments (the slices pinned below hold no string literal with "//"), so comment length never matters to a pin.
+std::string WithoutLineComments(const std::string& text)
+{
+    std::string out;
+    for (size_t i = 0; i < text.size();)
+    {
+        if (text.compare(i, 2, "//") == 0)
+        {
+            while (i < text.size() && text[i] != '\n')
+                ++i;
+        }
+        else
+            out += text[i++];
+    }
+    return out;
+}
+
 // The wiring: NrFocus.cpp feeds the tracker, the scene entry is the same as before, the preview run asks before it does any work.
 void Wiring(const std::string& repo)
 {
@@ -271,8 +288,10 @@ void Wiring(const std::string& repo)
 
     // the preview run: the question comes after the attempt is counted (a paused run still counts as an attempt, so the stale
     // result is not shown for it) and before the availability, the stream table and every GPU step
-    const std::string chara = ReadFile(repo + "/OptiScaler/ext/ffxiv/chara/CharaNr.cpp");
-    CHECK(!chara.empty());
+    const std::string charaText = ReadFile(repo + "/OptiScaler/ext/ffxiv/chara/CharaNr.cpp");
+    CHECK(!charaText.empty());
+    // Comments out: the pins below are about the order of statements, so a longer or shorter comment can never move or trip one.
+    const std::string chara = WithoutLineComments(charaText);
     const size_t entry = chara.find("static RunOutcome RunCoreSteps(");
     CHECK(entry != std::string::npos);
     const size_t attempts = chara.find("++m.table.At(known).attempts;", entry);
@@ -281,14 +300,21 @@ void Wiring(const std::string& repo)
     CHECK(attempts != std::string::npos && ask != std::string::npos && refresh != std::string::npos);
     CHECK(attempts < ask && ask < refresh);
     // ... and it ends in its own outcome, Paused, not in the generic Skipped: a pause is not counted as a render that kept the image
-    // (CountsAsFallback) and is not logged under the "no stream or list was free" cause text; the focus gate's episode lines report it
+    // (CountsAsFallback) and is not logged under the "no stream or list was free" cause text; the focus gate's episode lines report it.
+    // Protected property: the pause block leaves RunCoreSteps with that outcome before any work is done, i.e. the first `return` after
+    // the question is the Paused one, and it comes before the first work statement (ObserveRuntime, then Refresh and the stream table).
     const size_t paused = chara.find("return RunOutcome::Paused;", ask);
-    CHECK(paused != std::string::npos && paused - ask < 400);
+    CHECK(paused != std::string::npos);
+    CHECK(chara.find("return", ask) == paused); // no other exit, and no other outcome, in the pause block
+    const size_t firstWork = chara.find("ObserveRuntime();", entry);
+    CHECK(firstWork != std::string::npos && paused < firstWork);
     // a paused run keeps the open window's stream alive: Maintain releases a stream whose lastLive is older than the linger
-    // time (5 s by default), so without this refresh any longer alt-tab would free the model and rebuild it on return
+    // time (5 s by default), so without this refresh any longer alt-tab would free the model and rebuild it on return. The refresh
+    // belongs to the pause block: after the question, before its return.
     const size_t live = chara.find("m.table.At(openStream).lastLive = req.now;", ask);
     CHECK(live != std::string::npos && paused != std::string::npos && live < paused);
-    CHECK(chara.find("if (const int openStream = m.table.Find(key); openStream != kNoStream)", ask) < live);
+    const size_t findStream = chara.find("if (const int openStream = m.table.Find(key); openStream != kNoStream)", ask);
+    CHECK(findStream != std::string::npos && findStream < live);
 
     // the key now covers the preview too, and the two places that describe it say so
     const std::string ini = ReadFile(repo + "/OptiScaler/ext/ini/DlssNr.ini");
