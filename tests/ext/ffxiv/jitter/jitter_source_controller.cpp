@@ -773,6 +773,134 @@ void TestSeenObjectsLine()
     CHECK(q.env.Count("reached with 1 distinct jitter object") == 1);
 }
 
+// F1: the one in-game way the world tie can fail is a world pointer that is learned but never equals what the generator's call site sees. That
+// is said once, with both pointers, after the settle time; and the idle text says which of the two causes it is.
+void TestWorldLearnedButNeverSeenLine()
+{
+    const char* kLine = "Jitter source: the world camera pointer 0x1000 was learned from the camera getter but the generator's call site only saw 0x2000; "
+                        "the source fix cannot act";
+    Rig r;
+    r.Frame(true, false, false);
+    r.Step(); // enables the detours (forgets a world object learned before)
+    r.state.NoteCallSiteObject(0x2000);
+    r.state.LearnWorldObject(0x1000);
+    r.Frame(true, false, false);
+    r.Step();
+    CHECK(r.env.Count("only saw") == 0); // the sighting has to settle first
+    r.env.now += 5000;
+    r.Frame(true, false, false);
+    r.Step();
+    CHECK(r.env.Count(kLine) == 1);
+    for (int i = 0; i < 200; ++i)
+    {
+        r.state.NoteCallSiteObject(0x2000);
+        r.Frame(true, false, false);
+        r.Step();
+    }
+    CHECK(r.env.Count("only saw") == 1); // once
+    // the world pointer changes (the camera was rebuilt) and is still not seen: a new line for the new pointer, once
+    r.state.LearnWorldObject(0x4000);
+    r.Frame(true, false, false);
+    r.Step();
+    r.Frame(true, false, false);
+    r.Step();
+    CHECK(r.env.Count("only saw") == 2 && r.env.Count("pointer 0x4000 was learned") == 1);
+
+    // the world object IS among the seen ones: no such line
+    Rig a;
+    a.Frame(true, false, false);
+    a.Step();
+    a.state.NoteCallSiteObject(0x2000);
+    a.state.NoteCallSiteObject(0x1000);
+    a.state.LearnWorldObject(0x1000);
+    a.Frame(true, false, false);
+    a.Step();
+    a.env.now += 20000;
+    a.Frame(true, false, false);
+    a.Step();
+    CHECK(a.env.Count("only saw") == 0 && a.env.Count("reached with 2 distinct jitter objects") == 1);
+
+    // nothing seen at the call site at all: the idle text says so, the F1 line needs a non-empty set
+    Rig e;
+    e.Frame(true, false, false);
+    e.Step();
+    e.state.LearnWorldObject(0x1000);
+    e.Frame(true, false, false);
+    e.Step();
+    e.env.now += 20000;
+    e.Frame(true, false, false);
+    e.Step();
+    CHECK(e.env.Count("only saw") == 0);
+
+    // a world camera that is not learned: nothing to compare
+    Rig u;
+    u.Frame(true, false, false);
+    u.Step();
+    u.state.NoteCallSiteObject(0x2000);
+    u.env.now += 20000;
+    u.Frame(true, false, false);
+    u.Step();
+    CHECK(u.env.Count("only saw") == 0);
+
+    // a full table cannot say "never seen": the object may be one that did not fit
+    Rig o;
+    o.Frame(true, false, false);
+    o.Step();
+    for (std::uintptr_t p = 0x5000; p < 0x5000 + 0x100; p += 0x10)
+        o.state.NoteCallSiteObject(p);
+    o.state.LearnWorldObject(0x1000);
+    o.Frame(true, false, false);
+    o.Step();
+    o.env.now += 20000;
+    o.Frame(true, false, false);
+    o.Step();
+    CHECK(o.env.Count("only saw") == 0);
+}
+
+// F1, the idle text: "not learned yet" and "learned but never seen at the generator call site" are two different statements.
+void TestIdleReasonSaysWhichCause()
+{
+    // the world camera is not learned
+    Rig n;
+    n.Frame(true, false, false);
+    n.Step();
+    n.env.now += Controller<FakeEnv>::kInactiveDelayMs;
+    n.Frame(true, false, false);
+    n.Step();
+    CHECK(n.env.Count("Jitter source: inactive (the game's generator is not being normalised: the world camera is not learned yet)") == 1);
+    CHECK(!n.env.Logged("never seen at the generator call site"));
+
+    // learned, but the call site only saw another object
+    Rig s;
+    s.Frame(true, false, false);
+    s.Step();
+    s.state.NoteCallSiteObject(0x2000);
+    s.state.LearnWorldObject(0x1000);
+    s.env.now += Controller<FakeEnv>::kInactiveDelayMs;
+    s.Frame(true, false, false);
+    s.Step();
+    s.env.now += Controller<FakeEnv>::kInactiveDelayMs;
+    s.Frame(true, false, false);
+    s.Step();
+    CHECK(s.env.Count("Jitter source: inactive (the game's generator is not being normalised: the world camera was learned but never seen at the generator call site)") == 1);
+    CHECK(!s.env.Logged("is not learned yet"));
+
+    // learned and seen, the generator is idle for another reason: the generic text, no claim about the world camera
+    Rig g;
+    g.Frame(true, false, false);
+    g.Step();
+    g.state.NoteCallSiteObject(0x1000);
+    g.state.LearnWorldObject(0x1000);
+    g.env.now += Controller<FakeEnv>::kInactiveDelayMs;
+    g.Frame(true, false, false);
+    g.Step();
+    g.env.now += Controller<FakeEnv>::kInactiveDelayMs;
+    g.Frame(true, false, false);
+    g.Step();
+    CHECK(g.env.Count("Jitter source: inactive (the game's generator is not being normalised (not in DLSS mode, native strength not valid, or not running))") == 1);
+    CHECK(!g.env.Logged("world camera"));
+}
+
 // The verification line: the first after 120 checked frames, then every 30 s for five lines, then every five minutes (a session of hours stays
 // readable, and the 20-line budget covers the first hour and a half).
 void TestVerifyLineCadence()
@@ -904,6 +1032,8 @@ int main()
     TestUntellableFallsBackAtOnce();
     TestHeldPairIsNotAMiss();
     TestSeenObjectsLine();
+    TestWorldLearnedButNeverSeenLine();
+    TestIdleReasonSaysWhichCause();
     TestVerifyLineCadence();
     TestVerifyLineShowsTheLattice();
     TestLogBudgets();

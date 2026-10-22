@@ -98,6 +98,10 @@ template <class Env> class Controller
         in.fellBack = _fellBack;
         const GeneratorStatus status = state.Status(now);
         in.generatorRecent = status.recent;
+        const SeenObjects seen = state.Seen();
+        const std::uintptr_t world = state.WorldObject();
+        in.worldLearned = world != 0;
+        in.worldSeen = SeenContains(seen, world);
         Decision decision = Decide(in);
 
         // Both detours follow one condition: enabled while the hooks are in place and the fix has not fallen back, disabled otherwise.
@@ -135,7 +139,7 @@ template <class Env> class Controller
         }
 
         Report(env, now, decision, status, correctionKeyOn);
-        ReportObjects(env, state, now);
+        ReportObjects(env, state, seen, world, now);
         return result;
     }
 
@@ -343,29 +347,35 @@ template <class Env> class Controller
         }
     }
 
-    // The one diagnostic of the world-camera tie: which jitter objects the generator's camera call site is reached with. Written from here (the
-    // evaluate thread), not from a detour. The first line waits until the world camera is known and the first sighting has had time to settle; a
-    // later line is written (within the budget) whenever a new object appears, so a second camera that shows up minutes later is not missed.
-    void ReportObjects(Env& env, SharedState& state, std::uint64_t now)
+    // The diagnostics of the world-camera tie: which jitter objects the generator's camera call site is reached with, and, if the world camera's
+    // pointer is known but never among them, that the fix cannot act. Written from here (the evaluate thread), not from a detour. The first
+    // objects line waits until the world camera is known and the first sighting has had time to settle; a later one is written (within the
+    // budget) whenever a new object appears, so a second camera that shows up minutes later is not missed. The "cannot act" line is written
+    // once per learned pointer, after the same settle time.
+    void ReportObjects(Env& env, SharedState& state, const SeenObjects& seen, std::uintptr_t world, std::uint64_t now)
     {
         if (!state.Enabled())
             return;
-        const SeenObjects seen = state.Seen();
         if (seen.count == 0)
             return;
-        const std::uintptr_t world = state.WorldObject();
         if (world == 0)
             return;
         if (_seenSince == 0)
             _seenSince = now;
+        const bool settled = now - _seenSince >= kSeenSettleMs;
         const std::size_t signature = seen.count + (seen.overflow ? 1000 : 0);
-        if (signature == _seenLogged)
-            return;
-        if (_seenLogged == 0 && now - _seenSince < kSeenSettleMs)
-            return;
-        _seenLogged = signature;
-        if (_logs.objects.Take())
-            env.Log(FormatSeenObjects(seen, world));
+        if (signature != _seenLogged && (_seenLogged != 0 || settled))
+        {
+            _seenLogged = signature;
+            if (_logs.objects.Take())
+                env.Log(FormatSeenObjects(seen, world));
+        }
+        if (settled && !SeenContains(seen, world) && _worldMissLogged != world)
+        {
+            _worldMissLogged = world;
+            if (_logs.worldMiss.Take())
+                env.Log(FormatWorldNeverSeen(world, seen));
+        }
     }
 
     void NoteSizes(Env& env, const GeneratorStatus& status)
@@ -377,7 +387,7 @@ template <class Env> class Controller
 
     struct Logs
     {
-        LineBudget transitions { 24 }, phases { 32 }, verify { 20 }, fellBack { 4 }, sizes { 4 }, objects { 6 };
+        LineBudget transitions { 24 }, phases { 32 }, verify { 20 }, fellBack { 4 }, sizes { 4 }, objects { 6 }, worldMiss { 3 };
     };
 
     Watchdog _watchdog;
@@ -396,5 +406,6 @@ template <class Env> class Controller
     std::uint32_t _verifyLines = 0;
     std::uint64_t _seenSince = 0;     // when the world camera's object and a call-site sighting were first both known
     std::size_t _seenLogged = 0;      // the signature (count, overflow) of the set last reported
+    std::uintptr_t _worldMissLogged = 0; // the world pointer the "learned but never seen" line was last written for
 };
 } // namespace ext::ffxiv::jitter::source

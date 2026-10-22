@@ -370,6 +370,15 @@ void TestDecision()
     { auto i = in; i.buildMatched = false; i.guardsOk = false; d = Decide(i); CHECK(d.reason == Reason::ExecutableNotMatched); }
     { auto i = in; i.guardsOk = false; i.hooksInstalled = false; d = Decide(i); CHECK(d.reason == Reason::GuardFailed); }
     { auto i = in; i.hooksInstalled = false; i.fellBack = true; d = Decide(i); CHECK(d.reason == Reason::HooksNotInstalled); }
+    // F1: an idle generator names WHY, in this order: the world camera is not learned, learned but never seen at the call site, otherwise the
+    // generic reasons. A recent generator is active whatever the two flags say (it can only be recent if the world tie matched).
+    { auto i = in; i.generatorRecent = false; i.worldLearned = false; d = Decide(i); CHECK(!d.active && d.reason == Reason::WorldNotLearned); }
+    { auto i = in; i.generatorRecent = false; i.worldLearned = false; i.worldSeen = false; d = Decide(i); CHECK(d.reason == Reason::WorldNotLearned); }
+    { auto i = in; i.generatorRecent = false; i.worldSeen = false; d = Decide(i); CHECK(!d.active && d.reason == Reason::WorldNotSeen); }
+    { auto i = in; i.generatorRecent = false; d = Decide(i); CHECK(d.reason == Reason::GeneratorIdle); }
+    { auto i = in; i.worldLearned = false; i.worldSeen = false; d = Decide(i); CHECK(d.active); }
+    // the earlier reasons still win over the world reasons
+    { auto i = in; i.generatorRecent = false; i.worldLearned = false; i.fellBack = true; d = Decide(i); CHECK(d.reason == Reason::FellBack); }
     // nothing set at all
     CHECK(!Decide(DecisionInput {}).active);
 }
@@ -494,6 +503,31 @@ void TestText()
     CHECK(FormatInactive(Reason::KeyOff) == "Jitter source: inactive (key off)");
     CHECK(Has(FormatPhasesChanged(32, 18, 0.6f, 2560, 1440, 3840, 2160), "phases 32 -> 18"));
     CHECK(Has(FormatStandDown(), "jitter correction stands down"));
+    // F1: the idle texts name the cause; the two world texts are different from each other and from the generic one
+    {
+        const std::string notLearned = FormatInactive(Reason::WorldNotLearned), notSeen = FormatInactive(Reason::WorldNotSeen),
+                          idle = FormatInactive(Reason::GeneratorIdle);
+        CHECK(Has(notLearned, "the world camera is not learned yet") && !Has(notLearned, "never seen"));
+        CHECK(Has(notSeen, "the world camera was learned but never seen at the generator call site") && !Has(notSeen, "not learned yet"));
+        CHECK(!Has(idle, "world camera") && Has(idle, "not in DLSS mode") && Has(idle, "native strength not valid") && Has(idle, "not running"));
+        CHECK(Has(notLearned, "is not being normalised") && Has(notSeen, "is not being normalised") && Has(idle, "is not being normalised"));
+        SeenObjects seen;
+        seen.items[0] = { 0x2000, 5 };
+        seen.items[1] = { 0x3000, 7 };
+        seen.count = 2;
+        CHECK(!SeenContains(seen, 0x1000) && SeenContains(seen, 0x3000) && !SeenContains(seen, 0));
+        CHECK(!SeenContains(SeenObjects {}, 0x1000));
+        seen.overflow = true; // a full table cannot say "never": the object may be one that did not fit
+        CHECK(SeenContains(seen, 0x1000));
+        seen.overflow = false;
+        CHECK(FormatWorldNeverSeen(0x1000, seen) ==
+              "Jitter source: the world camera pointer 0x1000 was learned from the camera getter but the generator's call site only saw 0x2000, 0x3000; "
+              "the source fix cannot act");
+        seen.count = 1;
+        CHECK(FormatWorldNeverSeen(0x1000, seen) ==
+              "Jitter source: the world camera pointer 0x1000 was learned from the camera getter but the generator's call site only saw 0x2000; "
+              "the source fix cannot act");
+    }
     ToldLattice empty;
     Watchdog::Totals t;
     t.checked = 600;

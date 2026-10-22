@@ -400,7 +400,9 @@ enum class Reason : std::uint8_t
     GuardFailed,
     HooksNotInstalled,
     FellBack,
-    GeneratorIdle
+    WorldNotLearned, // the generator is idle and the camera getter has not yet told us which object is the world camera's
+    WorldNotSeen,    // ... the world camera's object is known but the generator's call site was never reached with it
+    GeneratorIdle    // ... both are fine: another mode, an invalid strength, or simply not running
 };
 
 struct DecisionInput
@@ -411,6 +413,10 @@ struct DecisionInput
     bool hooksInstalled = false;
     bool fellBack = false;
     bool generatorRecent = false; // the generator normalised a call within the last second
+    // Only used to name WHY an idle generator is idle (the default, true, names neither): the world camera's object is known / has been seen as
+    // the output pointer of the generator's camera call site.
+    bool worldLearned = true;
+    bool worldSeen = true;
 };
 
 struct Decision
@@ -434,7 +440,13 @@ constexpr Decision Decide(const DecisionInput& in)
     if (in.fellBack)
         return { false, Reason::FellBack };
     if (!in.generatorRecent)
+    {
+        if (!in.worldLearned)
+            return { false, Reason::WorldNotLearned };
+        if (!in.worldSeen)
+            return { false, Reason::WorldNotSeen };
         return { false, Reason::GeneratorIdle };
+    }
     return { true, Reason::None };
 }
 
@@ -448,7 +460,9 @@ constexpr const char* ReasonText(Reason r)
     case Reason::GuardFailed: return "instruction guard failed";
     case Reason::HooksNotInstalled: return "hooks not installed";
     case Reason::FellBack: return "fell back after the verification failed";
-    case Reason::GeneratorIdle: return "the game's generator is not being normalised (not in DLSS mode, native strength not valid, the world camera not known yet, or not running)";
+    case Reason::WorldNotLearned: return "the game's generator is not being normalised: the world camera is not learned yet";
+    case Reason::WorldNotSeen: return "the game's generator is not being normalised: the world camera was learned but never seen at the generator call site";
+    case Reason::GeneratorIdle: return "the game's generator is not being normalised (not in DLSS mode, native strength not valid, or not running)";
     }
     return "unknown";
 }
@@ -496,6 +510,18 @@ struct SeenObjects
     std::size_t count = 0;   // distinct pointers stored (at most kMaxSeenObjects)
     bool overflow = false;   // more distinct pointers than the table holds
 };
+
+// Was `object` among the output pointers the call site was reached with? A full table cannot say "never" (the object may be one that did not
+// fit), so it answers yes.
+inline bool SeenContains(const SeenObjects& seen, std::uintptr_t object)
+{
+    if (seen.overflow)
+        return true;
+    for (std::size_t i = 0; i < seen.count; ++i)
+        if (seen.items[i].pointer == object)
+            return true;
+    return false;
+}
 
 class SharedState
 {
@@ -676,6 +702,22 @@ inline std::string FormatSeenObjects(const SeenObjects& seen, std::uintptr_t wor
     if (seen.count > 1 || seen.overflow)
         text += "; a second jittered object exists, it is left alone (only the world camera's is normalised)";
     return text;
+}
+
+// The failure of the world tie itself: the pointer learned from the camera getter never equals what the generator's call site sees, so the
+// generator is never normalised and the fix stays idle.
+inline std::string FormatWorldNeverSeen(std::uintptr_t world, const SeenObjects& seen)
+{
+    std::string list;
+    for (std::size_t i = 0; i < seen.count; ++i)
+    {
+        if (i != 0)
+            list += ", ";
+        list += std::format("{:#x}", seen.items[i].pointer);
+    }
+    return std::format("Jitter source: the world camera pointer {:#x} was learned from the camera getter but the generator's call site only saw {}; "
+                       "the source fix cannot act",
+                       world, list);
 }
 
 inline std::string FormatSizeDisagreement(std::uint32_t gameW, std::uint32_t gameH, std::uint32_t ngxW, std::uint32_t ngxH)
