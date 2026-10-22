@@ -554,6 +554,84 @@ void BootReadoutStates()
     }
 }
 
+// ---- PRESET-BOOT fix round, item 5 (readout precedence): which statement wins when the runtime says two things about one request --------
+// Lines of builds\game-logs-20261021-bisect2\OptiScaler.log (the override-on run, the only one that prints the reports), payloads as the relay
+// sink gets them; the order in that log is Applying (2170), ReportOverrideStates (3700), Override Reported (3703), all within 70 ms.
+const char* kRealReport33 =
+    "SL Log: [10-39-59][streamline][info][tid:26056][18s:192ms:907us]commonEntry.cpp:1369[ngxLog] [FrameGeneration] [2026-10-21 10:39:59] "
+    "[tid:26056][EndpointCore::ReportOverrideStates:940] ReportOverrideStates: render preset (requested=3, effective=3)";
+const char* kRealOverrideYes =
+    "SL Log: [10-39-59][streamline][info][tid:26056][18s:192ms:929us]commonEntry.cpp:1368[ngxLog] [Unknown(32765)] [2026-10-21 10:39:59] "
+    "[NGXOverrideStatusCallback:2189] Feature [FrameGeneration] Override Reported: ModelPreset, Value: 3, Requested: Yes, Applied: Yes, Is Latest: No";
+std::string RealOverrideNo() // the same real line with the answer flipped: no log has an `Applied: No` yet, its meaning is unverified
+{
+    std::string s = kRealOverrideYes;
+    const auto at = s.find("Applied: Yes");
+    s.replace(at, 12, "Applied: No");
+    return s;
+}
+
+void ConfirmationPrecedence()
+{
+    CHECK(ParseLine(kRealReport33).kind == LineKind::Report && ParseLine(kRealReport33).newFormat && ParseLine(kRealReport33).recognised);
+    CHECK(ParseLine(RealOverrideNo()).kind == LineKind::OverrideReport && ParseLine(RealOverrideNo()).applied == 0);
+    {   // the order of the real burst, Yes at the end
+        Readout r;
+        r.Feed(kRealApplying3, 1);
+        r.Feed(kRealReport33, 2);
+        r.Feed(kRealOverrideYes, 3);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+    }
+    {   // NGX's Applied: No alone: not applied (as before)
+        Readout r;
+        r.Feed(RealOverrideNo(), 1);
+        CHECK(Confirm(r, 3) == Effect::NotApplied && r.Snapshot().confirmed);
+    }
+    {   // a LATER final report that says the requested preset is in force beats an earlier Applied: No
+        Readout r;
+        r.Feed(RealOverrideNo(), 1);
+        r.Feed(kRealReport33, 2);
+        CHECK_MSG(Confirm(r, 3) == Effect::Applied, "effect %d", static_cast<int>(Confirm(r, 3)));
+        const auto s = r.Snapshot();
+        CHECK(s.confirmed && s.overrideApplied == 0 && s.hasReport && s.effective == 3);
+        CHECK(StatusSentence(3, Confirm(r, 3), true) == "In use: Preset C (confirmed by the runtime)");
+    }
+    {   // the older wording of the final report counts the same way
+        Readout r;
+        r.Feed(RealOverrideNo(), 1);
+        r.Feed(Ngx("EndpointCore::ReportOverrideStates:932", "ReportOverrideStates: render preset (requested=1, applied=1, value=3)"), 2);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+    }
+    {   // a later Applying line counts too
+        Readout r;
+        r.Feed(RealOverrideNo(), 1);
+        r.Feed(kRealApplying3, 2);
+        CHECK(Confirm(r, 3) == Effect::Applied);
+    }
+    {   // Applied: No wins when nothing later says otherwise: it came last, or the later report names another preset in force
+        Readout last;
+        last.Feed(kRealApplying3, 1);
+        last.Feed(kRealReport33, 2);
+        last.Feed(RealOverrideNo(), 3);
+        CHECK(Confirm(last, 3) == Effect::NotApplied);
+        Readout other;
+        other.Feed(RealOverrideNo(), 1);
+        other.Feed(Report31016(3, 1), 2);
+        CHECK(Confirm(other, 3) == Effect::NotApplied);
+        Readout aboutAnother; // a later report about another preset is no evidence for this one
+        aboutAnother.Feed(RealOverrideNo(), 1);
+        aboutAnother.Feed(Report31016(1, 1), 2);
+        CHECK(Confirm(aboutAnother, 3) == Effect::NotApplied);
+    }
+    {   // a new request forgets the order together with the lines
+        Readout r;
+        r.Feed(kRealReport33, 1);
+        r.BeginRequest();
+        r.Feed(RealOverrideNo(), 2);
+        CHECK(Confirm(r, 3) == Effect::NotApplied);
+    }
+}
+
 } // namespace
 
 int main()
@@ -567,6 +645,7 @@ int main()
     Runtime31016Lines();
     Runtime31016Confirmation();
     NgxOverrideReport();
+    ConfirmationPrecedence();
     ReadoutWording();
     PauseRule();
     StatusSentences();

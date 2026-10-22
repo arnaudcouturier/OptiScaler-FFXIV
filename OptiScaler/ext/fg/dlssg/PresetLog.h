@@ -375,6 +375,9 @@ class Readout
         int effective = -1;
         int appliedLine = -1;        // "Applying settings for render preset N."
         int unsupportedId = -1;      // "Ignoring unsupported render preset ID N."
+        // Arrival order of the statements that can contradict each other (0 = not seen since the last request), so that the latest one
+        // about a request is the one that counts: see Confirm.
+        uint32_t order = 0, overrideOrder = 0, reportOrder = 0, appliedOrder = 0;
     };
 
     void NoteDriverQuery(bool queried)
@@ -419,8 +422,8 @@ class Readout
         out.uir = state_.uir;
         if (state_.unsupportedId == request)
             out.effect = Effect::NotApplied; // 310.9.16: "Ignoring unsupported render preset ID N."
-        else if (state_.overrideValue == request && state_.overrideApplied == 0)
-            out.effect = Effect::NotApplied; // NGX itself: "Override Reported: ModelPreset, Value: N, ..., Applied: No"
+        else if (state_.overrideValue == request && state_.overrideApplied == 0 && !SaysInForceAfterOverride(request))
+            out.effect = Effect::NotApplied; // NGX itself: "Override Reported: ModelPreset, Value: N, ..., Applied: No" (nothing later says otherwise)
         else if (state_.hasReport && state_.reportNew && state_.requested == request)
             out.effect = (state_.effective == request) ? Effect::Applied : Effect::NotApplied; // 310.9.16 report: the final word
         else if (state_.hasReport && state_.reportNew)
@@ -463,6 +466,7 @@ class Readout
                 state_.applied = p.applied;
                 state_.effective = p.effective;
                 state_.value = p.hasValue ? p.value : 0;
+                state_.reportOrder = ++state_.order;
                 if (p.newFormat && p.uir != Uir::Unknown)
                     state_.uir = p.uir;
             }
@@ -471,6 +475,7 @@ class Readout
             if (p.recognised)
             {
                 state_.appliedLine = static_cast<int>(p.value);
+                state_.appliedOrder = ++state_.order;
                 if (p.uir != Uir::Unknown)
                     state_.uir = p.uir;
             }
@@ -501,6 +506,7 @@ class Readout
                 state_.overrideValue = static_cast<int>(p.value > INT_MAX ? INT_MAX : p.value);
                 state_.overrideRequested = p.requested;
                 state_.overrideApplied = p.applied;
+                state_.overrideOrder = ++state_.order;
             }
             break;
         case LineKind::FlagOverride:
@@ -526,6 +532,24 @@ class Readout
     }
 
   private:
+    // The latest statement about a request wins. NGX's "Applied: No" (what it means is unverified: no log has one yet, only Yes) does not
+    // outrank a LATER line that says this request is the preset in force: the final ReportOverrideStates (requested = N, effective = N; or
+    // the older wording with applied > 0 and value N) or "Applying settings for render preset N.". A later report about another preset
+    // is no evidence for this request. Called with the mutex held.
+    bool SaysInForceAfterOverride(int request) const
+    {
+        if (state_.overrideOrder == 0)
+            return false;
+        if (state_.hasReport && state_.reportOrder > state_.overrideOrder)
+        {
+            if (state_.reportNew && state_.requested == request && state_.effective == request)
+                return true;
+            if (!state_.reportNew && state_.value == static_cast<uint64_t>(request) && state_.applied > 0)
+                return true;
+        }
+        return state_.appliedLine == request && state_.appliedOrder > state_.overrideOrder;
+    }
+
     static std::string Clean(std::string_view line)
     {
         std::string out(line.substr(0, kMaxLineChars));
