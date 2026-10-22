@@ -6,19 +6,17 @@
 // upscalers/IFeature.cpp there; split back out into its own game-module directory here, see SEAMS.md 3.8). Every
 // RVA/offset/byte guard comes from ext::ffxiv::GameBuild.h; a game patch means editing that file, not this one.
 
-#include <detours/detours.h>
-#include <tlhelp32.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
-#include <mutex>
-#include <vector>
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
 #include "ext/ffxiv/GameBuild.h"
+#include "ext/ffxiv/quality/NativeQualityRetry.h"
+#include "ext/ffxiv/quality/NativeQualityTransaction.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
 namespace ext::ffxiv::quality::FfxivNativeQualityHooks
@@ -61,7 +59,7 @@ inline constexpr size_t kSettingsSnapshotSize =
                kCurrentBuild.nativeQuality.settingsModeOffset, kCurrentBuild.nativeQuality.settingsSelectorOffset }) +
     1;
 
-// Byte-verifies the settings read path once (fail closed, log once) and caches the result: both DoInstall and
+// Byte-verifies the settings read path once (fail closed, log once) and caches the result: both Attempt and
 // DlaaRequiredNow gate on this, matching the oracle's EnsureFfxivNativeQuality probe.
 inline bool SettingsGuardOk()
 {
@@ -235,29 +233,35 @@ inline uintptr_t ObserveQuery(const unsigned int* display, unsigned int* optimal
     return result;
 }
 
-// Known, accepted risk (reviewed, not an oversight): THREAD_SUSPEND_RESUME (requested on
-// OpenThread, below) is only an access right -- it does not suspend anything by itself. The
-// actual suspension happens inside the DetourUpdateThread calls further down, each of which may
-// allocate its own per-thread bookkeeping while earlier threads in the same call are already
-// suspended; DetourAttach and DetourTransactionCommit can allocate too, all before the
-// transaction resumes anyone. Whether that bookkeeping comes from the CRT heap (hazardous:
-// another suspended thread could hold its lock) or elsewhere is not verified: this repo vendors
-// only detours.h and a prebuilt detours.lib, no source, so Detours' internal allocator cannot be
-// inspected here. Trampolines themselves are conventionally VirtualAlloc'd, but that is a
-// different allocation path and is not a mitigation for this one. Deliberately not restructured:
-// changing the suspend/attach ordering to address an unverified hazard risks introducing a real
-// bug in exchange for a theoretical one. The same note applies to ext::core::DetourThreadScope
-// (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
-// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and
-// ext::ffxiv::lighting::FfxivLightingCapture).
-inline bool DoInstall()
+// The thread enlistment and the hook transaction this note is about live in NativeQualityTransaction.h; the note applies
+// unchanged to every install attempt, retries included (at most three per session, so a retry repeats the exposure at most
+// twice more).
+// Known, accepted risk (reviewed, not an oversight): THREAD_SUSPEND_RESUME (requested on OpenThread in SnapshotLiveThreads) is
+// only an access right -- it does not suspend anything by itself. The actual suspension happens inside the DetourUpdateThread
+// calls, each of which allocates its own per-thread record while earlier threads in the same call are already suspended;
+// DetourAttach allocates one record per hook too, all before the transaction resumes anyone. Verified in the vendored
+// detours.lib (disassembly): those allocations are the CRT's operator new (a 16-byte thread record, a 48-byte operation
+// record), so the hazard is real, not hypothetical: a suspended thread that holds the process heap lock would block the next
+// allocation. Trampolines are VirtualAlloc'd, a different path that does not mitigate it; DetourTransactionCommit and Abort
+// allocate nothing (they only free with operator delete). Deliberately not restructured: the allocations happen inside Detours
+// and the window lasts a few milliseconds (the game log shows the whole first install in 58 ms). The same note applies to
+// ext::core::DetourThreadScope (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
+// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and ext::ffxiv::lighting::FfxivLightingCapture).// One install attempt. The guards below are deterministic for a given exe, so a refusal there is Permanent (never retried)
+// and keeps the one warning it always logged. The Detours half (thread snapshot + one hook transaction) is
+// transaction::AttemptHooks (NativeQualityTransaction.h), whose failures it classifies as transient or permanent. Nothing
+// is logged between a transaction's begin and end; the retry logging happens in InstallLog, after the threads run again.
+inline retry::StepResult Attempt()
 {
+    using retry::Outcome;
+    using retry::Stage;
+    constexpr retry::StepResult kRefused { Outcome::Permanent, Stage::Guard, 0, 0 };
+
     if (!SettingsGuardOk())
-        return false; // same probe NativeDlaaRequired fails closed on; EnsureFfxivNativeQuality refused to install here too
+        return kRefused; // same probe NativeDlaaRequired fails closed on; EnsureFfxivNativeQuality refused to install here too
 
     const auto* build = Build();
     if (build == nullptr)
-        return false;
+        return kRefused;
     const auto base = Base();
 
     auto queryActual = build->querySizeInstructions;
@@ -265,7 +269,7 @@ inline bool DoInstall()
         queryActual != build->querySizeInstructions)
     {
         LOG_WARN("FFXIV native quality: instruction mismatch; hooks disabled");
-        return false;
+        return kRefused;
     }
 
     auto updateActual = build->rendererUpdateInstructions;
@@ -277,93 +281,75 @@ inline bool DoInstall()
         updateActual != build->rendererUpdateInstructions || dispatchActual != build->resizeCallbacksInstructions)
     {
         LOG_WARN("FFXIV native quality: update instruction mismatch; hooks disabled");
-        return false;
+        return kRefused;
     }
 
-    originalRendererUpdate = reinterpret_cast<RendererUpdate>(base + build->rendererUpdateRva);
     dispatchResizeCallbacks = reinterpret_cast<ResizeCallbacks>(base + build->resizeCallbacksRva);
-    originalQuerySize = reinterpret_cast<QuerySize>(base + build->querySizeRva);
 
-    // Enlist existing game threads so Detours can relocate any instruction pointer in a patched prologue.
-    std::vector<HANDLE> threads;
-    HANDLE snapshotHandle = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshotHandle == INVALID_HANDLE_VALUE)
-        return false; // matches the oracle: no log here, only on the enlist-failure path below
+    // originalQuerySize / originalRendererUpdate are set to the raw function addresses by the transaction itself, just before
+    // each DetourAttach, on every attempt: a retry never starts from whatever an earlier attempt left in them.
+    const std::array<transaction::HookSpec, 2> specs { {
+        { reinterpret_cast<void**>(&originalQuerySize), reinterpret_cast<void*>(base + build->querySizeRva),
+          reinterpret_cast<void*>(&ObserveQuery), Stage::AttachQuerySize },
+        { reinterpret_cast<void**>(&originalRendererUpdate), reinterpret_cast<void*>(base + build->rendererUpdateRva),
+          reinterpret_cast<void*>(&ObserveRendererUpdate), Stage::AttachRendererUpdate },
+    } };
+    const retry::StepResult result = transaction::AttemptHooks(specs.data(), specs.size());
+    if (result.outcome != Outcome::Installed)
+        return result;
 
-    THREADENTRY32 entry {};
-    entry.dwSize = sizeof(entry);
-    bool readable = Thread32First(snapshotHandle, &entry) != FALSE;
-    bool threadsReady = readable;
-    while (readable)
-    {
-        if (entry.th32OwnerProcessID == GetCurrentProcessId() && entry.th32ThreadID != GetCurrentThreadId())
-        {
-            HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE,
-                                        entry.th32ThreadID);
-            if (thread != nullptr)
-                threads.push_back(thread);
-            else if (GetLastError() != ERROR_INVALID_PARAMETER)
-                threadsReady = false;
-        }
-        readable = Thread32Next(snapshotHandle, &entry) != FALSE;
-    }
-    CloseHandle(snapshotHandle);
-    if (!threadsReady)
-    {
-        for (auto thread : threads)
-            CloseHandle(thread);
-        LOG_WARN("FFXIV native quality: unable to enlist game threads; hooks disabled");
-        return false;
-    }
-
-    LONG result = DetourTransactionBegin();
-    if (result == NO_ERROR)
-    {
-        result = DetourUpdateThread(GetCurrentThread());
-        for (auto thread : threads)
-        {
-            if (result != NO_ERROR)
-                break;
-            result = DetourUpdateThread(thread);
-        }
-        if (result == NO_ERROR)
-            result = DetourAttach(&(PVOID&) originalQuerySize, ObserveQuery);
-        if (result == NO_ERROR)
-            result = DetourAttach(&(PVOID&) originalRendererUpdate, ObserveRendererUpdate);
-        if (result == NO_ERROR)
-            result = DetourTransactionCommit();
-        else
-            DetourTransactionAbort();
-    }
-    for (auto thread : threads)
-        CloseHandle(thread);
-
-    if (result == NO_ERROR)
-    {
-        available.store(true);
-        const int forced = ext::Cfg().upscaler.forcePerfQuality.value_or_default();
-        if (forced >= 0 && forced <= 5)
-            Request(forced);
-    }
+    available.store(true);
+    const int forced = ext::Cfg().upscaler.forcePerfQuality.value_or_default();
+    if (forced >= 0 && forced <= 5)
+        Request(forced);
     LOG_INFO("FFXIV native quality v2: hook transaction result={} (0=installed); native scene updates enabled",
-             result);
-    return result == NO_ERROR;
+             result.error);
+    return result;
 }
 
-inline std::atomic<int> installState { 0 }; // 0 = not resolved yet, 1 = installed, -1 = refused
-
-// EnsureHooks (ext::game::INativeQuality): lazy, call_once, cheap on every call after the first. The fast path is
-// one relaxed atomic load -- the brief's "pointer/bool test, no mutex, no string compare" -- with std::call_once
-// doing the one-time work exactly once even if several threads race in before it resolves.
-inline bool Install()
+// The retry's log lines, at most four per session: one per failed attempt that will be retried, one when it gives up
+// (carrying the details of the last failure), one when a later attempt installs. A refusal by the guards above is not
+// repeated here (it logged its own warning).
+struct InstallLog
 {
-    const int state = installState.load(std::memory_order_relaxed);
-    if (state != 0)
-        return state > 0;
+    void Failed(int attempt, int maxAttempts, const retry::StepResult& failure) const
+    {
+        LOG_WARN("FFXIV native quality: install attempt {}/{} failed at {}, error {}, thread {}; retrying", attempt,
+                 maxAttempts, retry::StageName(failure.stage), failure.error, failure.threadId);
+    }
+    void GaveUp(int attempt, int maxAttempts, const retry::StepResult& failure) const
+    {
+        LOG_WARN("FFXIV native quality: install attempt {}/{} failed at {}, error {}, thread {}; giving up; native "
+                 "quality selection stays off for this session",
+                 attempt, maxAttempts, retry::StageName(failure.stage), failure.error, failure.threadId);
+    }
+    void Recovered(int attempt) const { LOG_INFO("FFXIV native quality: installed on attempt {}", attempt); }
+};
 
-    static std::once_flag once;
-    std::call_once(once,
-                    [] { installState.store(DoInstall() ? 1 : -1, std::memory_order_relaxed); });
-    return installState.load(std::memory_order_relaxed) > 0;
+struct AttemptStep
+{
+    retry::StepResult operator()() const { return Attempt(); }
+};
+struct NowMs
+{
+    uint64_t operator()() const { return GetTickCount64(); }
+};
+
+using Installer = retry::RetryingInstaller<AttemptStep, NowMs, InstallLog>;
+
+// A function-local static, not a namespace-scope variable: the project builds with _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR, so
+// the installer (it holds a std::mutex) is not constant-initialised, and this form cannot be reached before it is built.
+inline Installer& TheInstaller()
+{
+    static Installer installer { AttemptStep {}, NowMs {}, InstallLog {} };
+    return installer;
 }
+
+// EnsureHooks (ext::game::INativeQuality): lazy, up to retry::kMaxAttempts attempts, cheap once the outcome is final (one
+// atomic load, no lock, no clock). The first call installs, as before. If an attempt fails for a reason that can clear by
+// itself (a game thread exiting during the enlistment, another component's Detours transaction open at that moment) the next
+// calls retry it, 250 ms and then 2000 ms after the failure; the callers are the feature-create and per-evaluate paths of
+// ext::upscaler (UpscalerSeams.cpp), so no extra thread or timer exists. A deterministic refusal ends after one attempt, and
+// after the last failed attempt the answer stays false for the session, exactly the old "refused" state.
+inline bool Install() { return TheInstaller().Ensure(); }
 } // namespace ext::ffxiv::quality::FfxivNativeQualityHooks
