@@ -956,6 +956,7 @@ constexpr unsigned kProductionCauseDeclined = 8; // above every RunOutcome value
 // The cause number of a RunOutcome is its value: every outcome stays below the number of the declined cause, which stays inside the CauseLog.
 static_assert(static_cast<unsigned>(nr::RunOutcome::Skipped) < kProductionCauseDeclined, "a RunOutcome value reaches the declined cause number");
 static_assert(static_cast<unsigned>(nr::RunOutcome::Failed) < kProductionCauseDeclined, "a RunOutcome value reaches the declined cause number");
+static_assert(static_cast<unsigned>(nr::RunOutcome::Paused) < kProductionCauseDeclined, "a RunOutcome value reaches the declined cause number");
 static_assert(kProductionCauseDeclined < nr::CauseLog::kCauses, "the declined cause does not fit the CauseLog");
 const char* ProductionCauseText(nr::RunOutcome outcome)
 {
@@ -997,7 +998,7 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr };
     if (nr::ProductionProduced(answer))
         return { std::move(result.view), answer };
-    if (g_productionCauses.First(static_cast<unsigned>(result.outcome)))
+    if (nr::CountsAsFallback(result.outcome) && g_productionCauses.First(static_cast<unsigned>(result.outcome))) // a focus pause logs its own episode lines
         LOG_INFO("CharaView NR: production NR kept the super-resolution output of a render: {} (counted; this cause is logged once)",
                  ProductionCauseText(result.outcome));
     if (diag::TraceEnabled())
@@ -1051,7 +1052,7 @@ PreSrCall RunNrPreSrInner(const DrawView& view, const SlotGpu& g, const SlotStat
     const nr::ProductionAnswer answer { result.outcome, result.view != nullptr && result.texture != nullptr };
     if (nr::ProductionProduced(answer))
         return { std::move(result.texture), answer };
-    if (g_preSrCauses.First(static_cast<unsigned>(result.outcome)))
+    if (nr::CountsAsFallback(result.outcome) && g_preSrCauses.First(static_cast<unsigned>(result.outcome))) // a focus pause logs its own episode lines
         LOG_INFO("CharaView NR: pre-SR NR kept the plain colour of a render: {} (counted; this cause is logged once)", ProductionCauseText(result.outcome));
     if (diag::TraceEnabled())
         diag::Trace(diag::TraceCategory::Finish, view.now, std::format("NR pre-SR outcome {} for {}x{}", static_cast<int>(result.outcome), in.width, in.height));

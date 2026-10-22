@@ -36,8 +36,9 @@ PlumbingFacts FactsOf(int bits)
 }
 constexpr int kFactsBits = 128;
 
-constexpr RunOutcome kOutcomes[] = { RunOutcome::Failed, RunOutcome::Ran, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped };
-constexpr RunOutcome kNotRan[] = { RunOutcome::Failed, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped };
+constexpr RunOutcome kOutcomes[] = { RunOutcome::Failed, RunOutcome::Ran, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped, RunOutcome::Paused };
+constexpr RunOutcome kNotRan[] = { RunOutcome::Failed, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped, RunOutcome::Paused };
+constexpr long kOutcomeCount = sizeof(kOutcomes) / sizeof(kOutcomes[0]);
 
 // The effects of the glue as fakes: they record the order in which they ran and answer what the test says.
 struct Effects
@@ -183,7 +184,7 @@ void TestAgainstTheOldGlue()
                         ++cases;
                     }
             }
-    CHECK(cases == static_cast<long>(kFactsBits) * 2 * 256 * 5 * 2);
+    CHECK(cases == static_cast<long>(kFactsBits) * 2 * 256 * kOutcomeCount * 2);
 }
 
 // The point of the function: whatever the module answers other than an image, the render keeps the SR output, is not an NR result, and

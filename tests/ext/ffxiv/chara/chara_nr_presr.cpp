@@ -24,8 +24,9 @@ namespace
 using Log = std::vector<std::string>;
 
 constexpr Placement kPlacements[] = { Placement::BringUp, Placement::PostSr, Placement::PreSr };
-constexpr RunOutcome kOutcomes[] = { RunOutcome::Failed, RunOutcome::Ran, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped };
-constexpr RunOutcome kNotRan[] = { RunOutcome::Failed, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped };
+constexpr RunOutcome kOutcomes[] = { RunOutcome::Failed, RunOutcome::Ran, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped, RunOutcome::Paused };
+constexpr RunOutcome kNotRan[] = { RunOutcome::Failed, RunOutcome::Preparing, RunOutcome::NotAvailable, RunOutcome::Skipped, RunOutcome::Paused };
+constexpr long kOutcomeCount = sizeof(kOutcomes) / sizeof(kOutcomes[0]);
 constexpr ResultKind kKinds[] = { ResultKind::None, ResultKind::BringUp, ResultKind::Production, ResultKind::PreSr };
 
 PlumbingFacts FactsOf(int bits)
@@ -692,7 +693,7 @@ void TestPostSrNrStatistic()
                                 CHECK(!MadeFromPostSrNr(s.composedFromNr, s.preSrColour));
                             ++cases;
                         }
-    CHECK(cases == 2 * 2 * 2 * 5 * 2 * 2);
+    CHECK(cases == 2 * 2 * 2 * kOutcomeCount * 2 * 2);
 }
 
 void TestTintFor()

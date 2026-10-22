@@ -208,12 +208,14 @@ void Wiring(const std::string& repo)
     const size_t refresh = chara.find("if (Refresh() != Availability::Available", entry);
     CHECK(attempts != std::string::npos && ask != std::string::npos && refresh != std::string::npos);
     CHECK(attempts < ask && ask < refresh);
-    const size_t skipped = chara.find("return RunOutcome::Skipped;", ask);
-    CHECK(skipped != std::string::npos && skipped - ask < 400);
+    // ... and it ends in its own outcome, Paused, not in the generic Skipped: a pause is not counted as a render that kept the image
+    // (CountsAsFallback) and is not logged under the "no stream or list was free" cause text; the focus gate's episode lines report it
+    const size_t paused = chara.find("return RunOutcome::Paused;", ask);
+    CHECK(paused != std::string::npos && paused - ask < 400);
     // a paused run keeps the open window's stream alive: Maintain releases a stream whose lastLive is older than the linger
     // time (5 s by default), so without this refresh any longer alt-tab would free the model and rebuild it on return
     const size_t live = chara.find("m.table.At(openStream).lastLive = req.now;", ask);
-    CHECK(live != std::string::npos && skipped != std::string::npos && live < skipped);
+    CHECK(live != std::string::npos && paused != std::string::npos && live < paused);
     CHECK(chara.find("if (const int openStream = m.table.Find(key); openStream != kNoStream)", ask) < live);
 
     // the key now covers the preview too, and the two places that describe it say so
