@@ -248,6 +248,8 @@ void TestFragment(const std::string& repo)
             CHECK(text.find("+-0.5 pixel") != std::string::npos && text.find("native strength") != std::string::npos);
             CHECK(text.find("8 * output area") != std::string::npos && text.find("32 Performance") != std::string::npos);
             CHECK(text.find("JitterCorrection stands down") != std::string::npos);
+            // an evaluate the fix could not tell is left to the correction as before: the text must not promise that it never runs
+            CHECK(text.find("every evaluate the fix tells") != std::string::npos && text.find("never scales on top of a told offset") != std::string::npos);
             CHECK(text.find("supported game build") != std::string::npos && text.find("Jitter source: verified") != std::string::npos);
             CHECK(text.find("exactly as without it") != std::string::npos);
         }

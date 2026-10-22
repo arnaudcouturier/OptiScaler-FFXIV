@@ -332,6 +332,7 @@ class Watchdog
 // |x|, |y| up to about 0.488 (NVIDIA's lattice), whatever the length of the window; an unbounded pattern (the game's own phase count) fills the
 // table and sets the overflow marker. This checks amplitude and period without trusting the strength decode.
 inline constexpr std::size_t kMaxLatticePairs = 128;
+inline constexpr float kLatticeSamePx = 1e-5f; // two told pairs closer than this on both axes are one pair
 
 class ToldLattice
 {
@@ -356,8 +357,10 @@ class ToldLattice
             _r.maxY = std::max(_r.maxY, y);
         }
         ++_frames;
+        // The same phase told by two routes (the generator's value from a record, ndc * size / 2 recomputed in double) differs by float noise: one
+        // pair within kLatticeSamePx. The real points of the 32-phase lattice are more than 0.03 px apart, so no two of them are merged.
         for (std::size_t i = 0; i < _count; ++i)
-            if (_pairs[i].x == x && _pairs[i].y == y) // value equality: 0 and -0 are one pair
+            if (std::fabs(_pairs[i].x - x) <= kLatticeSamePx && std::fabs(_pairs[i].y - y) <= kLatticeSamePx)
                 return;
         if (_count < kMaxLatticePairs)
             _pairs[_count++] = { x, y };

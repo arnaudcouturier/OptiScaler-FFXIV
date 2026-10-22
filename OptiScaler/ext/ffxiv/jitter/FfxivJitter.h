@@ -12,7 +12,8 @@
 // [FFXIV] JitterSource (default off, experimental): the source-level fix (FfxivJitterSource*.h, FfxivJitterSourceHooks.cpp). Hooks the game's jitter
 //   generator so the game DRAWS the full +-0.5 pixel lattice on NVIDIA's repeating cycle, observes the camera object the NGX packet is built from, and
 //   here replaces the Jitter.Offset.X/Y of THIS evaluate by the offset that was drawn. It runs before the correction and, while it is active,
-//   the correction stands down for the evaluate (it never scales on top). Any failed guard, a failed verification or the key off passes the game's
+//   the correction stands down for every evaluate the fix tells (it never scales on top of a told offset; an evaluate the fix could not tell,
+//   without a generator record and with a small value, is left to the correction as before). Any failed guard, a failed verification or the key off passes the game's
 //   values through, and the correction works exactly as without it.
 //
 // With all keys off, and the source fix never switched on, the cost is three loads of a config flag, one relaxed atomic load (whether the source

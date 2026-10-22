@@ -442,6 +442,22 @@ void TestToldLattice()
     // the same pair again never adds; a pair that differs in one axis does; 0 and -0 are the same pair
     l.Add(Halton(5, 2), Halton(5, 3));
     CHECK(l.Summary().distinct == 32);
+    // the same phase reached by two routes differs by float noise (the generator's value told from a record against ndc * size / 2 recomputed
+    // in double): one pair. The real points of the 32-phase lattice are at least 0.03 px apart, so the tolerance cannot merge two of them.
+    l.Add(Halton(5, 2) + 1e-7f, Halton(5, 3) - 2e-7f);
+    CHECK(l.Summary().distinct == 32);
+    l.Add(Halton(5, 2) + 1e-4f, Halton(5, 3));
+    CHECK(l.Summary().distinct == 33);
+    l = ToldLattice {};
+    for (unsigned i = 1; i <= 32; ++i)
+        l.Add(Halton(i, 2), Halton(i, 3));
+    for (unsigned i = 1; i <= 32; ++i)
+        l.Add(Halton(i, 2) + 3e-7f, Halton(i, 3) + 3e-7f);
+    CHECK(l.Summary().distinct == 32 && l.Summary().frames == 64);
+    for (unsigned i = 1; i <= 32; ++i)
+        for (unsigned j = i + 1; j <= 32; ++j)
+            CHECK(std::fabs(Halton(i, 2) - Halton(j, 2)) > 1e-3f || std::fabs(Halton(i, 3) - Halton(j, 3)) > 1e-3f);
+    l.Add(Halton(5, 2), Halton(5, 3));
     l.Add(Halton(5, 2), Halton(5, 3) + 0.01f);
     CHECK(l.Summary().distinct == 33);
     ToldLattice z;
