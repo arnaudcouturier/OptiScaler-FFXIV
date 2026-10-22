@@ -552,7 +552,7 @@ void TestText()
     CHECK(FormatInactive(Reason::ExecutableNotMatched) == "Jitter source: inactive (executable not matched)");
     CHECK(FormatInactive(Reason::KeyOff) == "Jitter source: inactive (key off)");
     CHECK(Has(FormatPhasesChanged(32, 18, 0.6f, 2560, 1440, 3840, 2160), "phases 32 -> 18"));
-    CHECK(Has(FormatStandDown(), "jitter correction stands down"));
+    CHECK(Has(FormatStandDown(), "jitter correction stands down for every evaluate the source fix tells") && Has(FormatStandDown(), "left to the correction"));
     // F1: the idle texts name the cause; the two world texts are different from each other and from the generic one
     {
         const std::string notLearned = FormatInactive(Reason::WorldNotLearned), notSeen = FormatInactive(Reason::WorldNotSeen),
@@ -587,7 +587,15 @@ void TestText()
     const std::string v = FormatVerified(t, empty.Summary(), 32);
     t.toldFromRecord = 1;
     const std::string v2 = FormatVerified(t, empty.Summary(), 32);
-    CHECK(Has(v2, "2 evaluates without a camera sample (1 told the generator's recorded value, 1 passed through)"));
+    // F11: what actually happened to a miss: told the record's value, or left to the correction engine (with the number of those that were above
+    // its limit, which it cannot scale); "passed through" is not claimed any more
+    CHECK(Has(v2, "2 evaluates without a camera sample (1 told the generator's recorded value, 1 left to the correction engine, 0 of them above its 0.55 px limit)"));
+    CHECK(!Has(v2, "passed through"));
+    t.untellable = 1;
+    CHECK(Has(FormatVerified(t, empty.Summary(), 32), "2 evaluates without a camera sample (1 told the generator's recorded value, 1 left to the correction engine, 1 of them above its 0.55 px limit)"));
+    t.untellable = 0;
+    t.toldFromRecord = 2;
+    CHECK(Has(FormatVerified(t, empty.Summary(), 32), "(2 told the generator's recorded value, 0 left to the correction engine, 0 of them above"));
     t.toldFromRecord = 0;
     // L5: "equals" only when nothing was outside the tolerance
     CHECK(Has(v, "drawn offset equals the generator's value") && !Has(v, "differs"));

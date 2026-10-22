@@ -673,7 +673,7 @@ inline std::string FormatPhasesChanged(std::uint32_t before, std::uint32_t after
 
 inline std::string FormatStandDown()
 {
-    return "Jitter source: jitter correction stands down while the source fix is active (NGX is told the drawn offset, no scaling)";
+    return "Jitter source: jitter correction stands down for every evaluate the source fix tells (NGX is told the drawn offset, no scaling); an evaluate it cannot tell is left to the correction";
 }
 
 // The told offsets over the window since the previous verification line.
@@ -691,9 +691,10 @@ inline std::string FormatVerified(const Watchdog::Totals& t, const ToldLattice::
     const std::string drawn = t.outside == 0 ? std::string("drawn offset equals the generator's value")
                                              : std::format("drawn offset differs from the generator's value in {} frames", t.outside);
     return std::format("Jitter source: verified {} frames, {} (max deviation {:.5f} px, outside {:.3f} px: {}), "
-                       "{} frames without a generator record, {} evaluates without a camera sample ({} told the generator's recorded value, {} passed through); {}",
+                       "{} frames without a generator record, {} evaluates without a camera sample ({} told the generator's recorded value, "
+                       "{} left to the correction engine, {} of them above its 0.55 px limit); {}",
                        t.checked, drawn, t.maxDeviation, kVerifyTolerancePx, t.outside, t.unverified, t.unpaired, t.toldFromRecord,
-                       t.unpaired >= t.toldFromRecord ? t.unpaired - t.toldFromRecord : 0, FormatLattice(lattice, phases));
+                       t.unpaired >= t.toldFromRecord ? t.unpaired - t.toldFromRecord : 0, t.untellable, FormatLattice(lattice, phases));
 }
 
 inline std::string FormatFellBack(Fallback f, const Watchdog::Totals& t)
