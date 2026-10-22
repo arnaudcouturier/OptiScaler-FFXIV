@@ -5,6 +5,7 @@
 #include "fg_preset_harness.h"
 
 #include "ext/fg/dlssg/PresetMenuText.h"
+#include "ext/fg/dlssg/PresetStatus.h"
 
 #include <string>
 
@@ -106,6 +107,36 @@ void InUseOnlyForConfirmedOrAuto()
                     CHECK_MSG(!Has(s, "stays in use"), "%s", s.c_str());
                 }
 }
+// PB review L3: the published restart state belongs to the target that failed; the menu follows the live selector, so a restart reason of
+// C is never shown for a chosen B (while frame generation is not dispatching, nothing republishes the status)
+void StaleRestartState()
+{
+    Status s;
+    s.configured = kPresetB;   // the user picked B in the menu after C failed
+    s.active = kPresetA;
+    s.restartNeeded = true;
+    s.fail = SwitchFail::Release;
+    s.failedTarget = kPresetC; // the step that failed was the switch to C
+    DropStaleRestart(s);
+    CHECK(!s.restartNeeded && s.fail == SwitchFail::None);
+    CHECK(DifferenceSentence(s.configured, s.active, Effect::Applied, s.restartNeeded, s.fail) ==
+          "Chosen: Preset B, in use: Preset A. The change is made when frame generation runs next.");
+    // the failed target is the chosen one: the restart text stays, with its reason
+    Status t;
+    t.configured = kPresetC;
+    t.active = kPresetA;
+    t.restartNeeded = true;
+    t.fail = SwitchFail::Release;
+    t.failedTarget = kPresetC;
+    DropStaleRestart(t);
+    CHECK(t.restartNeeded && t.fail == SwitchFail::Release);
+    // nothing failed: nothing to drop; and a state that was never a restart keeps its reason field as it is
+    Status u;
+    u.configured = kPresetB;
+    DropStaleRestart(u);
+    CHECK(!u.restartNeeded && u.fail == SwitchFail::None && u.failedTarget == -1);
+}
+
 // M2: the warning when the log shows NVIDIA's own copy of the runtime. It says what the log shows and what may be the reason (hedged), not a fact
 void NvidiaCopyWarning()
 {
@@ -127,6 +158,7 @@ int main()
     UnavailableControl();
     InUseOnlyForConfirmedOrAuto();
     NvidiaCopyWarning();
+    StaleRestartState();
     if (g_failures)
     {
         std::printf("fg_preset_menu_text: %d check(s) failed\n", g_failures);

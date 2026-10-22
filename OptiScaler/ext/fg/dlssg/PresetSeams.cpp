@@ -61,6 +61,7 @@ Status GetStatus()
     copy.boot = state.Boot();
     copy.moduleText = module::StatusText();
     copy.unavailable = CurrentAvailability(); // current for the menu even while no frame is dispatched
+    DropStaleRestart(copy);                   // a restart reason of an earlier target is not shown against the live choice
     return copy;
 }
 } // namespace ext::fg::preset
@@ -82,6 +83,7 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
     status.switches = switcher.Generation();
     status.fail = switcher.LastFail();
     status.restartNeeded = switcher.RestartNeeded(configured);
+    status.failedTarget = switcher.FailedRequest();
 
     // Nothing to do: the request in use is the configured one (and no switch is waiting to be cancelled), or the control is off, or
     // this target already failed.
@@ -121,6 +123,7 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
     status.switches = switcher.Generation();
     status.fail = switcher.LastFail();
     status.restartNeeded = switcher.RestartNeeded(configured);
+    status.failedTarget = switcher.FailedRequest();
     Publish(status);
 
     if (result == SwitchResult::InProgress)

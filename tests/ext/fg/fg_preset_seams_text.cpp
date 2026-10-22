@@ -218,6 +218,17 @@ void NvidiaCopyWarn(const std::string& repo)
     CHECK(relay.substr(sink, sinkEnd - sink).find("LOG_") == std::string::npos); // the sink never logs
 }
 
+// PB review L3: the failed target is published with the restart state, and GetStatus drops a restart that belongs to another target than
+// the live selector
+void StaleRestartPins(const std::string& repo)
+{
+    const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetSeams.cpp"));
+    CHECK(Count(seams, "status.failedTarget = switcher.FailedRequest();") == 2); // before the early exit and after the switch attempt
+    CHECK(Before(seams, "status.failedTarget = switcher.FailedRequest();", "Publish(status);")); // set before the first publish
+    CHECK(Before(seams, "copy.configured = ext::Cfg().fg.renderPreset.value_or_default();", "DropStaleRestart(copy);"));
+    CHECK(Before(seams, "DropStaleRestart(copy);", "return copy;"));
+}
+
 void MenuText(const std::string& repo)
 {
     const std::string menu = Flat(ReadFile(repo + "/OptiScaler/ext/fg/MenuFgPreset.cpp"));
@@ -289,6 +300,7 @@ int main(int argc, char** argv)
     RequestStatePins(repo);
     DrsLogLine(repo);
     NvidiaCopyWarn(repo);
+    StaleRestartPins(repo);
     MenuText(repo);
     if (g_failures)
     {
