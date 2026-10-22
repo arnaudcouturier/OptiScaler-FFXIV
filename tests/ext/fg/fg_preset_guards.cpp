@@ -56,6 +56,9 @@ enum class Clobber
     MarkLeaFromBase, MarkLeaFromIndex, MarkMov8B, MarkIndexStore, MarkXchg, MarkCmov, StoreViaR12, MarkXchgShort, MarkPartialXor,
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
+    // fix round 3 (L2): a full-width overwrite drops the mark, so a store through the register is no longer a store to the slot (accepted)
+    KillMovImm, KillMovImmC7, KillMov8B, KillMov89, KillMov32, KillXorZero, KillSubZero, KillMovzxReg, KillMovzxMem, KillMovsxReg, KillMovsxdMem, KillLea,
+    KillMerge,
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -303,6 +306,22 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkXchgShort: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                    // xchg rcx,rax (short form)
     case Clobber::MarkPartialXor: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0x31, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;            // xor ax,ax: a partial zero
     case Clobber::StoreViaR12: c.b({ 0x4D, 0x89, 0x6C, 0x24, 0x90 }); break;                                                    // mov [r12-70h],r13
+    // lea rax,[rbp-30h] / <a full-width overwrite of rax> / mov [rax-70h],r12 (the slot if rax still held the frame address)
+    case Clobber::KillMovImm: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0xB8, 0x10, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 }); break;                        // mov eax,10h
+    case Clobber::KillMovImmC7: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC0, 0x10, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 }); break;          // mov rax,10h (C7)
+    case Clobber::KillMov8B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8B, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                    // mov rax,rcx (8B)
+    case Clobber::KillMov89: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x89, 0xC8, 0x4C, 0x89, 0x60, 0x90 }); break;                                    // mov rax,rcx (89)
+    case Clobber::KillMov32: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x89, 0xC8, 0x4C, 0x89, 0x60, 0x90 }); break;                                          // mov eax,ecx
+    case Clobber::KillXorZero: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;                                        // xor eax,eax
+    case Clobber::KillSubZero: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x2B, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;                                  // sub rax,rax
+    case Clobber::KillMovzxReg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xB6, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movzx eax,cl
+    case Clobber::KillMovzxMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xB6, 0x01, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movzx eax,byte [rcx]
+    case Clobber::KillMovsxReg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xBE, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movsx eax,cl
+    case Clobber::KillMovsxdMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0x01, 0x4C, 0x89, 0x60, 0x90 }); break;                                // movsxd rax,dword [rcx]
+    case Clobber::KillLea: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8D, 0x41, 0x08, 0x4C, 0x89, 0x60, 0x90 }); break;                                // lea rax,[rcx+8] (rcx holds no frame address)
+    case Clobber::KillMerge:                                                                                                                   // both paths overwrite rax
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4D, 0x85, 0xC0, 0x74, 0x04, 0x33, 0xC0, 0xEB, 0x05, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 });
+        break;                                                                                                                                 // test r8,r8 / jz L1 / xor eax,eax / jmp L2 / L1: mov eax,1 / L2: store
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -970,6 +989,16 @@ void RegionRules()
         Spec t = Shape31016();
         t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
         CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
+    }
+    // fix round 3 (L2): the accepting direction. Each image takes the frame address into rax, overwrites rax at full width and stores through it:
+    // not a store to the slot any more. A mutant that never drops a mark refuses these (a silent "restart needed" on a real build).
+    // (pop is not here: any pop in the region is refused as a stack write, so it can never be the kill that saves an image.)
+    for (Clobber k : { Clobber::KillMovImm, Clobber::KillMovImmC7, Clobber::KillMov8B, Clobber::KillMov89, Clobber::KillMov32, Clobber::KillXorZero,
+                       Clobber::KillSubZero, Clobber::KillMovzxReg, Clobber::KillMovzxMem, Clobber::KillMovsxReg, Clobber::KillMovsxdMem, Clobber::KillLea,
+                       Clobber::KillMerge })
+    {
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "slot mode, full-width kill %d: %s", static_cast<int>(k), WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register mode, full-width kill %d", static_cast<int>(k));
     }
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
     CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
