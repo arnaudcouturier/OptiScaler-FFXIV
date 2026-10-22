@@ -689,6 +689,8 @@ Fake Build(const Spec& s)
     std::vector<Fn> fns = { { kReader, kReader + 0x100 }, { kReadFn, kReadFn + 0x100 }, { kCreate, f.createEnd }, { kDefaults, kDefaults + 0x40 } };
     if (s.copyInsideOtherFunction)
         fns.push_back({ kCopy - 4, kCopy + 0x40 });
+    if (s.leavingJump == 6)
+        fns.push_back({ kCopy, kCopy + 0x40 }); // a build whose copy function has an exception-table entry: a jump to its start is a function start too
     if (s.leavingJump == 4 || s.leavingJump == 5)
     {
         im[kOther] = 0xC3; // ret: an unrelated function
