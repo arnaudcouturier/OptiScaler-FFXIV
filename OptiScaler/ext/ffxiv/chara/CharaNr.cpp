@@ -1236,7 +1236,7 @@ static ProductionResult RunCopiedImpl(const ProductionRequest& request, Placemen
     result.outcome = RunCore(request.base, &request, placement);
     NoteBringUpEnded(m.table, key, result.outcome == RunOutcome::Ran);
     if (result.outcome != RunOutcome::Ran)
-        return result; // RunCore counted it
+        return result; // RunCore counted it (unless it was a focus pause: not a fallback, see CountsAsFallback)
     const int index = m.table.Find(key);
     if (index == kNoStream || PlacementFrom(m.streams[index].production, m.streams[index].preSr) != placement || m.table.At(index).runs == 0)
     {

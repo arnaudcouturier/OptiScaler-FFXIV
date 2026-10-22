@@ -85,7 +85,7 @@ void DrawNrCounters(const CharaConfig& cfg)
     if (!nrOn && st.streams == 0)
         return;
 
-    ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native or plain DLSS image", st.liveStreams,
+    ImGui::TextDisabled("NR windows: %u active, %u model(s); %llu NR results, %llu renders kept the native or plain DLSS image (focus pauses not counted)", st.liveStreams,
                         st.streams, (unsigned long long) st.runs, (unsigned long long) st.fallbacks);
     ImGui::TextDisabled("UI draws given an NR result: %llu", (unsigned long long) g_stats.nrSwaps.load(std::memory_order_relaxed));
     if (st.lastGpuMs > 0.0 || st.lastCpuMs > 0.0)
@@ -99,7 +99,7 @@ void DrawNrCounters(const CharaConfig& cfg)
             ImGui::TextDisabled("NR on the DLSS result: waiting for a preview that DLSS evaluated");
         else
         {
-            ImGui::TextDisabled("NR on the DLSS result: %llu runs, %llu renders kept the plain DLSS image; %llu DLSS images used the NR output",
+            ImGui::TextDisabled("NR on the DLSS result: %llu runs, %llu renders kept the plain DLSS image (focus pauses not counted); %llu DLSS images used the NR output",
                                 (unsigned long long) st.productionRuns, (unsigned long long) st.productionFallbacks,
                                 (unsigned long long) g_stats.nrProductionRuns.load(std::memory_order_relaxed));
             ImGui::TextDisabled("UI draws given a DLSS image made from NR: %llu",
@@ -117,7 +117,7 @@ void DrawNrCounters(const CharaConfig& cfg)
             ImGui::TextDisabled("NR before DLSS: waiting for a preview that DLSS evaluates");
         else
         {
-            ImGui::TextDisabled("NR before DLSS: %llu runs, %llu renders used the plain picture; DLSS history reset %llu time(s) for a picture change",
+            ImGui::TextDisabled("NR before DLSS: %llu runs, %llu renders used the plain picture (focus pauses not counted); DLSS history reset %llu time(s) for a picture change",
                                 (unsigned long long) st.preSrRuns, (unsigned long long) st.preSrFallbacks,
                                 (unsigned long long) g_stats.srSourceResets.load(std::memory_order_relaxed));
             if (st.preSrGpuMs > 0.0 || st.preSrCpuMs > 0.0)
