@@ -61,6 +61,7 @@ enum class Clobber
     KillMerge,
     // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
     MarkXchgRexB, MarkXchg32RexB, NopNoMark, MarkImul6B, MarkImul69, NoMarkImul6B,
+    MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -330,6 +331,14 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC8, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                              // imul rcx,rax,1 / mov [rcx-70h],r12
     case Clobber::MarkImul69: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x69, 0xC8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x61, 0x90 }); break;            // imul rcx,rax,1 (imm32)
     case Clobber::NoMarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC9, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                           // imul rcx,rcx,1: rcx never held the address
+    case Clobber::MarkCmpxchg:                                                                                                                  // lea rdx / xor eax,eax / xor ecx,ecx / cmpxchg rcx,rdx (equal: rcx = rdx) / store via rcx
+        c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x33, 0xC0, 0x33, 0xC9, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x61, 0x90 });
+        break;
+    case Clobber::MarkCmpxchgRax: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x60, 0x90 }); break;                       // lea rcx / cmpxchg rcx,rdx (not equal: rax = rcx) / store via rax
+    case Clobber::NoMarkCmpxchg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x61, 0x90 }); break;            // rdx and rcx never held the address
+    case Clobber::MarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;          // shld rcx,rax,1 into a zeroed rcx
+    case Clobber::MarkShrdCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rax,cl
+    case Clobber::MarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                                // movsxd rcx,eax
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -984,7 +993,8 @@ void RegionRules()
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
                        Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB, Clobber::MarkXchg32RexB,
-                       Clobber::MarkImul6B, Clobber::MarkImul69 })
+                       Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl,
+                       Clobber::MarkMovsxd })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
@@ -1004,6 +1014,8 @@ void RegionRules()
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NopNoMark).why == Why::Ok);
     CHECK(scan(Spec {}, Where::R13, Clobber::NopNoMark).why == Why::Ok);
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkImul6B).why == Why::Ok); // a three-operand imul of an unmarked register marks nothing
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkCmpxchg).why == Why::Ok); // a cmpxchg between unmarked registers marks nothing
+    CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkCmpxchg).why == Why::Ok);
     // fix round 3 (L2): the accepting direction. Each image takes the frame address into rax, overwrites rax at full width and stores through it:
     // not a store to the slot any more. A mutant that never drops a mark refuses these (a silent "restart needed" on a real build).
     // (pop is not here: any pop in the region is refused as a stack write, so it can never be the kill that saves an image.)

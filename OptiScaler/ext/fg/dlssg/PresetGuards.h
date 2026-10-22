@@ -626,6 +626,12 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                         next = static_cast<uint16_t>(next | (1u << dst));
                     return next;
                 }
+                if (op == 0x63) // movsxd r, r/m32: a copy of the source's low half
+                {
+                    if (holds(n.rm))
+                        next = static_cast<uint16_t>(next | (1u << n.reg));
+                    return next;
+                }
                 if (op == 0x6B || op == 0x69) // imul r, r/m, imm: the source reaches the destination
                 {
                     if (holds(n.rm))
@@ -646,6 +652,20 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
             {
                 if (holds(n.rm))
                     next = static_cast<uint16_t>(next | (1u << n.reg));
+                return next;
+            }
+            if (op == 0xB1) // cmpxchg r/m, r: on a match the source goes to the destination, otherwise the destination to rax (0F B0, the byte form, moves no address)
+            {
+                if (holds(n.reg))
+                    next = static_cast<uint16_t>(next | (1u << n.rm));
+                if (holds(n.rm))
+                    next = static_cast<uint16_t>(next | (1u << RAX));
+                return next;
+            }
+            if (op == 0xA4 || op == 0xA5 || op == 0xAC || op == 0xAD) // shld / shrd r/m, r: bits of the source land in the destination
+            {
+                if (holds(n.reg))
+                    next = static_cast<uint16_t>(next | (1u << n.rm));
                 return next;
             }
             if (op == 0xC1 || op == 0xC0) // xadd: both registers
