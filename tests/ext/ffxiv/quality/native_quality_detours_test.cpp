@@ -578,8 +578,8 @@ static void AnExceptionInsideTheWindowResumesTheThreadsAndAbortsTheTransaction()
     Parked live = StartParked();
     const HookSpec specs[] = { MakeSpecA(), MakeSpecB() };
 
-    // How many allocations does one successful transaction make on this thread? Fail the last one: by then the live thread
-    // is enlisted (Detours has suspended it) and the attach of A is pending.
+    // How many allocations does one successful transaction make on this thread? One per enlisted thread (the calling thread
+    // is dropped before Detours allocates) and one per attach: here the live thread, the attach of A and the attach of B.
     {
         std::vector<HANDLE> probe { Dup(live.thread) };
         g_newCount = 0;
@@ -589,36 +589,43 @@ static void AnExceptionInsideTheWindowResumesTheThreadsAndAbortsTheTransaction()
         Detach();
     }
     const int allocations = g_newCount;
-    CHECK(allocations >= 2);
+    CHECK(allocations == 3);
 
-    std::vector<HANDLE> threads { Dup(live.thread) };
-    GuardedCall call { specs, 2, &threads, {}, 0 };
-    g_failWithSeh = false;
-    g_newCount = 0;
-    g_failAt = allocations;
-    g_watchThread = GetCurrentThreadId();
-    const bool escaped = CallAndCatchAnyException(&call);
-    g_watchThread = 0;
-    g_failAt = 0;
-    if (escaped)
-        CleanUpAfterAnEscapedException(call);
+    // Fail each of them in turn. The step in progress at the failure is what the retry log and the classification are built
+    // on, so every step has to report itself: enlisting the live thread (nothing is suspended yet), the attach of A (the live
+    // thread is suspended) and the attach of B (the live thread is suspended and A's attach is pending).
+    const Stage expected[] = { Stage::EnlistThread, Stage::AttachQuerySize, Stage::AttachRendererUpdate };
+    for (int failAt = 1; failAt <= allocations && failAt <= 3; ++failAt)
+    {
+        std::vector<HANDLE> threads { Dup(live.thread) };
+        GuardedCall call { specs, 2, &threads, {}, 0 };
+        g_failWithSeh = false;
+        g_newCount = 0;
+        g_failAt = failAt;
+        g_watchThread = GetCurrentThreadId();
+        const bool escaped = CallAndCatchAnyException(&call);
+        g_watchThread = 0;
+        g_failAt = 0;
+        if (escaped)
+            CleanUpAfterAnEscapedException(call);
 
-    std::printf("probe: a failed allocation inside the window -> error %ld at '%s'\n", call.result.error,
-                retry::StageName(call.result.stage));
-    CHECK(!escaped); // the exception stays inside RunHookTransaction
-    CHECK(call.result.error == static_cast<long>(ERROR_NOT_ENOUGH_MEMORY));
-    CHECK(call.result.stage == Stage::AttachRendererUpdate); // where it happened
-    CHECK(retry::ClassifyDetours(call.result.stage, call.result.error) == Outcome::Transient);
-    CHECK(threads.empty()); // the handles were consumed
-    CHECK(Unhooked());
+        std::printf("probe: allocation %d of the window fails -> error %ld at '%s'\n", failAt, call.result.error,
+                    retry::StageName(call.result.stage));
+        CHECK(!escaped); // the exception stays inside RunHookTransaction
+        CHECK(call.result.error == static_cast<long>(ERROR_NOT_ENOUGH_MEMORY));
+        CHECK(call.result.stage == expected[failAt - 1]); // where it happened
+        CHECK(retry::ClassifyDetours(call.result.stage, call.result.error) == Outcome::Transient);
+        CHECK(threads.empty()); // the handles were consumed
+        CHECK(Unhooked());
 
-    const DWORD suspendCount = SuspendThread(live.thread); // the count BEFORE this call: 0 = the thread was running
-    CHECK(suspendCount == 0);
-    if (suspendCount != static_cast<DWORD>(-1))
-        ResumeThread(live.thread);
-    const LONG next = DetourTransactionBegin(); // an open transaction would answer 4317
-    CHECK(next == NO_ERROR);
-    DetourTransactionAbort();
+        const DWORD suspendCount = SuspendThread(live.thread); // the count BEFORE this call: 0 = the thread was running
+        CHECK(suspendCount == 0);
+        if (suspendCount != static_cast<DWORD>(-1))
+            ResumeThread(live.thread);
+        const LONG next = DetourTransactionBegin(); // an open transaction would answer 4317
+        CHECK(next == NO_ERROR);
+        DetourTransactionAbort();
+    }
 
     std::vector<HANDLE> again { Dup(live.thread) }; // and the next attempt installs
     CHECK(transaction::RunHookTransaction(specs, 2, again).error == 0);
@@ -627,7 +634,6 @@ static void AnExceptionInsideTheWindowResumesTheThreadsAndAbortsTheTransaction()
     CHECK(Unhooked());
     StopParked(live);
 }
-
 // Only C++ exceptions are turned into a failed attempt. Anything else (an access violation inside the window, say) is not
 // understood here and is left to propagate, not swallowed.
 static void AnExceptionThatIsNotACppExceptionIsNotSwallowed()
