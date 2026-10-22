@@ -167,8 +167,12 @@ void DrsLogLine(const std::string& repo)
                   "DLSS-G render preset: the runtime asked the driver for its preset (id 0x10E41DF1), answered 3 (Preset C) (the driver profile has no such "
                   "setting); the DLSS override id 0x10E41E03 is passed through to the driver",
               "%s", line.c_str());
-    // the arguments are the ids and the answer, in the order of the placeholders
     const std::string code = Flat(raw);
+    // L5: the hook admits the preset id ONLY; the override id never reaches the decision code (its behaviour is pinned in fg_preset_drs
+    // OverrideOnId; this text pin is the only test that fails when the id is admitted again, because the decision code ignores it anyway)
+    CHECK(code.find("if (settingId != kRenderPresetSettingId || setting == nullptr) return status;") != std::string::npos);
+    CHECK(code.find("settingId != kOverrideSettingId") == std::string::npos);
+    // the arguments are the ids and the answer, in the order of the placeholders
     CHECK(code.find("kRenderPresetSettingId, edit.value, Name(request), found ? \"\" : \" (the driver profile has no such setting)\", kOverrideSettingId);") !=
           std::string::npos);
 }

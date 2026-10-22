@@ -12,7 +12,9 @@ namespace ext::fg::preset
 {
 NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Status status, void* caller)
 {
-    if ((settingId != kRenderPresetSettingId && settingId != kOverrideSettingId) || setting == nullptr)
+    // Only the preset id is looked at. The DLSS override id (kOverrideSettingId) is never answered, so it does not get into the decision
+    // code at all and passes through to the driver untouched.
+    if (settingId != kRenderPresetSettingId || setting == nullptr)
         return status;
 
     // Other errors (invalid handle, API not initialised, ...) are not an answer about the setting: leave them alone.
