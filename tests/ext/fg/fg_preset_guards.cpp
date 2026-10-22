@@ -22,7 +22,7 @@ constexpr uint32_t kTextVa = 0x1000, kTextSize = 0x3000;
 constexpr uint32_t kDataVa = 0x4000, kDataSize = 0x1000; // not executable: the shared configuration global, a cookie, an import
 constexpr uint32_t kPdataVa = 0x5000, kPdataSize = 0x1000;
 
-constexpr uint32_t kReader = 0x1100, kReadFn = 0x1200, kCreate = 0x1400, kDefaults = 0x2800, kCopy = 0x2900;
+constexpr uint32_t kReader = 0x1100, kReadFn = 0x1200, kCreate = 0x1400, kDefaults = 0x2800, kCopy = 0x2900, kOther = 0x2A00; // kOther: an unrelated function (.pdata entry only when a test asks for it)
 constexpr uint32_t kGlobal = 0x4100, kCookie = 0x4200, kImport = 0x4300;
 
 // where the entry rdx (the context argument) is kept, and where it is reloaded from
@@ -56,6 +56,17 @@ enum class Clobber
     MarkLeaFromBase, MarkLeaFromIndex, MarkMov8B, MarkIndexStore, MarkXchg, MarkCmov, StoreViaR12, MarkXchgShort, MarkPartialXor,
     // string and bit-string stores write where a register says: refused in every mode
     StringStore, BtsMem,
+    // fix round 3 (L2): a full-width overwrite drops the mark, so a store through the register is no longer a store to the slot (accepted)
+    KillMovImm, KillMovImmC7, KillMov8B, KillMov89, KillMov32, KillXorZero, KillSubZero, KillMovzxReg, KillMovzxMem, KillMovsxReg, KillMovsxdMem, KillLea,
+    KillMerge,
+    // fix round 3 (M1 items 1-3): carriers the mark pass missed. Each lea rax,[rbp-30h] image moves the address and stores through the copy.
+    MarkXchgRexB, MarkXchg32RexB, NoMarkXchgRexB, NoMarkXchgShort, MarkImul6B, MarkImul69, NoMarkImul6B,
+    MarkCmpxchg, MarkCmpxchgRax, NoMarkCmpxchg, MarkShld, MarkShrdCl, MarkMovsxd,
+    // fix round 4 (LOW-8): the accepting twins (an unmarked source marks nothing) and the other two shift opcodes
+    MarkShldCl, MarkShrdImm, NoMarkShld, NoMarkShrd, NoMarkMovsxd, NoMarkImul69,
+    // fix round 4 (LOW-1): the one-operand mul / imul / div / idiv (F7 /4../7) read rax and a register or memory operand and write rax:rdx
+    MarkMul, MarkImul1, MarkMulHigh, MarkDivRem, MarkIdivRem, MarkDivMem, MarkDivDividend, NoMarkMul,
+    StoreViaR12OfRbp, StoreViaR12OfRsp, // mov [r12-0A0h],r13 / mov [r12+60h],r13: the slot, if r12 holds rbp / rsp
     // neighbours and unrelated writes that must NOT be refused
     NeighborAbove, NeighborBelow, MovupsAbove, LeaAbove, ScratchWrites
 };
@@ -111,9 +122,13 @@ struct Spec
     bool branchBeforeSave = false;     // test eax,eax / jz far, before the save
     bool callIntoFunction = false;     // call whose target is inside create (the middle of the region)
     bool callIntoTail = false;         // call whose target is inside create, after the read call (not in the region)
-    int leavingJump = 0;               // 1: jmp out of create to a place that is no function start, 2: to the start of a function (a tail call)
+    int leavingJump = 0;               // jmp out of create: 1 to a place that is no function start, 2 to the defaults function, 3 to the read function, 4 to an unrelated function (a tail call), 5 into the middle of it, 6 to the copy function, 7 to the cached-settings reader
     bool chainedFragment = false;      // a cold fragment in the exception table chained to create
     bool lea12BeforeSave = false;      // lea r12,[rbp-30h] in the entry run, before the save
+    int lea12IndexBeforeSave = 0;      // after xor ebx,ebx, before the save: 1 lea r12,[rbx+rbp] (rbp as the INDEX: a frame address), 2 lea r12,[rbx+rcx] (control, no frame register)
+    int copy12BeforeSave = 0;          // a copy of rbp / rsp into r12 before the save: 1 mov r12,rbp (8B), 2 mov r12,rsp (8B), 3 mov r12,rbp (89), 4 mov r12,rsp (89); 5 xor r12,rsp (NOT a copy: the stack-cookie idiom)
+    bool kill12AfterCopy = false;      // xor r12d,r12d right after that copy (a full-width kill before the save)
+    bool leavingCond = false;          // the leaving jump is a jz rel32 instead of a jmp rel32
     bool chainedOdd = false;           // the chained fragment's unwind info has an odd number of codes
     bool hiddenDefaultsCall = false;   // the bytes of "lea rcx,[rbp+40h] / call defaults" inside an immediate (not an instruction)
     bool hiddenCopySetup = false;      // the second copy site's "mov rdx,[rip+g]" is only bytes inside an immediate
@@ -303,6 +318,64 @@ void EmitClobber(Code& c, Clobber k, Where w, int32_t rbpToRsp)
     case Clobber::MarkXchgShort: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                    // xchg rcx,rax (short form)
     case Clobber::MarkPartialXor: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x66, 0x31, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;            // xor ax,ax: a partial zero
     case Clobber::StoreViaR12: c.b({ 0x4D, 0x89, 0x6C, 0x24, 0x90 }); break;                                                    // mov [r12-70h],r13
+    // lea rax,[rbp-30h] / <a full-width overwrite of rax> / mov [rax-70h],r12 (the slot if rax still held the frame address)
+    case Clobber::KillMovImm: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0xB8, 0x10, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 }); break;                        // mov eax,10h
+    case Clobber::KillMovImmC7: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC0, 0x10, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 }); break;          // mov rax,10h (C7)
+    case Clobber::KillMov8B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8B, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                    // mov rax,rcx (8B)
+    case Clobber::KillMov89: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x89, 0xC8, 0x4C, 0x89, 0x60, 0x90 }); break;                                    // mov rax,rcx (89)
+    case Clobber::KillMov32: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x89, 0xC8, 0x4C, 0x89, 0x60, 0x90 }); break;                                          // mov eax,ecx
+    case Clobber::KillXorZero: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;                                        // xor eax,eax
+    case Clobber::KillSubZero: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x2B, 0xC0, 0x4C, 0x89, 0x60, 0x90 }); break;                                  // sub rax,rax
+    case Clobber::KillMovzxReg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xB6, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movzx eax,cl
+    case Clobber::KillMovzxMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xB6, 0x01, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movzx eax,byte [rcx]
+    case Clobber::KillMovsxReg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x0F, 0xBE, 0xC1, 0x4C, 0x89, 0x60, 0x90 }); break;                                 // movsx eax,cl
+    case Clobber::KillMovsxdMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0x01, 0x4C, 0x89, 0x60, 0x90 }); break;                                // movsxd rax,dword [rcx]
+    case Clobber::KillLea: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x8D, 0x41, 0x08, 0x4C, 0x89, 0x60, 0x90 }); break;                                // lea rax,[rcx+8] (rcx holds no frame address)
+    case Clobber::KillMerge:                                                                                                                   // both paths overwrite rax
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x4D, 0x85, 0xC0, 0x74, 0x04, 0x33, 0xC0, 0xEB, 0x05, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x60, 0x90 });
+        break;                                                                                                                                 // test r8,r8 / jz L1 / xor eax,eax / jmp L2 / L1: mov eax,1 / L2: store
+    case Clobber::MarkXchgRexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x49, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                      // xchg rax,r8 (REX.W+B 90) / mov [r8-70h],r12
+    case Clobber::MarkXchg32RexB: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x41, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                    // xchg r8d,eax (32-bit form)
+    // an exchange of two registers that both hold nothing marks nothing: a mutant without the "(cur & gprWrites) != 0" test of the xchg rule marks r8 / rcx here
+    case Clobber::NoMarkXchgRexB: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0x49, 0x90, 0x4D, 0x89, 0x60, 0x90 }); break;                                    // lea rcx / xchg rax,r8 (neither marked) / mov [r8-70h],r12
+    case Clobber::NoMarkXchgShort: c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x48, 0x91, 0x4C, 0x89, 0x61, 0x90 }); break;                                   // lea rdx / xchg rcx,rax (neither marked) / mov [rcx-70h],r12
+    case Clobber::MarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC8, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                              // imul rcx,rax,1 / mov [rcx-70h],r12
+    case Clobber::MarkImul69: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x69, 0xC8, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x61, 0x90 }); break;            // imul rcx,rax,1 (imm32)
+    case Clobber::NoMarkImul6B: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x6B, 0xC9, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;                           // imul rcx,rcx,1: rcx never held the address
+    case Clobber::MarkCmpxchg:                                                                                                                  // lea rdx / xor eax,eax / xor ecx,ecx / cmpxchg rcx,rdx (equal: rcx = rdx) / store via rcx
+        c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x33, 0xC0, 0x33, 0xC9, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x61, 0x90 });
+        break;
+    case Clobber::MarkCmpxchgRax: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x60, 0x90 }); break;                       // lea rcx / cmpxchg rcx,rdx (not equal: rax = rcx) / store via rax
+    case Clobber::NoMarkCmpxchg: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xB1, 0xD1, 0x4C, 0x89, 0x61, 0x90 }); break;            // rdx and rcx never held the address
+    case Clobber::MarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;          // shld rcx,rax,1 into a zeroed rcx
+    case Clobber::MarkShrdCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rax,cl
+    case Clobber::MarkShldCl: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA5, 0xC1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shld rcx,rax,cl
+    case Clobber::MarkShrdImm: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAC, 0xC1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;        // shrd rcx,rax,1
+    // the same four rules with an unmarked source (rdx): the destination must stay unmarked, the store through it is accepted
+    case Clobber::NoMarkShld: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xA4, 0xD1, 0x01, 0x4C, 0x89, 0x61, 0x90 }); break;        // shld rcx,rdx,1
+    case Clobber::NoMarkShrd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xC9, 0x48, 0x0F, 0xAD, 0xD1, 0x4C, 0x89, 0x61, 0x90 }); break;              // shrd rcx,rdx,cl
+    case Clobber::NoMarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xCA, 0x4C, 0x89, 0x61, 0x90 }); break;                              // movsxd rcx,edx
+    case Clobber::NoMarkImul69: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x69, 0xC9, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0x61, 0x90 }); break;      // imul rcx,rcx,1 (imm32)
+    case Clobber::MarkMovsxd: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0x63, 0xC8, 0x4C, 0x89, 0x61, 0x90 }); break;                                // movsxd rcx,eax
+    // fix round 4 (LOW-1): lea <reg>,[rbp-30h], then a one-operand multiply or divide moves the address into rax or rdx; the store hits the slot
+    case Clobber::MarkMul: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // lea rcx / mov eax,1 / mul rcx (rax = address) / mov [rax-70h],r12
+    case Clobber::MarkImul1: c.b({ 0x48, 0x8D, 0x4D, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE9, 0x4C, 0x89, 0x60, 0x90 }); break; // the same with imul rcx
+    case Clobber::MarkMulHigh:                                                                                                              // lea rax / mov rcx,-1 / mul rcx (rdx = address - 1) / mov [rdx-6Fh],r12
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x62, 0x91 });
+        break;
+    case Clobber::MarkDivRem:                                                                                                               // lea rax / mov rcx,-1 / xor edx,edx / div rcx (rdx = address) / mov [rdx-70h],r12
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x33, 0xD2, 0x48, 0xF7, 0xF1, 0x4C, 0x89, 0x62, 0x90 });
+        break;
+    case Clobber::MarkIdivRem:                                                                                                              // the same with idiv by 7FFF..FFh
+        c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x48, 0xB9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x33, 0xD2, 0x48, 0xF7, 0xF9, 0x4C, 0x89, 0x62, 0x90 });
+        break;
+    case Clobber::MarkDivMem: c.b({ 0x48, 0x8D, 0x45, 0xD0, 0x33, 0xD2, 0x48, 0xF7, 0x33, 0x4C, 0x89, 0x62, 0x90 }); break;                  // lea rax / xor edx,edx / div qword [rbx] (a big divisor: rdx = address) / store via rdx
+    case Clobber::MarkDivDividend:                                                                                                          // lea rdx / xor eax,eax / mov rcx,-1 / div rcx (rdx:rax = A * 2^64, 2^64 = 1 mod 2^64-1: rax = rdx = A) / store via rax
+        c.b({ 0x48, 0x8D, 0x55, 0xD0, 0x33, 0xC0, 0x48, 0xC7, 0xC1, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0xF7, 0xF1, 0x4C, 0x89, 0x60, 0x90 });
+        break;
+    case Clobber::NoMarkMul: c.b({ 0x48, 0x8D, 0x55, 0xD0, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x48, 0xF7, 0xE1, 0x4C, 0x89, 0x60, 0x90 }); break; // only rdx held the address, and mul rcx does not read it
+    case Clobber::StoreViaR12OfRbp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0xFF, 0xFF, 0xFF }); break;
+    case Clobber::StoreViaR12OfRsp: c.b({ 0x4D, 0x89, 0xAC, 0x24, 0x60, 0x00, 0x00, 0x00 }); break;
     case Clobber::SlotLeaAt60: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x60 }); break;
     case Clobber::SlotLeaAt64: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x64 }); break;
     case Clobber::SlotLeaAt67: c.b({ 0x48, 0x8D, 0x4C, 0x24, 0x67 }); break;
@@ -388,6 +461,22 @@ Fake Build(const Spec& s)
     }
     if (s.lea12BeforeSave)
         c.b({ 0x4C, 0x8D, 0x65, 0xD0 }); // lea r12,[rbp-30h]
+    if (s.lea12IndexBeforeSave != 0)
+    {
+        c.b({ 0x33, 0xDB });                                                   // xor ebx,ebx: a known zero base
+        c.b({ 0x4C, 0x8D, 0x24, s.lea12IndexBeforeSave == 1 ? 0x2B : 0x0B }); // lea r12,[rbx+rbp] / lea r12,[rbx+rcx]
+    }
+    switch (s.copy12BeforeSave)
+    {
+    case 1: c.b({ 0x4C, 0x8B, 0xE5 }); break; // mov r12,rbp
+    case 2: c.b({ 0x4C, 0x8B, 0xE4 }); break; // mov r12,rsp
+    case 3: c.b({ 0x49, 0x89, 0xEC }); break; // mov r12,rbp (89 form)
+    case 4: c.b({ 0x49, 0x89, 0xE4 }); break; // mov r12,rsp (89 form)
+    case 5: c.b({ 0x4C, 0x33, 0xE4 }); break; // xor r12,rsp: names rsp as a value like the stack cookie's "xor rax,rsp", but copies nothing
+    default: break;
+    }
+    if (s.kill12AfterCopy)
+        c.b({ 0x45, 0x33, 0xE4 }); // xor r12d,r12d
     if (s.rdxWrittenBeforeSave)
         c.b({ 0x33, 0xD2 }); // xor edx,edx
     if (s.pushBeforeSave)
@@ -586,8 +675,23 @@ Fake Build(const Spec& s)
     }
     if (s.leavingJump != 0)
     {
-        c.b({ 0xE9 });
-        c.rel32(s.leavingJump == 1 ? kDefaults + 8 : (s.leavingJump == 2 ? kDefaults : kReadFn)); // inside another function / its start / the read function
+        if (s.leavingCond)
+            c.b({ 0x0F, 0x84 }); // jz rel32
+        else
+            c.b({ 0xE9 });
+        uint32_t target = kReadFn;
+        switch (s.leavingJump)
+        {
+        case 1: target = kDefaults + 8; break; // inside another function
+        case 2: target = kDefaults; break;     // the start of the defaults function
+        case 3: target = kReadFn; break;       // the read function
+        case 4: target = kOther; break;        // the start of an unrelated function (a tail call)
+        case 5: target = kOther + 4; break;    // the middle of it
+        case 6: target = kCopy; break;         // the configuration copy function
+        case 7: target = kReader; break;       // the cached-settings reader
+        default: break;
+        }
+        c.rel32(target);
     }
     if (s.jumpToSave)
     {
@@ -629,6 +733,13 @@ Fake Build(const Spec& s)
     std::vector<Fn> fns = { { kReader, kReader + 0x100 }, { kReadFn, kReadFn + 0x100 }, { kCreate, f.createEnd }, { kDefaults, kDefaults + 0x40 } };
     if (s.copyInsideOtherFunction)
         fns.push_back({ kCopy - 4, kCopy + 0x40 });
+    if (s.leavingJump == 6)
+        fns.push_back({ kCopy, kCopy + 0x40 }); // a build whose copy function has an exception-table entry: a jump to its start is a function start too
+    if (s.leavingJump == 4 || s.leavingJump == 5)
+    {
+        im[kOther] = 0xC3; // ret: an unrelated function
+        fns.push_back({ kOther, kOther + 0x40 });
+    }
     uint32_t p = kPdataVa;
     for (const auto& fn : fns)
     {
@@ -956,7 +1067,10 @@ void RegionRules()
     for (Clobber k : { Clobber::MarkAddSource, Clobber::MarkPartialAl, Clobber::MarkPartialAx, Clobber::MarkPartialMovAx, Clobber::MarkPartialLoadAl,
                        Clobber::MarkBranchMerge, Clobber::MarkLoopCarry, Clobber::MarkKeptInR15, Clobber::MarkKeptInRsi, Clobber::MarkLeaFromBase,
                        Clobber::MarkLeaFromIndex, Clobber::MarkMov8B, Clobber::MarkIndexStore, Clobber::MarkXchg, Clobber::MarkCmov,
-                       Clobber::MarkXchgShort, Clobber::MarkPartialXor })
+                       Clobber::MarkXchgShort, Clobber::MarkPartialXor, Clobber::MarkXchgRexB,
+                       Clobber::MarkImul6B, Clobber::MarkImul69, Clobber::MarkCmpxchg, Clobber::MarkCmpxchgRax, Clobber::MarkShld, Clobber::MarkShrdCl, Clobber::MarkShldCl, Clobber::MarkShrdImm,
+                       Clobber::MarkMovsxd, Clobber::MarkMul, Clobber::MarkImul1, Clobber::MarkMulHigh, Clobber::MarkDivRem, Clobber::MarkIdivRem,
+                       Clobber::MarkDivMem, Clobber::MarkDivDividend })
     {
         const Located l = scan(Shape31016(), Where::SlotRsp, k);
         CHECK_MSG(l.why == Why::CreateContext, "mark image %d: %s", static_cast<int>(k), WhyText(l.why));
@@ -970,6 +1084,87 @@ void RegionRules()
         Spec t = Shape31016();
         t.clobber = Clobber::StoreViaR12; // without the lea, r12 holds no frame address
         CHECK_MSG(Scan(t).why == Why::Ok, "the same store without the lea: %s", WhyText(Scan(t).why));
+    }
+    // fix round 4 (LOW-5): rbp as an INDEX register of a pre-save lea (xor ebx,ebx / lea r12,[rbx+rbp]) is a frame address as well; in the
+    // region the same lea is refused by readsFrameRegAsValue, before the save nothing else notices it
+    {
+        Spec s = Shape31016();
+        s.lea12IndexBeforeSave = 1;
+        s.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(s).why == Why::CreateContext, "a frame address built from rbp as an index before the save: %s", WhyText(Scan(s).why));
+        Spec r;
+        r.lea12IndexBeforeSave = 1;
+        r.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(r).why == Why::Ok, "the same bytes with the context in r13: %s", WhyText(Scan(r).why));
+        Spec unused = Shape31016();
+        unused.lea12IndexBeforeSave = 1;
+        CHECK_MSG(Scan(unused).why == Why::Ok, "the lea is never used: %s", WhyText(Scan(unused).why));
+        Spec other = Shape31016();
+        other.lea12IndexBeforeSave = 2; // lea r12,[rbx+rcx]: no frame register in it
+        other.clobber = Clobber::StoreViaR12OfRbp;
+        CHECK_MSG(Scan(other).why == Why::Ok, "a lea of two ordinary registers: %s", WhyText(Scan(other).why));
+    }
+    // `49 90` is xchg rax,r8 (refused above); `41 90` is the 32-bit xchg r8d,eax, which zero-extends both registers: accepted on purpose,
+    // the one deliberate inconsistency with the other 32-bit carriers (32-bit mov / 87 / 91-97 / movsxd still carry); the pin says what it does
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MarkXchg32RexB).why == Why::Ok);
+    CHECK(scan(Spec {}, Where::R13, Clobber::MarkXchg32RexB).why == Why::Ok);
+    // an exchange of two registers that hold nothing marks nothing (fix round 4, replaces NopNoMark, which could only fail if the DECODER gave a
+    // plain 90 a register write): a mutant that drops the "one of them is marked" test of the xchg rule refuses these
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkXchgRexB).why == Why::Ok);
+    CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkXchgRexB).why == Why::Ok);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkXchgShort).why == Why::Ok);
+    // the accepting twins of the shld / shrd / movsxd / imul-69 rules: with an unmarked source the destination stays unmarked
+    for (Clobber k : { Clobber::NoMarkShld, Clobber::NoMarkShrd, Clobber::NoMarkMovsxd, Clobber::NoMarkImul69 })
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "unmarked source, image %d: %s", static_cast<int>(k), WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkImul6B).why == Why::Ok); // a three-operand imul of an unmarked register marks nothing
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkCmpxchg).why == Why::Ok); // a cmpxchg between unmarked registers marks nothing
+    CHECK(scan(Spec {}, Where::R13, Clobber::NoMarkCmpxchg).why == Why::Ok);
+    CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::NoMarkMul).why == Why::Ok); // mul rcx reads rax and rcx only: a marked rdx stays out of it
+    // fix round 3 (L2): the accepting direction. Each image takes the frame address into rax, overwrites rax at full width and stores through it:
+    // not a store to the slot any more. A mutant that never drops a mark refuses these (a silent "restart needed" on a real build).
+    // (pop is not here: any pop in the region is refused as a stack write, so it can never be the kill that saves an image.)
+    for (Clobber k : { Clobber::KillMovImm, Clobber::KillMovImmC7, Clobber::KillMov8B, Clobber::KillMov89, Clobber::KillMov32, Clobber::KillXorZero,
+                       Clobber::KillSubZero, Clobber::KillMovzxReg, Clobber::KillMovzxMem, Clobber::KillMovsxReg, Clobber::KillMovsxdMem, Clobber::KillLea,
+                       Clobber::KillMerge })
+    {
+        CHECK_MSG(scan(Shape31016(), Where::SlotRsp, k).why == Why::Ok, "slot mode, full-width kill %d: %s", static_cast<int>(k), WhyText(scan(Shape31016(), Where::SlotRsp, k).why));
+        CHECK_MSG(scan(Spec {}, Where::R13, k).why == Why::Ok, "register mode, full-width kill %d", static_cast<int>(k));
+    }
+    // fix round 3 (M1 item 4): a copy of rbp or rsp made BEFORE the save is a frame address as well (both encodings of mov); the stack-cookie
+    // "xor rax,rsp" of the entry run must stay harmless, and a copy that is never used must not be refused
+    for (int copy = 1; copy <= 4; ++copy)
+    {
+        const Clobber store = (copy == 2 || copy == 4) ? Clobber::StoreViaR12OfRsp : Clobber::StoreViaR12OfRbp;
+        Spec s = Shape31016();
+        s.copy12BeforeSave = copy;
+        s.clobber = store;
+        CHECK_MSG(Scan(s).why == Why::CreateContext, "a frame register copied before the save and stored through (copy %d): %s", copy, WhyText(Scan(s).why));
+        Spec r;
+        r.copy12BeforeSave = copy;
+        r.clobber = store;
+        CHECK_MSG(Scan(r).why == Why::Ok, "the same bytes with the context in r13 (copy %d): %s", copy, WhyText(Scan(r).why));
+        Spec unused = Shape31016();
+        unused.copy12BeforeSave = copy;
+        CHECK_MSG(Scan(unused).why == Why::Ok, "the copy is never used (copy %d): %s", copy, WhyText(Scan(unused).why));
+        Spec noCopy = Shape31016();
+        noCopy.clobber = store;
+        CHECK_MSG(Scan(noCopy).why == Why::Ok, "the same store without the copy (copy %d): %s", copy, WhyText(Scan(noCopy).why));
+        // fix round 4 (LOW-8): a full-width kill between the copy and the save drops the mark, so the store goes through (regression pin: it
+        // has no mutant of its own, the kill itself is pinned by the Kill* images; this one pins the order copy -> kill -> store)
+        Spec killed = Shape31016();
+        killed.copy12BeforeSave = copy;
+        killed.kill12AfterCopy = true;
+        killed.clobber = store;
+        CHECK_MSG(Scan(killed).why == Why::Ok, "the copy is overwritten before the save (copy %d): %s", copy, WhyText(Scan(killed).why));
+    }
+    // fix round 4 (LOW-8): the mark of "mov r,rsp / rbp" must not be widened to the ALU branch. Every build has the stack cookie's
+    // "xor rax,rsp" in its entry run, but rax is reloaded and a call clears it before anything stores through it, so that image cannot show a
+    // widened rule. This one can: "xor r12,rsp" in the entry run, then a store through r12 (callee-saved, survives) must still be accepted.
+    {
+        Spec s = Shape31016();
+        s.copy12BeforeSave = 5;
+        s.clobber = Clobber::StoreViaR12OfRsp;
+        CHECK_MSG(Scan(s).why == Why::Ok, "xor r12,rsp is not a copy of rsp: %s", WhyText(Scan(s).why));
     }
     CHECK(scan(Shape31016(), Where::SlotRsp, Clobber::MovImmRbp).why == Why::CreateContext);
     CHECK(scan(Spec {}, Where::R13, Clobber::MovImmRbp).why == Why::Ok);
@@ -996,8 +1191,17 @@ void ControlFlowBoundaries()
         { Spec s = base(); s.callIntoFunction = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the function (slot %d)", slot); }
         { Spec s = base(); s.callIntoTail = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a call into the tail of the function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 1; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump out of the function to a non-function (slot %d)", slot); }
-        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the start of another function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 2; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the start of the defaults function (slot %d)", slot); }
         { Spec s = base(); s.leavingJump = 3; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the settings read function itself (slot %d)", slot); }
+        // fix round 3 (L1): only a jump that can reach the read call without the reload is refused; a tail call to an unrelated function never returns here
+        { Spec s = base(); s.leavingJump = 4; CHECK_MSG(Scan(s).why == Why::Ok, "a tail call to the start of an unrelated function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.leavingJump = 5; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump into the middle of an unrelated function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 6; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the configuration copy function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 7; CHECK_MSG(Scan(s).why == Why::CreateContext, "a jump to the cached-settings reader (slot %d)", slot); }
+        // fix round 4 (LOW-8): a conditional leaving jump follows the same rule as a jmp
+        { Spec s = base(); s.leavingJump = 2; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a conditional jump to the defaults function (slot %d)", slot); }
+        { Spec s = base(); s.leavingJump = 4; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::Ok, "a conditional tail call to an unrelated function (slot %d): %s", slot, WhyText(Scan(s).why)); }
+        { Spec s = base(); s.leavingJump = 5; s.leavingCond = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a conditional jump into the middle of an unrelated function (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; s.chainedOdd = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a chained fragment with an odd number of unwind codes (slot %d)", slot); }
         { Spec s = base(); s.chainedFragment = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained to create (slot %d)", slot); }
         { Spec s = base(); s.chainedPointer = true; CHECK_MSG(Scan(s).why == Why::CreateContext, "a cold fragment chained through a pointer (slot %d)", slot); }

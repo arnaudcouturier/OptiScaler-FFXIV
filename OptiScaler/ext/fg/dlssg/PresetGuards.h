@@ -414,15 +414,34 @@ struct ContextFacts
 //     taken, no copy of rsp/rbp as a value, no push/pop or other move of rsp/rbp);
 //  4. control flow: no jump from outside [save, reload] lands in it, no jump lands anywhere in (reload, call] and none lands on the
 //     entry run, every direct jump target inside create is an instruction start, there is no indirect jump, no call into create
-//     itself, no jump out of create at all (the three real builds have none; a call out returns), and no cold fragment of the
-//     exception table is chained to create: the only way to the call is through the save and then the reload.
+//     itself, a jump out of create only as a tail call to the start of another function (the real builds have none; a call out
+//     returns; Locate also refuses a tail call to the read function, the cached-settings reader, defaults or copy), and no cold
+//     fragment of the exception table is chained to create: the only way to the call is through the save and then the reload.
 //  A frame slot is also refused when a store in the region goes through a register that may hold a frame address ("marked": a
 //  frame lea, its copies, two-register arithmetic / cmov / xchg with a marked source, arithmetic on it; a mark is dropped only by a
 //  full-width overwrite or by a call for the volatile registers; computed by a forward may-analysis over the whole region, entry run
 //  included, with merges at jump targets and a fixed point for loops), when an index register is marked, and in every slot case for
-//  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored. NOT tracked: a
-//  frame address stored to memory and read back, an xmm carrier; hand-made code only.
-inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
+//  string stores and bit-string stores (they write where a register says); so is a frame address copied or stored.
+//  NOT tracked: the KNOWN list below, not a claim of completeness (a per-opcode carrier list can always have one more hole; every
+//  review round so far found one). All of it is hand-made code that no compiler emits; the shipped feature does not depend on any of it:
+//   * a frame address stored to memory and read back, or carried in an xmm register;
+//   * a marked register handed to a callee as an argument, or a callee that returns it in rax (the call only clears the volatile
+//     registers; the callee itself is outside the model);
+//   * a copy of rsp or rbp made before the save by anything but a mov or a frame lea (add/or/adc into a zeroed register, say): in the
+//     entry run only those count, because the stack cookie's "xor rax,rsp" names rsp as a value there in every build;
+//   * the byte moves (88 / 8A) and the byte cmpxchg 0F B0 (a byte moves no address: they neither carry nor drop a mark); 41 90, the
+//     32-bit xchg r8d,eax, which truncates both registers (accepted on purpose: it is the ONE deliberate inconsistency with the other
+//     32-bit carriers (mov / 87 / 91-97 / movsxd, which still carry). It is safe because both registers are zero-extended, so
+//     nothing of a 64-bit frame address survives in either one unless the stack lies below 4 GiB; a hand patch that rebuilds the
+//     full value needs another instruction, and that one (or r8,r9 with a marked r9, say) is tracked);
+//   * the value of a marked register: any displacement through it is refused, even one that cannot reach the slot (a compiler that
+//     hoists "lea rsi,[rbp+40h]" and writes a field through it much later would get "restart needed"; none of the four known builds does).
+//     The same holds for a plain copy, "mov rsi,rbp" / "mov rsi,rsp" (what a compiler emits for the address of an object at offset 0):
+//     a rebuilt runtime that hoists one before the save and writes a field through rsi later gets the same silent "restart needed".
+//     A false refusal, never a false accept; constant-offset tracking would remove it and is not done;
+//   * entries into create from outside: the jump checks look at the jumps that sit INSIDE create. Another function that jumps or calls
+//     into the middle of create is a boundary of the whole proof, not something the leaving-jump rule decides.
+inline Why ProveContext(const std::vector<x64::Insn>& insns, const std::vector<Function>& fns, uint32_t create, const Frame& f, uint32_t chainedFragment, uint32_t readCall, ContextFacts& out, uint32_t& failAt)
 {
     using namespace x64;
     const int iCall = InsnIndex(insns, readCall);
@@ -526,8 +545,12 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
             continue;
         if (b.target < create || b.target >= createEnd)
         {
-            // leaving create: a call comes back; a jump out would reach the read function, the copy or the defaults without the reload
-            if (b.flow != Flow::Call)
+            // leaving create: a call comes back. A jump out never does: it is allowed only as a tail call to the START of another
+            // function (a tail call never returns to this code; whether that function can jump or call back into the middle of create
+            // is not checked: entries into create from outside are a boundary of the whole proof). Locate refuses the starts that lead
+            // to the read call: the read function, the cached-settings reader, defaults and copy; a jump to anywhere else could reach
+            // them without the reload
+            if (b.flow != Flow::Call && (b.target < 0 || StartOf(fns, static_cast<uint32_t>(b.target)) == nullptr))
             {
                 failAt = b.at;
                 return Why::CreateContext;
@@ -550,8 +573,11 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
 
     // Registers that may hold a frame address before each instruction, computed from the end of the prologue (so a frame lea in the
     // entry run counts) to the reload: a forward may-analysis, union at jump targets, repeated to a fixed point (loops). A frame
-    // location's address taken with lea marks its register; so do mov / lea / two-register add-sub-or-xor-and-adc-sbb-imul-cmov-xchg-xadd
-    // with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
+    // location's address taken with lea marks its register; so do mov (and a mov from rsp or rbp itself) / lea, the two-register
+    // add-sub-or-xor-and-adc-sbb forms, the register forms of imul (0F AF and the three-operand 6B / 69), the one-operand mul / imul /
+    // div / idiv (F7 /4../7: rax and rdx, register or memory operand), movsxd, cmov, xchg (87 and
+    // the short forms 90..97, 90 only with REX.W and REX.B: 49 90 = xchg rax,r8; 41 90 is the 32-bit form, see below), xadd, cmpxchg (0F B1: source to destination, destination to rax) and shld / shrd,
+    // all with a marked source; arithmetic with an immediate and every other instruction leave the mark alone. A mark is dropped only
     // by a FULL-WIDTH overwrite (a 64/32-bit mov from an unmarked register or from memory or an immediate, movzx/movsx, pop, a zero
     // idiom, lea of unmarked registers) and, for the volatile registers, by a call; 8- and 16-bit writes keep it.
     const size_t regionLen = static_cast<size_t>(iReload - iStart + 1);
@@ -568,12 +594,24 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                 next = static_cast<uint16_t>(next & ~kVolatile);
             if (n.isLea && n.mem.present)
             {
-                const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP);
+                // rsp or rbp as the base or as the index (lea r12,[rbx+rbp]): either way the result is a frame address plus something
+                const bool frame = !n.mem.ripRel && (n.mem.base == RSP || n.mem.base == RBP || n.mem.index == RSP || n.mem.index == RBP);
                 const bool derived = frame || holds(n.mem.ripRel ? kNoReg : n.mem.base) || holds(n.mem.index);
                 if (derived)
                     next = static_cast<uint16_t>(next | (1u << n.reg));
                 else if (!narrow)
                     next = static_cast<uint16_t>(next & ~(1u << n.reg));
+                return next;
+            }
+            if (!n.twoByte && n.opcode == 0xF7 && n.ext >= 4 && n.hasModrm)
+            {
+                // one-operand mul / imul (/4, /5: rdx:rax = rax * r/m) and div / idiv (/6, /7: rax = rdx:rax / r/m, rdx = the remainder).
+                // Register or memory operand; n.ext is the opcode extension here (n.reg is not a register in a group opcode). rax and rdx
+                // can both carry an input: a product with 1 or -1 is the address (or one below it), a remainder by a larger divisor is
+                // the dividend itself. 32-bit and 16-bit forms carry too, like the 32-bit mov. The byte forms (F6) move no address.
+                const bool dividend = n.ext >= 6 && holds(RDX);
+                if ((n.mod == 3 && holds(n.rm)) || holds(RAX) || dividend)
+                    next = static_cast<uint16_t>(next | (1u << RAX) | (1u << RDX));
                 return next;
             }
             if (!n.hasModrm || n.mod != 3)
@@ -591,7 +629,15 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                     kill = !narrow;
                 if (kill)
                     next = static_cast<uint16_t>(next & ~n.gprWrites);
-                if (!n.twoByte && n.opcode >= 0x91 && n.opcode <= 0x97 && (cur & n.gprWrites) != 0) // xchg r, rax (short form): both may hold either value
+                // xchg r, rax (short form 91..97, and 90 with REX.W and REX.B = xchg rax,r8: the decoder reports both registers in
+                // gprWrites; a plain nop / pause has none): both may hold either value. 41 90 (REX.B without REX.W) is the 32-bit xchg
+                // r8d,eax: it zero-extends BOTH registers, so neither can keep a 64-bit frame address, and it is left out on purpose. This is
+                // the one deliberate inconsistency with the other 32-bit carriers (32-bit mov, 87, 91-97 and movsxd stay conservative and
+                // carry, because a copy is a copy for this model). It is safe: after it neither register holds more than the low 32 bits of
+                // the address, which is the address only if the stack lies below 4 GiB. A hand patch that rebuilds the full value needs the
+                // high half from somewhere: a tracked register (or r8,r9 with a marked r9, say: refused), or memory / the TEB (the
+                // "stored to memory" class above, not tracked). Pinned by MarkXchg32RexB (accepted in both modes).
+                if (!n.twoByte && n.opcode >= 0x90 && n.opcode <= 0x97 && (n.opcode > 0x90 || n.rexW) && (cur & n.gprWrites) != 0)
                     next = static_cast<uint16_t>(next | n.gprWrites);
                 return next;
             }
@@ -602,7 +648,9 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                 if (op == 0x89 || op == 0x8B) // mov
                 {
                     const uint8_t dst = (op == 0x89) ? n.rm : n.reg, src = (op == 0x89) ? n.reg : n.rm;
-                    if (holds(src))
+                    // rsp and rbp are frame addresses themselves: a copy of either (made before the save too, where nothing marks them)
+                    // is marked. Only here: other forms name them as a value legitimately (the stack cookie's "xor rax,rsp").
+                    if (holds(src) || src == RSP || src == RBP)
                         next = static_cast<uint16_t>(next | (1u << dst));
                     else if (!narrow)
                         next = static_cast<uint16_t>(next & ~(1u << dst));
@@ -624,6 +672,18 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
                         next = static_cast<uint16_t>(next | (1u << dst));
                     return next;
                 }
+                if (op == 0x63) // movsxd r, r/m32: a copy of the source's low half
+                {
+                    if (holds(n.rm))
+                        next = static_cast<uint16_t>(next | (1u << n.reg));
+                    return next;
+                }
+                if (op == 0x6B || op == 0x69) // imul r, r/m, imm: the source reaches the destination
+                {
+                    if (holds(n.rm))
+                        next = static_cast<uint16_t>(next | (1u << n.reg));
+                    return next;
+                }
                 if (op == 0xC7 && n.ext == 0) // mov r, imm
                 {
                     if (!narrow)
@@ -638,6 +698,20 @@ inline Why ProveContext(const std::vector<x64::Insn>& insns, uint32_t create, co
             {
                 if (holds(n.rm))
                     next = static_cast<uint16_t>(next | (1u << n.reg));
+                return next;
+            }
+            if (op == 0xB1) // cmpxchg r/m, r: on a match the source goes to the destination, otherwise the destination to rax (0F B0, the byte form, moves no address)
+            {
+                if (holds(n.reg))
+                    next = static_cast<uint16_t>(next | (1u << n.rm));
+                if (holds(n.rm))
+                    next = static_cast<uint16_t>(next | (1u << RAX));
+                return next;
+            }
+            if (op == 0xA4 || op == 0xA5 || op == 0xAC || op == 0xAD) // shld / shrd r/m, r: bits of the source land in the destination
+            {
+                if (holds(n.reg))
+                    next = static_cast<uint16_t>(next | (1u << n.rm));
                 return next;
             }
             if (op == 0xC1 || op == 0xC0) // xadd: both registers
@@ -862,7 +936,7 @@ inline Located Locate(const ImageView& view)
     ContextFacts ctx;
     {
         uint32_t failAt = 0;
-        const Why proof = ProveContext(insns, create, frame, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
+        const Why proof = ProveContext(insns, fns, create, frame, ChainedFragmentOf(sc, create), readCallInCreate, ctx, failAt);
         if (proof != Why::Ok)
         {
             fail.failAt = failAt;
@@ -923,6 +997,18 @@ inline Located Locate(const ImageView& view)
     // defaults is a normal function; copy is a leaf (no exception-table entry) but must not sit inside another function
     if (StartOf(fns, defaults) == nullptr || InsideFunction(fns, copy))
         return no(Why::NotFunctionStart);
+    // a tail call out of create (allowed by the proof of the context) must not go to a function that leads to the read call
+    for (const x64::Insn& b : insns)
+    {
+        if ((b.flow != x64::Flow::Jump && b.flow != x64::Flow::CondJump) || (b.target >= create && b.target < createEnd))
+            continue;
+        const uint32_t t = static_cast<uint32_t>(b.target);
+        if (t == readerTarget || t == readFn || t == defaults || t == copy)
+        {
+            fail.failAt = b.at;
+            return no(Why::CreateContext);
+        }
+    }
 
     Located ok;
     ok.why = Why::Ok;
