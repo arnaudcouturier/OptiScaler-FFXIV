@@ -65,8 +65,10 @@ inline bool IsLinkFolder(const fs::path& dir)
 } // namespace detail
 
 // Same order as Util::FindFilePath (a direct hit in startDir, then a breadth-first search under it, then the same search under the
-// game root found through the Unreal Engine folder layout), except that no NR.* folder is entered. With no NR.* folder present the
-// answer is the one FindFilePath gives.
+// game root found through the Unreal Engine folder layout), except that no NR.* folder is entered, no folder is entered more than
+// kLegacySearchMaxDepth (8) levels below the start folder, and no symbolic link or junction is entered. The answer is therefore the
+// one FindFilePath gives only for a tree without NR.* folders, without links and no deeper than 8 levels. A shared runtime folder
+// that is a junction INSIDE the game folder is no longer found (FindFilePath follows it); the start folder itself may be a junction.
 // `incomplete` (when given) is set when a folder could not be listed or a listing broke off half way: "not found" is then only "not found
 // in what could be read", and the caller must not treat it as a fact.
 inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::path& fileName, const ExcludeFn& excluded = {},
