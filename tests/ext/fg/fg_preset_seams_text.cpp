@@ -240,12 +240,11 @@ void UiRecompositionPause(const std::string& repo)
     const std::string rule = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/UiRecompositionRule.h")));
     for (const char* forbidden : { "PresetLog.h", "ReadoutState", "Confirm", "Effect::", "Uir::", "PausesUiRecomposition" })
         CHECK_MSG(rule.find(forbidden) == std::string::npos, "UiRecompositionRule.h mentions %s", forbidden);
-    // the readout keeps its own function; it is documented as readout only
+    // the dead "paused" query is gone from the relay (no caller): the only thing left of the runtime's reply is the menu readout
     const std::string relay = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.cpp"));
-    CHECK(relay.find("return PausesUiRecomposition(request, confirmed.effect, confirmed.uir);") != std::string::npos);
-    CHECK(relay.find("if (request != kPresetA && request != kPresetC) return false;") != std::string::npos);
     const std::string header = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.h"));
-    CHECK(header.find("menu readout only") != std::string::npos);
+    for (const char* gone : { "UiRecompositionPaused", "PausesUiRecomposition" })
+        CHECK_MSG(relay.find(gone) == std::string::npos && header.find(gone) == std::string::npos, "the relay still has %s", gone);
 }
 
 // The note about HUD-less recomposition next to a preset that drops it: one sentence (PresetMenuText.h) in the log, in the preset section and

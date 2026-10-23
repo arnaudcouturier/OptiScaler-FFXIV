@@ -24,11 +24,6 @@ enum class RelayState : uint8_t
 };
 RelayState LogRelayState();
 
-// True while the runtime's own reply says that the active request turned its UI recomposition off: Preset A unless the runtime says
-// otherwise, Preset C only when the runtime confirmed C and turned the recomposition off. For the menu readout only: it never decides
-// the flag that OptiScaler sends (UiRecompositionRule.h does, from the request alone; a pin in fg_preset_seams_text checks it).
-bool UiRecompositionPaused();
-
 // Logs, at most a few at a time, the preset lines the parser did not recognise. Cheap when there are none; call from any
 // thread that is allowed to log (the FG dispatch thread, the menu).
 void FlushCandidateLines();

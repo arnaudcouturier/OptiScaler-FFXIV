@@ -18,8 +18,8 @@
 // not on a reply that arrives after creation) is what keeps the creation stable; a 310.9.1.0 user who wants the recomposition picks
 // Auto or B, which the menu says.
 //
-// The runtime's confirmation (PresetLog.h Readout::Confirm, PausesUiRecomposition, PresetLogRelay.h UiRecompositionPaused) feeds the
-// menu readout only. It never decides the flag; tests/ext/fg/fg_preset_seams_text.cpp pins that.
+// The runtime's confirmation (PresetLog.h Readout::Confirm) feeds the menu readout only (PresetMenuText.h UiRecompositionReadoutNote). It
+// never decides the flag; tests/ext/fg/fg_preset_seams_text.cpp pins that.
 
 #include "ext/fg/dlssg/PresetRequest.h"
 #include "ext/fg/dlssg/PresetSwitch.h"

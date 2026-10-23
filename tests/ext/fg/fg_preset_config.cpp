@@ -71,6 +71,11 @@ void IniFragment(const std::string& repo)
     CHECK(ini.find("restart needed") != std::string::npos);
     // Preset C is not handled by every runtime build; the text must not promise it
     CHECK(ini.find("not every runtime build") != std::string::npos);
+    // the recomposition sentence follows the rule (UiRecompositionRule.h): Preset A and C are not asked for it from the first option call,
+    // nothing is "paused" afterwards (the old mechanism); Preset B and Auto keep asking
+    CHECK(ini.find("pause") == std::string::npos);
+    CHECK(ini.find("In HUD-less recomposition mode Preset A and C are not asked for NVIDIA's UI recomposition") != std::string::npos);
+    CHECK(ini.find("Preset B and Auto ask for it") != std::string::npos);
 }
 } // namespace
 

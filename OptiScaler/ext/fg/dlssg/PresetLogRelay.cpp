@@ -120,15 +120,6 @@ RelayState LogRelayState()
     return attached && attached == spdlog::default_logger() ? RelayState::Attached : RelayState::Lost;
 }
 
-bool UiRecompositionPaused()
-{
-    const int request = Requests().Active();
-    if (request != kPresetA && request != kPresetC)
-        return false; // the common case costs nothing
-    const auto confirmed = ReadoutState().Confirm(request);
-    return PausesUiRecomposition(request, confirmed.effect, confirmed.uir);
-}
-
 void FlushCandidateLines()
 {
     // once per process: the sink only noted that NGX's init line named NVIDIA's own copy of the runtime

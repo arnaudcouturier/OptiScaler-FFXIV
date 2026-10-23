@@ -606,8 +606,9 @@ class Readout
     int candidateLogs_ = 0;
     uint64_t lastCandidateLog_ = 0;
 };
-// Does the runtime's own reply say that this request turned its UI recomposition off? READOUT ONLY (the menu): it never decides what
-// OptiScaler asks for, that is UiRecompositionRule.h from the request alone. A is documented to turn it off ("Preset A selected,
+// Does the runtime's own reply say that this request turned its UI recomposition off? Not used by the product any more (the menu readout
+// reads Confirm() itself, PresetMenuText.h UiRecompositionReadoutNote); kept with its table of replies in fg_preset_log. It never decided
+// what OptiScaler asks for, that is UiRecompositionRule.h from the request alone. A is documented to turn it off ("Preset A selected,
 // disabling UIR"), so A counts unless the runtime says it did not apply A or kept the recomposition on. C: 310.9.1.0 ignores it and
 // 310.9.16 applies it with the recomposition off, so it counts only when the runtime confirmed C AND turned the recomposition off.
 inline bool PausesUiRecomposition(int request, Effect effect, Uir uir)
