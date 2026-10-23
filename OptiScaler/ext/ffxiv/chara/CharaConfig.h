@@ -1,6 +1,6 @@
 #pragma once
 // Config keys of the character preview feature (CharaView). Names and sections are the ones used by the build this
-// feature was reconstructed from, so ini files move between builds (docs/RECONSTRUCTION-NICKLE.md, CharaView).
+// feature was reconstructed from, so ini files move between builds (docs/RECONSTRUCTION-REFERENCE.md, CharaView).
 //
 // Depends on <Config.h> only: the config tests compile ExtConfig.cpp against stub headers. `Bind` is a template on the
 // binder so this header does not need the binder's definition; ext::FfxivConfig::Bind (ext/core/ExtConfig.cpp) calls it.
@@ -17,7 +17,7 @@ struct CharaConfig
     CustomOptional<bool> previewGuideCapture { false }; // [FFXIV] PreviewGuideCapture: diagnostics for the DLSS path
     CustomOptional<bool> previewDebugTint { false };    // [FFXIV] PreviewDebugTint: tints the processed preview image (debug aid)
     CustomOptional<bool> previewNrTrace { false };      // [HDR] PreviewNRTrace: trace log lines for preview NR work
-    CustomOptional<bool> previewNr { false };           // [FFXIV] PreviewNR: Neural Rendering for character previews (new work, not in Nickle's build)
+    CustomOptional<bool> previewNr { false };           // [FFXIV] PreviewNR: Neural Rendering for character previews (new work, not in the collaborator's build)
     CustomOptional<uint32_t> previewNrLingerSeconds { 5 }; // [FFXIV] PreviewNRLingerSeconds: how long a preview's NR model outlives its window
     CustomOptional<bool> previewNrLate { false };       // [FFXIV] PreviewNRLate: show the previous frame's NR result (no GPU wait)
     CustomOptional<bool> previewNrBeforeSr { false };   // [FFXIV] PreviewNRBeforeSR: run NR before the DLSS evaluate instead of after it (experimental; needs PreviewDLSS and PreviewNR)

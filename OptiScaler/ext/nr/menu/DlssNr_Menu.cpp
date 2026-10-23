@@ -518,7 +518,7 @@ void RenderMenu(float menuResScale)
 
         // Experimental. 0 off (soft knee), 1 Neutwo + our composition, 2 Neutwo + pure-inverse replace,
         // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights), 5 linear light + composed
-        // (the normalised frame as it is, clipped at white; Nickle's mode, docs/RECONSTRUCTION-NICKLE.md).
+        // (the normalised frame as it is, clipped at white; the collaborator's mode, docs/RECONSTRUCTION-REFERENCE.md).
         // Always shown.
         static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed",
                                                  "Neutwo proxy + replace", "Hybrid proxy + composed",

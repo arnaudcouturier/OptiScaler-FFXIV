@@ -11,7 +11,7 @@ bool Pending();
 bool PendingHDR();
 void Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCommandList* commands, ID3D12Resource* hdrSource,
              D3D12_RESOURCE_STATES hdrState, ID3D12Resource* sdrSource, D3D12_RESOURCE_STATES sdrState);
-// F4 (docs/RECONSTRUCTION-NICKLE.md): "Include OptiScaler menu". True while an HDR PNG should be taken after the menu
+// F4 (docs/RECONSTRUCTION-REFERENCE.md): "Include OptiScaler menu". True while an HDR PNG should be taken after the menu
 // was drawn onto the presented image (OptiHDR + HDR PNG + ScreenshotMenu + overlay menu enabled + menu visible). The
 // bridge then leaves a pending request alone and PrepareMenu takes it.
 bool MenuCaptureWanted();

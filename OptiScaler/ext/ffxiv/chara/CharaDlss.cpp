@@ -51,8 +51,8 @@
 // feature (render size W x H, output 2W x 2H) and recomposed with the native alpha. UI draws that sample the native image
 // get the composed image instead. Every failure keeps the native image.
 //
-// Reconstructed from the behaviour of Nickle's depth-jitter-20261013 build (no source available), see
-// docs/RECONSTRUCTION-NICKLE.md.
+// Reconstructed from the behaviour of the collaborator's depth-jitter-20261013 build (no source available), see
+// docs/RECONSTRUCTION-REFERENCE.md.
 namespace ext::ffxiv::chara::dlss
 {
 using Microsoft::WRL::ComPtr;

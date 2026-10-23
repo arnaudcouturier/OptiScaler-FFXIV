@@ -118,7 +118,7 @@ struct CompanionBuild
 
 // The character preview renderer's render-target table (ext/ffxiv/chara). The table is reached through a tiny accessor
 // function of the executable; the code pattern below finds it without an RVA, and the RVAs are the values of the
-// current build, kept as documentation and as a cross-check of the scan (docs/RECONSTRUCTION-NICKLE.md, CharaView).
+// current build, kept as documentation and as a cross-check of the scan (docs/RECONSTRUCTION-REFERENCE.md, CharaView).
 //
 // Accessor: mov rax,[rip+disp32] ; mov ecx,edx ; mov rax,[rax+rcx*8+0x2c8] ; ret
 // The four displacement bytes are not compared (mask 0). Exactly one hit in .text is required.
@@ -147,7 +147,7 @@ struct CharaViewBuild
     std::uint32_t maxTextBytes = 128u << 20;  // the .text scan is refused above this size
 };
 
-// The game's camera jitter object (ext/ffxiv/jitter, docs/RECONSTRUCTION-NICKLE.md): the scene camera owns a 20-byte object
+// The game's camera jitter object (ext/ffxiv/jitter, docs/RECONSTRUCTION-REFERENCE.md): the scene camera owns a 20-byte object
 // { float jx, jy; float ndcX, ndcY; int counter } that the game's jitter generator fills (pixel jitter jx, jy in [-0.5, 0.5],
 // the NDC translation the projection matrix gets, and a frame counter). Reached through three pointers:
 //   G = [exe base + cameraGlobalRva] ; S = [G + cameraOffset] ; P = [S + jitterPointerOffset] ; object = P.

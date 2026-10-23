@@ -225,7 +225,7 @@ struct alignas(256) DlssNrConstants
     // The reversible-proxy mode. 0 soft knee + our composition (default), 1 unclipped Neutwo proxy +
     // our composition, 2 Neutwo proxy + pure-inverse replace (model's answer straight back, no
     // composition), 3/4 hybrid proxy (composed / replace), 5 linear light + composed (the normalised
-    // frame, clipped to the unit cube, with no curve; Nickle's mode, see docs/RECONSTRUCTION-NICKLE.md).
+    // frame, clipped to the unit cube, with no curve; the collaborator's mode, see docs/RECONSTRUCTION-REFERENCE.md).
     // Trailing field, mirroring the shader's cbuffer, so the layout stays a flat run of 4-byte scalars
     // that C++ and HLSL agree on.
     uint32_t ReversibleMode;

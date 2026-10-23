@@ -35,7 +35,7 @@ struct HdrConfig
     CustomOptional<int> screenshotKey { UnboundKey };      // ScreenshotKey (saved as hex when > 0)
     CustomOptional<bool> screenshotIccOnly { false };      // ScreenshotIccOnly
     CustomOptional<int> screenshotFormat { 0 };            // ScreenshotFormat: 0 SDR PNG, 1 HDR PNG
-    // F4 (Nickle's "Include OptiScaler menu"): HDR PNG taken after the visible menu was drawn onto the image
+    // F4 (the collaborator's "Include OptiScaler menu"): HDR PNG taken after the visible menu was drawn onto the image
     CustomOptional<bool> screenshotMenu { false };         // ScreenshotMenu
 
     void Bind(config::Binder& b);

@@ -1,5 +1,5 @@
 #pragma once
-// Neural Rendering (NR) for the character previews. New work, not part of Nickle's build (see docs/RECONSTRUCTION-NICKLE.md).
+// Neural Rendering (NR) for the character previews. New work, not part of the collaborator's build (see docs/RECONSTRUCTION-REFERENCE.md).
 //
 // The NR model only runs on Direct3D 12 (the D3D11 entry points of the model refuse the network), so a preview image is handed to
 // the DX11-on-12 bridge's D3D12 device through shared textures, processed there and drawn from a shared result texture:

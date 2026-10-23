@@ -4,7 +4,7 @@
 //
 // A candidate is the legacy-location file (found by the old recursive search) or a file inside a folder named
 // "NR.<digits>[.<digits>...]" (for example OptiScaler\NR.310.9\nvngx_dlssnr.dll). The folder naming and the idea of one
-// immutable selection with a revision follow the community fork by Nickle (GPL-3.0); the code here is this fork's own.
+// immutable selection with a revision follow the community fork by the collaborator (GPL-3.0); the code here is this fork's own.
 
 #include <algorithm>
 #include <cstdint>

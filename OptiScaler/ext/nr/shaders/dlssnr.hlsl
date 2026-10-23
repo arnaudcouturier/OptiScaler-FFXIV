@@ -847,7 +847,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // encode. It is the only proxy the resolve does not have to undo, because the model's colour comes
         // back in the same linear units. Anything above the white point is clipped (the model's input is a
         // unit-range surface), so a saturated highlight can change hue. Opaque alpha, like the other
-        // reversible proxies. Reconstructed from Nickle's depth-jitter-20261013 build.
+        // reversible proxies. Reconstructed from the collaborator's depth-jitter-20261013 build.
         if (gReversibleMode == 5)
         {
             gTarget[id.xy] = float4(saturate(normalized), 1.0);

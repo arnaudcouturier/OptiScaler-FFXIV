@@ -7,7 +7,7 @@
 //   AlphaTintNr  the same with the tint of an image NR produced
 // Resource slots and constant-buffer layouts are fixed; CharaGuides.cpp binds them by these registers.
 //
-// Written from a description of the behaviour of Nickle's depth-jitter-20261013 build (docs/RECONSTRUCTION-NICKLE.md).
+// Written from a description of the behaviour of the collaborator's depth-jitter-20261013 build (docs/RECONSTRUCTION-REFERENCE.md).
 
 Texture2D<float4> Source : register(t0);   // Copy: native image; Alpha: the upscaler output
 Texture2D<float4> Motion : register(t1);   // Guides: signed motion target (RGBA16F, xy used)

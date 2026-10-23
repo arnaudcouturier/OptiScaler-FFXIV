@@ -1,7 +1,7 @@
 // Headless shader test for the NR "Linear light + composed" proxy (DlssNr ReversibleMode 5).
 // Windows D3D11 WARP executes the shared HLSL; no game or NR DLL is involved.
 //
-// Reconstructed behaviour (see docs/RECONSTRUCTION-NICKLE.md section F2): the encode writes the normalised
+// Reconstructed behaviour (see docs/RECONSTRUCTION-REFERENCE.md section F2): the encode writes the normalised
 // frame, clipped to the unit cube, with opaque alpha and no sRGB curve; the resolve then reads the proxy and
 // the model back without an sRGB decode, so a model that returns its input leaves the frame unchanged.
 #define NOMINMAX

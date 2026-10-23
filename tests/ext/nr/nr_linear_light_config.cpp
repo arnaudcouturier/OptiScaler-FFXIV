@@ -1,4 +1,4 @@
-// "Linear light + composed" is ReversibleMode 5 (docs/RECONSTRUCTION-NICKLE.md, F3). Saved NR presets validate the
+// "Linear light + composed" is ReversibleMode 5 (docs/RECONSTRUCTION-REFERENCE.md, F3). Saved NR presets validate the
 // field against its range, so the range has to include 5 and nothing above it. Uses the real ext::NrConfig and the
 // real preset code, like nr_user_presets.
 #include "ext/nr/NrConfig.h"

@@ -224,7 +224,7 @@ inline bool FinisherAccepted(const FinisherCheck& c) { return CheckFinisher(c) =
 // The render a pass belongs to: starts at the first accepted geometry draw while no pass is active (or the previous render
 // finished), ends at a finisher that fails the check or at the end of the frame.
 //
-// One deliberate deviation from the specification of Nickle's build: there a pass ends only at the bridge's present, so two renders
+// One deliberate deviation from the specification of the collaborator's build: there a pass ends only at the bridge's present, so two renders
 // of one presented frame share one pass (the same jitter phase, the guides and motion target of the first render). Here an accepted
 // finisher closes the render ("finished"): its facts stay readable (a second finisher of the same render is still checked against
 // them), but the next prepass or G-buffer draw starts a new pass and bumps the counter.

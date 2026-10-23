@@ -1,5 +1,5 @@
 #pragma once
-// "Include OptiScaler menu" (ini `[HDR] ScreenshotMenu`, F4; docs/RECONSTRUCTION-NICKLE.md): when it applies, an HDR PNG
+// "Include OptiScaler menu" (ini `[HDR] ScreenshotMenu`, F4; docs/RECONSTRUCTION-REFERENCE.md): when it applies, an HDR PNG
 // is taken after the menu was drawn onto the presented image instead of from the clean image. Kept free of any
 // engine type so the decision can be tested without a GPU.
 

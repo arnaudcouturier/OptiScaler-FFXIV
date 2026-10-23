@@ -327,8 +327,8 @@ The licence text is Licenses\OptiScaler-FFXIV_LICENSE_GPL-3.0.txt. The correspon
 Credits (details in Licenses\ATTRIBUTION.md):
   * The OptiScaler team.
   * Dagherbou (DLSS Neural Rendering base), wilsjo2 (multipass, pre-SR and the MFG unlock), SirenBrink (FFXIV integration),
-    byunjoe and Nickle (contributions to the fork).
-  * Nickle: three behaviours of an unpublished build were reconstructed by reverse engineering and re-implemented
+    byunjoe and other collaborators (named in the README credits).
+  * A collaborator: three behaviours of an unpublished build were reconstructed by reverse engineering and re-implemented
     (the NR shader edit for the "Linear light" proxy, the NR HDR mapping "Linear light + composed", the HDR PNG option
     "Include OptiScaler menu"). No source code of that build was used. See Licenses\ATTRIBUTION.md.
   * RenoDX (clshortfuse): HDR shaders behind scene HDR. Licenses\RenoDX_LICENSE.txt, RenoDX_ATTRIBUTION.txt, RenoDX_FFXIV_NOTICE.md.
