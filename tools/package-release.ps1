@@ -174,10 +174,11 @@ function Find-UserPath([string]$file) {
         $found.Add($text.Substring($i - 1, $end - $i + 1))
     }
     for ($i = $text.IndexOf($wide, [StringComparison]::OrdinalIgnoreCase); $i -ge 2; $i = $text.IndexOf($wide, $i + 1, [StringComparison]::OrdinalIgnoreCase)) {
-        if ($text[$i - 1] -ne [char]0 -or $text[$i - 2] -notmatch '[A-Za-z]') { continue }
+        if ($text[$i - 2] -notmatch '[A-Za-z]') { continue }
         $chars = [System.Text.StringBuilder]::new()
         for ($j = $i - 2; $j + 1 -lt $text.Length -and $chars.Length -lt 100 -and $text[$j + 1] -eq [char]0 -and $text[$j] -ge ' ' -and $text[$j] -le '~'; $j += 2) { [void]$chars.Append($text[$j]) }
-        $found.Add($chars.ToString())
+        # the drive letter must itself be wide text (a letter followed by a zero byte): then the loop above copies it
+        if ($chars.Length -gt 0) { $found.Add($chars.ToString()) }
     }
     return @($found | Select-Object -Unique)
 }

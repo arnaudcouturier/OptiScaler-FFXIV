@@ -55,6 +55,8 @@ function Invoke-Release([string]$pkg) {
 # clean package: a zip, exit 0, no privacy complaint. Paths that merely look similar must not trip the scan.
 $p = New-Package
 Add-Text "$p\OptiScaler.dll" 'C:\Windows\System32\kernel32.dll \Users\ no drive Users\x D:\Program Files\Users' 'ascii'
+Add-Text "$p\OptiScaler.dll" 'C' 'ascii'   # a one-byte letter in front of wide text is not a wide drive letter
+Add-Text "$p\OptiScaler.dll" ':\Users\x' 'utf16'
 $r = Invoke-Release $p
 Check ($r.Code -eq 0 -and $r.Zip) 'clean package packs' $r.Text
 Check ($r.Entries -contains 'winmm.dll' -and $r.Entries -contains 'nvngx.dll_dlssnr.dll') 'clean package has the fork binaries'
