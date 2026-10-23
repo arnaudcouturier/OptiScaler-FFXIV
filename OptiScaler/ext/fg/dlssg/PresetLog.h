@@ -606,10 +606,10 @@ class Readout
     int candidateLogs_ = 0;
     uint64_t lastCandidateLog_ = 0;
 };
-// Does this request pause the UI recomposition of NVIDIA's runtime (OptiScaler then does not ask for it)? A is documented to turn
-// it off ("Preset A selected, disabling UIR"), so A pauses unless the runtime says it did not apply A or kept the recomposition
-// on. C: 310.9.1.0 ignores it (nothing to pause) and 310.9.16 applies it with the recomposition off, so it pauses only when the
-// runtime confirmed C AND turned the recomposition off.
+// Does the runtime's own reply say that this request turned its UI recomposition off? READOUT ONLY (the menu): it never decides what
+// OptiScaler asks for, that is UiRecompositionRule.h from the request alone. A is documented to turn it off ("Preset A selected,
+// disabling UIR"), so A counts unless the runtime says it did not apply A or kept the recomposition on. C: 310.9.1.0 ignores it and
+// 310.9.16 applies it with the recomposition off, so it counts only when the runtime confirmed C AND turned the recomposition off.
 inline bool PausesUiRecomposition(int request, Effect effect, Uir uir)
 {
     if (request == kPresetA)
