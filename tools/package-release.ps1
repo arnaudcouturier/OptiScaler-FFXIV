@@ -168,7 +168,7 @@ Copy-Item -LiteralPath $attrib -Destination (Join-Path $stage 'Licenses\ATTRIBUT
 
 $byo = @(
     'nvngx_dlss.dll          NVIDIA DLSS super resolution runtime. The game normally ships its own copy next to the executable; OptiScaler uses it.'
-    'nvngx_dlssnr.dll        NVIDIA DLSS Neural Rendering model, needed for [DlssNr] Enabled. Obtain it from NVIDIA (the DLSS SDK or the NVIDIA app/driver distribution). The ini comment in [DlssNr] names the version and, for RTX 20/30/40, the community compatibility runtime it expects.'
+    'nvngx_dlssnr.dll        NVIDIA DLSS Neural Rendering model, needed for [DlssNr] Enabled. Obtain it from NVIDIA (the DLSS SDK or the NVIDIA app/driver distribution). The ini comment in [DlssNr] names the version and, for RTX 20/30/40, the community compatibility runtime it expects. Put it beside OptiScaler, or one folder per version in OptiScaler\NR.<version>\ (for example NR.310.9) to switch between versions in the Neural Rendering card.'
     'nvngx_dlssg.dll         NVIDIA DLSS frame generation runtime, needed for DLSS-G output.'
     'sl.interposer.dll, sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll   NVIDIA Streamline plugins, placed in OptiScaler\streamline\, needed for DLSS-G output. Use the versions that match nvngx_dlssg.dll.'
     'OptiScaler\dlssg_sm86\  Community companion DLSS-G runtime, only for the experimental RTX 30 path ([DLSSG] AmpereMfgUnlock).'
@@ -209,8 +209,12 @@ SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart t
   Neural Rendering (needs nvngx_dlssnr.dll): [DlssNr] Enabled=true
   Frame generation (needs DLSS-G files):   [FrameGen] Enabled=true, FGInput=upscaler, FGOutput=dlssg
   HDR10 output (Windows HDR on first):     [HDR] FfxivHDR=true      ([HDR] Mode=1 = RenoDX scene HDR)
-  HUD-less frame generation (opt-in):      [HudLess] Mode=ui_free   (needs DLSS-G output)
+  HUD-less frame generation (opt-in):      [HudLess] Mode=recomposition   (needs DLSS-G output; use it with the DLSS-G preset Auto or B; ui_free is experimental)
+  DLSS-G render preset (opt-in):           [DLSSG] RenderPreset=0..3   (0 Auto, 1 A, 2 B, 3 C; changeable in the menu while the game runs)
+  Neural Rendering model version:          [DlssNr] Runtime=auto|legacy|NR.<version>
   Defaults: Neural Rendering, HDR, HUD-less, the DLSS-G unlock and the quality override are all OFF until you switch them on.
+  Two things are ON by default in FFXIV: the automatic mipmap bias ([Mipmap] MipmapBiasAuto) and the quality change without the 500 ms pause
+  ([NgxRelease] SkipReleaseSleep). Set them to false to turn them off.
   Menu look:                               [Menu] Style=ember       (flat charcoal menu; set [Menu] AccentColorR/G/B for the accent, default is blue)
 
 BRING YOUR OWN (not included: not redistributable from this repository)
@@ -218,10 +222,14 @@ $(($byo | ForEach-Object { "  $_" }) -join "`n")
 
 KNOWN LIMITS
   * Only the settings marked "tested" in the project README were played in game, on one RTX 4090. Everything else is untested.
-  * HUD-less is opt-in and off by default; SDR with DLSS-G 2x-4x was tested, HDR was not.
+  * HUD-less is opt-in and off by default; recomposition in SDR with DLSS-G 2x-4x was tested, HDR was not. ui_free is experimental (in one scene its
+    UI mask fell back for most frames).
+  * DLSS-G Preset A and C turn NVIDIA's UI recomposition off (Preset C also turns FG Lite on), so with them HUD-less recomposition is not requested
+    (the log and the menu say so). Use preset Auto or B with recomposition.
   * Window mode ([Window] Mode=on), the automatic multiplier ([DLSSG] AutoMFG=true), "Run NR before DLSS" in the character
     preview and the game jitter correction are off by default. Window mode needs [XeFG] ForceBorderless=true and ReShade.
-    The jitter correction is experimental and made no visible difference at the Quality mode in the maintainer's test.
+    The jitter correction is experimental and made no visible difference at the Quality mode in the maintainer's test. The source-level jitter fix
+    ([FFXIV] JitterSource) is experimental, off by default and supports one game executable build.
   * DLSS presets L and M cost more fps than K (heavier models); K is the default.
   * libxell.dll (Intel XeLL) is not part of this archive.
   * 5x and 6x multi frame generation on RTX 40 are experimental; one GPU hang happened at 6x. Use 4x or lower.
