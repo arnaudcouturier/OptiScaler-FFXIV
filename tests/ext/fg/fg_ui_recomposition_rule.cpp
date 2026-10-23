@@ -39,6 +39,22 @@ void RuleTable()
     }
 }
 
+void NobodyAskedForRecompositionNeverPauses()
+{
+    // The HUD-less engine reports "paused by the preset" from droppedByPreset (HudlessEngine.cpp PausedByPreset). Recomposition is wanted
+    // only with the mode on, a hud-less source for the game build and [DLSSG] UIRecomposition not false (QueryRecomposition().enabled);
+    // when it is not wanted, Preset A or C take nothing away, so the engine must not stop or report a pause, on every availability.
+    for (auto why : kAll)
+        for (int preset : { kAuto, kPresetA, kPresetB, kPresetC })
+        {
+            const auto d = DecideUiRecomposition(false, why, preset);
+            CHECK_MSG(!d.droppedByPreset && !d.requested, "not wanted, preset %d availability %d: dropped %d requested %d", preset,
+                      static_cast<int>(why), d.droppedByPreset, d.requested);
+        }
+    // the same preset C pauses it as soon as it is wanted
+    CHECK(DecideUiRecomposition(true, Unavailable::None, kPresetC).droppedByPreset);
+}
+
 void FirstCallCarriesTheFinalValue()
 {
     // The decision takes no runtime confirmation: the first SetOptions of a process booted on C asks for nothing, the first one on Auto
@@ -186,6 +202,7 @@ void LiveTransitions()
 int main()
 {
     RuleTable();
+    NobodyAskedForRecompositionNeverPauses();
     FirstCallCarriesTheFinalValue();
     VersionIndependent();
     UnavailableControlRunsAsAuto();

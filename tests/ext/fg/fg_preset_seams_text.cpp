@@ -287,7 +287,11 @@ void UiRecompositionNotePins(const std::string& repo)
     // the HUD-less engine: the same rule says "paused by the preset" (DLSS-G provider only), the core asks it only for the recomposition mode
     // and before the source is touched
     const std::string engine = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessEngine.cpp")));
-    CHECK(engine.find("bool Engine::PausedByPreset() { return FrameGenProvider() == Provider::DlssG && ext::fg::preset::CurrentUiRecompositionDecision(true).droppedByPreset; }") != std::string::npos);
+    // ... and only when recomposition is wanted at all (mode, a hud-less source for the game build, [DLSSG] UIRecomposition): the argument is
+    // QueryRecomposition().enabled, never a constant true (a constant would report Fallback(PausedByPreset) and stop tagging for a
+    // recomposition nobody asked for; the rule's "not wanted never drops" row in fg_ui_recomposition_rule is the behaviour behind it)
+    CHECK(engine.find("bool Engine::PausedByPreset() { return FrameGenProvider() == Provider::DlssG && ext::fg::preset::CurrentUiRecompositionDecision(QueryRecomposition().enabled).droppedByPreset; }") != std::string::npos);
+    CHECK(engine.find("CurrentUiRecompositionDecision(true)") == std::string::npos);
     const std::string core = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessCore.h")));
     CHECK(core.find("if (mode == Mode::Recomposition && _host.PausedByPreset()) return Fail(Reason::PausedByPreset);") != std::string::npos);
     CHECK(Before(core, "_host.PausedByPreset()", "IHudlessSource* source = _host.Source();"));
