@@ -19,8 +19,22 @@
     * Build by-products (.pdb .exp .lib .ilk .obj) and upstream's setup scripts are left out; -IncludeSymbols adds the .pdb.
     * Every packed third-party binary must map to a licence file that is present under Licenses\ in -Package; a missing one stops
       the script. A binary whose licence file does not name it is packed with a warning that the maintainer has to confirm.
+    * Entries under Licenses\ go through the same block-list as everything else (a blocked file there is left out and reported).
+    * Privacy scan: every packed PE (.dll, .exe, .addon*) is searched for a user profile path (a drive letter followed by :\Users\,
+      in ASCII and in UTF-16LE), which a build leaves in the debug directory or in assertion strings and which would publish the
+      Windows user name of the build machine. One in a binary this fork builds (winmm.dll, nvngx.dll_dlssnr.dll) or in anything
+      outside OptiScaler\ stops the script with exit 5 before any archive is written; there is no switch to ignore it. One in a
+      third-party library under OptiScaler\ (FidelityFX, XeSS, Direct3D 12 core) is a vendor build path: it is reported as a
+      warning with the string, and the file is packed. The scan does not look at .pdb files (-IncludeSymbols packs them knowingly).
   After writing the archive the script extracts it to a scratch folder and checks every hash against SHA256SUMS.txt, and checks that
   -Package was not modified (its tree hash before and after).
+
+  Exit codes:
+    0  archive written and verified
+    2  bad arguments, or -Package / the checkout is missing something it needs
+    3  a file in -Package is unclassified, a licence or notice file is missing, or the ini lacks a fork section
+    4  verification of the written archive failed (hash or file count mismatch, or -Package changed)
+    5  a packed binary contains a user profile path (the privacy scan above); nothing is written
 .PARAMETER Package
   Folder produced by tools\package.ps1 (contains OptiScaler.dll, OptiScaler.ini, the forwarder).
 .PARAMETER Version
@@ -98,7 +112,10 @@ foreach ($f in (Get-ChildItem -LiteralPath $Package -Recurse -File -Force | Sort
     $top = ($rel -split '[\\/]')[0]
 
     if (($Exclude -contains $name) -or ($Exclude -contains $rel)) { $skipped.Add("$rel (excluded by request)"); continue }
-    if ($top -eq 'Licenses') { $include.Add(@{ Source = $f.FullName; Dest = $rel }); continue }
+    if ($top -eq 'Licenses') {
+        if ($blockPatterns | Where-Object { $name -match $_ }) { $blocked.Add($rel) } else { $include.Add(@{ Source = $f.FullName; Dest = $rel }) }
+        continue
+    }
     if ($blockPatterns | Where-Object { $name -match $_ }) { $blocked.Add($rel); continue }
     if ($skipPatterns | Where-Object { $name -match $_ }) {
         if ($IncludeSymbols -and $name -match '\.pdb$') { $include.Add(@{ Source = $f.FullName; Dest = $rel }) } else { $skipped.Add($rel) }
@@ -140,6 +157,48 @@ if (Test-Path $fragDir) {
         $section = [IO.Path]::GetFileNameWithoutExtension($frag.Name)
         if ($ini -notmatch "(?im)^\s*\[$([regex]::Escape($section))\]\s*$") { Fail "OptiScaler.ini has no [$section] section: the package was not made by tools\package.ps1" 3 }
     }
+}
+
+# ---------------------------------------------------------------- privacy scan of the packed binaries
+# A user profile path (drive letter + :\Users\) in a binary is the build machine's Windows user name; see the header.
+function Find-UserPath([string]$file) {
+    $bytes = [IO.File]::ReadAllBytes($file)
+    $text = [Text.Encoding]::Latin1.GetString($bytes)   # one char per byte, so IndexOf walks the raw bytes
+    $found = [System.Collections.Generic.List[string]]::new()
+    $ascii = ':\Users\'
+    $wide = (($ascii.ToCharArray() | ForEach-Object { [string]$_ + [char]0 }) -join '')
+    for ($i = $text.IndexOf($ascii, [StringComparison]::OrdinalIgnoreCase); $i -ge 1; $i = $text.IndexOf($ascii, $i + 1, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($text[$i - 1] -notmatch '[A-Za-z]') { continue }
+        $end = $i
+        while ($end -lt $text.Length -and ($end - $i) -lt 100 -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
+        $found.Add($text.Substring($i - 1, $end - $i + 1))
+    }
+    for ($i = $text.IndexOf($wide, [StringComparison]::OrdinalIgnoreCase); $i -ge 2; $i = $text.IndexOf($wide, $i + 1, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($text[$i - 1] -ne [char]0 -or $text[$i - 2] -notmatch '[A-Za-z]') { continue }
+        $chars = [System.Text.StringBuilder]::new()
+        for ($j = $i - 2; $j + 1 -lt $text.Length -and $chars.Length -lt 100 -and $text[$j + 1] -eq [char]0 -and $text[$j] -ge ' ' -and $text[$j] -le '~'; $j += 2) { [void]$chars.Append($text[$j]) }
+        $found.Add($chars.ToString())
+    }
+    return @($found | Select-Object -Unique)
+}
+$userPathBinaries = [System.Collections.Generic.List[string]]::new()
+foreach ($i in $include) {
+    if ($i.Dest -notmatch '(?i)\.(dll|exe|addon\w*)$') { continue }
+    $hits = Find-UserPath $i.Source
+    if (-not $hits) { continue }
+    $shown = ($hits | Select-Object -First 3 | ForEach-Object { '"' + $_ + '"' }) -join ', '
+    if ($i.Dest -like 'OptiScaler\*') {
+        # third-party library (the classification above lets nothing else in under OptiScaler\): a vendor build path, not this machine's
+        $warnings.Add("$($i.Dest) : contains a user profile path $shown. It is a third-party library, so it is packed; the maintainer should check that the path is the vendor's.")
+    } else {
+        $userPathBinaries.Add("$($i.Dest) contains $shown")
+    }
+}
+if ($userPathBinaries.Count -gt 0) {
+    Write-Host '[release] a packed binary holds a user profile path (the Windows user name of the build machine); nothing was written:' -ForegroundColor Red
+    $userPathBinaries | ForEach-Object { Write-Host "  $_" }
+    Write-Host '  Rebuild so that the path is not embedded (the forwarder links with /PDBALTPATH:%_PDB%), then package again.'
+    exit 5
 }
 
 # ---------------------------------------------------------------- source URL (from the checkout, nothing hard-coded)
@@ -201,7 +260,8 @@ INSTALL
   4. Extract everything into the folder that contains ffxiv_dx11.exe (overwrite when asked).
   5. Add the files in "BRING YOUR OWN" for the features you want.
   6. Start the game. Press Insert to open the OptiScaler menu. To get a log file for bug reports set [Log] LogToFile=true
-     (OptiScaler.log is then written next to winmm.dll).
+     (OptiScaler.log is then written next to winmm.dll). The log contains the game folder path, and the file paths and hashes of the
+     NVIDIA runtimes it finds. Before you post it publicly, remove or mask the path if it contains your Windows user name.
 
 SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart the game after changing most of them)
   (the combination used in the maintainer's tested setup; in the menu or the ini)
@@ -237,8 +297,13 @@ KNOWN LIMITS
     patch they switch themselves off (see the log) until the fork is updated; the rest keeps working.
 
 UNINSTALL
-  Close the game, delete winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, the OptiScaler folder, Licenses, INSTALL.txt, NOTICE.txt
-  and SHA256SUMS.txt from the game folder, then copy back whatever you saved in step 2.
+  Close the game and delete only what this archive installed, in the folder that contains ffxiv_dx11.exe:
+    winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, INSTALL.txt, NOTICE.txt, SHA256SUMS.txt, and the Licenses folder
+  and these files inside the OptiScaler folder (a folder left empty by this can be removed too):
+$(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { "    $($_.Dest)" }) -join "`n")
+  Do NOT delete the OptiScaler folder as a whole. Leave your own NVIDIA files alone: nvngx_dlssg.dll, the streamline folder, the
+  NR.<version> folders, dlssg_sm86 and any nvngx_dlssnr.dll you placed there are yours (see BRING YOUR OWN). Then copy back whatever
+  you saved in step 2.
 "@
 
 $notice = @"
