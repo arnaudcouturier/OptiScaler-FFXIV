@@ -318,7 +318,7 @@ void UiRecompositionNotePins(const std::string& repo)
     CHECK(seams.find("const auto available = CurrentAvailability();") != std::string::npos);
     const size_t table = seams.find("Unavailable CurrentAvailability()");
     CHECK(table != std::string::npos);
-    CHECK(seams.substr(table, 330).find("CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None, State::Instance().activeFgOutput == FGOutput::DLSSG)") != std::string::npos);
+    CHECK(seams.substr(table, seams.find("}", table) - table).find("CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None, State::Instance().activeFgOutput == FGOutput::DLSSG)") != std::string::npos);
     for (const std::string& unit : { seams, drs, menu })
         CHECK(unit.find("hudless::CurrentMode") == std::string::npos);
 }
