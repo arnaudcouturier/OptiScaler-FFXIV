@@ -96,6 +96,61 @@ int ApplyAdaUnlockPatches(std::vector<uint8_t>& image, std::vector<std::pair<siz
 }
 } // namespace
 
+// The render-preset table of the runtime (EndpointConfiguration::ApplyRenderPreset = Located::readFn). The stores are 16-bit engaged-optional
+// values into the endpoint configuration: `mov word [reg+0x54], 0x100/0x101` is the UI recomposition override (off/on), `mov word [reg+0x68],
+// 0x100/0x101` the FG Lite override (off/on). Read in nvngx_dlssg.dll 310.9.16 (sha 8d59d49b, model-store build cadee1aa):
+//   Preset C: +0x54 = 0x100 directly followed by +0x68 = 0x101      (recomposition OFF, FG Lite ON)
+//   Preset A: +0x54 = 0x100                                          (recomposition OFF)         Preset B: +0x54 = 0x101 (recomposition ON)
+//   common to A and B: +0x68 = 0x100 (FG Lite OFF)                   private-flag overrides: +0x54 = 0x100 and +0x68 = 0x100 once each
+// so the function holds three +0x54 = 0x100, one +0x54 = 0x101, two +0x68 = 0x100 and one +0x68 = 0x101 stores. The recomposition rule
+// (ext/fg/dlssg/UiRecompositionRule.h: A and C drop it, Auto and B keep it) rests on this table. 310.9.1.0 and 310.8.0 have no Preset C and no
+// +0x68 stores at all: one +0x54 = 0x100 store (A). Any other build must show one of the two shapes, else the recipe fails: a runtime that
+// changed the table would otherwise be paired with the wrong rule silently.
+struct StoreScan
+{
+    int ui0 = 0, ui1 = 0, lite0 = 0, lite1 = 0; // +0x54 = 0x100, +0x54 = 0x101, +0x68 = 0x100, +0x68 = 0x101
+    int cPairs = 0;                            // a +0x54 = 0x100 store immediately followed by a +0x68 = 0x101 store
+};
+
+StoreScan ScanPresetStores(const std::vector<uint8_t>& image, uint32_t from, uint32_t to)
+{
+    StoreScan scan;
+    int previous = 0; // kind of the previous store: 1 = ui0
+    uint32_t previousEnd = 0;
+    for (uint32_t at = from; at + 7 <= to && at + 9 <= image.size(); ++at)
+    {
+        uint32_t p = at;
+        if (image[p++] != 0x66)
+            continue;
+        if ((image[p] & 0xF0) == 0x40) // REX
+            ++p;
+        if (image[p++] != 0xC7)
+            continue;
+        const uint8_t modrm = image[p++];
+        if ((modrm & 0xF8) != 0x40 || (modrm & 7) == 4) // [reg+disp8], no SIB
+            continue;
+        const uint8_t disp = image[p++];
+        const uint8_t lo = image[p++], hi = image[p++];
+        if ((disp != 0x54 && disp != 0x68) || hi != 0x01 || lo > 1)
+            continue;
+        const int kind = disp == 0x54 ? (lo ? 2 : 1) : (lo ? 4 : 3);
+        if (kind == 1)
+            ++scan.ui0;
+        else if (kind == 2)
+            ++scan.ui1;
+        else if (kind == 3)
+            ++scan.lite0;
+        else
+            ++scan.lite1;
+        if (kind == 4 && previous == 1 && previousEnd == at)
+            ++scan.cPairs;
+        previous = kind;
+        previousEnd = p;
+        at = p - 1;
+    }
+    return scan;
+}
+
 int main()
 {
     const char* path = std::getenv("OPTISCALER_DLSSG_DLL");
@@ -164,6 +219,21 @@ int main()
             CHECK(l.defaults == e.defaults && l.copy == e.copy);
             CHECK(l.copySites[0] == e.site0 && l.copySites[1] == e.site1 && l.sharedGlobal == e.global);
         }
+    // The preset table behind the UI recomposition rule (see ScanPresetStores).
+    if (l.why == Why::Ok && l.defaults > l.readFn)
+    {
+        const StoreScan scan = ScanPresetStores(image, l.readFn, l.defaults);
+        const bool full = scan.ui0 == 3 && scan.ui1 == 1 && scan.lite0 == 2 && scan.lite1 == 1 && scan.cPairs == 1;
+        const bool aOnly = scan.ui0 == 1 && scan.ui1 == 0 && scan.lite0 == 0 && scan.lite1 == 0 && scan.cPairs == 0;
+        std::printf("preset table check (readFn %X..%X): +0x54=0x100 x%d, +0x54=0x101 x%d, +0x68=0x100 x%d, +0x68=0x101 x%d, C pair (recomposition off + FG Lite on) x%d -> %s\n",
+                    l.readFn, l.defaults, scan.ui0, scan.ui1, scan.lite0, scan.lite1, scan.cPairs,
+                    full ? "the 310.9.16 table: A and C turn the recomposition off, B turns it on"
+                         : aOnly ? "the older shape: Preset A only, no Preset C" : "UNKNOWN TABLE: review the recomposition rule before trusting this build");
+        CHECK(full || aOnly);
+        for (const auto& e : kExpect)
+            if (sha == e.sha && std::strstr(e.what, "310.9.16") != nullptr)
+                CHECK(full);
+    }
     // Coexistence with the Ada unlock: its patches must not disturb any guarded byte, so the same RVAs come out afterwards.
     if (l.why == Why::Ok)
     {
