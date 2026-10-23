@@ -184,6 +184,21 @@ void RecompositionNote()
     CHECK(!Has(c, "cannot") && !Has(c, "not allowed") && !Has(c, "blocked"));
 }
 
+// The selector gate (item 4 of the brief): C is a valid configuration with HUD-less off (the UI is simply interpolated). Whatever the
+// preset, a control that is available says nothing about being unavailable, and an unavailable control names its own reason, never the HUD-less mode.
+void SelectorHasNoHudlessGate()
+{
+    for (int p : { kAuto, kPresetA, kPresetB, kPresetC })
+        CHECK(UnavailableSentence(p, CheckAvailable(false, false, true)).empty());
+    for (auto why : { Unavailable::AmpereRuntime, Unavailable::ReplacementRuntime, Unavailable::OtherOutput })
+    {
+        const auto s = UnavailableSentence(kPresetC, why);
+        CHECK(Has(s, "Chosen: Preset C, not in use: ") && !Has(s, "HUD") && !Has(s, "hud"));
+    }
+    // HUD-less not in recomposition mode: the preset sections add nothing about it
+    CHECK(UiRecompositionNote(false, kPresetC, kPresetC).empty());
+}
+
 void RecompositionReadout()
 {
     // the runtime's reply is readout only: it adds a line, it never removes the note
@@ -204,6 +219,7 @@ int main()
 {
     RecompositionDroppedSentence();
     RecompositionNote();
+    SelectorHasNoHudlessGate();
     RecompositionReadout();
     InUseLabels();
     NothingToSayWhenTheyAgree();
