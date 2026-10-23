@@ -25,6 +25,7 @@
 #include "ext/fg/dlssg/PresetSwitch.h"
 
 #include <atomic>
+#include <optional>
 
 namespace ext::fg::preset
 {
@@ -65,9 +66,27 @@ public:
         return static_cast<Unavailable>(value);
     }
 
+    // The remembered value, or nothing while no consumer has looked yet. Never changes the latch.
+    std::optional<Unavailable> Peek() const
+    {
+        const int value = remembered_.load(std::memory_order_acquire);
+        return value < 0 ? std::nullopt : std::optional<Unavailable>(static_cast<Unavailable>(value));
+    }
+
 private:
     std::atomic<int> remembered_ { -1 };
 };
+
+// The availability the CONTROL (menu, live preset switch, driver answer) works from: sticky in the unavailable direction. When boot fixed
+// a reason why the runtime was not told the preset (companion runtime, replacement runtime, another output), a live value that later
+// goes back to None (the box was unticked, a fallback happened) must not make a switch to A or C possible: the rule keeps reading the
+// remembered value, so the preset the switch commits would no longer be the one the flag follows. Latched None (the runtime was told)
+// or nothing latched yet: the live value, as before. Reading never commits.
+inline Unavailable ControlAvailability(const AvailabilityLatch& latch, Unavailable live)
+{
+    const auto kept = latch.Peek();
+    return kept.has_value() && *kept != Unavailable::None ? *kept : live;
+}
 
 struct UiRecompositionDecision
 {

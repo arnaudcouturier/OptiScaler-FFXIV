@@ -112,6 +112,8 @@ int ApplyAdaUnlockPatches(std::vector<uint8_t>& image, std::vector<std::pair<siz
 // +0x54 = 0x100 store (A), no marker, nothing to map. Any other build must show one of the two shapes, else the recipe fails: a runtime that
 // changed the table would otherwise be paired with the wrong rule silently. If a future build keeps the table but changes the code shape of
 // the log call, the mapping part says UNKNOWN TABLE (loud, a manual re-run and a new reading, not a silent pass).
+// Limit: N is the build's own label for the group. The check trusts that label and does not check the dispatch (the compare chain or jump
+// table that sends a requested 1, 2 or 3 to the group); a build that logged the right N in the wrong branch of the dispatch would pass.
 struct PresetGroup
 {
     int count = 0;           // groups logged with this preset number

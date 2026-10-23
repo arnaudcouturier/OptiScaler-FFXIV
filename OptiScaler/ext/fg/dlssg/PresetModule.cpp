@@ -5,6 +5,7 @@
 #include "PresetDrs.h"
 #include "PresetGuards.h"
 #include "PresetLogRelay.h"
+#include "ext/core/PathText.h"
 
 #include <Util.h>
 
@@ -89,7 +90,7 @@ bool IsRuntime(HMODULE module)
     return GetProcAddress(module, "NVSDK_NGX_D3D12_CreateFeature") != nullptr && GetProcAddress(module, "NVSDK_NGX_D3D12_Init_Ext") != nullptr;
 }
 
-std::string Narrow(const std::wstring& w) { return std::filesystem::path(w).string(); }
+std::string Narrow(const std::wstring& w) { return ext::PathText(w); }
 
 std::wstring PathOf(HMODULE module)
 {

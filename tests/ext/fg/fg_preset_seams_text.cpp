@@ -3,6 +3,7 @@
 // (fg_preset_request, _switch, _guards, _log); these pins keep an upstream merge or a refactor from silently dropping a seam.
 #include "fg_preset_harness.h"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -318,6 +319,9 @@ void UiRecompositionNotePins(const std::string& repo)
     CHECK(seams.find("const auto available = CurrentAvailability();") != std::string::npos);
     const size_t table = seams.find("Unavailable CurrentAvailability()");
     CHECK(table != std::string::npos);
+    // the control's availability is sticky in the unavailable direction (UiRecompositionRule.h ControlAvailability, tested in
+    // fg_ui_recomposition_rule): the table's answer goes through the latch, which this function only reads, never commits
+    CHECK(seams.substr(table, seams.find("}", table) - table).find("return ControlAvailability(TheLatch(), CheckAvailable(") != std::string::npos);
     CHECK(seams.substr(table, seams.find("}", table) - table).find("CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None, State::Instance().activeFgOutput == FGOutput::DLSSG)") != std::string::npos);
     for (const std::string& unit : { seams, drs, menu })
         CHECK(unit.find("hudless::CurrentMode") == std::string::npos);
@@ -414,6 +418,45 @@ void MenuText(const std::string& repo)
 } // namespace
 
 
+// Release hardening. (1) PresetModule logs and stores paths as text; std::filesystem::path::string() converts through the ANSI code page
+// and throws for a folder name that page cannot represent (a Japanese or Cyrillic game folder on another locale), which would make the
+// live preset change fail. The module goes through ext::PathText (UTF-8, never throws; its behaviour is tested in chara_path_text).
+// (2) The carry-over of the recomposition flag into the switch's off call is pinned in the off body above; this pin closes the other
+// route, a renamed helper: the field is assigned in exactly one place, DlssgSeams.cpp.
+void HardeningPins(const std::string& repo)
+{
+    const std::string raw = ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetModule.cpp");
+    const std::string mod = Flat(raw);
+    CHECK(mod.find(".string()") == std::string::npos);
+    CHECK(mod.find("#include \"ext/core/PathText.h\"") != std::string::npos);
+    CHECK(mod.find("std::string Narrow(const std::wstring& w) { return ext::PathText(w); }") != std::string::npos);
+    CHECK(Count(mod, "Narrow(") == 5); // the definition and the four uses all go through it
+
+    const std::string field = "enableUserInterfaceRecomposition";
+    size_t assignments = 0;
+    std::string where;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(repo + "/OptiScaler"))
+    {
+        const std::string ext = entry.path().extension().string();
+        if (!entry.is_regular_file() || (ext != ".cpp" && ext != ".h" && ext != ".hpp" && ext != ".inl"))
+            continue;
+        const std::string text = ReadFile(entry.path().string());
+        for (size_t at = text.find(field); at != std::string::npos; at = text.find(field, at + field.size()))
+        {
+            size_t next = at + field.size();
+            while (next < text.size() && (text[next] == ' ' || text[next] == '	'))
+                ++next;
+            if (next + 1 < text.size() && text[next] == '=' && text[next + 1] != '=')
+            {
+                ++assignments;
+                where = entry.path().filename().string();
+            }
+        }
+    }
+    CHECK(assignments == 1);
+    CHECK(where == "DlssgSeams.cpp");
+}
+
 int main(int argc, char** argv)
 {
     const std::string repo = argc > 1 ? argv[1] : ".";
@@ -426,6 +469,7 @@ int main(int argc, char** argv)
     NvidiaCopyWarn(repo);
     StaleRestartPins(repo);
     MenuText(repo);
+    HardeningPins(repo);
     if (g_failures)
     {
         std::printf("fg_preset_seams_text: %d check(s) failed\n", g_failures);

@@ -141,6 +141,41 @@ void LatchRemembersTheFirstLook()
     }
 }
 
+// Release hardening: the control's availability is sticky in the unavailable direction. Boot latched a runtime that was not told the
+// preset (companion runtime, replacement runtime or another output), then the live value went back to None (the box was unticked): a
+// live switch to A or C must stay unavailable, because the rule keeps reading the latched value (Auto) and would otherwise disagree
+// with the preset the switch commits. Reading it never commits.
+void ControlAvailabilityIsSticky()
+{
+    AvailabilityLatch latch;
+    CHECK(!latch.Peek().has_value()); // empty
+    CHECK(ControlAvailability(latch, Unavailable::None) == Unavailable::None);
+    CHECK(ControlAvailability(latch, Unavailable::AmpereRuntime) == Unavailable::AmpereRuntime);
+    CHECK(!latch.Peek().has_value()); // reading the control never fixes the latch
+
+    latch.Resolve(Unavailable::AmpereRuntime, true); // boot: the runtime was not told
+    CHECK(latch.Peek() == Unavailable::AmpereRuntime);
+    CHECK(ControlAvailability(latch, Unavailable::None) == Unavailable::AmpereRuntime); // live went back to None: still unavailable
+    CHECK(ControlAvailability(latch, Unavailable::ReplacementRuntime) == Unavailable::AmpereRuntime);
+    CHECK(ControlAvailability(latch, Unavailable::AmpereRuntime) == Unavailable::AmpereRuntime);
+
+    for (auto why : kAll)
+    {
+        if (why == Unavailable::None)
+            continue;
+        AvailabilityLatch each;
+        each.Resolve(why, true);
+        CHECK_MSG(ControlAvailability(each, Unavailable::None) == why, "latched %d, live None", static_cast<int>(why));
+    }
+
+    // the other direction is as before: latched None (the runtime was told), live now unavailable -> the live value shows
+    AvailabilityLatch told;
+    told.Resolve(Unavailable::None, true);
+    CHECK(told.Peek() == Unavailable::None);
+    CHECK(ControlAvailability(told, Unavailable::AmpereRuntime) == Unavailable::AmpereRuntime);
+    CHECK(ControlAvailability(told, Unavailable::None) == Unavailable::None);
+}
+
 void PresetsThatDrop()
 {
     CHECK(PresetDropsUiRecomposition(kPresetA));
@@ -310,6 +345,7 @@ int main()
     UnavailableControlRunsAsAuto();
     PresetsThatDrop();
     LatchRemembersTheFirstLook();
+    ControlAvailabilityIsSticky();
     LiveTransitions();
     if (g_failures)
     {

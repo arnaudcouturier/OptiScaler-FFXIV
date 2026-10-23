@@ -40,24 +40,25 @@ void Publish(const Status& status)
     std::lock_guard lock(g_statusMutex);
     g_status = status;
 }
+
+ext::fg::preset::AvailabilityLatch& TheLatch()
+{
+    static ext::fg::preset::AvailabilityLatch latch;
+    return latch;
+}
 } // namespace
 
 namespace ext::fg::preset
 {
 Unavailable CurrentAvailability()
 {
-    return CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None,
-                          State::Instance().activeFgOutput == FGOutput::DLSSG);
+    return ControlAvailability(TheLatch(), CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(),
+                                                          State::Instance().activeFgNvngx != FGNvngxReplacement::None,
+                                                          State::Instance().activeFgOutput == FGOutput::DLSSG));
 }
 
 namespace
 {
-AvailabilityLatch& TheLatch()
-{
-    static AvailabilityLatch latch;
-    return latch;
-}
-
 // Availability of the control as the recomposition rule sees it: the one remembered by the first driver query or the first SetOptions
 // (UiRecompositionRule.h AvailabilityLatch), the live value before that.
 Unavailable RuleAvailability(bool atCreation) { return TheLatch().Resolve(CurrentAvailability(), atCreation); }
