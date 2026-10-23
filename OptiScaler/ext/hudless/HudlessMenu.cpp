@@ -3,6 +3,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
+#include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/game/Game.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
@@ -88,6 +89,14 @@ void DrawHudless(ext::menu::Ctx&)
 
     if (current == Mode::Recomposition || (selected == int(Mode::Recomposition)))
         ImGui::TextWrapped("Recomposition applies after a game restart (DLSS-G reads it when the feature is created).");
+
+    // A DLSS-G render preset that takes the recomposition away (A, C): the same sentence as in the log and next to the preset selector.
+    if (const auto note = ext::fg::preset::UiRecompositionMenuNote(); !note.empty())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s", note.c_str());
+        ImGui::PopStyleColor();
+    }
 
     bool tint = cfg.showDetectedUi.value_or_default();
     if (ImGui::Checkbox("Show detected UI (HUD-less)", &tint))

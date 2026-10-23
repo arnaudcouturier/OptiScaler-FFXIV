@@ -45,4 +45,9 @@ Unavailable CurrentAvailability();
 // checkbox is written at once although it says restart) cannot flip the flag of a running feature. Other callers (the HUD-less engine, the
 // menu) read the remembered value, or the live one while nothing was remembered. Safe from any thread.
 UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation = false);
+
+// The sentence the menu shows next to the HUD-less mode and next to the preset selector (PresetMenuText.h UiRecompositionNote), empty when
+// there is nothing to say; and the readout line from the runtime's own reply (readout only).
+std::string UiRecompositionMenuNote();
+std::string UiRecompositionReadoutText();
 } // namespace ext::fg::preset

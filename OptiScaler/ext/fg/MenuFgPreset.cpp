@@ -6,7 +6,6 @@
 #include "ext/fg/dlssg/PresetLogRelay.h"
 #include "ext/fg/dlssg/PresetMenuText.h"
 #include "ext/fg/dlssg/PresetStatus.h"
-#include "ext/hudless/HudlessEngine.h"
 
 #include <Config.h>
 
@@ -127,7 +126,7 @@ void DrawRenderPresetSection()
         return;
     }
     if (status.configured == kPresetC || status.active == kPresetC)
-        ImGui::TextDisabled("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off and FG Lite on: inferred from the preset number; the runtime does not state it).");
+        ImGui::TextDisabled("Preset C: the 310.9.16 runtime turns UI recomposition off and FG Lite on (read from its preset table); the 310.9.1.0 runtime ignores it (applied=0).");
 
     const auto confirmed = ReadoutState().Confirm(status.active);
     // the choice and what the runtime was told differ: both are named, with the reason (PresetMenuText.h)
@@ -152,16 +151,15 @@ void DrawRenderPresetSection()
         ImGui::PopStyleColor();
     }
 
-    // HUD-less recomposition and the presets: A turns the runtime's own UI recomposition off (ui_free mode is not affected)
-    const bool involved =
-        status.configured == kPresetA || status.active == kPresetA || status.configured == kPresetC || status.active == kPresetC;
-    if (ext::hudless::QueryRecomposition().enabled && involved)
+    // HUD-less recomposition next to a preset that takes it away: the same sentence as in the log and next to the HUD-less mode
+    // (PresetMenuText.h). Nothing is blocked; the runtime's own reply is a readout line under it.
+    if (const auto note = UiRecompositionMenuNote(); !note.empty())
     {
-        if (UiRecompositionPaused())
-            ImGui::TextWrapped("UI recomposition of NVIDIA's runtime is paused by this preset: with the HUD-less recomposition mode the "
-                               "interface is no longer kept out of the generated frames. Preset B or Auto brings it back.");
-        else if (status.active == kPresetC)
-            ImGui::TextWrapped("Preset C: UI recomposition stays on until the runtime confirms that it applied C; it is then taken to be off (inferred from the preset number; the runtime does not state it).");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s", note.c_str());
+        ImGui::PopStyleColor();
+        if (const auto readout = UiRecompositionReadoutText(); !readout.empty())
+            ImGui::TextDisabled("%s", readout.c_str());
     }
 
     DrawReadout(status);

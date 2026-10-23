@@ -248,6 +248,54 @@ void UiRecompositionPause(const std::string& repo)
     CHECK(header.find("menu readout only") != std::string::npos);
 }
 
+// The note about HUD-less recomposition next to a preset that drops it: one sentence (PresetMenuText.h) in the log, in the preset section and
+// next to the HUD-less mode; the live switch's off call carries the flag of the feature that still exists; nothing is blocked.
+void UiRecompositionNotePins(const std::string& repo)
+{
+    const std::string menu = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/MenuFgPreset.cpp")));
+    CHECK(menu.find("UiRecompositionMenuNote()") != std::string::npos);
+    CHECK(menu.find("UiRecompositionReadoutText()") != std::string::npos);
+    CHECK(Before(menu, "UiRecompositionMenuNote()", "UiRecompositionReadoutText()"));
+    CHECK(Before(menu, "UiRecompositionMenuNote()", "DrawReadout(status);"));
+    // the old inference text and the old "stays on until the runtime confirms" claim are gone: the flag never waits for the reply
+    CHECK(menu.find("UiRecompositionPaused") == std::string::npos);
+    CHECK(menu.find("stays on until the runtime confirms") == std::string::npos);
+    CHECK(menu.find("inferred from the preset number") == std::string::npos);
+    CHECK(menu.find("BeginDisabled(off)") != std::string::npos); // the only thing that disables the selector is the availability
+    const std::string hudless = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessMenu.cpp")));
+    CHECK(hudless.find("UiRecompositionMenuNote()") != std::string::npos);
+    CHECK(Before(hudless, "ext::hudless::SetMode(chosen);", "UiRecompositionMenuNote()"));
+    CHECK(hudless.find("BeginDisabled") == std::string::npos || hudless.find("BeginDisabled") > hudless.find("UiRecompositionMenuNote()"));
+    const std::string seams = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetSeams.cpp")));
+    // the menu note reads the rule's availability, the sentence comes from the pure text
+    CHECK(seams.find("return UiRecompositionNote(wanted, active, chosen);") != std::string::npos);
+    CHECK(seams.find("EffectiveRequest(availability, Requests().Active())") != std::string::npos);
+    // the switch's off call: the flag of the still-active request, before anything is released
+    const size_t off = seams.find("steps.off = [&]");
+    const size_t release = seams.find("steps.release = [&]");
+    CHECK(off != std::string::npos && release != std::string::npos && off < release);
+    const std::string offBody = seams.substr(off, release - off);
+    CHECK(offBody.find("CurrentUiRecompositionDecision(ext::hudless::QueryRecomposition().enabled).requested") != std::string::npos);
+    CHECK(offBody.find("off.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    // the log carries the sentence once per episode, from the same pure function
+    const std::string dlssg = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp")));
+    CHECK(dlssg.find("LOG_INFO(\"{}\", ext::fg::preset::UiRecompositionDroppedSentence(droppedBy));") != std::string::npos);
+    CHECK(dlssg.find("if (droppedBy != lastDroppedBy)") != std::string::npos);
+    CHECK(dlssg.find("const int droppedBy = dropped ? decision.preset : -1;") != std::string::npos);
+    // the one availability table: the dispatch tick, the menu status and the driver hook all call CurrentAvailability(); none of them, nor
+    // the table itself, looks at the HUD-less mode (C without HUD-less is a valid configuration: the UI is interpolated)
+    CHECK(Count(seams, "CurrentAvailability()") >= 3);
+    const std::string drs = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetDrs.cpp")));
+    CHECK(drs.find("CurrentAvailability() == Unavailable::None") != std::string::npos);
+    CHECK(seams.find("copy.unavailable = CurrentAvailability();") != std::string::npos);
+    CHECK(seams.find("const auto available = CurrentAvailability();") != std::string::npos);
+    const size_t table = seams.find("Unavailable CurrentAvailability()");
+    CHECK(table != std::string::npos);
+    CHECK(seams.substr(table, 330).find("CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None, State::Instance().activeFgOutput == FGOutput::DLSSG)") != std::string::npos);
+    for (const std::string& unit : { seams, drs, menu })
+        CHECK(unit.find("hudless::CurrentMode") == std::string::npos);
+}
+
 // M2: the relay sink only reads (it must never log); the one WARN line is written from FlushCandidateLines, before its early exit
 void NvidiaCopyWarn(const std::string& repo)
 {
@@ -311,8 +359,8 @@ void MenuText(const std::string& repo)
     // "in use" is only ever said by StatusSentence, from what the runtime confirmed
     CHECK(menu.find("StatusSentence(status.active, confirmed.effect, ReplyReadable())") != std::string::npos);
     CHECK(menu.find("In use") == std::string::npos);
-    // L7: that C turns the recomposition off is read from the preset number, not reported by the runtime: said so
-    CHECK(menu.find("Preset C: the 310.9.1.0 runtime ignores it (applied=0); the 310.9.16 runtime acts on it (UI recomposition off and FG Lite on: inferred from the preset number; the runtime does not state it).") != std::string::npos);
+    // L7, updated: that C turns the recomposition off is now read from the preset table of the 310.9.16 binary (ApplyRenderPreset), no longer inferred
+    CHECK(menu.find("Preset C: the 310.9.16 runtime turns UI recomposition off and FG Lite on (read from its preset table); the 310.9.1.0 runtime ignores it (applied=0).") != std::string::npos);
     CHECK(menu.find("Runtime report: preset requested %d, in force %d") != std::string::npos);
     // PRESET-BOOT phase 1: a boot with only "Applying settings for render preset N." (no ReportOverrideStates, no Override Reported)
     // is a normal, confirmed state. Every line that talks about a report, a refusal or "ignored" hangs on a field that only a line of
@@ -326,9 +374,9 @@ void MenuText(const std::string& repo)
     CHECK(menu.find("not reported") == std::string::npos && menu.find("missing") == std::string::npos && menu.find("no report") == std::string::npos);
     CHECK(menu.find("The runtime does not act on preset id %d.") != std::string::npos);
     CHECK(menu.find("A private flag set in the driver forces UI recomposition or FG Lite off.") != std::string::npos);
-    CHECK(menu.find("UI recomposition of NVIDIA's runtime is paused by this preset") != std::string::npos);
-    CHECK(menu.find("Preset B or Auto brings it back.") != std::string::npos);
-    CHECK(menu.find("Preset C: UI recomposition stays on until the runtime confirms that it applied C; it is then taken to be off (inferred from the preset number; the runtime does not state it).") != std::string::npos);
+    // the old wordings (paused after the fact, stays on until the runtime confirms) are gone; the note comes from PresetMenuText.h
+    CHECK(menu.find("is paused by this preset") == std::string::npos);
+    CHECK(menu.find("Preset B or Auto brings it back.") == std::string::npos);
     CHECK(menu.find("Preset A and C turn off") == std::string::npos);
     CHECK(menu.find("ImGui::BeginDisabled(off);") != std::string::npos);
     CHECK(Count(menu, "ImGui::BeginDisabled(") == Count(menu, "ImGui::EndDisabled();"));
@@ -345,6 +393,7 @@ int main(int argc, char** argv)
     UpstreamSeams(repo);
     AutoCostsNothing(repo);
     UiRecompositionPause(repo);
+    UiRecompositionNotePins(repo);
     RequestStatePins(repo);
     DrsLogLine(repo);
     NvidiaCopyWarn(repo);

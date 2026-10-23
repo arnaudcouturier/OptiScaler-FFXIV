@@ -6,6 +6,7 @@
 
 #include "ext/fg/dlssg/PresetLog.h"
 #include "ext/fg/dlssg/PresetSwitch.h"
+#include "ext/fg/dlssg/UiRecompositionRule.h"
 
 #include <cctype>
 #include <string>
@@ -72,4 +73,44 @@ inline std::string UnavailableSentence(int chosen, Unavailable why)
         return UnavailableText(why);
     return std::string("Chosen: ") + Name(chosen) + ", not in use: " + UnavailableText(why);
 }
+// The sentence for a preset that takes the UI recomposition away (A or C; empty for any other request). Written to the log once per
+// episode (boot, each switch that changes it) and drawn in the menu next to the HUD-less mode and next to the preset selector. It says what
+// happens and what to use instead; nothing is blocked. 310.9.16 does this itself (verified in ApplyRenderPreset); 310.9.1.0 ignores C but
+// OptiScaler does not ask for the recomposition there either (UiRecompositionRule.h), so the sentence holds on every runtime version.
+inline std::string UiRecompositionDroppedSentence(int request)
+{
+    if (!PresetDropsUiRecomposition(request))
+        return {};
+    const std::string name = Name(request);
+    return name + " turns NVIDIA's UI recomposition off on this runtime, so the HUD is interpolated; use Auto or B for recomposition, or ui_free with " +
+           (request == kPresetA ? "A" : "C");
+}
+
+// What the menu says next to the HUD-less mode and next to the preset selector. `wanted`: HUD-less recomposition is on
+// (ext::hudless::QueryRecomposition().enabled). `active` and `chosen` are the effective requests (UiRecompositionRule.h EffectiveRequest, so
+// a control that is off gives Auto). In use first; a chosen preset that is not applied yet is announced the same way.
+inline std::string UiRecompositionNote(bool wanted, int active, int chosen)
+{
+    if (!wanted)
+        return {};
+    if (PresetDropsUiRecomposition(active))
+        return UiRecompositionDroppedSentence(active);
+    if (PresetDropsUiRecomposition(chosen))
+        return "Once applied, " + UiRecompositionDroppedSentence(chosen);
+    return {};
+}
+
+// The readout line under the note, from the runtime's own reply (readout only, it never changes what OptiScaler requests).
+inline std::string UiRecompositionReadoutNote(int request, Effect effect, Uir uir)
+{
+    if (!PresetDropsUiRecomposition(request))
+        return {};
+    if (effect == Effect::NotApplied)
+        return std::string("This runtime version did not apply ") + Name(request) +
+               ", so it does not turn the recomposition off itself; OptiScaler still does not request it, the same on every version.";
+    if (effect == Effect::Applied && uir == Uir::Disabled)
+        return "The runtime reported that it turned its UI recomposition off.";
+    return {};
+}
+
 } // namespace ext::fg::preset

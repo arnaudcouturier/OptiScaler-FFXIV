@@ -4,6 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/FgInternal.h"
+#include "ext/fg/dlssg/PresetMenuText.h"
 #include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
@@ -81,6 +82,15 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
                  recomposition.formatSource, options.uiBufferFormat, dropped ? " -- not requested, dropped by the DLSS-G render preset (" : "",
                  dropped ? ext::fg::preset::Name(decision.preset) : "", dropped ? ")" : "", restart);
         lastLogged = effective;
+    }
+    // One sentence per episode (at boot, and when a live switch changes which preset drops the recomposition), never per frame.
+    static int lastDroppedBy = -1;
+    const int droppedBy = dropped ? decision.preset : -1;
+    if (droppedBy != lastDroppedBy)
+    {
+        if (droppedBy >= 0)
+            LOG_INFO("{}", ext::fg::preset::UiRecompositionDroppedSentence(droppedBy));
+        lastDroppedBy = droppedBy;
     }
     lastEnabled = (int) recomposition.enabled;
 }

@@ -149,8 +149,62 @@ void NvidiaCopyWarning()
 }
 } // namespace
 
+// HUD-less recomposition next to a preset that takes it away (UiRecompositionRule.h): the sentence is the same in the log and in the menu
+// next to BOTH controls, it names the preset, says what happens and what to use instead, and never blocks anything.
+void RecompositionDroppedSentence()
+{
+    CHECK(UiRecompositionDroppedSentence(kPresetC) ==
+          "Preset C turns NVIDIA's UI recomposition off on this runtime, so the HUD is interpolated; use Auto or B for recomposition, or ui_free with C");
+    CHECK(UiRecompositionDroppedSentence(kPresetA) ==
+          "Preset A turns NVIDIA's UI recomposition off on this runtime, so the HUD is interpolated; use Auto or B for recomposition, or ui_free with A");
+    for (int p : { kAuto, kPresetB, 9, -1 })
+        CHECK(UiRecompositionDroppedSentence(p).empty());
+}
+
+void RecompositionNote()
+{
+    const std::string c = UiRecompositionDroppedSentence(kPresetC);
+    const std::string a = UiRecompositionDroppedSentence(kPresetA);
+    // in use
+    CHECK(UiRecompositionNote(true, kPresetC, kPresetC) == c);
+    CHECK(UiRecompositionNote(true, kPresetA, kPresetA) == a);
+    CHECK(UiRecompositionNote(true, kPresetC, kAuto) == c); // switched away in the selector, not applied yet: the one in use is what counts
+    CHECK(UiRecompositionNote(true, kPresetA, kPresetC) == a);
+    // chosen but not applied yet
+    CHECK(UiRecompositionNote(true, kAuto, kPresetC) == "Once applied, " + c);
+    CHECK(UiRecompositionNote(true, kPresetB, kPresetA) == "Once applied, " + a);
+    // nothing to say: Auto / B in use and chosen, or recomposition is not wanted (mode off / ui_free / no source / UIRecomposition off)
+    CHECK(UiRecompositionNote(true, kAuto, kAuto).empty());
+    CHECK(UiRecompositionNote(true, kPresetB, kPresetB).empty());
+    CHECK(UiRecompositionNote(true, kAuto, kPresetB).empty());
+    for (int active : { kAuto, kPresetA, kPresetB, kPresetC })
+        for (int chosen : { kAuto, kPresetA, kPresetB, kPresetC })
+            CHECK(UiRecompositionNote(false, active, chosen).empty());
+    // never mentions blocking: the ini cannot be blocked either
+    CHECK(!Has(c, "cannot") && !Has(c, "not allowed") && !Has(c, "blocked"));
+}
+
+void RecompositionReadout()
+{
+    // the runtime's reply is readout only: it adds a line, it never removes the note
+    CHECK(UiRecompositionReadoutNote(kAuto, Effect::Applied, Uir::Disabled).empty());
+    CHECK(UiRecompositionReadoutNote(kPresetB, Effect::Applied, Uir::Enabled).empty());
+    // 310.9.1.0 case: C not applied, the runtime keeps its recomposition, OptiScaler still does not request it
+    const auto ignored = UiRecompositionReadoutNote(kPresetC, Effect::NotApplied, Uir::Unknown);
+    CHECK(Has(ignored, "did not apply Preset C") && Has(ignored, "still does not request it"));
+    // 310.9.16: C applied with the recomposition off
+    CHECK(Has(UiRecompositionReadoutNote(kPresetC, Effect::Applied, Uir::Disabled), "turned its UI recomposition off"));
+    CHECK(Has(UiRecompositionReadoutNote(kPresetA, Effect::Applied, Uir::Disabled), "turned its UI recomposition off"));
+    CHECK(UiRecompositionReadoutNote(kPresetA, Effect::Unknown, Uir::Unknown).empty()); // inferred, not reported
+    // C waiting for confirmation: nothing claimed yet
+    CHECK(UiRecompositionReadoutNote(kPresetC, Effect::Unknown, Uir::Unknown).empty());
+}
+
 int main()
 {
+    RecompositionDroppedSentence();
+    RecompositionNote();
+    RecompositionReadout();
     InUseLabels();
     NothingToSayWhenTheyAgree();
     PendingChange();

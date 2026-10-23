@@ -6,8 +6,10 @@
 #include "ext/fg/dlssg/PresetLogRelay.h"
 #include "ext/fg/dlssg/PresetModule.h"
 #include "ext/fg/dlssg/PresetRequest.h"
+#include "ext/fg/dlssg/PresetMenuText.h"
 #include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/fg/dlssg/PresetSwitch.h"
+#include "ext/hudless/HudlessEngine.h"
 
 #include <State.h>
 #include <proxies/Streamline_Proxy.h>
@@ -48,9 +50,13 @@ Unavailable CurrentAvailability()
                           State::Instance().activeFgOutput == FGOutput::DLSSG);
 }
 
-UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation)
+namespace
 {
-    static std::atomic<int> remembered { -1 }; // Unavailable of the first SetOptions
+// Availability of the control as the recomposition rule sees it: remembered at the first SetOptions (the creation of the feature), the live
+// value before that.
+Unavailable RuleAvailability(bool atCreation)
+{
+    static std::atomic<int> remembered { -1 };
     int availability = remembered.load(std::memory_order_acquire);
     if (availability < 0)
     {
@@ -62,7 +68,29 @@ UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool at
             availability = remembered.load(std::memory_order_acquire);
         }
     }
-    return DecideUiRecomposition(modeWantsIt, static_cast<Unavailable>(availability), Requests().Active());
+    return static_cast<Unavailable>(availability);
+}
+} // namespace
+
+UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation)
+{
+    return DecideUiRecomposition(modeWantsIt, RuleAvailability(atCreation), Requests().Active());
+}
+
+std::string UiRecompositionMenuNote()
+{
+    const bool wanted = ext::hudless::QueryRecomposition().enabled;
+    const auto availability = RuleAvailability(false);
+    const int active = EffectiveRequest(availability, Requests().Active());
+    const int chosen = EffectiveRequest(availability, ext::Cfg().fg.renderPreset.value_or_default());
+    return UiRecompositionNote(wanted, active, chosen);
+}
+
+std::string UiRecompositionReadoutText()
+{
+    const int active = EffectiveRequest(RuleAvailability(false), Requests().Active());
+    const auto confirmed = ReadoutState().Confirm(active);
+    return UiRecompositionReadoutNote(active, confirmed.effect, confirmed.uir);
 }
 
 Status GetStatus()
@@ -121,6 +149,10 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
         sl::DLSSGOptions off {};
         off.mode = sl::DLSSGMode::eOff;
         off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+        // The feature still exists with the flag the rule gave for the request that is active until the commit (below): an off call that
+        // carries another value would make Streamline mark the feature for recreation before the resources are even released.
+        if (CurrentUiRecompositionDecision(ext::hudless::QueryRecomposition().enabled).requested)
+            off.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
         return StreamlineProxy::DLSSGSetOptions()(viewport, off) == sl::Result::eOk;
     };
     steps.release = [&]
