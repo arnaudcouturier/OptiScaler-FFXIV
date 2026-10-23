@@ -136,6 +136,12 @@ Add-Text "$p\OptiScaler.dll" 'e:\USERS\bob\x.pdb' 'ascii'
 $r = Invoke-Release $p
 Check ($r.Code -eq 5 -and -not $r.Zip) 'case-insensitive ASCII user path in winmm.dll gives exit 5' "code $($r.Code)"
 
+# a doubled-backslash path (C-escaped), ASCII, in winmm.dll
+$p = New-Package
+Add-Text "$p\OptiScaler.dll" 'C:\\Users\\bob\\x.pdb' 'ascii'
+$r = Invoke-Release $p
+Check ($r.Code -eq 5 -and -not $r.Zip) 'doubled-backslash ASCII user path in winmm.dll gives exit 5' "code $($r.Code)"
+
 # a doubled-backslash path (C-escaped), UTF-16LE, in winmm.dll
 $p = New-Package
 Add-Text "$p\OptiScaler.dll" 'C:\\Users\\x\\a.pdb' 'utf16'
