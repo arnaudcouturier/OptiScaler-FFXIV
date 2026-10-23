@@ -8,6 +8,7 @@
 #include "ext/fg/dlssg/PresetStatus.h"
 
 #include <string>
+#include <type_traits>
 
 using namespace ext::fg::preset;
 
@@ -184,12 +185,31 @@ void RecompositionNote()
     CHECK(!Has(c, "cannot") && !Has(c, "not allowed") && !Has(c, "blocked"));
 }
 
-// The selector gate (item 4 of the brief): C is a valid configuration with HUD-less off (the UI is simply interpolated). Whatever the
-// preset, a control that is available says nothing about being unavailable, and an unavailable control names its own reason, never the HUD-less mode.
-void SelectorHasNoHudlessGate()
+/// The selector gate (item 4 of the brief): C is a valid configuration with HUD-less off (the UI is simply interpolated), so the control's
+// availability is a function of the runtime situation ONLY. This pins the table itself: the function takes exactly the three runtime
+// inputs (a fourth, say the HUD-less mode, would change its type and fail to compile here), it answers for all eight combinations with
+// the documented precedence, and the sentence is empty exactly when the control is available, for every preset. The pin that no caller
+// feeds it anything else is the source scan at the end of UiRecompositionNotePins (fg_preset_seams_text): no `hudless::CurrentMode` in the
+// units that call it. (The sentences of an unavailable control are checked in UnavailableControl.)
+void SelectorAvailabilityTable()
 {
-    for (int p : { kAuto, kPresetA, kPresetB, kPresetC })
-        CHECK(UnavailableSentence(p, CheckAvailable(false, false, true)).empty());
+    static_assert(std::is_same_v<decltype(&CheckAvailable), Unavailable (*)(bool, bool, bool)>, "the availability table takes the three runtime inputs only");
+    for (int bits = 0; bits < 8; ++bits)
+    {
+        const bool ampere = (bits & 1) != 0;
+        const bool replacement = (bits & 2) != 0;
+        const bool dlssgOutput = (bits & 4) != 0;
+        const Unavailable expected = ampere ? Unavailable::AmpereRuntime
+                                     : replacement ? Unavailable::ReplacementRuntime
+                                     : !dlssgOutput ? Unavailable::OtherOutput
+                                                    : Unavailable::None;
+        const Unavailable got = CheckAvailable(ampere, replacement, dlssgOutput);
+        CHECK_MSG(got == expected, "ampere %d replacement %d dlssg output %d: got %d", ampere, replacement, dlssgOutput, static_cast<int>(got));
+        for (int p : { kAuto, kPresetA, kPresetB, kPresetC })
+            CHECK_MSG(UnavailableSentence(p, got).empty() == (got == Unavailable::None), "preset %d, availability %d", p, static_cast<int>(got));
+    }
+    // C with nothing else going on is selectable: no reason to give
+    CHECK(UnavailableSentence(kPresetC, CheckAvailable(false, false, true)).empty());
     for (auto why : { Unavailable::AmpereRuntime, Unavailable::ReplacementRuntime, Unavailable::OtherOutput })
     {
         const auto s = UnavailableSentence(kPresetC, why);
@@ -219,7 +239,7 @@ int main()
 {
     RecompositionDroppedSentence();
     RecompositionNote();
-    SelectorHasNoHudlessGate();
+    SelectorAvailabilityTable();
     RecompositionReadout();
     InUseLabels();
     NothingToSayWhenTheyAgree();

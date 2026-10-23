@@ -151,40 +151,91 @@ void PresetsThatDrop()
     CHECK(!PresetDropsUiRecomposition(-1));
 }
 
-// A live switch drives the real Switcher with fake steps. The decision is taken from Requests().Active(), which changes only when the
-// switch commits (after the resources were released), so: the old value through the off tick and the waiting ticks (no SetOptions is
-// made then anyway), and the NEW value on the first SetOptions after the "Switched" tick, which is the creation of the next feature.
-// No SetOptions between the tick and the commit sees a mixed value.
+/// A live switch drives the real Switcher through the same tick protocol as PresetSwitchTick (PresetSeams.cpp): the dispatch is skipped on
+// every InProgress / Switched tick and a SetOptions (which asks the rule) only follows a tick that returned Unchanged or RestartNeeded. The
+// rule's only moving input is Requests().Active(), so the test records it at every step the Switcher runs (evaluate, off, release, install,
+// activated) and at every SetOptions, and asserts the order: the old request through off / release / install, the new one from the commit on
+// (the activated callback runs after it), no SetOptions at all between the off call and the commit, and the first SetOptions after
+// "Switched" decides with the new request. A failed switch (any step) leaves the old request and the old decision.
 struct Trace
 {
-    std::vector<bool> beforeCommit; // decision at every tick before Switched
-    bool atCreation = false;        // decision at the first SetOptions after Switched
-    bool oldValue = false;
+    std::vector<int> stepInputs;    // Active() seen by evaluate, off, release, install (before the commit)
+    int atActivated = -1;           // Active() seen by the activated callback (after the commit)
+    int setOptionsDuringSwitch = 0; // SetOptions-bearing ticks between the first tick of the switch and the Switched tick
+    bool oldValue = false;          // the decision before the first tick
+    bool atCreation = false;        // the decision at the first SetOptions after Switched
+    bool afterFail = false;         // the decision at the first SetOptions after a failed switch
+    int ticks = 0;
     SwitchResult last = SwitchResult::Unchanged;
 };
 
-Trace Transition(int from, int to, bool wanted = true)
+enum class FailAt
+{
+    None,
+    Evaluate,
+    Off,
+    Release,
+    Install
+};
+
+Trace Transition(int from, int to, bool wanted = true, FailAt fail = FailAt::None)
 {
     RequestState state;
     state.InitOnce(from);
     state.NoteDriverQuery(false, false, 0); // the runtime's first driver query was seen (no such setting): Auto can be restored live
     Switcher sw(state);
-    SwitchSteps steps;
-    steps.evaluate = [] { return true; };
-    steps.off = [] { return true; };
-    steps.release = [] { return true; };
-    steps.install = [] { return true; };
     Trace t;
-    t.oldValue = DecideUiRecomposition(wanted, Unavailable::None, state.Active()).requested;
+    SwitchSteps steps;
+    steps.evaluate = [&]
+    {
+        t.stepInputs.push_back(state.Active());
+        return fail != FailAt::Evaluate;
+    };
+    steps.off = [&]
+    {
+        t.stepInputs.push_back(state.Active());
+        return fail != FailAt::Off;
+    };
+    steps.release = [&]
+    {
+        t.stepInputs.push_back(state.Active());
+        return fail != FailAt::Release;
+    };
+    steps.install = [&]
+    {
+        t.stepInputs.push_back(state.Active());
+        return fail != FailAt::Install;
+    };
+    steps.activated = [&] { t.atActivated = state.Active(); };
+    auto decision = [&] { return DecideUiRecomposition(wanted, Unavailable::None, state.Active()).requested; };
+
+    t.oldValue = decision();
     uint64_t now = 1000;
+    bool switching = false;
     for (int i = 0; i < 64; ++i)
     {
         t.last = sw.Apply(to, steps, now += 16);
+        ++t.ticks;
+        const bool dispatches = t.last == SwitchResult::Unchanged || t.last == SwitchResult::RestartNeeded;
+        if (t.last == SwitchResult::InProgress)
+            switching = true;
         if (t.last == SwitchResult::Switched)
+        {
+            // the Switched tick skips the dispatch as well; the next tick finds the request active and dispatches
+            const auto next = sw.Apply(to, steps, now += 16);
+            t.last = next;
+            if (next == SwitchResult::Unchanged)
+                t.atCreation = decision();
             break;
-        t.beforeCommit.push_back(DecideUiRecomposition(wanted, Unavailable::None, state.Active()).requested);
+        }
+        if (t.last == SwitchResult::RestartNeeded)
+        {
+            t.afterFail = decision(); // dispatch goes on with the unchanged request
+            break;
+        }
+        if (dispatches && switching)
+            ++t.setOptionsDuringSwitch;
     }
-    t.atCreation = DecideUiRecomposition(wanted, Unavailable::None, state.Active()).requested;
     return t;
 }
 
@@ -209,14 +260,35 @@ void LiveTransitions()
     for (const auto& c : cases)
     {
         const auto t = Transition(c.from, c.to);
-        CHECK_MSG(t.last == SwitchResult::Switched, "%d -> %d did not switch", c.from, c.to);
+        CHECK_MSG(t.last == SwitchResult::Unchanged, "%d -> %d did not end Unchanged after Switched", c.from, c.to);
+        // phase 1, before the commit: every step (evaluate, off, release, install) sees the OLD request, so the rule still says the old
+        // value, and no tick of the switch makes a SetOptions
+        CHECK_MSG(t.stepInputs.size() == 4, "%d -> %d ran %zu steps", c.from, c.to, t.stepInputs.size());
+        for (int input : t.stepInputs)
+            CHECK_MSG(input == c.from, "%d -> %d: a step before the commit saw request %d", c.from, c.to, input);
         CHECK_MSG(t.oldValue == c.before, "%d -> %d old value", c.from, c.to);
-        CHECK_MSG(!t.beforeCommit.empty(), "%d -> %d no tick before the commit", c.from, c.to);
-        for (bool seen : t.beforeCommit)
-            CHECK_MSG(seen == c.before, "%d -> %d: a tick before the commit saw %d, expected %d", c.from, c.to, seen, c.before);
+        CHECK_MSG(t.setOptionsDuringSwitch == 0, "%d -> %d: %d SetOptions between the off call and the commit", c.from, c.to,
+                  t.setOptionsDuringSwitch);
+        // phase 2, the commit: the activated callback already sees the NEW request
+        CHECK_MSG(t.atActivated == c.to, "%d -> %d: activated saw request %d", c.from, c.to, t.atActivated);
+        // phase 3, the first SetOptions after the switch (the creation of the next feature): the new rule value
         CHECK_MSG(t.atCreation == c.after, "%d -> %d: the creation after the switch saw %d, expected %d", c.from, c.to, t.atCreation,
                   c.after);
+        CHECK_MSG(t.ticks >= 3, "%d -> %d: the switch took %d ticks (off, waiting, release)", c.from, c.to, t.ticks);
     }
+    // a switch that fails at any step changes nothing: the old request stays active, so the rule keeps its old value for the SetOptions
+    // that dispatch goes on with (the menu says restart needed)
+    for (FailAt fail : { FailAt::Evaluate, FailAt::Off, FailAt::Release, FailAt::Install })
+        for (const Case& c : { Case { kAuto, kPresetC, true, false }, Case { kPresetC, kAuto, false, true } })
+        {
+            const auto t = Transition(c.from, c.to, true, fail);
+            CHECK_MSG(t.last == SwitchResult::RestartNeeded, "fail %d: %d -> %d not RestartNeeded", static_cast<int>(fail), c.from, c.to);
+            CHECK_MSG(t.afterFail == c.before, "fail %d: %d -> %d flipped the decision to %d", static_cast<int>(fail), c.from, c.to,
+                      t.afterFail);
+            for (int input : t.stepInputs)
+                CHECK_MSG(input == c.from, "fail %d: %d -> %d: a step saw request %d", static_cast<int>(fail), c.from, c.to, input);
+            CHECK(t.atActivated == -1); // never activated
+        }
     // not wanted (HUD-less off or ui_free): never requested at any point of any switch
     for (int from : { kAuto, kPresetA, kPresetB, kPresetC })
         for (int to : { kAuto, kPresetA, kPresetB, kPresetC })
@@ -225,8 +297,6 @@ void LiveTransitions()
                 continue;
             const auto t = Transition(from, to, false);
             CHECK(!t.oldValue && !t.atCreation);
-            for (bool seen : t.beforeCommit)
-                CHECK(!seen);
         }
 }
 } // namespace
