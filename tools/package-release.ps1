@@ -40,13 +40,13 @@
 .PARAMETER Package
   Folder produced by tools\package.ps1 (contains OptiScaler.dll, OptiScaler.ini, the forwarder).
 .PARAMETER Version
-  Release tag, for example ffxiv-2026.10.17-fd6c2870-rc1 (convention: ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]); the leading "ffxiv-" may be left out.
+  Release tag, for example ffxiv-2026.10.23-d9b62110 (convention: ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]); the leading "ffxiv-" may be left out.
 .PARAMETER Exclude
   File names or package-relative paths to leave out of the archive. Default: libxell.dll (Intel's XeLL library: its licence file does not name it, so it is not redistributed; pass -Exclude @() to pack it anyway).
 .PARAMETER OutDir
   Output folder, default <repo>\dist. A .gitignore containing "*" is written there so the archive can never be committed by accident.
 .EXAMPLE
-  pwsh -File tools\package.ps1 -Target C:\work\pkg ; pwsh -File tools\package-release.ps1 -Package C:\work\pkg -Version ffxiv-2026.10.17-fd6c2870-rc1
+  pwsh -File tools\package.ps1 -Target C:\work\pkg ; pwsh -File tools\package-release.ps1 -Package C:\work\pkg -Version ffxiv-2026.10.23-d9b62110
 #>
 #requires -Version 7
 [CmdletBinding()]
