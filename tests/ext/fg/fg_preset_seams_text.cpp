@@ -270,13 +270,20 @@ void UiRecompositionNotePins(const std::string& repo)
     // the menu note reads the rule's availability, the sentence comes from the pure text
     CHECK(seams.find("return UiRecompositionNote(wanted, active, chosen);") != std::string::npos);
     CHECK(seams.find("EffectiveRequest(availability, Requests().Active())") != std::string::npos);
-    // the switch's off call: the flag of the still-active request, before anything is released
+    // the switch's off call is the plain zero struct that Deactivate() sends (mode eOff, nothing else): no recomposition flag, no buffer
+    // format, no rule call. The flag-without-formats combination of the earlier carry-over is sent nowhere else, and the eOff call frees the
+    // feature itself (8 plain off calls in game-logs-20261022-recomp-auto, no "flag changed" line).
     const size_t off = seams.find("steps.off = [&]");
     const size_t release = seams.find("steps.release = [&]");
     CHECK(off != std::string::npos && release != std::string::npos && off < release);
     const std::string offBody = seams.substr(off, release - off);
-    CHECK(offBody.find("CurrentUiRecompositionDecision(ext::hudless::QueryRecomposition().enabled).requested") != std::string::npos);
-    CHECK(offBody.find("off.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    CHECK(offBody.find("sl::DLSSGOptions off {};") != std::string::npos);
+    CHECK(offBody.find("off.mode = sl::DLSSGMode::eOff;") != std::string::npos);
+    CHECK(offBody.find("DLSSGSetOptions()(viewport, off) == sl::Result::eOk") != std::string::npos);
+    for (const char* forbidden : { "off.enableUserInterfaceRecomposition", "hudLessBufferFormat", "uiBufferFormat", "CurrentUiRecompositionDecision",
+                                   "QueryRecomposition", "AdjustUiRecomposition", "sl::Boolean" })
+        CHECK_MSG(offBody.find(forbidden) == std::string::npos, "the switch's off call mentions %s", forbidden);
+    CHECK(Count(offBody, "off.") == 2); // off.mode and off.queueParallelismMode, nothing else is set
     // the HUD-less engine: the same rule says "paused by the preset" (DLSS-G provider only), the core asks it only for the recomposition mode
     // and before the source is touched
     const std::string engine = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessEngine.cpp")));

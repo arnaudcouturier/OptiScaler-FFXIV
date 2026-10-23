@@ -149,10 +149,8 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
         sl::DLSSGOptions off {};
         off.mode = sl::DLSSGMode::eOff;
         off.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
-        // The feature still exists with the flag the rule gave for the request that is active until the commit (below): an off call that
-        // carries another value would make Streamline mark the feature for recreation before the resources are even released.
-        if (CurrentUiRecompositionDecision(ext::hudless::QueryRecomposition().enabled).requested)
-            off.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
+        // The plain off call, the same zero struct Deactivate() sends: the eOff call itself frees the feature (no recomposition flag and no
+        // buffer formats here; that combination is sent nowhere else).
         return StreamlineProxy::DLSSGSetOptions()(viewport, off) == sl::Result::eOk;
     };
     steps.release = [&]
