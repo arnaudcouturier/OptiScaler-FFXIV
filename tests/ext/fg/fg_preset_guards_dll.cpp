@@ -96,25 +96,62 @@ int ApplyAdaUnlockPatches(std::vector<uint8_t>& image, std::vector<std::pair<siz
 }
 } // namespace
 
-// The render-preset table of the runtime (EndpointConfiguration::ApplyRenderPreset = Located::readFn). The stores are 16-bit engaged-optional
+/// The render-preset table of the runtime (EndpointConfiguration::ApplyRenderPreset = Located::readFn). The stores are 16-bit engaged-optional
 // values into the endpoint configuration: `mov word [reg+0x54], 0x100/0x101` is the UI recomposition override (off/on), `mov word [reg+0x68],
 // 0x100/0x101` the FG Lite override (off/on). Read in nvngx_dlssg.dll 310.9.16 (sha 8d59d49b, model-store build cadee1aa):
 //   Preset C: +0x54 = 0x100 directly followed by +0x68 = 0x101      (recomposition OFF, FG Lite ON)
-//   Preset A: +0x54 = 0x100                                          (recomposition OFF)         Preset B: +0x54 = 0x101 (recomposition ON)
-//   common to A and B: +0x68 = 0x100 (FG Lite OFF)                   private-flag overrides: +0x54 = 0x100 and +0x68 = 0x100 once each
-// so the function holds three +0x54 = 0x100, one +0x54 = 0x101, two +0x68 = 0x100 and one +0x68 = 0x101 stores. The recomposition rule
-// (ext/fg/dlssg/UiRecompositionRule.h: A and C drop it, Auto and B keep it) rests on this table. 310.9.1.0 and 310.8.0 have no Preset C and no
-// +0x68 stores at all: one +0x54 = 0x100 store (A). Any other build must show one of the two shapes, else the recipe fails: a runtime that
-// changed the table would otherwise be paired with the wrong rule silently.
+//   Preset A: +0x54 = 0x100 directly followed by +0x68 = 0x100      (recomposition OFF, FG Lite OFF)
+//   Preset B: +0x54 = 0x101, then a short jump to Preset A's +0x68 = 0x100 store (recomposition ON, FG Lite OFF: the common store of A and B)
+//   private-flag overrides (a different log message): +0x54 = 0x100 and +0x68 = 0x100 once each
+// so the function holds three +0x54 = 0x100, one +0x54 = 0x101, two +0x68 = 0x100 and one +0x68 = 0x101 stores (the COUNTS). The recomposition
+// rule (ext/fg/dlssg/UiRecompositionRule.h: A and C drop it, Auto and B keep it) rests on this table, so the recipe also checks the MAPPING from
+// preset number to store: every preset branch logs "Applying settings for render preset %u." with the number as a stack argument right before
+// its stores, `mov dword [rsp+20h], N` / lea r8 / mov edx / lea rcx / call, and the first store follows the call (the exact shape is
+// GroupMarker below). The number N the build itself logs in front of a group is the preset the group belongs to, so a runtime that swapped A
+// and B or A and C (same counts, different mapping) fails here. 310.9.1.0 and 310.8.0 have no Preset C and no +0x68 stores at all: one
+// +0x54 = 0x100 store (A), no marker, nothing to map. Any other build must show one of the two shapes, else the recipe fails: a runtime that
+// changed the table would otherwise be paired with the wrong rule silently. If a future build keeps the table but changes the code shape of
+// the log call, the mapping part says UNKNOWN TABLE (loud, a manual re-run and a new reading, not a silent pass).
+struct PresetGroup
+{
+    int count = 0;           // groups logged with this preset number
+    int ui = -1;             // 0: +0x54 = 0x100 (recomposition off), 1: +0x54 = 0x101 (on)
+    int lite = -1;           // 0: +0x68 = 0x100 (FG Lite off), 1: +0x68 = 0x101 (on), -1: no such store
+    bool liteByJump = false; // the +0x68 store is reached by a short jump from the +0x54 store, not by falling through
+    uint32_t liteAt = 0;
+};
+
 struct StoreScan
 {
     int ui0 = 0, ui1 = 0, lite0 = 0, lite1 = 0; // +0x54 = 0x100, +0x54 = 0x101, +0x68 = 0x100, +0x68 = 0x101
     int cPairs = 0;                            // a +0x54 = 0x100 store immediately followed by a +0x68 = 0x101 store
+    PresetGroup preset[4];                     // by the number the build logs in front of the group (1 = A, 2 = B, 3 = C)
+    int unmapped = 0;                          // +0x54 stores that no preset marker explains (the private-flag one is expected to be one)
 };
+
+struct StoreRec
+{
+    uint32_t at, end;
+    int kind; // 1 = +0x54 = 0x100, 2 = +0x54 = 0x101, 3 = +0x68 = 0x100, 4 = +0x68 = 0x101
+};
+
+// The shape in front of a preset branch's first store at `at`: mov dword [rsp+20h], N (C7 44 24 20 N 00 00 00) / lea r8,[rip+x] / mov edx,imm32 /
+// lea rcx,[rip+x] / call rel32. Returns N (1..3) or 0.
+int GroupMarker(const std::vector<uint8_t>& image, uint32_t at, uint32_t from)
+{
+    if (at < from + 32 || at > image.size())
+        return 0;
+    const uint8_t* m = &image[at - 32];
+    const bool shape = m[0] == 0xC7 && m[1] == 0x44 && m[2] == 0x24 && m[3] == 0x20 && m[5] == 0 && m[6] == 0 && m[7] == 0 &&
+                       m[8] == 0x4C && m[9] == 0x8D && m[10] == 0x05 && m[15] == 0xBA && m[20] == 0x48 && m[21] == 0x8D && m[22] == 0x0D &&
+                       m[27] == 0xE8;
+    return shape && m[4] >= 1 && m[4] <= 3 ? m[4] : 0;
+}
 
 StoreScan ScanPresetStores(const std::vector<uint8_t>& image, uint32_t from, uint32_t to)
 {
     StoreScan scan;
+    std::vector<StoreRec> stores;
     int previous = 0; // kind of the previous store: 1 = ui0
     uint32_t previousEnd = 0;
     for (uint32_t at = from; at + 7 <= to && at + 9 <= image.size(); ++at)
@@ -144,11 +181,50 @@ StoreScan ScanPresetStores(const std::vector<uint8_t>& image, uint32_t from, uin
             ++scan.lite1;
         if (kind == 4 && previous == 1 && previousEnd == at)
             ++scan.cPairs;
+        stores.push_back({ at, p, kind });
         previous = kind;
         previousEnd = p;
         at = p - 1;
     }
+    for (size_t i = 0; i < stores.size(); ++i)
+    {
+        const StoreRec& s = stores[i];
+        if (s.kind != 1 && s.kind != 2)
+            continue;
+        const int number = GroupMarker(image, s.at, from);
+        if (number == 0)
+        {
+            ++scan.unmapped;
+            continue;
+        }
+        PresetGroup& g = scan.preset[number];
+        ++g.count;
+        g.ui = s.kind == 2 ? 1 : 0;
+        // the +0x68 store of the group: the next store when it starts right where this one ends, else the target of a short jump (EB rel8)
+        for (const StoreRec& next : stores)
+        {
+            const bool falls = next.at == s.end;
+            const bool jumps = s.end + 2 <= image.size() && image[s.end] == 0xEB &&
+                               next.at == s.end + 2 + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(image[s.end + 1])));
+            if ((falls || jumps) && (next.kind == 3 || next.kind == 4))
+            {
+                g.lite = next.kind == 4 ? 1 : 0;
+                g.liteByJump = !falls;
+                g.liteAt = next.at;
+            }
+        }
+    }
     return scan;
+}
+
+// Is the mapping the one the recomposition rule assumes? A (1): recomposition off, FG Lite off by fall-through; B (2): recomposition on, FG Lite off
+// through the jump to A's own +0x68 store (the common store); C (3): recomposition off, FG Lite on. Each exactly once. The one +0x54 store without a
+// marker is the private-flag override.
+bool PresetMappingIsTheRulesTable(const StoreScan& s)
+{
+    const PresetGroup &a = s.preset[1], &b = s.preset[2], &c = s.preset[3];
+    return s.unmapped == 1 && a.count == 1 && a.ui == 0 && a.lite == 0 && !a.liteByJump && b.count == 1 && b.ui == 1 && b.lite == 0 &&
+           b.liteByJump && b.liteAt == a.liteAt && c.count == 1 && c.ui == 0 && c.lite == 1 && !c.liteByJump;
 }
 
 int main()
@@ -223,12 +299,21 @@ int main()
     if (l.why == Why::Ok && l.defaults > l.readFn)
     {
         const StoreScan scan = ScanPresetStores(image, l.readFn, l.defaults);
-        const bool full = scan.ui0 == 3 && scan.ui1 == 1 && scan.lite0 == 2 && scan.lite1 == 1 && scan.cPairs == 1;
+        const bool counts = scan.ui0 == 3 && scan.ui1 == 1 && scan.lite0 == 2 && scan.lite1 == 1 && scan.cPairs == 1;
+        const bool mapping = PresetMappingIsTheRulesTable(scan);
+        const bool full = counts && mapping;
         const bool aOnly = scan.ui0 == 1 && scan.ui1 == 0 && scan.lite0 == 0 && scan.lite1 == 0 && scan.cPairs == 0;
         std::printf("preset table check (readFn %X..%X): +0x54=0x100 x%d, +0x54=0x101 x%d, +0x68=0x100 x%d, +0x68=0x101 x%d, C pair (recomposition off + FG Lite on) x%d -> %s\n",
                     l.readFn, l.defaults, scan.ui0, scan.ui1, scan.lite0, scan.lite1, scan.cPairs,
                     full ? "the 310.9.16 table: A and C turn the recomposition off, B turns it on"
-                         : aOnly ? "the older shape: Preset A only, no Preset C" : "UNKNOWN TABLE: review the recomposition rule before trusting this build");
+                         : aOnly ? "the older shape: Preset A only, no Preset C"
+                                 : counts ? "UNKNOWN MAPPING (the counts are right, the preset-to-store mapping is not): review the recomposition rule before trusting this build"
+                                          : "UNKNOWN TABLE: review the recomposition rule before trusting this build");
+        if (counts || !aOnly)
+            std::printf("preset mapping (preset number the build logs in front of each group): A=1 ui %d lite %d%s, B=2 ui %d lite %d%s, C=3 ui %d lite %d%s; %d +0x54 store(s) without a preset marker; the rule's table (A off/off, B on/off via the common store, C off/on): %s\n",
+                        scan.preset[1].ui, scan.preset[1].lite, scan.preset[1].liteByJump ? " by jump" : "", scan.preset[2].ui,
+                        scan.preset[2].lite, scan.preset[2].liteByJump ? " by jump" : "", scan.preset[3].ui, scan.preset[3].lite,
+                        scan.preset[3].liteByJump ? " by jump" : "", scan.unmapped, mapping ? "yes" : "NO");
         CHECK(full || aOnly);
         for (const auto& e : kExpect)
             if (sha == e.sha && std::strstr(e.what, "310.9.16") != nullptr)
