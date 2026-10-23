@@ -1,0 +1,55 @@
+#pragma once
+// The one rule that decides whether OptiScaler asks DLSS-G for UI recomposition. Pure (no Windows, NVIDIA or logger headers), so
+// tests/ext/fg/fg_ui_recomposition_rule.cpp builds it standalone.
+//
+// Why a rule on the PRESET and not on what the runtime reported: nvngx_dlssg reads the flag when the feature is created, and a
+// change after that makes Streamline recreate the feature ("UserInterfaceRecomposition flag changed from create-time value 1 to 0").
+// The runtime's confirmation of a preset only exists after the creation, so a decision taken from it asks for recomposition on the
+// first SetOptions and withdraws it a moment later. Measured 2026-10-22: that recreation left about 59 of 132 presents/s as distinct
+// pictures. The decision is taken from the configured / active request instead, on every SetOptions, the first one included, exactly
+// like the reference build (`preset != 1 && preset != 3`).
+//
+// Verified in nvngx_dlssg.dll 310.9.16 (sha256 8d59d49b...), EndpointConfiguration::ApplyRenderPreset: A forces UI recomposition off
+// (and FG Lite off), B forces it on, C forces it off (and FG Lite on), Auto leaves it to the application. So under A and C the
+// application's request is overridden by the runtime itself and asking for it only costs a feature recreation.
+//
+// 310.9.1.0 ignores C (the runtime reports applied=0), so there C does NOT turn recomposition off by itself. The rule is the same
+// there: C and recomposition lose recomposition on every version. Reason: one rule that does not depend on the runtime build (and so
+// not on a reply that arrives after creation) is what keeps the creation stable; a 310.9.1.0 user who wants the recomposition picks
+// Auto or B, which the menu says.
+//
+// The runtime's confirmation (PresetLog.h Readout::Confirm, PausesUiRecomposition, PresetLogRelay.h UiRecompositionPaused) feeds the
+// menu readout only. It never decides the flag; tests/ext/fg/fg_preset_seams_text.cpp pins that.
+
+#include "ext/fg/dlssg/PresetRequest.h"
+#include "ext/fg/dlssg/PresetSwitch.h"
+
+namespace ext::fg::preset
+{
+// Presets under which the runtime forces its UI recomposition off: A and C. Anything else, an invalid number included, is read as
+// Auto (RequestState already turns an invalid configured value into Auto).
+constexpr bool PresetDropsUiRecomposition(int request) { return request == kPresetA || request == kPresetC; }
+
+// The request the runtime is really told: the driver-settings seam only answers while the control is available (PresetDrs.cpp), so a
+// companion runtime or a replacement runtime, or an output other than DLSS-G, is never told the preset and runs as Auto.
+constexpr int EffectiveRequest(Unavailable availability, int activeRequest)
+{
+    return availability == Unavailable::None && ValidRequest(activeRequest) ? activeRequest : kAuto;
+}
+
+struct UiRecompositionDecision
+{
+    bool requested = false;        // set enableUserInterfaceRecomposition and tag the hud-less image
+    bool droppedByPreset = false;  // recomposition was wanted and the preset takes it away
+    int preset = kAuto;            // the request the decision was taken from (the effective one)
+};
+
+// `modeWantsIt`: [HudLess] Mode is recomposition, a game source exists and [DLSSG] UIRecomposition is not off
+// (ext::hudless::QueryRecomposition().enabled). `activeRequest`: Requests().Active(), the boot request until a live switch commits.
+constexpr UiRecompositionDecision DecideUiRecomposition(bool modeWantsIt, Unavailable availability, int activeRequest)
+{
+    const int preset = EffectiveRequest(availability, activeRequest);
+    const bool dropped = modeWantsIt && PresetDropsUiRecomposition(preset);
+    return { modeWantsIt && !dropped, dropped, preset };
+}
+} // namespace ext::fg::preset

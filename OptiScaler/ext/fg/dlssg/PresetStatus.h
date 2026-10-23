@@ -2,6 +2,7 @@
 // What the DLSS-G preset control shows in the menu (written on the FG dispatch thread by PresetSeams.cpp, read by the UI thread).
 
 #include "ext/fg/dlssg/PresetSwitch.h"
+#include "ext/fg/dlssg/UiRecompositionRule.h"
 
 #include <cstdint>
 #include <string>
@@ -38,4 +39,10 @@ Status GetStatus();
 // Why the control is off right now (None = on): the companion runtime is configured, a replacement runtime is active or the output is
 // not DLSS-G. Used by the dispatch tick, the menu and the driver-settings seam. Safe from any thread.
 Unavailable CurrentAvailability();
+
+// The recomposition rule (UiRecompositionRule.h) for the active request of the process. `atCreation` is passed by the DLSS-G option seam
+// (every SetOptions): the first such call remembers the availability of the control, so a later change of it (the companion-runtime
+// checkbox is written at once although it says restart) cannot flip the flag of a running feature. Other callers (the HUD-less engine, the
+// menu) read the remembered value, or the live one while nothing was remembered. Safe from any thread.
+UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation = false);
 } // namespace ext::fg::preset

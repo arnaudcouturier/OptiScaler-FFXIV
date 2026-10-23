@@ -192,19 +192,60 @@ void RequestStatePins(const std::string& repo)
     CHECK(req.find("if (bootRequest == kAuto) return {};") != std::string::npos);
     CHECK(req.find("AnswerCachedRead(settingId, Active(), Base(), Boot())") != std::string::npos);
 }
+// The text of `source` without // comments (a pin on code must not be satisfied or broken by a remark)
+std::string WithoutLineComments(const std::string& source)
+{
+    std::string out;
+    std::istringstream in(source);
+    for (std::string line; std::getline(in, line);)
+    {
+        bool quoted = false;
+        for (size_t i = 0; i + 1 < line.size(); ++i)
+        {
+            if (line[i] == '"' && (i == 0 || line[i - 1] != '\\'))
+                quoted = !quoted;
+            if (!quoted && line[i] == '/' && line[i + 1] == '/')
+            {
+                line.resize(i);
+                break;
+            }
+        }
+        out += line + '\n';
+    }
+    return out;
+}
+
+// UI recomposition: the flag is decided by ONE pure rule (UiRecompositionRule.h) from the active request, on every SetOptions, the first
+// one included. The runtime's confirmation feeds the menu readout only and never reaches the flag decision.
 void UiRecompositionPause(const std::string& repo)
 {
-    const std::string seams = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp"));
-    // the pause follows what the runtime confirmed (UiRecompositionPaused), not the request
-    CHECK(seams.find("const bool paused = recomposition.enabled && ext::fg::preset::UiRecompositionPaused();") != std::string::npos);
-    CHECK(seams.find("PausesUiRecomposition(ext::fg::preset::Requests().Active())") == std::string::npos);
-    CHECK(seams.find("if (recomposition.enabled && !paused)") != std::string::npos);
-    CHECK(seams.find("options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    const std::string seams = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp")));
+    const size_t begin = seams.find("void AdjustUiRecomposition(sl::DLSSGOptions& options)");
+    const size_t end = seams.find("IFGFeature_Dx12* AsDx12(IFGFeature* fg)");
+    CHECK(begin != std::string::npos && end != std::string::npos && begin < end);
+    const std::string body = seams.substr(begin, end - begin);
+    // the decision comes from the rule, evaluated at creation time (the first call remembers the availability of the control)
+    CHECK(body.find("ext::fg::preset::CurrentUiRecompositionDecision(recomposition.enabled, true)") != std::string::npos);
+    CHECK(body.find("if (decision.requested)") != std::string::npos);
+    CHECK(body.find("options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    // nothing of the runtime's reply reaches the flag decision
+    for (const char* forbidden : { "UiRecompositionPaused", "ReadoutState", "Confirm", "PausesUiRecomposition", "Effect::", "Uir::", "PresetLogRelay" })
+        CHECK_MSG(body.find(forbidden) == std::string::npos, "AdjustUiRecomposition mentions %s", forbidden);
+    // and the file does not use them elsewhere either: the only reader of the confirmation is the menu readout
+    CHECK(seams.find("UiRecompositionPaused") == std::string::npos);
+    CHECK(seams.find("PausesUiRecomposition") == std::string::npos);
     // the restart remark is only for a change of the config / hud-less mode, not for a pause by the preset switch
-    CHECK(seams.find("lastEnabled != (int) recomposition.enabled") != std::string::npos);
+    CHECK(body.find("lastEnabled != (int) recomposition.enabled") != std::string::npos);
+    // the rule itself has no input from the runtime
+    const std::string rule = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/UiRecompositionRule.h")));
+    for (const char* forbidden : { "PresetLog.h", "ReadoutState", "Confirm", "Effect::", "Uir::", "PausesUiRecomposition" })
+        CHECK_MSG(rule.find(forbidden) == std::string::npos, "UiRecompositionRule.h mentions %s", forbidden);
+    // the readout keeps its own function; it is documented as readout only
     const std::string relay = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.cpp"));
     CHECK(relay.find("return PausesUiRecomposition(request, confirmed.effect, confirmed.uir);") != std::string::npos);
     CHECK(relay.find("if (request != kPresetA && request != kPresetC) return false;") != std::string::npos);
+    const std::string header = Flat(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetLogRelay.h"));
+    CHECK(header.find("menu readout only") != std::string::npos);
 }
 
 // M2: the relay sink only reads (it must never log); the one WARN line is written from FlushCandidateLines, before its early exit

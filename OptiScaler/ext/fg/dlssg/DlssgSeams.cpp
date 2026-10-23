@@ -4,7 +4,7 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/Dx12Access.h"
 #include "ext/fg/FgInternal.h"
-#include "ext/fg/dlssg/PresetLogRelay.h"
+#include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
 
@@ -43,19 +43,20 @@ void ApplyMenuDlssgInterlock(sl::DLSSGOptions& options)
 }
 
 // Separate UI path: without it DLSS-G treats tagged HUD-less / UI images as hints only and still interpolates the UI.
-// nvngx_dlssg reads it at feature *creation*, so it must already be on for the very first SetOptions, long before the
-// first capture: it follows [HudLess] Mode == recomposition (and [DLSSG] UIRecomposition, unset = on), not "an image was
-// delivered". The hud-less format is the last captured one, else the bridge's buffer format (S10, ext/hudless).
+// nvngx_dlssg reads it at feature *creation* and a later change makes Streamline recreate the feature, so the final value must already
+// be in the very first SetOptions, long before the first capture. It follows [HudLess] Mode == recomposition (and [DLSSG]
+// UIRecomposition, unset = on), not "an image was delivered", and the render preset: A and C take the recomposition away inside NVIDIA's
+// runtime (verified in 310.9.16 ApplyRenderPreset), so they are not asked for it. ONE pure rule (UiRecompositionRule.h, via
+// CurrentUiRecompositionDecision) decides from the active request on every call, the first included; the runtime's reply to a preset
+// never takes part (it only exists after the creation, and deciding from it created the feature with the flag on and withdrew it a
+// moment later). The hud-less format is the last captured one, else the bridge's buffer format (S10, ext/hudless).
 void AdjustUiRecomposition(sl::DLSSGOptions& options)
 {
     const auto recomposition = ext::hudless::QueryRecomposition();
+    const auto decision = ext::fg::preset::CurrentUiRecompositionDecision(recomposition.enabled, true);
+    const bool dropped = decision.droppedByPreset;
 
-    // WS2: DLSS-G Preset A turns the UI recomposition of the NVIDIA runtime off (Preset C only when the runtime confirmed that it acts
-    // on C and turned it off), so it is not requested while that is the case. The menu says so; Auto and B bring it back with the
-    // next feature creation (the preset switch makes one).
-    const bool paused = recomposition.enabled && ext::fg::preset::UiRecompositionPaused();
-
-    if (recomposition.enabled && !paused)
+    if (decision.requested)
     {
         options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
 
@@ -67,17 +68,18 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
 
     static int lastLogged = -1;
     static int lastEnabled = -1;
-    const int effective = recomposition.enabled && !paused ? 1 : 0;
+    const int effective = decision.requested ? 1 : 0;
     if (lastLogged != effective)
     {
-        // "only applies after a game restart" is true for the config / hud-less mode changing; a pause by the preset switch is
-        // picked up at the next feature creation, which the preset switch itself causes.
+        // "only applies after a game restart" is true for the config / hud-less mode changing; a drop by the preset is picked up at the
+        // next feature creation, which the live preset switch itself causes.
         const char* restart = lastEnabled != -1 && lastEnabled != (int) recomposition.enabled
                                   ? " -- changed after start, only applies after a game restart"
                                   : "";
-        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}{}",
+        LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}{}{}{}",
                  effective != 0, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,
-                 recomposition.formatSource, options.uiBufferFormat, paused ? " -- paused by the DLSS-G render preset" : "", restart);
+                 recomposition.formatSource, options.uiBufferFormat, dropped ? " -- not requested, dropped by the DLSS-G render preset (" : "",
+                 dropped ? ext::fg::preset::Name(decision.preset) : "", dropped ? ")" : "", restart);
         lastLogged = effective;
     }
     lastEnabled = (int) recomposition.enabled;

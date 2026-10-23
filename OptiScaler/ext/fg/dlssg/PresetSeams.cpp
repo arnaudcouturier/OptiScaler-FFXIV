@@ -12,6 +12,7 @@
 #include <State.h>
 #include <proxies/Streamline_Proxy.h>
 
+#include <atomic>
 #include <mutex>
 
 // WS2: the live DLSS-G render preset change on the FG dispatch thread (DLSSG_Dx12::Dispatch calls ext::fg::PresetSwitchTick before
@@ -45,6 +46,23 @@ Unavailable CurrentAvailability()
 {
     return CheckAvailable(ext::Cfg().fg.ampereMfgUnlock.value_or_default(), State::Instance().activeFgNvngx != FGNvngxReplacement::None,
                           State::Instance().activeFgOutput == FGOutput::DLSSG);
+}
+
+UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation)
+{
+    static std::atomic<int> remembered { -1 }; // Unavailable of the first SetOptions
+    int availability = remembered.load(std::memory_order_acquire);
+    if (availability < 0)
+    {
+        availability = static_cast<int>(CurrentAvailability());
+        if (atCreation)
+        {
+            int expected = -1;
+            remembered.compare_exchange_strong(expected, availability, std::memory_order_acq_rel);
+            availability = remembered.load(std::memory_order_acquire);
+        }
+    }
+    return DecideUiRecomposition(modeWantsIt, static_cast<Unavailable>(availability), Requests().Active());
 }
 
 Status GetStatus()
