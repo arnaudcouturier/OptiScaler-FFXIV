@@ -26,8 +26,12 @@ NvAPI_Status OnDrsGetSetting(NvU32 settingId, NVDRS_SETTING* setting, NvAPI_Stat
     ReadoutState().NoteDriverQuery(true); // the runtime asked, whatever the answer
     module::ObserveDriverQuery(caller);   // possible provider of the live path
 
+    // The first look at the availability is shared with the recomposition rule (it must describe the runtime as it was told), so the rule
+    // cannot read another value at the first SetOptions.
+    const Unavailable available = CurrentAvailability();
+    RememberAvailability(available);
     const auto edit = HandleDriverReply(Requests(), settingId, found, isNumber, found ? setting->u32CurrentValue : 0,
-                                       CurrentAvailability() == Unavailable::None);
+                                       available == Unavailable::None);
     if (!edit.replace)
         return status;
 

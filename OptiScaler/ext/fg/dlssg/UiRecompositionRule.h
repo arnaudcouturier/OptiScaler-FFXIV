@@ -24,6 +24,8 @@
 #include "ext/fg/dlssg/PresetRequest.h"
 #include "ext/fg/dlssg/PresetSwitch.h"
 
+#include <atomic>
+
 namespace ext::fg::preset
 {
 // Presets under which the runtime forces its UI recomposition off: A and C. Anything else, an invalid number included, is read as
@@ -36,6 +38,36 @@ constexpr int EffectiveRequest(Unavailable availability, int activeRequest)
 {
     return availability == Unavailable::None && ValidRequest(activeRequest) ? activeRequest : kAuto;
 }
+
+// The availability of the control as the runtime lived it: remembered ONCE, by whichever consumer comes first (the driver-settings seam, when
+// the runtime first asks the driver for its preset at boot, or the first SetOptions), and never changed afterwards. The runtime was told the
+// preset (or not) on that first look, and the rule has to describe that runtime: the companion-runtime checkbox writes its config at once
+// although it says "restart", so a second look could disagree with what the runtime was told and the flag would no longer match the preset
+// it applied. Before anything is remembered a reader that does not commit (the menu) sees the live value.
+class AvailabilityLatch
+{
+public:
+    // `live`: the availability right now. `commit`: this caller is one of the two that fix it. Returns the remembered value, or `live` while
+    // nothing is remembered and this caller does not commit.
+    Unavailable Resolve(Unavailable live, bool commit)
+    {
+        int value = remembered_.load(std::memory_order_acquire);
+        if (value < 0)
+        {
+            value = static_cast<int>(live);
+            if (commit)
+            {
+                int expected = -1;
+                remembered_.compare_exchange_strong(expected, value, std::memory_order_acq_rel);
+                value = remembered_.load(std::memory_order_acquire);
+            }
+        }
+        return static_cast<Unavailable>(value);
+    }
+
+private:
+    std::atomic<int> remembered_ { -1 };
+};
 
 struct UiRecompositionDecision
 {

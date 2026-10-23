@@ -6,6 +6,7 @@
 #include "ext/fg/dlssg/PresetLogRelay.h"
 #include "ext/fg/dlssg/PresetModule.h"
 #include "ext/fg/dlssg/PresetStatus.h"
+#include "ext/fg/dlssg/UiRecompositionRule.h"
 
 #include <cstring>
 #include <initializer_list>
@@ -20,6 +21,8 @@ RequestState g_state;
 Readout g_readout;
 int g_observed = 0;
 Unavailable g_available = Unavailable::None;
+AvailabilityLatch g_latch; // the real latch the rule reads (PresetSeams.cpp holds the product's one)
+int g_remembered = 0;      // RememberAvailability calls
 } // namespace
 
 namespace ext::fg::preset
@@ -27,6 +30,11 @@ namespace ext::fg::preset
 RequestState& Requests() { return g_state; }
 Readout& ReadoutState() { return g_readout; }
 Unavailable CurrentAvailability() { return g_available; }
+void RememberAvailability(Unavailable live)
+{
+    ++g_remembered;
+    g_latch.Resolve(live, true);
+}
 namespace module
 {
 void ObserveDriverQuery(void*) { ++g_observed; }
@@ -43,6 +51,9 @@ void Reset(int request)
     g_readout.BeginRequest();
     g_observed = 0;
     g_available = Unavailable::None;
+    g_remembered = 0;
+    g_latch.~AvailabilityLatch();
+    new (&g_latch) AvailabilityLatch();
 }
 
 NVDRS_SETTING Fresh()
@@ -175,6 +186,44 @@ void UnavailableControlDoesNotAnswer()
     }
 }
 
+void FirstDriverQueryFixesTheAvailabilityForTheRule()
+{
+    // Boot with Preset C and the control available: the runtime asks the driver and is told C (it forces the recomposition off). The user then
+    // ticks "Load RTX 20/30 runtime" before the first SetOptions (the checkbox writes at once): the live availability is now AmpereRuntime,
+    // but the rule must keep describing the runtime that was told C, so it still drops the recomposition instead of asking for it.
+    Reset(kPresetC);
+    auto missing = Fresh();
+    CHECK(OnDrsGetSetting(kRenderPresetSettingId, &missing, NVAPI_SETTING_NOT_FOUND, nullptr) == NVAPI_OK && missing.u32CurrentValue == 3u);
+    CHECK(g_remembered == 1);
+    g_available = Unavailable::AmpereRuntime;
+    const auto atFirstSetOptions = g_latch.Resolve(g_available, true); // what AdjustUiRecomposition does
+    CHECK(atFirstSetOptions == Unavailable::None);
+    const auto decision = DecideUiRecomposition(true, atFirstSetOptions, g_state.Active());
+    CHECK(!decision.requested && decision.droppedByPreset && decision.preset == kPresetC);
+
+    // The other way round: the control was off at the first look (the runtime was never told C), then it becomes available: the rule keeps
+    // reading Auto, which is what the runtime runs
+    Reset(kPresetC);
+    g_available = Unavailable::OtherOutput;
+    auto found = Dword(2);
+    CHECK(OnDrsGetSetting(kRenderPresetSettingId, &found, NVAPI_OK, nullptr) == NVAPI_OK && found.u32CurrentValue == 2u);
+    g_available = Unavailable::None;
+    CHECK(g_latch.Resolve(g_available, true) == Unavailable::OtherOutput);
+    CHECK(DecideUiRecomposition(true, g_latch.Resolve(g_available, true), g_state.Active()).requested);
+
+    // Only a real question about the preset id fixes it: other ids, errors and a null setting leave the latch empty (a later look still
+    // reads the live value)
+    Reset(kPresetC);
+    auto s = Dword(0);
+    OnDrsGetSetting(kOverrideSettingId, &s, NVAPI_OK, nullptr);
+    OnDrsGetSetting(0x10308298u, &s, NVAPI_OK, nullptr);
+    OnDrsGetSetting(kRenderPresetSettingId, nullptr, NVAPI_OK, nullptr);
+    OnDrsGetSetting(kRenderPresetSettingId, &s, NVAPI_ERROR, nullptr);
+    CHECK(g_remembered == 0);
+    g_available = Unavailable::ReplacementRuntime;
+    CHECK(g_latch.Resolve(g_available, false) == Unavailable::ReplacementRuntime);
+}
+
 void ProviderIsObservedForThePresetIdOnly()
 {
     Reset(kAuto);
@@ -195,6 +244,7 @@ int main()
     NonDwordRepliesAreLeftAlone();
     OverrideOnId();
     UnavailableControlDoesNotAnswer();
+    FirstDriverQueryFixesTheAvailabilityForTheRule();
     ProviderIsObservedForThePresetIdOnly();
     if (g_failures)
     {

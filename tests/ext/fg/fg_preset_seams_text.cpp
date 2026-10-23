@@ -305,7 +305,16 @@ void UiRecompositionNotePins(const std::string& repo)
     // the table itself, looks at the HUD-less mode (C without HUD-less is a valid configuration: the UI is interpolated)
     CHECK(Count(seams, "CurrentAvailability()") >= 3);
     const std::string drs = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/PresetDrs.cpp")));
-    CHECK(drs.find("CurrentAvailability() == Unavailable::None") != std::string::npos);
+    // the driver hook looks at the availability ONCE per query, hands that value to the latch the recomposition rule reads (so the rule and
+    // the answer given to the runtime cannot come from two clocks) and answers with the same value
+    CHECK(drs.find("const Unavailable available = CurrentAvailability(); RememberAvailability(available);") != std::string::npos);
+    CHECK(Before(drs, "RememberAvailability(available);", "HandleDriverReply(Requests()"));
+    CHECK(drs.find("available == Unavailable::None);") != std::string::npos);
+    CHECK(Count(drs, "CurrentAvailability()") == 1);
+    // the rule's availability is the one latch (UiRecompositionRule.h AvailabilityLatch, tested in fg_ui_recomposition_rule), not a second copy
+    CHECK(seams.find("return TheLatch().Resolve(CurrentAvailability(), atCreation);") != std::string::npos);
+    CHECK(seams.find("void RememberAvailability(Unavailable live) { TheLatch().Resolve(live, true); }") != std::string::npos);
+    CHECK(seams.find("compare_exchange") == std::string::npos && seams.find("remembered") == std::string::npos);
     CHECK(seams.find("copy.unavailable = CurrentAvailability();") != std::string::npos);
     CHECK(seams.find("const auto available = CurrentAvailability();") != std::string::npos);
     const size_t table = seams.find("Unavailable CurrentAvailability()");

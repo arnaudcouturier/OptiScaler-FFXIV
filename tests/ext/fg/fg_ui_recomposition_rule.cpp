@@ -109,6 +109,38 @@ void UnavailableControlRunsAsAuto()
     CHECK(EffectiveRequest(Unavailable::None, 9) == kAuto);
 }
 
+void LatchRemembersTheFirstLook()
+{
+    // nothing remembered: a reader that does not commit sees the live value every time and leaves the latch empty
+    AvailabilityLatch menuFirst;
+    CHECK(menuFirst.Resolve(Unavailable::AmpereRuntime, false) == Unavailable::AmpereRuntime);
+    CHECK(menuFirst.Resolve(Unavailable::None, false) == Unavailable::None);
+    // the first committing caller fixes it, whoever it is; every later look gets that value, committing or not
+    CHECK(menuFirst.Resolve(Unavailable::OtherOutput, true) == Unavailable::OtherOutput);
+    CHECK(menuFirst.Resolve(Unavailable::None, false) == Unavailable::OtherOutput);
+    CHECK(menuFirst.Resolve(Unavailable::None, true) == Unavailable::OtherOutput);
+    CHECK(menuFirst.Resolve(Unavailable::AmpereRuntime, true) == Unavailable::OtherOutput);
+    // the case of the review: the driver query at boot (available) comes first, the user ticks the companion-runtime box, the first
+    // SetOptions sees the live AmpereRuntime but the rule keeps the value the runtime was told
+    AvailabilityLatch boot;
+    CHECK(boot.Resolve(Unavailable::None, true) == Unavailable::None); // driver query
+    const auto atSetOptions = boot.Resolve(Unavailable::AmpereRuntime, true);
+    CHECK(atSetOptions == Unavailable::None);
+    CHECK(!DecideUiRecomposition(true, atSetOptions, kPresetC).requested); // C still dropped: the runtime applied C
+    CHECK(DecideUiRecomposition(true, Unavailable::AmpereRuntime, kPresetC).requested); // what a second clock would have said
+    // and the same when the first SetOptions comes first (no driver query at all)
+    AvailabilityLatch late;
+    CHECK(late.Resolve(Unavailable::None, true) == Unavailable::None);
+    CHECK(late.Resolve(Unavailable::None, true) == Unavailable::None);
+    // every value round-trips
+    for (auto why : kAll)
+    {
+        AvailabilityLatch each;
+        CHECK(each.Resolve(why, true) == why);
+        CHECK(each.Resolve(Unavailable::None == why ? Unavailable::OtherOutput : Unavailable::None, false) == why);
+    }
+}
+
 void PresetsThatDrop()
 {
     CHECK(PresetDropsUiRecomposition(kPresetA));
@@ -207,6 +239,7 @@ int main()
     VersionIndependent();
     UnavailableControlRunsAsAuto();
     PresetsThatDrop();
+    LatchRemembersTheFirstLook();
     LiveTransitions();
     if (g_failures)
     {

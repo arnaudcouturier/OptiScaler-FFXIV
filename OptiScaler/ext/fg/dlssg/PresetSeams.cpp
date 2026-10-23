@@ -52,25 +52,18 @@ Unavailable CurrentAvailability()
 
 namespace
 {
-// Availability of the control as the recomposition rule sees it: remembered at the first SetOptions (the creation of the feature), the live
-// value before that.
-Unavailable RuleAvailability(bool atCreation)
+AvailabilityLatch& TheLatch()
 {
-    static std::atomic<int> remembered { -1 };
-    int availability = remembered.load(std::memory_order_acquire);
-    if (availability < 0)
-    {
-        availability = static_cast<int>(CurrentAvailability());
-        if (atCreation)
-        {
-            int expected = -1;
-            remembered.compare_exchange_strong(expected, availability, std::memory_order_acq_rel);
-            availability = remembered.load(std::memory_order_acquire);
-        }
-    }
-    return static_cast<Unavailable>(availability);
+    static AvailabilityLatch latch;
+    return latch;
 }
+
+// Availability of the control as the recomposition rule sees it: the one remembered by the first driver query or the first SetOptions
+// (UiRecompositionRule.h AvailabilityLatch), the live value before that.
+Unavailable RuleAvailability(bool atCreation) { return TheLatch().Resolve(CurrentAvailability(), atCreation); }
 } // namespace
+
+void RememberAvailability(Unavailable live) { TheLatch().Resolve(live, true); }
 
 UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation)
 {

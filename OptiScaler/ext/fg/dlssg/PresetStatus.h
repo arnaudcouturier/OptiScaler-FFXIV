@@ -40,10 +40,15 @@ Status GetStatus();
 // not DLSS-G. Used by the dispatch tick, the menu and the driver-settings seam. Safe from any thread.
 Unavailable CurrentAvailability();
 
+// Called by the driver-settings seam with the availability it is about to answer with: the first call (the runtime asking the driver for
+// its preset at boot) or the first SetOptions, whichever comes first, remembers it for the recomposition rule, so the rule describes the
+// runtime as it was told (UiRecompositionRule.h AvailabilityLatch). Later calls change nothing. Safe from any thread.
+void RememberAvailability(Unavailable live);
+
 // The recomposition rule (UiRecompositionRule.h) for the active request of the process. `atCreation` is passed by the DLSS-G option seam
-// (every SetOptions): the first such call remembers the availability of the control, so a later change of it (the companion-runtime
-// checkbox is written at once although it says restart) cannot flip the flag of a running feature. Other callers (the HUD-less engine, the
-// menu) read the remembered value, or the live one while nothing was remembered. Safe from any thread.
+// (every SetOptions): the first such call remembers the availability of the control unless a driver query did already, so a later change of
+// it (the companion-runtime checkbox is written at once although it says restart) cannot flip the flag of a running feature. Other callers
+// (the HUD-less engine, the menu) read the remembered value, or the live one while nothing was remembered. Safe from any thread.
 UiRecompositionDecision CurrentUiRecompositionDecision(bool modeWantsIt, bool atCreation = false);
 
 // The sentence the menu shows next to the HUD-less mode and next to the preset selector (PresetMenuText.h UiRecompositionNote), empty when
