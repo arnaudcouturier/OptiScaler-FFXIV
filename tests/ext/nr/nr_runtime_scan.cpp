@@ -35,6 +35,24 @@ struct TempTree
     }
 };
 
+
+// A directory junction (needs no privilege). False when it could not be made, so a test never passes for lack of a junction.
+static bool MakeJunction(const fs::path& link, const fs::path& target)
+{
+    const std::wstring command = L"cmd /c mklink /J \"" + link.wstring() + L"\" \"" + target.wstring() + L"\" >nul 2>nul";
+    _wsystem(command.c_str());
+    std::error_code ec;
+    return fs::exists(link / L".", ec);
+}
+
+static fs::path Deep(const fs::path& root, int levels)
+{
+    fs::path p = root;
+    for (int i = 0; i < levels; ++i)
+        p /= L"d" + std::to_wstring(i + 1);
+    return p;
+}
+
 static void LegacySearch()
 {
     {   // only NR.* folders: there is no legacy file
@@ -94,6 +112,35 @@ static void LegacySearch()
         CHECK(found.has_value() && found->parent_path().filename() == L"Other");
         fs::remove(t.root / L"Other" / kFile);
         CHECK(!FindLegacy(start, kFile).has_value());
+    }
+    {   // the depth is capped: a folder 8 levels down is searched, 9 levels down is not (a runaway or cyclic tree stays bounded)
+        TempTree t;
+        Touch(Deep(t.root, 8) / kFile);
+        CHECK(FindLegacy(t.root, kFile).has_value());
+    }
+    {
+        TempTree t;
+        Touch(Deep(t.root, 9) / kFile);
+        CHECK(!FindLegacy(t.root, kFile).has_value());
+    }
+    {   // a junction is not entered: neither a folder elsewhere nor a cycle back to the start
+        TempTree t;
+        TempTree outside;
+        Touch(outside.root / kFile);
+        CHECK(MakeJunction(t.root / L"link", outside.root));
+        CHECK(MakeJunction(t.root / L"loop", t.root));
+        CHECK(!FindLegacy(t.root, kFile).has_value());
+        Touch(t.root / L"real" / kFile); // a normal folder next to the junctions is still searched
+        const auto found = FindLegacy(t.root, kFile);
+        CHECK(found.has_value() && found->parent_path().filename() == L"real");
+    }
+    {   // the start folder itself may be a junction (only the folders below it are not followed)
+        TempTree t;
+        TempTree outside;
+        Touch(outside.root / L"sub" / kFile);
+        CHECK(MakeJunction(t.root / L"start", outside.root));
+        const auto found = FindLegacy(t.root / L"start", kFile);
+        CHECK(found.has_value() && found->parent_path().filename() == L"sub");
     }
     {   // a missing start folder is not an error
         TempTree t;

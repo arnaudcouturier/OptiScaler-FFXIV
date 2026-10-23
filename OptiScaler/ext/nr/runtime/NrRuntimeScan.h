@@ -18,6 +18,7 @@
 #include <atomic>
 #include <functional>
 #include <queue>
+#include <utility>
 #include <set>
 #include <system_error>
 
@@ -42,6 +43,25 @@ inline bool BenignDirectoryError(const std::error_code& ec)
 
 // An NR.* folder is a candidate of the picker, never "the" legacy file.
 inline bool SkipDirectory(const fs::path& dir) { return HasRuntimePrefix(dir.filename().wstring()); }
+
+// How many folder levels below the start folder the legacy search enters. The search runs on the render thread (the first caller of
+// Current()), and a folder tree can be unbounded or cyclic; a real install keeps the file within a few levels of the OptiScaler folder.
+inline constexpr unsigned kLegacySearchMaxDepth = 8;
+
+// A symbolic link or a junction (mount point). The search does not follow those: a link back to a parent folder would never end.
+// Other reparse points (cloud placeholders and the like) are ordinary folders for this purpose. A folder whose attributes cannot be
+// read is treated as a link (not entered), which is the safe answer.
+inline bool IsLinkFolder(const fs::path& dir)
+{
+    WIN32_FIND_DATAW data {};
+    HANDLE find = FindFirstFileW(dir.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE)
+        return true;
+    FindClose(find);
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+        return false;
+    return data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
+}
 } // namespace detail
 
 // Same order as Util::FindFilePath (a direct hit in startDir, then a breadth-first search under it, then the same search under the
@@ -59,11 +79,12 @@ inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::pa
 
     const auto bfs = [&](const fs::path& root) -> std::optional<fs::path>
     {
-        std::queue<fs::path> pending;
-        pending.push(root);
+        std::queue<std::pair<fs::path, unsigned>> pending; // folder, levels below the start folder
+        pending.push({ root, 0 });
         while (!pending.empty())
         {
-            const fs::path dir = pending.front();
+            const fs::path dir = pending.front().first;
+            const unsigned depth = pending.front().second;
             pending.pop();
             std::error_code iterEc;
             fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, iterEc);
@@ -80,8 +101,8 @@ inline std::optional<fs::path> FindLegacy(const fs::path& startDir, const fs::pa
                 std::error_code typeEc;
                 if (entry.is_directory(typeEc))
                 {
-                    if (!detail::SkipDirectory(entry.path()))
-                        pending.push(entry.path());
+                    if (depth < detail::kLegacySearchMaxDepth && !detail::SkipDirectory(entry.path()) && !detail::IsLinkFolder(entry.path()))
+                        pending.push({ entry.path(), depth + 1 });
                 }
                 else if (entry.path().filename() == fileName)
                 {
