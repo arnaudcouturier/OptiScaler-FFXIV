@@ -34,7 +34,7 @@ void Feed(StateTracker& t, int n, Reason r, bool armed = true)
 
 void TestReasons()
 {
-    static_assert(kReasonCount == 15);
+    static_assert(kReasonCount == 16);
     std::set<std::string> names;
     for (size_t i = 0; i < kReasonCount; ++i)
     {
@@ -47,7 +47,7 @@ void TestReasons()
     // The documented list (docs/HUDLESS.md section 5), by name
     for (const char* n : { "ModeOff", "NoFrameGeneration", "ProviderUnsupported", "NoSource", "NoBoundaryThisFrame",
                            "CaptureRejected", "SizeMismatch", "FormatUnsupported", "MsaaOrArray", "SlotBusy",
-                           "PasteNotReady", "SceneHdrOwnsFrame", "MaskCoverage", "DebugTintOn" })
+                           "PasteNotReady", "SceneHdrOwnsFrame", "MaskCoverage", "DebugTintOn", "PausedByPreset" })
         assert(names.count(n) == 1);
     assert(std::string(ReasonName(Reason::Count)) == "?");
 }

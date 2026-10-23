@@ -2,6 +2,7 @@
 
 #include "ext/Seams.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/fg/dlssg/PresetStatus.h"
 #include "ext/game/Game.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/hdr/Hdr10.h"
@@ -119,6 +120,7 @@ class Engine final : public IEngineHost, private FenceReader
     Reason StageCapture(const FrameImage& image) override;
     bool PasteReady() override;
     bool SceneHdrOwnsFrame() override;
+    bool PausedByPreset() override;
     void Log(const std::string& line) override { LOG_INFO("{}", line); }
 
   private:
@@ -201,6 +203,9 @@ bool Engine::FrameGenActive()
     auto* fg = Access::Hudless::Fg(*_sc);
     return fg != nullptr && fg->IsActive() && !fg->IsPaused() && Config::Instance()->IsFGEnabled();
 }
+
+// The same rule as the DLSS-G option seam (ext/fg/dlssg/UiRecompositionRule.h): the preset takes the recomposition away. DLSS-G provider only.
+bool Engine::PausedByPreset() { return FrameGenProvider() == Provider::DlssG && ext::fg::preset::CurrentUiRecompositionDecision(true).droppedByPreset; }
 
 // One log line per distinct refusal text (the texts are a handful of fixed strings): a refusal repeats every present and the
 // summary only counts the reasons, so the cause of a CaptureRejected is written once, the first time it happens.

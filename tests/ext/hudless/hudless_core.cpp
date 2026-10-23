@@ -53,6 +53,9 @@ struct FakeHost final : IEngineHost
     Reason stage = Reason::None;
     bool pasteReady = true;
     bool sceneOwns = false;
+    bool pausedByPreset = false; // the DLSS-G render preset takes the UI recomposition away
+    int pausedQueries = 0;
+    int stages = 0;
     std::vector<std::string> log;
     int calls = 0;        // every host query / action
     int pasteQueries = 0; // PasteReady() calls
@@ -64,7 +67,8 @@ struct FakeHost final : IEngineHost
     float CoverageLimit() override { ++calls; return limit; }
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
     Reason CheckCapture(const FrameImage&) override { ++calls; return check; }
-    Reason StageCapture(const FrameImage&) override { ++calls; return stage; }
+    Reason StageCapture(const FrameImage&) override { ++calls; ++stages; return stage; }
+    bool PausedByPreset() override { ++calls; ++pausedQueries; return pausedByPreset; }
     bool PasteReady() override { ++calls; ++pasteQueries; return pasteReady; }
     bool SceneHdrOwnsFrame() override { ++calls; return sceneOwns; }
     void Log(const std::string& line) override { log.push_back(line); }
@@ -1228,9 +1232,86 @@ void TestStateLinesPerFade()
 }
 } // namespace
 
+// A render preset that takes NVIDIA's UI recomposition away (A, C) makes the recomposition tags and captures useless: the engine asks for
+// nothing (the UI-boundary source is armed only by Take(), so its capture goes idle), stages and tags nothing, and says why.
+void TestPausedByPreset()
+{
+    // recomposition + a dropping preset: no Take, no staging, no tags, the reason is counted and becomes the displayed fallback
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        Core core(host);
+        for (int i = 0; i < 5; ++i)
+        {
+            const Run r = Present(core, Mode::Recomposition);
+            assert(!r.staged && !r.swapped && r.reason == Reason::PausedByPreset);
+            assert(!core.WantsTags() && !core.Staged());
+        }
+        assert(core.Snapshot().phase == Phase::Searching); // not yet a verdict
+        for (int i = 0; i < 200; ++i)
+        {
+            const Run r = Present(core, Mode::Recomposition);
+            assert(!r.staged && r.reason == Reason::PausedByPreset);
+        }
+        assert(host.source.takes == 0 && host.source.activeCalls == 0 && host.stages == 0);
+        const Status s = core.Snapshot();
+        assert(s.phase == Phase::Fallback && s.reason == Reason::PausedByPreset && s.captured == 0);
+        assert(s.reasons[static_cast<size_t>(Reason::PausedByPreset)] == 205);
+        assert(StateText(s.phase, s.reason) == "Fallback(PausedByPreset)");
+        assert(std::string(ReasonText(Reason::PausedByPreset)).find("preset") != std::string::npos);
+    }
+    // the preset goes back to Auto / B (a live switch): the capture resumes at once and the state recovers
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        Core core(host);
+        for (int i = 0; i < 100; ++i)
+            Present(core, Mode::Recomposition);
+        assert(core.Snapshot().phase == Phase::Fallback);
+        host.pausedByPreset = false;
+        const Run first = Present(core, Mode::Recomposition);
+        assert(first.staged && first.reason == Reason::None && core.WantsTags());
+        for (int i = 0; i < 80; ++i)
+            Present(core, Mode::Recomposition);
+        assert(core.Snapshot().phase == Phase::Active && host.source.takes == 81);
+    }
+    // only the recomposition is affected: ui_free (the recommended mode with C) is never asked, so it is never paused by the preset
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        Core core(host);
+        const Run r = Present(core, Mode::UiFree);
+        assert(r.staged && r.swapped && r.reason == Reason::None && host.pausedQueries == 0);
+    }
+    // frame generation off or an unsupported provider is reported as that, not as the preset
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        host.fgActive = false;
+        Core core(host);
+        assert(Present(core, Mode::Recomposition).reason == Reason::NoFrameGeneration);
+    }
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        host.provider = Provider::None;
+        Core core(host);
+        assert(Present(core, Mode::Recomposition).reason == Reason::ProviderUnsupported);
+    }
+    // mode off asks nothing at all
+    {
+        FakeHost host;
+        host.pausedByPreset = true;
+        Core core(host);
+        Present(core, Mode::Off);
+        assert(host.calls == 0 && host.pausedQueries == 0);
+    }
+}
+
 int main()
 {
     TestOff();
+    TestPausedByPreset();
     TestReasons();
     TestPasteDecision();
     TestBoundaryText();

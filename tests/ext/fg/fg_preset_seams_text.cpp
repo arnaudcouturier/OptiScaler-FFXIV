@@ -277,6 +277,14 @@ void UiRecompositionNotePins(const std::string& repo)
     const std::string offBody = seams.substr(off, release - off);
     CHECK(offBody.find("CurrentUiRecompositionDecision(ext::hudless::QueryRecomposition().enabled).requested") != std::string::npos);
     CHECK(offBody.find("off.enableUserInterfaceRecomposition = sl::Boolean::eTrue;") != std::string::npos);
+    // the HUD-less engine: the same rule says "paused by the preset" (DLSS-G provider only), the core asks it only for the recomposition mode
+    // and before the source is touched
+    const std::string engine = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessEngine.cpp")));
+    CHECK(engine.find("bool Engine::PausedByPreset() { return FrameGenProvider() == Provider::DlssG && ext::fg::preset::CurrentUiRecompositionDecision(true).droppedByPreset; }") != std::string::npos);
+    const std::string core = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessCore.h")));
+    CHECK(core.find("if (mode == Mode::Recomposition && _host.PausedByPreset()) return Fail(Reason::PausedByPreset);") != std::string::npos);
+    CHECK(Before(core, "_host.PausedByPreset()", "IHudlessSource* source = _host.Source();"));
+    CHECK(Before(core, "const Provider provider = _host.FrameGenProvider();", "_host.PausedByPreset()"));
     // the log carries the sentence once per episode, from the same pure function
     const std::string dlssg = Flat(WithoutLineComments(ReadFile(repo + "/OptiScaler/ext/fg/dlssg/DlssgSeams.cpp")));
     CHECK(dlssg.find("LOG_INFO(\"{}\", ext::fg::preset::UiRecompositionDroppedSentence(droppedBy));") != std::string::npos);

@@ -42,6 +42,7 @@ enum class Reason : uint8_t
     SceneHdrOwnsFrame,
     MaskCoverage,
     DebugTintOn,
+    PausedByPreset,
     Count
 };
 inline constexpr size_t kReasonCount = static_cast<size_t>(Reason::Count);
@@ -81,6 +82,8 @@ constexpr const char* ReasonName(Reason reason)
         return "MaskCoverage";
     case Reason::DebugTintOn:
         return "DebugTintOn";
+    case Reason::PausedByPreset:
+        return "PausedByPreset";
     default:
         return "?";
     }
@@ -121,6 +124,8 @@ constexpr const char* ReasonText(Reason reason)
         return "the UI mask covers too much of the screen (fade, or a preset changing the capture)";
     case Reason::DebugTintOn:
         return "the Show Detected UI compare view is on";
+    case Reason::PausedByPreset:
+        return "paused by the DLSS-G render preset: it turns NVIDIA's UI recomposition off (use Auto or B, or ui_free)";
     default:
         return "";
     }

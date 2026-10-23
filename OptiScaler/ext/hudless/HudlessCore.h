@@ -50,6 +50,9 @@ struct IEngineHost
     virtual bool PasteReady() = 0;
     // ISceneHdr supplies a scene for this frame (or an HDR screenshot is pending): the HDR code keeps the frame.
     virtual bool SceneHdrOwnsFrame() = 0;
+    // The DLSS-G render preset takes NVIDIA's UI recomposition away (A, C): the recomposition tags and captures would feed nothing.
+    // Asked only in the recomposition mode, after the frame generation and provider checks, before the source is touched.
+    virtual bool PausedByPreset() { return false; }
     virtual void Log(const std::string& line) = 0;
 };
 
@@ -163,6 +166,11 @@ class Core
         const Provider provider = _host.FrameGenProvider();
         if (provider == Provider::None || (mode == Mode::UiFree && provider != Provider::DlssG))
             return Fail(Reason::ProviderUnsupported);
+
+        // A render preset that takes the recomposition away: no capture and no tags (the UI-boundary source is armed only by Take(), so it
+        // goes idle too), counted and shown as the reason.
+        if (mode == Mode::Recomposition && _host.PausedByPreset())
+            return Fail(Reason::PausedByPreset);
 
         // Recomposition would need a PQ UI image DLSS-G refuses here, and a hud-less tag converted to PQ: only ui_free
         // is carried over HDR10 output (docs/HUDLESS.md section 8).
