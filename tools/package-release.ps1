@@ -20,8 +20,10 @@
     * Every packed third-party binary must map to a licence file that is present under Licenses\ in -Package; a missing one stops
       the script. A binary whose licence file does not name it is packed with a warning that the maintainer has to confirm.
     * Entries under Licenses\ go through the same block-list as everything else (a blocked file there is left out and reported).
-    * Privacy scan: every packed PE (.dll, .exe, .addon*) is searched for a user profile path (a drive letter followed by :\Users\,
-      in ASCII and in UTF-16LE), which a build leaves in the debug directory or in assertion strings and which would publish the
+      Of the rest, only .txt and .md files (any case) and names without an extension are packed; anything else there
+      (a .dll, an .exe, ...) stops the script with exit 3 naming the file.
+    * Privacy scan: every packed PE (.dll, .exe, .addon*) is searched for a user profile path (a drive letter, a colon, one or more
+      backslashes or slashes, "Users", a separator: C:\Users\, C:/Users/ and C:\\Users\\ all match; in ASCII and in UTF-16LE), which a build leaves in the debug directory or in assertion strings and which would publish the
       Windows user name of the build machine. One in a binary this fork builds (winmm.dll, nvngx.dll_dlssnr.dll) or in anything
       outside OptiScaler\ stops the script with exit 5 before any archive is written; there is no switch to ignore it. One in a
       third-party library under OptiScaler\ (FidelityFX, XeSS, Direct3D 12 core) is a vendor build path: it is reported as a
@@ -113,7 +115,9 @@ foreach ($f in (Get-ChildItem -LiteralPath $Package -Recurse -File -Force | Sort
 
     if (($Exclude -contains $name) -or ($Exclude -contains $rel)) { $skipped.Add("$rel (excluded by request)"); continue }
     if ($top -eq 'Licenses') {
-        if ($blockPatterns | Where-Object { $name -match $_ }) { $blocked.Add($rel) } else { $include.Add(@{ Source = $f.FullName; Dest = $rel }) }
+        if ($blockPatterns | Where-Object { $name -match $_ }) { $blocked.Add($rel) }
+        elseif ($name -match '(?i)\.(txt|md)$' -or $name -notmatch '\.') { $include.Add(@{ Source = $f.FullName; Dest = $rel }) }
+        else { $unknown.Add("$rel  (only .txt, .md and names without an extension are allowed under Licenses\)") }
         continue
     }
     if ($blockPatterns | Where-Object { $name -match $_ }) { $blocked.Add($rel); continue }
@@ -161,24 +165,25 @@ if (Test-Path $fragDir) {
 
 # ---------------------------------------------------------------- privacy scan of the packed binaries
 # A user profile path (drive letter + :\Users\) in a binary is the build machine's Windows user name; see the header.
+# One pattern per encoding: a drive letter, ':', one or more '\' or '/' (so C:/Users/, C:\\Users\\ and \\?\C:\Users\ all match), "Users"
+# (any case), a separator. The wide form needs the zero byte after every character, so a lone letter in front of wide text is no drive letter.
+$userPathAscii = [regex]::new('[A-Za-z]:[\\/]+Users[\\/]', 'IgnoreCase, CultureInvariant, Compiled')
+$userPathWide = [regex]::new('[A-Za-z]\x00:\x00(?:[\\/]\x00)+U\x00s\x00e\x00r\x00s\x00[\\/]\x00', 'IgnoreCase, CultureInvariant, Compiled')
 function Find-UserPath([string]$file) {
     $bytes = [IO.File]::ReadAllBytes($file)
-    $text = [Text.Encoding]::Latin1.GetString($bytes)   # one char per byte, so IndexOf walks the raw bytes
+    $text = [Text.Encoding]::Latin1.GetString($bytes)   # one char per byte, so the regex walks the raw bytes
     $found = [System.Collections.Generic.List[string]]::new()
-    $ascii = ':\Users\'
-    $wide = (($ascii.ToCharArray() | ForEach-Object { [string]$_ + [char]0 }) -join '')
-    for ($i = $text.IndexOf($ascii, [StringComparison]::OrdinalIgnoreCase); $i -ge 1; $i = $text.IndexOf($ascii, $i + 1, [StringComparison]::OrdinalIgnoreCase)) {
-        if ($text[$i - 1] -notmatch '[A-Za-z]') { continue }
-        $end = $i
-        while ($end -lt $text.Length -and ($end - $i) -lt 100 -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
-        $found.Add($text.Substring($i - 1, $end - $i + 1))
+    foreach ($m in $userPathAscii.Matches($text)) {
+        $end = $m.Index + $m.Length
+        while ($end -lt $text.Length -and ($end - $m.Index) -lt 100 -and $text[$end] -ge ' ' -and $text[$end] -le '~') { $end++ }
+        $found.Add($text.Substring($m.Index, $end - $m.Index))
+        if ($found.Count -ge 20) { break }
     }
-    for ($i = $text.IndexOf($wide, [StringComparison]::OrdinalIgnoreCase); $i -ge 2; $i = $text.IndexOf($wide, $i + 1, [StringComparison]::OrdinalIgnoreCase)) {
-        if ($text[$i - 2] -notmatch '[A-Za-z]') { continue }
+    foreach ($m in $userPathWide.Matches($text)) {
         $chars = [System.Text.StringBuilder]::new()
-        for ($j = $i - 2; $j + 1 -lt $text.Length -and $chars.Length -lt 100 -and $text[$j + 1] -eq [char]0 -and $text[$j] -ge ' ' -and $text[$j] -le '~'; $j += 2) { [void]$chars.Append($text[$j]) }
-        # the drive letter must itself be wide text (a letter followed by a zero byte): then the loop above copies it
-        if ($chars.Length -gt 0) { $found.Add($chars.ToString()) }
+        for ($j = $m.Index; $j + 1 -lt $text.Length -and $chars.Length -lt 100 -and $text[$j + 1] -eq [char]0 -and $text[$j] -ge ' ' -and $text[$j] -le '~'; $j += 2) { [void]$chars.Append($text[$j]) }
+        $found.Add($chars.ToString())
+        if ($found.Count -ge 40) { break }
     }
     return @($found | Select-Object -Unique)
 }
@@ -235,6 +240,10 @@ $byo = @(
     'ReShade 6.8.0           Your own ReShade install, only if you want presets applied to the HUD-less image ([HudLess] ReShadePresets).'
 )
 
+# -IncludeSymbols packs the .pdb files under their own names: the uninstall text lists them (names taken from the include list)
+$symbolNames = @($include | Where-Object { $_.Dest -match '\.pdb$' -and $_.Dest -notmatch '[\\/]' } | ForEach-Object { $_.Dest })
+$uninstallSymbols = if ($symbolNames.Count) { "    plus the symbol files this archive was made with: $($symbolNames -join ', ')`n" } else { '' }
+
 $install = @"
 OptiScaler-FFXIV $tag
 =====================================================================
@@ -261,8 +270,8 @@ INSTALL
   4. Extract everything into the folder that contains ffxiv_dx11.exe (overwrite when asked).
   5. Add the files in "BRING YOUR OWN" for the features you want.
   6. Start the game. Press Insert to open the OptiScaler menu. To get a log file for bug reports set [Log] LogToFile=true
-     (OptiScaler.log is then written next to winmm.dll). The log contains the game folder path, and the file paths and hashes of the
-     NVIDIA runtimes it finds. Before you post it publicly, remove or mask the path if it contains your Windows user name.
+     (OptiScaler.log is then written next to winmm.dll). The log contains the game folder path, and it also holds the file paths and
+     hashes of the NVIDIA runtimes it finds. Before you post it publicly, remove or mask every path that contains your Windows user name.
 
 SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart the game after changing most of them)
   (the combination used in the maintainer's tested setup; in the menu or the ini)
@@ -300,6 +309,7 @@ KNOWN LIMITS
 UNINSTALL
   Close the game and delete only what this archive installed, in the folder that contains ffxiv_dx11.exe:
     winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, INSTALL.txt, NOTICE.txt, SHA256SUMS.txt, and the Licenses folder
+$uninstallSymbols    plus OptiScaler.log, if you turned LogToFile on (the game writes it next to winmm.dll)
   and these files inside the OptiScaler folder (a folder left empty by this can be removed too):
 $(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { "    $($_.Dest)" }) -join "`n")
   Do NOT delete the OptiScaler folder as a whole. Leave your own NVIDIA files alone: nvngx_dlssg.dll, the streamline folder, the
