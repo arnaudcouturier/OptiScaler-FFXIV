@@ -15,7 +15,9 @@ pwsh -File tools\package-release.ps1 -Package <package folder> -Version ffxiv-<y
 
 `tools\package.ps1` copies the build output to the target folder and merges the fragments in `OptiScaler\ext\ini\` into the shipped `OptiScaler.ini`. `tools\package-release.ps1` turns that folder into `dist\OptiScaler-FFXIV-<Version>.zip`. It never writes to the package folder (it hashes the folder before and after to prove it), writes a `.gitignore` containing `*` into `dist\` so an archive cannot be committed by accident, and finishes by extracting the archive to a scratch folder and re-checking every hash.
 
-Exit codes of `package-release.ps1`: 0 ok, 2 bad arguments or a missing required file, 3 a file it cannot classify or a licence file that is missing, 4 verification failed.
+Exit codes of `package-release.ps1`: 0 ok, 2 bad arguments or a missing required file, 3 a file it cannot classify or a licence file that is missing, 4 verification failed, 5 a packed binary contains a user profile path.
+
+Exit 5 is the privacy scan: before anything is written, every packed `.dll`, `.exe` and `.addon*` is searched (ASCII and UTF-16LE) for a drive letter followed by `:\Users\`, which a build can leave in the PE debug directory or in assertion strings and which would publish the Windows user name of the build machine. The message names the file and the string. There is no switch to skip it: rebuild so that the path is not embedded (the forwarder links with `/PDBALTPATH:%_PDB%`, which keeps only the `.pdb` file name). A match inside a third-party library under `OptiScaler\` (FidelityFX, XeSS, Direct3D 12 core) is reported as a warning with the string and the file is packed, because it can only be the vendor's build path; read the warning once. Files under `Licenses\` are classified like every other file (a blocked name there is left out and reported) and scanned too.
 
 ## 2. What goes into the archive
 
