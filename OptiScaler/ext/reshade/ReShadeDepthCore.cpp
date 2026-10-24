@@ -60,7 +60,7 @@ const char* const kDepthSemantic = "DEPTH";
 constexpr std::string_view kBufReadySource = "bufready_depth";
 
 // Texture variables ReShade effects declare for the depth buffer, by priority. A variable that is merely named like "depth"
-// may be an internal texture of an effect (it dangles after a reload) and is never used. MartysMods MXAO declares only
+// may be an internal texture of an effect (it dangles after a reload) and is never used. Some effects (MXAO) declare only
 // DepthInputTex.
 constexpr const char* kDepthInputNames[] = { "ReShade::DepthBufferTex", "DepthBufferTex", "DepthInputTex" };
 
