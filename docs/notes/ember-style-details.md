@@ -1,6 +1,6 @@
 # Menu style (Ember): palette, shape and rules in full
 
-Material moved out of [FEATURES.md](../FEATURES.md#menu-style-ember) on 2026-10-23; the paragraphs are copied unchanged; internal names are renamed or removed.
+Material moved out of [FEATURES.md](../FEATURES.md#menu-style-ember) on 2026-10-23; the paragraphs are copied from it with only internal names renamed or removed and the in-game status corrections of 2026-10-23.
 
 **What it does.** A second look for the in-game menu, selected with `[Menu] Style = ember` (the default, `classic`, is upstream's). The classic theme mixes the accent colour into almost everything: a button is 32% accent over near black, its hover 55%, the title bar and the headers the same, so a bright accent such as orange turns into brown and rust. Ember keeps every surface and control neutral and uses the accent only to mark state: the check mark, the slider grab, the overline of the selected tab, the focus ring, the text selection, the resize grips and the plots.
 

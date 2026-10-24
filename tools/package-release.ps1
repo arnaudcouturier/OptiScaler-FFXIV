@@ -274,7 +274,7 @@ INSTALL
      hashes of the NVIDIA runtimes it finds. Before you post it publicly, remove or mask every path that contains your Windows user name.
 
 SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart the game after changing most of them)
-  (the combination used in the maintainer's tested setup; in the menu or the ini)
+  (the combination used in the author's tested setup; in the menu or the ini)
   DLSS upscaling on the DirectX 11 game:   [Upscalers] Dx11Upscaler=dlss_12
   Neural Rendering (needs nvngx_dlssnr.dll): [DlssNr] Enabled=true
   Frame generation (needs DLSS-G files):   [FrameGen] Enabled=true, FGInput=upscaler, FGOutput=dlssg
@@ -298,7 +298,7 @@ KNOWN LIMITS
     (the log and the menu say so). Use preset Auto or B with recomposition.
   * Window mode ([Window] Mode=on), the automatic multiplier ([DLSSG] AutoMFG=true), "Run NR before DLSS" in the character
     preview and the game jitter correction are off by default. Window mode needs [XeFG] ForceBorderless=true and ReShade.
-    The jitter correction is experimental and made no visible difference at the Quality mode in the maintainer's test. The source-level jitter fix
+    The jitter correction is experimental; an earlier version of it showed no visible difference at the Quality mode in the author's test. The source-level jitter fix
     ([FFXIV] JitterSource) is experimental, off by default and supports one game executable build.
   * DLSS presets L and M cost more fps than K (heavier models); K is the default.
   * libxell.dll (Intel XeLL) is not part of this archive.
