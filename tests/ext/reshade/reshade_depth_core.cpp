@@ -969,6 +969,19 @@ void ReloadCannotResolve()
         r.binder.OnReloadedEffects(kRt);
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
     }
+    { // the variables cannot even be listed at the event: the same
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
+        r.fake.texturesOk = false;
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.DepthIs(kCopy, kCopy) && r.fake.BoundCopiesReferenced());
+        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
+        r.fake.texturesOk = true;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound); // the next begin repairs it
+        r.Finish();
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+    }
     { // ... or a later begin does
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
@@ -1427,6 +1440,31 @@ void BackendFailures()
         CHECK(r.Begin() == Outcome::Failed);
         CHECK(r.Clean());
     }
+    { // a begin that fails before it bound anything puts nothing back and does not look at the binding again
+        int secondAddRef = 0;
+        {
+            Rig q;
+            CHECK(q.Pass());
+            q.fake.log.clear();
+            q.NextFrame();
+            q.Begin();
+            int seen = 0;
+            for (size_t i = 0; i < q.fake.log.size(); ++i)
+                if (q.fake.log[i] == "AddRef" && ++seen == 2) // the first is the capture's copy, the second the original srv
+                    secondAddRef = int(i) + 1;
+        }
+        CHECK(secondAddRef > 0);
+        Rig r;
+        CHECK(r.Pass());
+        r.fake.log.clear();
+        r.fake.calls = 0;
+        r.fake.faultAt = secondAddRef;
+        r.fake.fault = Fault::Throw;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.fake.Calls("TextureBinding") == 1 && r.fake.Calls("UpdateTextureBindings") == 0);
+        CHECK(r.Clean());
+    }
 
     // The calls of a finish. A restore that cannot be verified or done leaves the runtime dirty with its references; the bools
     // are a separate step and never keep the binding from being put back.
@@ -1458,8 +1496,7 @@ void BackendFailures()
             // a throw after the restore went through is still an unverified restore
             const bool dirtyAfter = !r.Clean() && r.fake.BoundCopiesReferenced();
             CHECK(dirtyAfter == c.dirty);
-            if (c.dirty)
-                CHECK(r.binder.Status() == kFailed);
+            CHECK(r.binder.Status() == kFailed); // a failed restore step, of the binding or of a bool, is reported
             r.fake.faultAt = 0;
             r.fake.fault = Fault::None;
             CHECK(r.Pass() && r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb));
@@ -1654,11 +1691,19 @@ void Threads()
             }
         });
 
-    constexpr int kPasses = 20000;
-    for (int i = 0; i < kPasses; ++i)
+    // The work is fixed, not the time: run until enough passes really bound and the capture side really published, however the
+    // scheduler treats the threads. The deadline only keeps a broken run from hanging. The frame moves on with the capture side.
+    constexpr uint64_t kBoundTarget = 20000, kPublishTarget = 1000;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    uint64_t passes = 0, seenPublishes = 0;
+    while ((binder.GetCounters().passesBound < kBoundTarget || publishes.load() < kPublishTarget) &&
+           std::chrono::steady_clock::now() < deadline)
     {
-        if (i % 50 == 0)
+        if (passes++ % 50 == 0 && publishes.load() != seenPublishes)
+        {
+            seenPublishes = publishes.load();
             ++fake.frame;
+        }
         binder.OnBeginEffects(kRt);
         binder.OnFinishEffects(kRt);
     }
@@ -1671,11 +1716,11 @@ void Threads()
     CHECK(fake.Balanced());
     CHECK(fake.violations == 0);
     CHECK(torn == 0);
-    CHECK(binder.GetCounters().passesBound > uint64_t(kPasses / 4));
-    CHECK(publishes > 100);
+    CHECK(binder.GetCounters().passesBound >= kBoundTarget);
+    CHECK(publishes >= kPublishTarget);
     CHECK(!fake.HoldsCopy());
-    std::printf("  threads: %llu passes bound of %d, %llu captures published\n", (unsigned long long)binder.GetCounters().passesBound,
-                kPasses, (unsigned long long)publishes.load());
+    std::printf("  threads: %llu passes bound of %llu, %llu captures published\n", (unsigned long long)binder.GetCounters().passesBound,
+                (unsigned long long)passes, (unsigned long long)publishes.load());
 }
 } // namespace
 

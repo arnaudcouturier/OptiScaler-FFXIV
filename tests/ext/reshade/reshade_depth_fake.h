@@ -92,6 +92,7 @@ struct Fake final : IBackend
 
     // knobs for the restore paths
     bool failRestore = false; // update_texture_bindings with something that is not a copy returns false
+    bool texturesOk = true;   // false: the texture variables cannot be enumerated
     bool slowAddRef = false;  // widen the window between the core reading a capture and holding its view
     bool logCalls = true;     // keep the call log (off: the allocation test must not count the fake's own allocations)
 
@@ -298,6 +299,8 @@ struct Fake final : IBackend
         return Run<bool>("TextureVariables", false,
                          [&]() -> bool
                          {
+                             if (!texturesOk)
+                                 return false;
                              ++textureEnums;
                              out.clear();
                              for (const auto& v : vars)
