@@ -9,8 +9,15 @@
 //
 // The core never releases a copy reference that ReShade may still hold: ReShade's binding map does not own the view. A restore
 // that fails or cannot be verified keeps the runtime "dirty" (the copy and the original stay referenced) and every begin or
-// finish of that runtime retries it first. Only destroy_effect_runtime (the map is gone with the runtime) lets go without a
-// ReShade call. (After ResizeBuffers ReShade creates a new runtime object, so a destroy never leaves a map behind.)
+// finish of that runtime retries it first.
+//
+// destroy_effect_runtime does not settle it either: whether ResizeBuffers makes ReShade create a new runtime object or reset the
+// same one (the pointer value then comes back, with its binding map) is unverified, and the core does not depend on it. A
+// destroy of a runtime that holds nothing forgets it. A destroy of one that still holds the copy (a bound or a dirty pass)
+// makes no ReShade call and releases nothing: the entry is kept and marked orphaned. If the pointer comes back, its next begin,
+// finish or reload runs the normal retry first (the existing dirty path). If it never does, the references are held until
+// Shutdown() or the destructor, which release everything without a ReShade call: a leaked view is acceptable, a view that
+// is freed while a map may still hold it is not.
 //
 // The DEPTH semantic itself cannot be read through the API; a texture variable that is merely NAMED like a depth input may
 // not read it at all. So a variable counts as a DEPTH reader for a pass only if, after the bind, it reads back exactly the copy.
@@ -50,6 +57,8 @@ namespace ext::reshade::depth
 inline constexpr int64_t kMaxCaptureAgeMs = 250; // a capture older than this is stale (251 ms is stale)
 inline constexpr int64_t kMaxCaptureFrames = 1;  // ... and so is one more than this many frames old (or from the future)
 inline constexpr int64_t kConsumerWindowMs = 1000; // GetConsumer: the last begin that found a trusted depth input is at most this old
+inline constexpr int64_t kLogIntervalMs = 60'000;   // a counter is logged at most this often
+inline constexpr int64_t kNeverLogged = INT64_MIN;
 
 // The capture the copy was made from (the capture side fills it after every successful evaluate).
 struct DepthCapture
@@ -69,6 +78,11 @@ struct DepthCapture
 // valid, at most kMaxCaptureAgeMs old and 0 or kMaxCaptureFrames frames behind `frame`. Signed arithmetic: a capture from the
 // future (negative age or frame delta) is stale.
 bool IsFresh(const DepthCapture& capture, int64_t nowMs, uint64_t frame);
+
+// One rule for every counter: log its first occurrence, then at most once per kLogIntervalMs (with the count of that moment).
+// `lastLoggedMs` is kNeverLogged until the first line. A clock that went backwards logs nothing until the interval has passed
+// since the last line; a counter that stopped ticking is simply not asked again (its last occurrences are not logged).
+bool ShouldLog(uint64_t count, int64_t nowMs, int64_t lastLoggedMs);
 
 // RESHADE_DEPTH_INPUT_* macro value check: true only if the whole string (surrounding white space removed, one trailing f/F
 // allowed) is a number exactly equal to `neutral`. Empty, unparsable, inf/nan, trailing junk and a leading '+' are not neutral.
@@ -202,14 +216,11 @@ enum class Counter : uint8_t
     PassesBound,
     OtherDevice,
     Failed,
+    ErasedUnverified,
     Count
 };
 inline constexpr size_t kCounters = static_cast<size_t>(Counter::Count);
 const char* CounterName(Counter counter);
-
-// Log the first occurrence of a counter and every 1000th after it. The counters that tick every frame while ReShade runs
-// without an evaluate (otherDevice, passesBound, staleCaptures) log their first occurrence only.
-bool ShouldLog(Counter counter, uint64_t count);
 
 struct Counters
 {
@@ -221,9 +232,14 @@ struct Counters
     uint64_t passesBound = 0;
     uint64_t otherDevice = 0;        // begins of runtimes that are not ours: another device, or not D3D11
     uint64_t failed = 0;             // every Outcome::Failed, and every restore that had to be left pending
+    // Erases of the DEPTH entry that no readback of this pass vouched for: a pass in which no variable read the copy back, a
+    // retry or reload where no re-resolved variable shows it, and the case of no variable at all. Each one may have lost the
+    // pick of another add-on (Generic Depth) until it selects again; a deliberate trade-off against leaving the copy in a map
+    // that ReShade frees views of. The in-game run shows how often that happens.
+    uint64_t erasedUnverified = 0;
 };
 
-// Called when ShouldLog says so, with the new value. May be null.
+// Called when ShouldLog says so (first occurrence, then once per kLogIntervalMs), with the current count. May be null.
 using LogFn = void (*)(Counter counter, uint64_t count);
 
 // What the capture side needs to know before it has a capture: a depth consumer exists, and how big its back buffer is.
@@ -238,6 +254,14 @@ class DepthBinder
 {
   public:
     explicit DepthBinder(IBackend& backend, LogFn log = nullptr);
+    // Shutdown(): the process or the test is over.
+    ~DepthBinder();
+    DepthBinder(const DepthBinder&) = delete;
+    DepthBinder& operator=(const DepthBinder&) = delete;
+
+    // Releases every reference the binder still holds (orphaned runtimes included) and forgets all runtimes, without a ReShade
+    // call: nothing is put back, the maps are assumed gone. Any thread; the destructor calls it.
+    void Shutdown() noexcept;
 
     // Starts disabled. Any thread. Disabling does not cut a pass short: finish_effects still puts the binding back.
     void SetEnabled(bool enabled) noexcept;
@@ -259,10 +283,14 @@ class DepthBinder
     // was ended then finds nothing open (nested begin/finish: the first finish closes the second pass, the second is a no-op).
     Outcome OnBeginEffects(uint64_t runtime) noexcept;
     void OnFinishEffects(uint64_t runtime) noexcept;
-    // The runtime and its binding map are gone: the references of an open pass are released, no ReShade call.
+    // A runtime that holds nothing is forgotten. One that holds the copy (a bound or dirty pass) is kept as orphaned, no ReShade
+    // call and no reference released: the pointer may come back (a reset that reuses the object, its map surviving), and then
+    // its next begin, finish or reload retries first. See the top of this file.
     void OnDestroyRuntime(uint64_t runtime) noexcept;
-    // Effects were reloaded: forgets the manual transform cache and the trust latch. An open pass is restored first (the
-    // variable is looked up again, its handle from begin is stale); if that fails the runtime stays dirty with its references.
+    // Effects were reloaded: forgets the manual transform cache and the trust latch. An open pass (or a dirty or orphaned
+    // runtime) is ended first: the named variables are looked up again, and if one shows the copy the original goes back, if
+    // none does the DEPTH entry is ERASED (which can lose another add-on's pick, counted as erasedUnverified); with no
+    // variable at all the entry is erased too. Only a failing ReShade call leaves the runtime dirty with its references.
     void OnReloadedEffects(uint64_t runtime) noexcept;
     // A technique was switched or the preset changed: forgets the manual transform cache only. reshade_set_technique_state fires
     // BEFORE the change, so the wiring clears on the preset-path event as well and the next begin asks again; the window in
@@ -273,6 +301,9 @@ class DepthBinder
     // never writes it). Copy; built here, so the refusal paths do not allocate.
     std::string Status() const noexcept;
     Counters GetCounters() const noexcept;
+
+    // What real ReShade answers for a genuine reader's get_texture_binding after the bind (exactly the copy) is not settled by
+    // reading the headers: the first real bind logs the readback in P3 so the in-game run shows it.
 
   private:
     struct SavedBool
@@ -296,6 +327,9 @@ class DepthBinder
         bool open = false;
         bool inPass = false;
         bool bound = false;
+        // The runtime was destroyed while it held the copy: kept without a ReShade call. Its stored handles may belong to a
+        // runtime that is gone, so a finish of it is a retry (everything is looked up again), like a begin or a reload.
+        bool orphaned = false;
         uint64_t copy = 0;
         // True once a variable read the copy back after the bind. Only then are `variable` (valid until the pass ends) and
         // `orig*` (what that variable showed before the bind) meaningful; an unverified pass is undone with an erase.
@@ -311,7 +345,6 @@ class DepthBinder
         Rollback, // a begin that failed: the handles of the pass
         Retry,    // an earlier pass that never finished, or a restore that is still pending: look everything up again
         Reload,   // reloaded effects: look the variable up again, the uniforms are new objects
-        Forget,   // destroy: release only
     };
     enum class StatusKind : uint8_t
     {
@@ -351,6 +384,7 @@ class DepthBinder
     LogFn _log;
     std::atomic<bool> _enabled { false };
     std::atomic<uint64_t> _counts[kCounters] {};
+    std::atomic<int64_t> _lastLogged[kCounters] {}; // set to kNeverLogged by the constructor
 
     std::recursive_mutex _mutex; // _runtimes
     std::map<uint64_t, Runtime> _runtimes;

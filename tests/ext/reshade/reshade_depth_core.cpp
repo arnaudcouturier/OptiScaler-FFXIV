@@ -251,7 +251,9 @@ void RestoreOnlyIfOurs()
         CHECK(!r.fake.unis[0].value); // the bools were put back anyway
         CHECK(r.binder.GetCounters().overwrittenByOther == 0); // an unreadable binding is not "replaced by another add-on"
         CHECK(r.binder.Status() == kFailed);
-        r.binder.OnDestroyRuntime(kRt); // the runtime and its map are gone: now the references can go
+        r.binder.OnDestroyRuntime(kRt); // kept as orphaned: no ReShade call, nothing released
+        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1);
+        r.binder.Shutdown(); // ... until the binder ends
         CHECK(r.fake.Balanced());
     }
 }
@@ -639,6 +641,7 @@ void DecoyShapes()
         CHECK(!r.fake.hasDepth && !r.fake.MapHoldsCopy());
         CHECK(r.Clean());
         CHECK(r.binder.GetCounters().noDepthInput == 1 && r.binder.GetCounters().passesBound == 0);
+        CHECK(r.binder.GetCounters().erasedUnverified == 1); // the undo of an unverified bind is an erase nothing vouched for
         // the latch holds: later begins bind nothing and record no new consumer
         r.Finish();
         const size_t updates = r.fake.updates.size();
@@ -662,6 +665,7 @@ void DecoyShapes()
         for (const auto& u : r.fake.updates)
             CHECK(u.srv != kOther && u.srgb != kOtherSrgb); // the decoy's view was never written into ReShade's map
         CHECK(r.fake.CoreRefs(kOther) == 0 && r.fake.CoreRefs(kOtherSrgb) == 0);
+        CHECK(r.binder.GetCounters().erasedUnverified == 1);
         // the decoy's texture dies with the next effect reload
         r.fake.OwnerRelease(kOther);
         r.fake.OwnerRelease(kOtherSrgb);
@@ -669,6 +673,8 @@ void DecoyShapes()
         r.Finish();
         CHECK(r.Clean());
     }
+    // A TRADE-OFF, not a bug: verification is strict. A variable that shows the copy in only one slot after the bind is not a
+    // DEPTH reader (a real reader shows both slots), so such a pass is undone with an erase.
     for (int half = 0; half < 2; ++half) // a half pair after the bind does not verify: only a readback of (copy, copy) does
     {
         Rig r;
@@ -1369,9 +1375,10 @@ void ReloadMidPass()
         CHECK(r.fake.log.empty());
         CHECK(r.Pass() && r.Clean());
     }
-    { // another add-on took the binding over before the reload. The variables as the new effects know them cannot be vouched
-      // for (none reads the copy back), so the entry is erased rather than trusted: the other add-on's pick is lost until it
-      // selects again, and the copy is certainly gone. The original is not written back either.
+    { // A TRADE-OFF, not a bug: another add-on took the binding over before the reload. The variables as the new effects know
+      // them cannot be vouched for (none reads the copy back), and a same-named variable may be a decoy without the DEPTH
+      // semantic, so the entry is erased rather than trusted: the other add-on's pick is lost until it selects again, and the
+      // copy is certainly gone. The original is not written back either (erasedUnverified counts it).
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.SetDepth(kOther, kOtherSrgb);
@@ -1393,28 +1400,38 @@ void ReloadMidPass()
 
 void ReloadCannotResolve()
 {
-    { // the variable cannot be found at the event: the copy may still be bound, so both references stay
+    { // no variable of that name at the event: nothing can vouch for the entry, so it is erased (needs no variable) and the
+      // pass ends, with both references given back once the erase went through
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.vars.clear();
         r.binder.OnReloadedEffects(kRt);
-        CHECK(r.fake.DepthIs(kCopy, kCopy));
-        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
-        CHECK(r.fake.BoundCopiesReferenced());
-        CHECK(r.binder.Status() == kFailed);
-        // a later reload with the variable back repairs it
-        r.fake.vars.push_back(DepthVar());
-        r.binder.OnReloadedEffects(kRt);
-        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+        CHECK(!r.fake.hasDepth && r.fake.updates.size() == 2 && r.fake.UpdateAt(1).srv == 0 && r.fake.UpdateAt(1).srgb == 0);
+        CHECK(r.Clean());
+        CHECK(r.binder.GetCounters().erasedUnverified == 1 && r.binder.GetCounters().failed == 0);
     }
-    { // a reload that leaves the runtime dirty still forgets what was learned about the effects: the macros ...
+    { // the erase cannot be done: dirty, both references kept, and the erase is counted only when it went through
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.vars.clear();
+        r.fake.failRestore = true;
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.DepthIs(kCopy, kCopy) && r.fake.BoundCopiesReferenced());
+        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
+        CHECK(r.binder.Status() == kFailed && r.binder.GetCounters().erasedUnverified == 0);
+        r.fake.failRestore = false;
+        r.binder.OnReloadedEffects(kRt); // the next one repairs it
+        CHECK(!r.fake.hasDepth && r.Clean() && r.binder.GetCounters().erasedUnverified == 1);
+    }
+    { // a reload that leaves the runtime dirty (the variables cannot be listed) still forgets what was learned about the
+      // effects: the macros ...
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
         r.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; // the new effects carry a manual transform
+        r.fake.texturesOk = false;
         r.binder.OnReloadedEffects(kRt);
         CHECK(r.fake.BoundCopiesReferenced());
-        r.fake.vars.push_back(DepthVar());
+        r.fake.texturesOk = true;
         r.NextFrame();
         CHECK(r.Begin() == Outcome::ManualTransform); // the cached "neutral" is gone
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean()); // ... and the begin repaired the binding first
@@ -1423,16 +1440,16 @@ void ReloadCannotResolve()
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         CHECK(r.fake.Calls("IsDepthView") == 2);
-        r.fake.vars.clear();
+        r.fake.texturesOk = false;
         r.binder.OnReloadedEffects(kRt);
-        r.fake.vars.push_back(DepthVar());
+        r.fake.texturesOk = true;
         r.NextFrame();
         CHECK(r.Begin() == Outcome::Bound);
         r.Finish();
         CHECK(r.Clean());
         CHECK(r.fake.Calls("IsDepthView") == 4); // looked at again after the reload
     }
-    { // the variables cannot even be listed at the event: the same
+    { // the variables cannot even be listed at the event: dirty (nothing is known), and the next begin repairs it
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.texturesOk = false;
@@ -1441,11 +1458,12 @@ void ReloadCannotResolve()
         CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
         r.fake.texturesOk = true;
         r.NextFrame();
-        CHECK(r.Begin() == Outcome::Bound); // the next begin repairs it
+        CHECK(r.Begin() == Outcome::Bound);
         r.Finish();
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+        CHECK(r.binder.GetCounters().erasedUnverified == 0); // a variable showed the copy: not an unverified erase
     }
-    { // ... or a later begin does
+    { // after the erase the next begin starts over with an empty entry
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.vars.clear();
@@ -1454,20 +1472,217 @@ void ReloadCannotResolve()
         r.NextFrame();
         CHECK(r.Begin() == Outcome::Bound);
         r.Finish();
-        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+        CHECK(!r.fake.hasDepth && r.Clean());
     }
-    { // only a destroy lets go of a dirty runtime without ReShade
+    { // the same at the next begin instead of a reload
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.vars.clear();
-        r.binder.OnReloadedEffects(kRt);
-        r.fake.log.clear();
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput); // the retry erased first, then there is nothing to bind to
+        CHECK(!r.fake.hasDepth && r.Clean() && r.binder.GetCounters().erasedUnverified == 1);
+    }
+}
+
+// ---- destroy of a runtime that still holds the copy -------------------------------------------------------------------------
+// Whether ResizeBuffers makes ReShade create a NEW runtime object (its binding map is new and empty) or RESET the same one (the
+// pointer value comes back with its map) is unverified. A destroy that makes no ReShade call and releases nothing is safe in
+// both worlds, and the next event of a returning pointer retries first.
+void DestroyedRuntime(Rig& r, bool mapSurvives)
+{
+    r.binder.OnDestroyRuntime(kRt);
+    if (!mapSurvives)
+        r.fake.SetDepth(0, 0); // a new object has a new, empty map
+}
+
+void OrphanedRuntimes()
+{
+    for (const bool mapSurvives : { false, true })
+    {
+        { // destroy during a bound pass, then a begin on the same pointer
+            Rig r;
+            CHECK(r.Begin() == Outcome::Bound);
+            r.fake.log.clear();
+            DestroyedRuntime(r, mapSurvives);
+            CHECK(r.fake.log.empty()); // no ReShade call, nothing released
+            CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
+            r.copyView = kCopy2; // the owner recreates the copy and frees the old one meanwhile
+            r.fake.OwnerRelease(kCopy);
+            CHECK(!r.fake.IsFreed(kCopy)); // the map may still hold it
+            r.NextFrame();
+            r.fake.log.clear();
+            CHECK(r.Begin() == Outcome::Bound); // the retry comes first, then a new pass
+            CHECK(r.fake.UpdateAt(1).semantic == "DEPTH");
+            r.Finish();
+            CHECK(!r.fake.MapHoldsCopy() && r.Clean());
+            CHECK(r.fake.IsFreed(kCopy) && r.fake.violations == 0);
+            // A surviving map holds the copy, so a variable shows it and vouches for the original; a new map is empty and
+            // nothing shows the copy, so the entry is erased.
+            CHECK(r.binder.GetCounters().erasedUnverified == (mapSurvives ? 0u : 1u));
+            if (mapSurvives)
+                CHECK(r.fake.UpdateAt(1).srv == kOrig && r.fake.UpdateAt(1).srgb == kOrigSrgb);
+            else
+                CHECK(r.fake.UpdateAt(1).srv == 0 && r.fake.UpdateAt(1).srgb == 0);
+            // the orphan flag ended with the retry: the next pass finishes the normal way and keeps another add-on's pick
+            r.NextFrame();
+            CHECK(r.Begin() == Outcome::Bound);
+            r.fake.SetDepth(kOther, kOtherSrgb);
+            r.Finish();
+            CHECK(r.binder.GetCounters().overwrittenByOther == 1 && r.fake.DepthIs(kOther, kOtherSrgb));
+            CHECK(r.Clean() && r.binder.GetCounters().erasedUnverified == (mapSurvives ? 0u : 1u));
+        }
+        { // a dirty runtime is destroyed, then the pointer returns
+            Rig r;
+            r.fake.failRestore = true;
+            r.Begin();
+            r.Finish();
+            DestroyedRuntime(r, mapSurvives);
+            CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1);
+            r.fake.failRestore = false;
+            r.NextFrame();
+            CHECK(r.Begin() == Outcome::Bound);
+            r.Finish();
+            CHECK(!r.fake.MapHoldsCopy() && r.Clean() && r.fake.violations == 0);
+        }
+        { // the pointer returns with a reload, or with a stray finish
+            for (const bool reload : { true, false })
+            {
+                Rig r;
+                CHECK(r.Begin() == Outcome::Bound);
+                DestroyedRuntime(r, mapSurvives);
+                r.fake.vars[0].handle = 0x777; // the effects are loaded again, with new handles
+                if (reload)
+                    r.binder.OnReloadedEffects(kRt);
+                else
+                    r.Finish();
+                CHECK(!r.fake.MapHoldsCopy() && r.Clean() && r.fake.violations == 0);
+                if (mapSurvives)
+                    CHECK(r.fake.DepthIs(kOrig, kOrigSrgb));
+            }
+        }
+        { // the retry has to be possible: when it fails the runtime stays orphaned with its references, and the begin is refused
+            Rig r;
+            CHECK(r.Begin() == Outcome::Bound);
+            DestroyedRuntime(r, mapSurvives);
+            r.fake.failRestore = true;
+            r.NextFrame();
+            CHECK(r.Begin() == Outcome::Failed);
+            CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1);
+            r.fake.failRestore = false;
+            r.NextFrame();
+            CHECK(r.Begin() == Outcome::Bound);
+            r.Finish();
+            CHECK(r.Clean());
+        }
+        { // the uniforms of an orphan: the normal retry of a finish or a begin puts bufready_depth back; a reload does not touch
+          // uniforms (they are new objects), as for any other pass
+            for (const int via : { 0, 1, 2 })
+            {
+                Rig r;
+                CHECK(r.Begin() == Outcome::Bound);
+                CHECK(r.fake.unis[0].value);
+                const int sets = r.fake.Calls("SetUniformBool");
+                DestroyedRuntime(r, mapSurvives);
+                if (via == 0)
+                {
+                    r.Finish();
+                    CHECK(!r.fake.unis[0].value);
+                }
+                else if (via == 1)
+                {
+                    r.NextFrame();
+                    CHECK(r.Begin() == Outcome::Bound);
+                    r.Finish();
+                    CHECK(!r.fake.unis[0].value); // put back by the retry, so the new pass saw the real value
+                }
+                else
+                {
+                    r.binder.OnReloadedEffects(kRt);
+                    CHECK(r.fake.Calls("SetUniformBool") == sets);
+                }
+                CHECK(r.Clean());
+            }
+        }
+    }
+
+    { // the pointer never returns: the references stay until the binder ends, then they go without a ReShade call
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
         r.binder.OnDestroyRuntime(kRt);
+        r.binder.OnDestroyRuntime(kRt); // a second destroy keeps it, too
+        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
+        r.fake.log.clear();
+        r.binder.Shutdown();
         for (const auto& l : r.fake.log)
             CHECK(l == "Release");
         CHECK(r.fake.Calls("Release") == 3);
         CHECK(r.fake.Balanced());
-        CHECK(r.fake.DepthIs(kCopy, kCopy)); // the runtime and its map are gone with it
+        CHECK(r.fake.DepthIs(kCopy, kCopy)); // nothing was put back
+        r.binder.Shutdown(); // idempotent
+        CHECK(r.fake.Balanced());
+    }
+    { // Shutdown also forgets the runtimes that hold nothing (a closed entry is not released, it has nothing to release)
+        Rig r;
+        CHECK(r.Pass());
+        const int queries = r.fake.defQueries;
+        r.binder.Shutdown();
+        CHECK(r.Clean());
+        CHECK(r.Pass());
+        CHECK(r.fake.defQueries > queries);
+        CHECK(r.Clean());
+    }
+    { // the destructor does the same
+        Fake fake;
+        {
+            DepthBinder binder(fake, nullptr);
+            binder.SetEnabled(true);
+            DepthCapture c;
+            c.valid = true;
+            c.outputW = 3840;
+            c.outputH = 2160;
+            c.renderW = 1920;
+            c.renderH = 1080;
+            c.frame = fake.frame;
+            c.tickMs = fake.now;
+            c.copyView = kCopy;
+            c.device = kDevice;
+            binder.PublishCapture(c);
+            CHECK(binder.OnBeginEffects(kRt) == Outcome::Bound);
+            binder.OnDestroyRuntime(kRt);
+            CHECK(fake.CoreRefs(kCopy) == 1);
+        }
+        CHECK(fake.Balanced());
+    }
+    { // two runtimes at once: Shutdown ends both
+        Fake a, b;
+        Router router(a, b);
+        DepthBinder binder(router, nullptr);
+        binder.SetEnabled(true);
+        DepthCapture c;
+        c.valid = true;
+        c.outputW = 3840;
+        c.outputH = 2160;
+        c.renderW = 1920;
+        c.renderH = 1080;
+        c.frame = a.frame;
+        c.tickMs = a.now;
+        c.copyView = kCopy;
+        c.device = kDevice;
+        binder.PublishCapture(c);
+        CHECK(binder.OnBeginEffects(kRt) == Outcome::Bound && binder.OnBeginEffects(kRt2) == Outcome::Bound);
+        binder.OnDestroyRuntime(kRt2);
+        CHECK(a.CoreRefs(kCopy) == 2);
+        binder.Shutdown();
+        CHECK(a.Balanced());
+    }
+    { // a destroy of a runtime that holds nothing forgets it (what it had learned goes with it)
+        Rig r;
+        CHECK(r.Pass());
+        const int queries = r.fake.defQueries;
+        r.binder.OnDestroyRuntime(kRt);
+        CHECK(r.Pass());
+        CHECK(r.fake.defQueries > queries);
+        CHECK(r.Clean());
     }
 }
 
@@ -1620,15 +1835,13 @@ void RollbackResolvesAgain()
         r.Finish();
         CHECK(r.Clean());
     }
-    { // no variable to look up at the next begin: the old pass stays dirty and the begin is refused
+    { // no variable to look up at the next begin: the old pass is ended with an erase, which nothing vouches for
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.vars.clear();
         r.NextFrame();
-        CHECK(r.Begin() == Outcome::Failed);
-        CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.BoundCopiesReferenced());
-        r.binder.OnDestroyRuntime(kRt);
-        CHECK(r.fake.Balanced());
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(!r.fake.hasDepth && r.Clean() && r.binder.GetCounters().erasedUnverified == 1);
     }
 }
 
@@ -1646,20 +1859,6 @@ void PairingAndRuntimeLifetime()
         const size_t n = r.fake.log.size();
         r.Finish();
         CHECK(r.fake.log.size() == n && r.fake.updates.size() == 2);
-    }
-    { // destroy with a pass open: references released, ReShade not called (its map is gone), finish is a no-op
-        Rig r;
-        r.Begin();
-        r.fake.log.clear();
-        r.binder.OnDestroyRuntime(kRt);
-        for (const auto& l : r.fake.log)
-            CHECK(l == "Release");
-        CHECK(r.fake.Calls("Release") == 3);
-        CHECK(r.fake.Balanced());
-        CHECK(r.fake.DepthIs(kCopy, kCopy));
-        r.fake.log.clear();
-        r.Finish();
-        CHECK(r.fake.log.empty());
     }
     { // destroy / reload with no pass open: nothing to do
         Rig r;
@@ -1845,7 +2044,8 @@ void FaultInjection()
             }
             d.fake.faultAt = 0;
             d.fake.fault = Fault::None;
-            d.binder.OnDestroyRuntime(kRt);
+            d.binder.OnDestroyRuntime(kRt); // a runtime that still holds the copy stays, orphaned ...
+            d.binder.Shutdown();            // ... until the binder ends
             CHECK(!escaped);
             CHECK(d.fake.Balanced());
         }
@@ -1859,7 +2059,7 @@ void FaultInjection()
         bool escaped = false;
         try
         {
-            d.binder.OnDestroyRuntime(kRt);
+            d.binder.Shutdown();
         }
         catch (...)
         {
@@ -2082,6 +2282,7 @@ void BackendFailures()
             d.Begin();
             d.Finish();
             d.binder.OnDestroyRuntime(kRt);
+            d.binder.Shutdown();
             CHECK(d.fake.Balanced());
         }
 }
@@ -2089,33 +2290,81 @@ void BackendFailures()
 // ---- counters, log hook, allocation, threads -------------------------------------------------------------------------------
 void LogHook()
 {
-    Rig r;
-    r.fake.vars.clear();
-    for (int i = 0; i < 2001; ++i)
+    // One rule for every counter: the first occurrence is logged, then at most once per 60 s (by the backend's clock) with the
+    // count of that moment. The function itself is pinned in the helpers test; this is the wiring.
     {
+        Rig r;
+        r.fake.vars.clear(); // noDepthInput on every begin
         r.NextFrame();
         r.Begin();
+        const int64_t t1 = r.fake.now;
+        CHECK(g_logged.size() == 1 && g_logged[0] == std::make_pair(Counter::NoDepthInput, uint64_t(1)));
+        for (int i = 0; i < 2000; ++i) // 2001 occurrences within half a minute
+        {
+            r.fake.now += 15;
+            r.Begin();
+        }
+        CHECK(r.binder.GetCounters().noDepthInput == 2001);
+        CHECK(g_logged.size() == 1); // no 1000th or 2000th line any more
+        r.fake.now = t1 + 59'999;
+        r.Begin(); // 2002
+        CHECK(g_logged.size() == 1);
+        r.fake.now = t1 + 60'000;
+        r.Begin(); // 2003: one interval since the first line
+        CHECK(g_logged.size() == 2 && g_logged[1] == std::make_pair(Counter::NoDepthInput, uint64_t(2003)));
+        const int64_t t2 = t1 + 60'000;
+        r.fake.now = t2 + 59'999;
+        r.Begin(); // 2004
+        r.fake.now = t2 + 30'000; // the clock went backwards ...
+        r.Begin(); // 2005
+        r.fake.now = t2 - 5000; // ... to before the last line
+        r.Begin(); // 2006
+        CHECK(g_logged.size() == 2);
+        r.fake.now = t2 + 60'000;
+        r.Begin(); // 2007: the interval is measured from the last line, not from the earlier tries
+        CHECK(g_logged.size() == 3 && g_logged[2] == std::make_pair(Counter::NoDepthInput, uint64_t(2007)));
+        r.fake.now = t2 + 60'000 + 3'600'000; // a counter that was quiet for an hour: logged at once, with the whole count
+        r.Begin();
+        CHECK(g_logged.size() == 4 && g_logged[3] == std::make_pair(Counter::NoDepthInput, uint64_t(2008)));
+        r.fake.sameDevice = false; // another counter has its own clock: its first occurrence is logged at once
+        r.Begin();
+        CHECK(g_logged.size() == 5 && g_logged[4] == std::make_pair(Counter::OtherDevice, uint64_t(1)));
     }
-    CHECK(r.binder.GetCounters().noDepthInput == 2001);
-    CHECK(g_logged.size() == 3);
-    if (g_logged.size() == 3)
-        CHECK(g_logged[0] == std::make_pair(Counter::NoDepthInput, uint64_t(1)) &&
-              g_logged[1] == std::make_pair(Counter::NoDepthInput, uint64_t(1000)) &&
-              g_logged[2] == std::make_pair(Counter::NoDepthInput, uint64_t(2000)));
 
-    { // the counters that tick every frame (while ReShade runs without an evaluate, for a runtime that is not ours, per pass) log
-      // their first occurrence only; one that signals a real problem keeps its every 1000th line
+    { // a clock that fails costs the line, not the counter: the next occurrence is the first one logged
+        Rig probe;
+        probe.fake.sameDevice = false;
+        probe.Begin();
+        int nowCall = 0;
+        for (size_t k = 0; k < probe.fake.log.size(); ++k)
+            if (probe.fake.log[k] == "NowMs")
+                nowCall = int(k) + 1; // the bump is the last thing the begin does
+        CHECK(nowCall > 0);
+        for (const Fault fault : { Fault::Throw, Fault::ThrowAfter })
+        {
+            Rig q;
+            q.fake.sameDevice = false;
+            q.fake.faultAt = nowCall;
+            q.fake.fault = fault;
+            CHECK(q.Begin() == Outcome::OtherDevice);
+            CHECK(q.binder.GetCounters().otherDevice == 1 && g_logged.empty());
+            q.fake.faultAt = 0;
+            CHECK(q.Begin() == Outcome::OtherDevice);
+            CHECK(g_logged.size() == 1 && g_logged[0] == std::make_pair(Counter::OtherDevice, uint64_t(2)));
+        }
+    }
+
+    { // the counters that tick every frame log their first occurrence only, within a minute
         struct Chatty
         {
             Counter counter;
-            size_t logged;
             void (*breakIt)(Rig&);
         };
         const Chatty chatty[] = {
-            { Counter::StaleCaptures, 1, [](Rig& q) { q.fake.now += 300; } },
-            { Counter::OtherDevice, 1, [](Rig& q) { q.fake.sameDevice = false; } },
-            { Counter::Failed, 3, [](Rig& q) { q.fake.definitionError = true; } },
-            { Counter::SizeMismatches, 3, [](Rig& q) { q.fake.bbW = 1; } },
+            { Counter::StaleCaptures, [](Rig& q) { q.fake.now += 300; } },
+            { Counter::OtherDevice, [](Rig& q) { q.fake.sameDevice = false; } },
+            { Counter::Failed, [](Rig& q) { q.fake.definitionError = true; } },
+            { Counter::SizeMismatches, [](Rig& q) { q.fake.bbW = 1; } },
         };
         for (const Chatty& c : chatty)
         {
@@ -2123,7 +2372,7 @@ void LogHook()
             c.breakIt(q);
             for (int i = 0; i < 2001; ++i)
                 q.Begin();
-            CHECK(g_logged.size() == c.logged);
+            CHECK(g_logged.size() == 1);
             if (g_logged.size() >= 1)
                 CHECK(g_logged[0].first == c.counter && g_logged[0].second == 1);
         }
@@ -2160,6 +2409,15 @@ void LogHook()
         CHECK(g_logged.size() == 1 && g_logged[0].first == c.counter && g_logged[0].second == 1);
     }
 
+    { // erasedUnverified too (after the passesBound of the pass that is ended by the reload)
+        Rig q;
+        q.Begin();
+        q.fake.vars.clear();
+        q.binder.OnReloadedEffects(kRt);
+        CHECK(g_logged.size() == 2 && g_logged[0].first == Counter::PassesBound);
+        CHECK(g_logged.size() == 2 && g_logged[1] == std::make_pair(Counter::ErasedUnverified, uint64_t(1)));
+    }
+
     Rig p; // overwrittenByOther and passesBound too
     p.Begin();
     p.fake.SetDepth(kOther, kOtherSrgb);
@@ -2169,9 +2427,17 @@ void LogHook()
 
 void ThrowingHook()
 {
-    // a log hook that throws neither changes the outcome nor leaves a pass half done
+    // a log hook that throws neither changes the outcome nor leaves a pass half done, and the line that threw is not asked for
+    // again at once
+    static int hookCalls = 0;
+    hookCalls = 0;
     Fake fake;
-    DepthBinder binder(fake, [](Counter, uint64_t) { throw std::runtime_error("log"); });
+    DepthBinder binder(fake,
+                       [](Counter, uint64_t)
+                       {
+                           ++hookCalls;
+                           throw std::runtime_error("log");
+                       });
     binder.SetEnabled(true);
     DepthCapture c;
     c.valid = true;
@@ -2190,6 +2456,9 @@ void ThrowingHook()
     CHECK(fake.StateKey() == before && fake.Balanced());
     fake.vars.clear();
     CHECK(binder.OnBeginEffects(kRt) == Outcome::NoDepthInput); // so does noDepthInput
+    CHECK(hookCalls == 2);
+    CHECK(binder.OnBeginEffects(kRt) == Outcome::NoDepthInput);
+    CHECK(hookCalls == 2); // within the minute: no second try
 }
 
 void NoAllocationOnRefusals()
@@ -2369,6 +2638,7 @@ int main()
     EnableDisable();
     ReloadMidPass();
     ReloadCannotResolve();
+    OrphanedRuntimes();
     FailedRestoreRetry();
     RollbackResolvesAgain();
     PairingAndRuntimeLifetime();

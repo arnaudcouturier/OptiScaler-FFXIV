@@ -93,10 +93,16 @@ bool IsNeutralDefinition(std::string_view value, double neutral)
     return result.ec == std::errc() && result.ptr == end && parsed == neutral;
 }
 
-bool ShouldLog(Counter counter, uint64_t count)
+bool ShouldLog(uint64_t count, int64_t nowMs, int64_t lastLoggedMs)
 {
-    const bool everyFrame = counter == Counter::OtherDevice || counter == Counter::PassesBound || counter == Counter::StaleCaptures;
-    return count == 1 || (!everyFrame && count != 0 && count % 1000 == 0);
+    if (count == 0)
+        return false;
+    if (lastLoggedMs == kNeverLogged)
+        return true;
+    if (nowMs < lastLoggedMs) // the clock went backwards: wait until it is a whole interval past the last line
+        return false;
+    // unsigned: the difference of two int64 with nowMs >= lastLoggedMs is exact modulo 2^64, never an overflow
+    return static_cast<uint64_t>(nowMs) - static_cast<uint64_t>(lastLoggedMs) >= static_cast<uint64_t>(kLogIntervalMs);
 }
 
 const char* DepthEventName(DepthEvent event)
@@ -139,6 +145,8 @@ const char* CounterName(Counter counter)
         return "otherDevice";
     case Counter::Failed:
         return "failed";
+    case Counter::ErasedUnverified:
+        return "erasedUnverified";
     case Counter::Count:
         break;
     }
@@ -165,7 +173,31 @@ bool LateRegistrationPlanner::ShouldRetry(bool enabled, bool attempted, Register
 }
 
 // ---- the binder: small members --------------------------------------------------------------------------------------------
-DepthBinder::DepthBinder(IBackend& backend, LogFn log) : _backend(backend), _log(log) {}
+DepthBinder::DepthBinder(IBackend& backend, LogFn log) : _backend(backend), _log(log)
+{
+    for (auto& last : _lastLogged)
+        last.store(kNeverLogged, std::memory_order_relaxed);
+}
+
+DepthBinder::~DepthBinder() { Shutdown(); }
+
+// The process or the test is over: whatever is still held (orphaned runtimes, or a restore that never succeeded) is released,
+// with no ReShade call. A leaked view would be acceptable; a view freed while a map may still hold it is not, and that is
+// what a call into ReShade at this point could not rule out.
+void DepthBinder::Shutdown() noexcept
+{
+    try
+    {
+        std::lock_guard lock(_mutex);
+        for (auto& entry : _runtimes)
+            if (entry.second.open)
+                ReleasePass(entry.second);
+        _runtimes.clear();
+    }
+    catch (...)
+    {
+    }
+}
 
 void DepthBinder::SetEnabled(bool enabled) noexcept
 {
@@ -271,6 +303,7 @@ Counters DepthBinder::GetCounters() const noexcept
     out.passesBound = n(Counter::PassesBound);
     out.otherDevice = n(Counter::OtherDevice);
     out.failed = n(Counter::Failed);
+    out.erasedUnverified = n(Counter::ErasedUnverified);
     return out;
 }
 
@@ -295,13 +328,20 @@ void DepthBinder::SetStatus(StatusKind kind, const DepthCapture* capture) noexce
     }
 }
 
+// The count always ticks. The line follows the one rule of ShouldLog, by the backend's clock; a clock that fails costs this line
+// only (the next occurrence is asked again), and a hook that throws does not make the occurrence logged twice.
 void DepthBinder::Bump(Counter counter) noexcept
 {
-    const uint64_t count = _counts[static_cast<size_t>(counter)].fetch_add(1, std::memory_order_relaxed) + 1;
-    if (_log == nullptr || !ShouldLog(counter, count))
+    const size_t index = static_cast<size_t>(counter);
+    const uint64_t count = _counts[index].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (_log == nullptr)
         return;
     try
     {
+        const int64_t now = _backend.NowMs();
+        int64_t last = _lastLogged[index].load(std::memory_order_relaxed);
+        if (!ShouldLog(count, now, last) || !_lastLogged[index].compare_exchange_strong(last, now, std::memory_order_relaxed))
+            return;
         _log(counter, count);
     }
     catch (...)
@@ -393,7 +433,7 @@ void DepthBinder::OnFinishEffects(uint64_t runtime) noexcept
     {
         std::lock_guard lock(_mutex);
         if (const auto it = _runtimes.find(runtime); it != _runtimes.end())
-            EndPass(runtime, it->second, it->second.inPass ? End::Finish : End::Retry);
+            EndPass(runtime, it->second, it->second.inPass && !it->second.orphaned ? End::Finish : End::Retry);
     }
     catch (...)
     {
@@ -427,12 +467,19 @@ void DepthBinder::Forget(uint64_t runtime, bool reload) noexcept
         Runtime& state = it->second;
         if (!reload)
         {
-            EndPass(runtime, state, End::Forget);
-            _runtimes.erase(it);
+            // A runtime that holds nothing is simply forgotten. One that still holds the copy (a bound pass, or a restore that is
+            // pending) is kept as it is, with its references and no ReShade call: whether the ReShade runtime object is new
+            // after a ResizeBuffers (its map empty) or the same one (its map still there) is not known, and both are safe this
+            // way. A pointer that comes back runs the normal retry at its next event; one that never does is released by
+            // Shutdown().
+            if (state.open)
+                state.orphaned = true;
+            else
+                _runtimes.erase(it);
             return;
         }
         // The effects are new: what was looked up is stale. An open pass is restored first (this also repairs a runtime that
-        // is dirty); if that is not possible the entry stays with its references until the runtime is destroyed.
+        // is dirty or orphaned); if that is not possible the entry stays with its references.
         EndPass(runtime, state, End::Reload);
         state.manual.reset();
         state.trust = Trust::Unknown;
@@ -659,17 +706,14 @@ void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how) noexcept
 {
     if (!state.open)
         return;
-    if (how != End::Forget)
+    if (state.inPass && how != End::Reload)
+        RestoreBools(runtime, state, how);
+    if (state.bound && !RestoreBinding(runtime, state, how))
     {
-        if (state.inPass && how != End::Reload)
-            RestoreBools(runtime, state, how);
-        if (state.bound && !RestoreBinding(runtime, state, how))
-        {
-            state.inPass = false;
-            Bump(Counter::Failed);
-            SetStatus(StatusKind::Failed);
-            return;
-        }
+        state.inPass = false;
+        Bump(Counter::Failed);
+        SetStatus(StatusKind::Failed);
+        return;
     }
     ReleasePass(state);
 }
@@ -681,7 +725,7 @@ void DepthBinder::ReleasePass(Runtime& state) noexcept
         ReleaseView(state.origSrv);
     if (state.refSrgb)
         ReleaseView(state.origSrgb);
-    state.open = state.inPass = state.bound = false;
+    state.open = state.inPass = state.bound = state.orphaned = false;
     state.copy = state.variable = state.origSrv = state.origSrgb = 0;
     state.refSrv = state.refSrgb = false;
     state.bools.clear();
@@ -738,15 +782,28 @@ void DepthBinder::RestoreBools(uint64_t runtime, Runtime& state, End how) noexce
 //  - at finish and rollback the variable of the pass is read: if the copy is in it (a half of the pair counts) the original that
 //    the variable showed before the bind goes back, otherwise another add-on replaced the entry and its choice stays;
 //  - at retry and reload the handle is stale, so the named variables are looked up again: one that shows the copy vouches for
-//    the entry and the original goes back; if none does, the entry is erased (a variable looked up now proves nothing).
+//    the entry and the original goes back; if none does, or there is no variable of those names at all, the entry is erased (a
+//    variable looked up now proves nothing, and an erase needs no variable).
 // Nothing but the original of a verified pass and "empty" is ever written, since ReShade frees views it knows nothing about.
+//
+// Every erase that no readback of this pass vouched for is counted (erasedUnverified), and only once the erase went through.
+// It can lose the pick of another add-on (Generic Depth) until that add-on selects again. A DELIBERATE TRADE-OFF: the
+// alternative, leaving the entry alone when a same-named variable no longer shows the copy, would trust a variable that may be
+// a decoy without the DEPTH semantic, and then the copy stays in a map that ReShade frees views of.
 bool DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, End how) noexcept
 {
     try
     {
         auto holdsCopy = [&](uint64_t srv, uint64_t srgb) { return srv == state.copy || srgb == state.copy; };
+        auto eraseUnverified = [&]
+        {
+            if (!_backend.UpdateTextureBindings(runtime, kDepthSemantic, 0, 0))
+                return false;
+            Bump(Counter::ErasedUnverified);
+            return true;
+        };
         if (!state.verified)
-            return _backend.UpdateTextureBindings(runtime, kDepthSemantic, 0, 0);
+            return eraseUnverified();
 
         uint64_t srv = 0, srgb = 0;
         if (how == End::Finish || how == End::Rollback)
@@ -766,8 +823,6 @@ bool DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, End how) noex
         if (!_backend.TextureVariables(runtime, textures))
             return false;
         const std::vector<const TextureVar*> candidates = FindDepthInputs(textures);
-        if (candidates.empty())
-            return false;
         for (const TextureVar* c : candidates)
         {
             if (!_backend.TextureBinding(runtime, c->handle, srv, srgb))
@@ -775,7 +830,7 @@ bool DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, End how) noex
             if (holdsCopy(srv, srgb))
                 return _backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb);
         }
-        return _backend.UpdateTextureBindings(runtime, kDepthSemantic, 0, 0);
+        return eraseUnverified();
     }
     catch (...)
     {

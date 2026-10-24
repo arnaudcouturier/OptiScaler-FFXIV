@@ -99,31 +99,34 @@ void NeutralDefinition()
 
 void LogRule()
 {
-    // the counters that rarely tick: the first occurrence and every 1000th
-    for (Counter c : { Counter::OverwrittenByOther, Counter::SizeMismatches, Counter::ManualTransformStandDowns, Counter::NoDepthInput,
-                       Counter::Failed })
-    {
-        CHECK(!ShouldLog(c, 0));
-        CHECK(ShouldLog(c, 1));
-        for (uint64_t n = 2; n < 1000; ++n)
-            CHECK(!ShouldLog(c, n));
-        CHECK(ShouldLog(c, 1000));
-        CHECK(!ShouldLog(c, 1001));
-        CHECK(!ShouldLog(c, 1999));
-        CHECK(ShouldLog(c, 2000));
-        CHECK(!ShouldLog(c, 2500));
-        CHECK(ShouldLog(c, 1'000'000));
-        CHECK(!ShouldLog(c, 1'000'001));
-    }
-    // the counters that tick every frame while ReShade runs without an evaluate: the first occurrence only
-    for (Counter c : { Counter::OtherDevice, Counter::PassesBound, Counter::StaleCaptures })
-    {
-        CHECK(!ShouldLog(c, 0));
-        CHECK(ShouldLog(c, 1));
-        for (uint64_t n = 2; n <= 3000; ++n)
-            CHECK(!ShouldLog(c, n));
-        CHECK(!ShouldLog(c, 1'000'000));
-    }
+    static_assert(kLogIntervalMs == 60'000);
+    // the first occurrence is logged, whatever the clock says
+    CHECK(ShouldLog(1, 0, kNeverLogged));
+    CHECK(ShouldLog(1, 123456, kNeverLogged));
+    CHECK(ShouldLog(1, INT64_MIN + 1, kNeverLogged));
+    CHECK(ShouldLog(7, 5, kNeverLogged)); // a first line that failed to go out: any later count is the first one logged
+    CHECK(!ShouldLog(0, 5, kNeverLogged)); // nothing has happened
+    // then at most once per interval, with the current count: 59 999 ms is too soon, 60 000 ms is not
+    CHECK(!ShouldLog(2, 1000, 1000));
+    CHECK(!ShouldLog(2, 1000 + 59'999, 1000));
+    CHECK(ShouldLog(2, 1000 + 60'000, 1000));
+    CHECK(ShouldLog(2, 1000 + 60'001, 1000));
+    CHECK(ShouldLog(1'000'000, 1000 + 60'000, 1000));
+    CHECK(!ShouldLog(1'000'000, 1000 + 59'999, 1000)); // however high the count
+    // a counter that went quiet and ticks again much later: logged at once, with all the occurrences since the last line
+    CHECK(ShouldLog(5, 1000 + 3'600'000, 1000));
+    // the clock went backwards: nothing until the interval has passed since the last line
+    CHECK(!ShouldLog(9, 1000 - 1, 1000));
+    CHECK(!ShouldLog(9, 1000 - 60'000, 1000));
+    CHECK(!ShouldLog(9, 1000 - 1'000'000, 1000));
+    CHECK(!ShouldLog(9, 0, 1000 + 120'000)); // far ahead of a clock that was reset
+    CHECK(ShouldLog(9, 1000 + 120'000 + 60'000, 1000 + 120'000));
+    // a first line at clock 0 is a line like any other, and the difference never overflows
+    CHECK(!ShouldLog(2, 59'999, 0));
+    CHECK(ShouldLog(2, 60'000, 0));
+    CHECK(ShouldLog(2, INT64_MAX, 0));
+    CHECK(ShouldLog(2, INT64_MAX, INT64_MIN + 1));
+    CHECK(!ShouldLog(2, INT64_MIN + 1, INT64_MAX));
 }
 
 void Names()
@@ -136,7 +139,8 @@ void Names()
     CHECK(std::string(CounterName(Counter::PassesBound)) == "passesBound");
     CHECK(std::string(CounterName(Counter::OtherDevice)) == "otherDevice");
     CHECK(std::string(CounterName(Counter::Failed)) == "failed");
-    static_assert(kCounters == 8);
+    CHECK(std::string(CounterName(Counter::ErasedUnverified)) == "erasedUnverified");
+    static_assert(kCounters == 9);
     static_assert(kConsumerWindowMs == 1000);
 
     CHECK(std::string(DepthEventName(DepthEvent::BeginEffects)) == "reshade_begin_effects");
