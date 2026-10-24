@@ -1495,6 +1495,28 @@ void FailedRestoreRetry()
         r.Finish();
         CHECK(r.fake.updates.size() == 4 && r.fake.StateKey() == before && r.Clean());
     }
+    { // the original was "nothing": the retry has to write that, or the copy stays in the entry
+        Rig r;
+        r.fake.SetDepth(0, 0);
+        r.fake.failRestore = true;
+        CHECK(r.Begin() == Outcome::Bound);
+        r.Finish();
+        CHECK(r.fake.MapHoldsCopy());
+        r.fake.failRestore = false;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.UpdateAt(1).srv == 0 && r.fake.UpdateAt(1).srgb == 0); // the retried restore of an empty original
+        r.Finish();
+        CHECK(!r.fake.hasDepth && r.Clean());
+        Rig q; // the same through a reload
+        q.fake.SetDepth(0, 0);
+        q.fake.failRestore = true;
+        q.Begin();
+        q.Finish();
+        q.fake.failRestore = false;
+        q.binder.OnReloadedEffects(kRt);
+        CHECK(!q.fake.MapHoldsCopy() && q.Clean());
+    }
     { // a stray finish retries too, through the variable as it is now
         Rig r;
         r.fake.failRestore = true;
@@ -2263,7 +2285,10 @@ void Threads()
                 else if (s.empty())
                     ++torn;
                 (void)binder.GetCounters();
-                (void)binder.GetConsumer(fake.now).seen;
+                // the size pair of the consumer record always comes from one begin: 16:9, 3840x2160 or 1920x1080
+                const ConsumerInfo consumer = binder.GetConsumer(fake.now);
+                if (consumer.width * 9 != consumer.height * 16)
+                    ++torn;
             }
         });
     std::thread toggler(
@@ -2301,6 +2326,8 @@ void Threads()
             seenPublishes = publishes.load();
             ++fake.frame;
         }
+        fake.bbW = passes % 2 ? 3840 : 1920; // every other begin has the wrong size for the capture: refused, but recorded
+        fake.bbH = passes % 2 ? 2160 : 1080;
         binder.OnBeginEffects(kRt);
         binder.OnFinishEffects(kRt);
     }
