@@ -723,6 +723,16 @@ void ManualTransformCache()
         r.Finish();
         CHECK(r.Clean());
     }
+    { // ... and what was learned about the depth input
+        Rig r;
+        CHECK(r.Pass());
+        const int checks = r.fake.Calls("IsDepthView");
+        CHECK(checks == 2);
+        const int queries = r.fake.defQueries;
+        r.binder.OnTechniquesChanged(kRt);
+        CHECK(r.Pass());
+        CHECK(r.fake.defQueries > queries && r.fake.Calls("IsDepthView") == checks); // macros asked again, trust kept
+    }
     { // global scope is asked first: a global value spares the per-effect queries
         Rig r;
         r.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2";
@@ -1007,12 +1017,13 @@ void FailedRestoreRetry()
         r.Finish();
         CHECK(r.fake.updates.size() == 4 && r.fake.StateKey() == before && r.Clean());
     }
-    { // a stray finish retries too
+    { // a stray finish retries too, through the variable as it is now
         Rig r;
         r.fake.failRestore = true;
         r.Begin();
         r.Finish();
         r.fake.failRestore = false;
+        r.fake.vars[0].handle = 0x777;
         r.Finish();
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
     }
@@ -1086,6 +1097,18 @@ void RollbackResolvesAgain()
         r.Finish();
         CHECK(r.fake.StateKey() == before && r.Clean());
         CHECK(r.binder.GetCounters().overwrittenByOther == 0);
+    }
+    { // the values go back to the uniform they came from
+        Rig r;
+        r.fake.unis = { { 0x601, "bufready_depth", true }, { 0x602, "bufready_depth", false } };
+        const std::string before = r.fake.StateKey();
+        CHECK(r.Begin() == Outcome::Bound);
+        r.fake.unis[0].handle = 0x688;
+        r.fake.unis[1].handle = 0x689;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound);
+        r.Finish();
+        CHECK(r.fake.StateKey() == before && r.Clean());
     }
     { // the uniforms are matched by position: another set of them is left alone
         Rig r;
@@ -1619,6 +1642,18 @@ void Threads()
             }
         });
 
+    // ReShade's own events from another thread (a reload or a preset change can arrive between a begin and its finish)
+    std::thread events(
+        [&]
+        {
+            while (!stop.load())
+            {
+                binder.OnTechniquesChanged(kRt);
+                binder.OnReloadedEffects(kRt);
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        });
+
     constexpr int kPasses = 20000;
     for (int i = 0; i < kPasses; ++i)
     {
@@ -1631,6 +1666,7 @@ void Threads()
     capture.join();
     reader.join();
     toggler.join();
+    events.join();
     binder.SetEnabled(true);
     CHECK(fake.Balanced());
     CHECK(fake.violations == 0);
