@@ -217,6 +217,29 @@ void RestoreOnlyIfOurs()
         CHECK(r.fake.updates.size() == 1 && r.binder.GetCounters().overwrittenByOther == 1);
         CHECK(r.Clean());
     }
+    { // a bind that fails after it was verified, with another add-on's pick in the entry: that pick stays
+        int getBool = 0;
+        {
+            Rig q;
+            q.Begin();
+            for (size_t i = 0; i < q.fake.log.size() && getBool == 0; ++i)
+                if (q.fake.log[i] == "GetUniformBool")
+                    getBool = int(i) + 1;
+        }
+        CHECK(getBool > 0);
+        Rig r;
+        r.fake.afterCall = [&](const char* name)
+        {
+            if (std::string(name) == "UniformVariables")
+                r.fake.SetDepth(kOther, kOtherSrgb);
+        };
+        r.fake.faultAt = getBool;
+        r.fake.fault = Fault::Fail;
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.fake.DepthIs(kOther, kOtherSrgb) && r.fake.updates.size() == 1);
+        CHECK(r.binder.GetCounters().overwrittenByOther == 0); // only a finish counts it
+        CHECK(r.Clean());
+    }
     { // the binding cannot be read at finish: the copy may still be bound, so the runtime is dirty and keeps its references
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
@@ -646,7 +669,8 @@ void DecoyShapes()
         r.Finish();
         CHECK(r.Clean());
     }
-    { // a half pair after the bind does not verify: only a readback of (copy, copy) does
+    for (int half = 0; half < 2; ++half) // a half pair after the bind does not verify: only a readback of (copy, copy) does
+    {
         Rig r;
         r.fake.vars = { { 0x900, "DepthInputTex", "", kOther, kOtherSrgb } };
         bool done = false;
@@ -654,9 +678,9 @@ void DecoyShapes()
         {
             if (!done && std::string(name) == "UpdateTextureBindings")
             {
-                done = true;
-                r.fake.vars[0].srv = kCopy; // as if the variable showed the copy in one slot
-                r.fake.vars[0].srgb = kOther;
+                done = true; // as if the variable showed the copy in one slot
+                r.fake.vars[0].srv = half == 0 ? kCopy : kOther;
+                r.fake.vars[0].srgb = half == 0 ? kOther : kCopy;
             }
         };
         CHECK(r.Begin() == Outcome::NoDepthInput);
@@ -708,6 +732,34 @@ void DecoyShapes()
         for (const auto& u : r.fake.updates)
             CHECK(u.srv != kOther);
         CHECK(r.Clean());
+    }
+    { // retry/reload: the real reader is the second candidate; the first one is a decoy that does not show the copy
+        Rig r;
+        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.fake.failRestore = true;
+        CHECK(r.Begin() == Outcome::Bound);
+        r.Finish();
+        CHECK(r.fake.MapHoldsCopy());
+        r.fake.failRestore = false;
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb)); // vouched for by the second candidate: the original, not an erase
+        CHECK(r.Clean());
+    }
+    { // retry/reload: a candidate that cannot be read leaves the runtime dirty, and a later reload repairs it
+        Rig r;
+        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.fake.failRestore = true;
+        r.Begin();
+        r.Finish();
+        r.fake.failRestore = false;
+        r.fake.calls = 0;
+        r.fake.faultAt = 2; // call 1 lists the variables, call 2 reads the first candidate
+        r.fake.fault = Fault::Fail;
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.MapHoldsCopy() && r.fake.BoundCopiesReferenced() && r.fake.CoreRefs(kCopy) == 1);
+        r.fake.faultAt = 0;
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
     }
     { // the decoy has the better name: the candidate that reads the copy back is the DEPTH reader, and its own read is the original
         Rig r;

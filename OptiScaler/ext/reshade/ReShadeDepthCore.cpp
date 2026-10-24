@@ -681,7 +681,7 @@ void DepthBinder::ReleasePass(Runtime& state) noexcept
         ReleaseView(state.origSrv);
     if (state.refSrgb)
         ReleaseView(state.origSrgb);
-    state.open = state.inPass = state.bound = state.verified = false;
+    state.open = state.inPass = state.bound = false;
     state.copy = state.variable = state.origSrv = state.origSrgb = 0;
     state.refSrv = state.refSrgb = false;
     state.bools.clear();
