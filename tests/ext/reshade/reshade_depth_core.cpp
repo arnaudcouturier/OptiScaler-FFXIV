@@ -1659,9 +1659,16 @@ void Threads()
         {
             while (!stop.load())
             {
+                // A status is one of the fixed lines, or the sizes of ONE capture: render width = render height + 500, output
+                // 3840x2160. Anything else (a kind from one write and sizes from another) is a torn read.
                 const std::string s = binder.Status();
-                unsigned w = 0, h = 0;
-                if (sscanf_s(s.c_str(), "Automatic scene depth: %ux%u -> 3840x2160", &w, &h) == 2 && h + 500 != w)
+                if (s.rfind("Automatic scene depth", 0) == 0)
+                {
+                    unsigned w = 0, h = 0;
+                    if (sscanf_s(s.c_str(), "Automatic scene depth: %ux%u -> 3840x2160", &w, &h) != 2 || h + 500 != w)
+                        ++torn;
+                }
+                else if (s.empty())
                     ++torn;
                 (void)binder.GetCounters();
                 (void)binder.ConsumerSeen(fake.now);
@@ -1670,12 +1677,10 @@ void Threads()
     std::thread toggler(
         [&]
         {
-            while (!stop.load())
+            while (!stop.load()) // writes the status as fast as it can: the feature is on about half of the time
             {
                 binder.SetEnabled(false);
-                std::this_thread::yield();
                 binder.SetEnabled(true);
-                std::this_thread::sleep_for(std::chrono::microseconds(300));
             }
         });
 
