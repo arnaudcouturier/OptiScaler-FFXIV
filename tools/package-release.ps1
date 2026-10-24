@@ -328,9 +328,9 @@ Credits (the table by area is in Licenses\ATTRIBUTION.md):
   * The OptiScaler team.
   * SirenBrink (https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV, GPL-3.0): a large part of this archive's
     code comes from this community fork: the FFXIV integration, OptiHDR and scene HDR, HDR PNG capture, XeFG/XeMFG, frame
-    markers and pacing, and the DLSS-G render preset, NR model picker, bind-time mip bias and source-level jitter fix (as in its
-    v6.0). Its v6.0 source also contains the NR "Linear light" mode, the HDR PNG option "Include OptiScaler menu" and the
-    character preview, which this archive has too.
+    markers and pacing. Its v6.0 source also contains the NR "Linear light" mode, the HDR PNG option "Include OptiScaler menu"
+    and the character preview, which this archive has too. The DLSS-G render preset, NR model picker, bind-time mip bias and
+    source-level jitter fix follow the design of its v6.0 source, with code written for this repository.
   * Dagherbou (DLSS Neural Rendering base), y4my4my4m (multipass, MFG unlock), wilsjo2 (pre-SR, native path, MFG unlock hardening),
     byunjoe (HUD-less frame generation), and janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, stegalloway,
     mavismmg and dashdogy, whose work that community fork adapts.
