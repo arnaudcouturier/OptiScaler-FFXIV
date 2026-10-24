@@ -574,7 +574,6 @@ void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how) noexcept
         if (state.bound && !RestoreBinding(runtime, state, how))
         {
             state.inPass = false;
-            state.bools.clear();
             SetStatus(StatusKind::Failed);
             return;
         }

@@ -650,6 +650,10 @@ void ManualTransform()
         CHECK(q.Begin() == Outcome::Bound);
         q.Finish();
         CHECK(q.Clean());
+        Rig g; // an error on a global query stands down, whatever else there is to look at
+        g.fake.techniques.clear();
+        g.fake.definitionError = true;
+        CHECK(g.Begin() == Outcome::Failed);
         Rig e; // an error on a per-effect query, after the global ones were neutral
         e.fake.faultAt = 11; // call 1 is the capture's AddRef, 2-3 the runtime gates, 4-9 the global macros, 10 the techniques
         e.fake.fault = Fault::Fail;
@@ -968,6 +972,31 @@ void ReloadCannotResolve()
         r.fake.vars.push_back(DepthVar());
         r.binder.OnReloadedEffects(kRt);
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+    }
+    { // a reload that leaves the runtime dirty still forgets what was learned about the effects: the macros ...
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
+        r.fake.vars.clear();
+        r.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; // the new effects carry a manual transform
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.fake.BoundCopiesReferenced());
+        r.fake.vars.push_back(DepthVar());
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::ManualTransform); // the cached "neutral" is gone
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean()); // ... and the begin repaired the binding first
+    }
+    { // ... and whether the depth input could be trusted
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.Calls("IsDepthView") == 2);
+        r.fake.vars.clear();
+        r.binder.OnReloadedEffects(kRt);
+        r.fake.vars.push_back(DepthVar());
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound);
+        r.Finish();
+        CHECK(r.Clean());
+        CHECK(r.fake.Calls("IsDepthView") == 4); // looked at again after the reload
     }
     { // the variables cannot even be listed at the event: the same
         Rig r;

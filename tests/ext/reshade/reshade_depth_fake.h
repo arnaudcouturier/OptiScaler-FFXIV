@@ -281,7 +281,10 @@ struct Fake final : IBackend
                          });
     }
     bool IsD3D11(uint64_t) override { return Run<bool>("IsD3D11", false, [&]() -> bool { return d3d11; }); }
-    bool SameDevice(uint64_t, uint64_t) override { return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice; }); }
+    bool SameDevice(uint64_t, uint64_t captureDevice) override
+    {
+        return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice && captureDevice == kDevice; });
+    }
     bool BackBufferSize(uint64_t, uint32_t& w, uint32_t& h) override
     {
         return Run<bool>("BackBufferSize", false,
