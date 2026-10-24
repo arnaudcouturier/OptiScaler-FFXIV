@@ -36,6 +36,7 @@ const char* const kUnavailable = "Scene depth unavailable; generic depth retaine
 const char* const kSizeMismatch = "ReShade size differs from the scene depth; generic depth retained";
 const char* const kManual = "Manual ReShade depth transform retained";
 const char* const kNoInput = "No depth input found; generic depth retained";
+const char* const kNotTrusted = "Depth input not trusted; generic depth retained";
 const char* const kFailed = "ReShade call failed; generic depth retained";
 
 // every public entry is noexcept in the declaration
@@ -48,7 +49,7 @@ static_assert(noexcept(std::declval<DepthBinder&>().PublishCapture(DepthCapture 
 static_assert(noexcept(std::declval<DepthBinder&>().SetEnabled(true)));
 static_assert(noexcept(std::declval<const DepthBinder&>().Status()));
 static_assert(noexcept(std::declval<const DepthBinder&>().GetCounters()));
-static_assert(noexcept(std::declval<const DepthBinder&>().ConsumerSeen(0)));
+static_assert(noexcept(std::declval<const DepthBinder&>().GetConsumer(0).seen));
 
 Fake::Var DepthVar() { return { kDepthVar, "ReShade::DepthBufferTex", "DEPTH", 0, 0 }; }
 
@@ -195,24 +196,17 @@ void RestoreOnlyIfOurs()
         CHECK(!r.fake.unis[0].value); // the bool is restored anyway
         CHECK(r.Clean());
     }
-    { // only the srgb view differs: still not ours
+    // A pair with only one half replaced still holds the copy, so it is ours: put back, never released while the map may hold it
+    for (const auto& [srv, srgb] : { std::pair { kCopy, kOtherSrgb }, std::pair { kOther, kCopy } })
+    {
         Rig r;
+        const std::string before = r.fake.StateKey();
         CHECK(r.Begin() == Outcome::Bound);
-        r.fake.SetDepth(kCopy, kOtherSrgb);
+        r.fake.SetDepth(srv, srgb);
         r.Finish();
-        CHECK(r.fake.updates.size() == 1 && r.fake.DepthIs(kCopy, kOtherSrgb));
-        CHECK(r.binder.GetCounters().overwrittenByOther == 1);
-        r.fake.SetDepth(kOrig, kOrigSrgb);
-        CHECK(r.Clean());
-    }
-    { // only the srv view differs
-        Rig r;
-        CHECK(r.Begin() == Outcome::Bound);
-        r.fake.SetDepth(kOther, kCopy);
-        r.Finish();
-        CHECK(r.fake.updates.size() == 1 && r.fake.DepthIs(kOther, kCopy));
-        CHECK(r.binder.GetCounters().overwrittenByOther == 1);
-        r.fake.SetDepth(kOrig, kOrigSrgb);
+        CHECK(r.fake.updates.size() == 2 && r.fake.UpdateAt(1).srv == kOrig && r.fake.UpdateAt(1).srgb == kOrigSrgb);
+        CHECK(!r.fake.HoldsCopy() && r.fake.StateKey() == before);
+        CHECK(r.binder.GetCounters().overwrittenByOther == 0);
         CHECK(r.Clean());
     }
     { // replaced by "nothing": also not ours
@@ -301,8 +295,9 @@ void Gates()
     Refuses(Outcome::CaptureUnavailable, kUnavailable, [](Rig& r) { r.fake.frame -= 1; }, "from the future");
     Refuses(Outcome::SizeMismatch, kSizeMismatch, [](Rig& r) { r.fake.bbW = 1920; }, "width");
     Refuses(Outcome::SizeMismatch, kSizeMismatch, [](Rig& r) { r.fake.bbH = 2161; }, "height");
-    Refuses(Outcome::SizeMismatch, kSizeMismatch, [](Rig& r) { r.fake.bbOk = false; }, "size unknown");
-    Refuses(Outcome::SizeMismatch, kSizeMismatch,
+    // the back buffer size is read before the capture is looked at: a failed query is a failed pass, not a mismatch
+    Refuses(Outcome::Failed, kFailed, [](Rig& r) { r.fake.bbOk = false; }, "size unknown");
+    Refuses(Outcome::Failed, kFailed,
             [](Rig& r)
             {
                 DepthCapture c = r.Capture();
@@ -395,14 +390,14 @@ void GateOrder()
     r.fake.sameDevice = true;
     step(Outcome::ManualTransform, "manual transform");
     CHECK(r.fake.textureEnums == 0); // reported without looking for a depth input
-    CHECK(!r.binder.ConsumerSeen(r.fake.now));
+    CHECK(!r.binder.GetConsumer(r.fake.now).seen);
     r.fake.globalDefs.clear();
     r.binder.OnReloadedEffects(kRt); // the manual check is cached until effects reload
     step(Outcome::NoDepthInput, "no depth input");
-    CHECK(!r.binder.ConsumerSeen(r.fake.now));
+    CHECK(!r.binder.GetConsumer(r.fake.now).seen);
     r.fake.vars.push_back(DepthVar());
     step(Outcome::NoCapture, "no capture");
-    CHECK(r.binder.ConsumerSeen(r.fake.now)); // a depth input was found: the capture gate may open
+    CHECK(r.binder.GetConsumer(r.fake.now).seen); // a depth input was found: the capture gate may open
     mode = CaptureMode::Stale;
     step(Outcome::CaptureUnavailable, "stale capture");
     mode = CaptureMode::Fresh;
@@ -437,18 +432,81 @@ void ClockAfterSnapshot()
     CHECK(r.Clean());
 }
 
-void ConsumerSeenWindow()
+void ConsumerInfoWindow()
 {
     Rig r;
-    CHECK(!r.binder.ConsumerSeen(r.fake.now)); // nothing has looked yet
-    CHECK(!r.binder.ConsumerSeen(0));
+    CHECK(!r.binder.GetConsumer(r.fake.now).seen); // nothing has looked yet
+    CHECK(!r.binder.GetConsumer(0).seen);
+    {
+        const ConsumerInfo none = r.binder.GetConsumer(r.fake.now);
+        CHECK(none.seenMs == 0 && none.width == 0 && none.height == 0);
+    }
     r.binder.PublishCapture(DepthCapture {});
     const int64_t at = r.fake.now;
-    CHECK(r.Begin() == Outcome::NoCapture); // no capture yet: the begin still records the consumer
-    CHECK(r.binder.ConsumerSeen(at));
-    CHECK(r.binder.ConsumerSeen(at + 1000));
-    CHECK(!r.binder.ConsumerSeen(at + 1001));
-    CHECK(r.binder.ConsumerSeen(at - 5)); // an earlier reading on another thread is not "long ago"
+    CHECK(r.Begin() == Outcome::NoCapture); // no capture yet: the begin still records the consumer ...
+    {
+        const ConsumerInfo c = r.binder.GetConsumer(at);
+        CHECK(c.seen && c.seenMs == at);
+        CHECK(c.width == 3840 && c.height == 2160); // ... and the size of its back buffer, which the capture side filters on
+    }
+    CHECK(r.binder.GetConsumer(at + 1000).seen);
+    CHECK(!r.binder.GetConsumer(at + 1001).seen); // stale after a second, whatever the size says
+    CHECK(r.binder.GetConsumer(at + 1001).width == 3840);
+    CHECK(r.binder.GetConsumer(at - 5).seen); // an earlier reading on another thread is not "long ago"
+
+    { // the size is whatever the begin read; a later begin of the same or another runtime replaces it
+        r.fake.bbW = 1920;
+        r.fake.bbH = 1080;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::SizeMismatch); // the size gate still refuses ...
+        const ConsumerInfo c = r.binder.GetConsumer(r.fake.now);
+        CHECK(c.seen && c.width == 1920 && c.height == 1080); // ... after the consumer was recorded
+    }
+    { // the back buffer size cannot be read: not a consumer, and not a size mismatch either
+        Rig q;
+        q.fake.bbOk = false;
+        CHECK(q.Begin() == Outcome::Failed);
+        CHECK(q.binder.Status() == kFailed);
+        const ConsumerInfo c = q.binder.GetConsumer(q.fake.now);
+        CHECK(!c.seen && c.width == 0 && c.height == 0);
+        CHECK(q.binder.GetCounters().failed == 1 && q.binder.GetCounters().sizeMismatches == 0);
+        q.fake.bbOk = true;
+        q.NextFrame();
+        CHECK(q.Begin() == Outcome::Bound); // nothing is latched
+        q.Finish();
+    }
+    { // two runtimes: the most recent begin that found a trusted depth input wins
+        Fake a, b;
+        Router router(a, b);
+        DepthBinder binder(router, nullptr);
+        binder.SetEnabled(true);
+        b.bbW = 1920;
+        b.bbH = 1080;
+        binder.PublishCapture(DepthCapture {});
+        CHECK(binder.OnBeginEffects(kRt) == Outcome::NoCapture);
+        CHECK(binder.GetConsumer(a.now).width == 3840);
+        a.now += 5;
+        CHECK(binder.OnBeginEffects(kRt2) == Outcome::NoCapture);
+        ConsumerInfo c = binder.GetConsumer(a.now);
+        CHECK(c.width == 1920 && c.height == 1080 && c.seenMs == a.now);
+        a.now += 5;
+        CHECK(binder.OnBeginEffects(kRt) == Outcome::NoCapture);
+        CHECK(binder.GetConsumer(a.now).width == 3840);
+        b.sameDevice = false; // a runtime that is not ours does not take over
+        a.now += 5;
+        CHECK(binder.OnBeginEffects(kRt2) == Outcome::OtherDevice);
+        CHECK(binder.GetConsumer(a.now).width == 3840);
+    }
+    { // before the first capture a runtime of another device does not record a consumer and writes no status
+        Rig q;
+        q.binder.PublishCapture(DepthCapture {});
+        q.fake.sameDevice = false;
+        const std::string status = q.binder.Status();
+        CHECK(q.Begin() == Outcome::OtherDevice);
+        CHECK(!q.binder.GetConsumer(q.fake.now).seen);
+        CHECK(q.binder.Status() == status && status == kWaiting);
+        CHECK(q.fake.Calls("SameDevice") == 1); // always asked, also with no capture yet
+    }
 
     // only a begin that got past the depth input gate counts: not another device, a manual transform, nothing to read
     struct Case
@@ -463,19 +521,21 @@ void ConsumerSeenWindow()
         { "manual transform", [](Rig& q) { q.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; }, Outcome::ManualTransform },
         { "no depth input", [](Rig& q) { q.fake.vars.clear(); }, Outcome::NoDepthInput },
         { "disabled", [](Rig& q) { q.binder.SetEnabled(false); }, Outcome::Disabled },
+        { "depth input that is not trusted",[](Rig& q) { q.fake.vars = { { 0x900, "DepthInputTex", "", kColor, kColor } }; },
+          Outcome::NoDepthInput },
     };
     for (const Case& c : cases)
     {
         Rig q;
         c.breakIt(q);
         CHECK(q.Begin() == c.outcome);
-        CHECK(!q.binder.ConsumerSeen(q.fake.now));
+        CHECK(!q.binder.GetConsumer(q.fake.now).seen);
     }
     // a stale or mismatching capture does not matter: the consumer is there
     Rig s;
     s.fake.now += 300;
     CHECK(s.Begin() == Outcome::CaptureUnavailable);
-    CHECK(s.binder.ConsumerSeen(s.fake.now));
+    CHECK(s.binder.GetConsumer(s.fake.now).seen);
 }
 
 void Untrusted()
@@ -485,10 +545,10 @@ void Untrusted()
         r.fake.vars = { { 0x900, "DepthInputTex", "", kColor, kColor } };
         const std::string before = r.fake.StateKey();
         CHECK(r.Begin() == Outcome::NoDepthInput);
-        CHECK(r.binder.Status() == kNoInput);
+        CHECK(r.binder.Status() == kNotTrusted);
         CHECK(r.fake.updates.empty() && r.fake.StateKey() == before && r.Clean());
         CHECK(r.binder.GetCounters().noDepthInput == 1);
-        CHECK(!r.binder.ConsumerSeen(r.fake.now));
+        CHECK(!r.binder.GetConsumer(r.fake.now).seen);
 
         // latched until the effects reload, even if the variable changes
         r.fake.vars[0].srv = r.fake.vars[0].srgb = kOrig;
@@ -532,6 +592,306 @@ void Untrusted()
         q.fake.SetDepth(kOther, kOtherSrgb);
         CHECK(q.Pass());
         CHECK(q.fake.Calls("IsDepthView") == 2);
+    }
+}
+
+// ---- decoys: variables with the exact name of a depth input that do not read ReShade's DEPTH semantic ----------------------
+// The bind lands in the semantic entry, but such a variable keeps showing its own binding, so nothing reads the copy back and
+// the pass cannot be verified. It is undone with an ERASE of the entry, never with what the decoy showed (that may be a texture
+// of an effect, which ReShade frees at the next reload while the entry still pointed at it); the runtime is latched until its
+// effects reload, and the status says the depth input is not trusted.
+void DecoyShapes()
+{
+    auto lastUpdateIsErase = [](const Rig& r)
+    {
+        const Fake::Update u = r.fake.UpdateAt(r.fake.updates.size() - 1);
+        return u.semantic == "DEPTH" && u.srv == 0 && u.srgb == 0;
+    };
+    { // an empty decoy picked before the real reader
+        Rig r;
+        r.fake.vars = { { 0x900, "DepthInputTex", "", 0, 0 }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.Status() == kNotTrusted);
+        CHECK(r.fake.updates.size() == 2 && r.fake.UpdateAt(0).srv == kCopy && lastUpdateIsErase(r));
+        CHECK(!r.fake.hasDepth && !r.fake.MapHoldsCopy());
+        CHECK(r.Clean());
+        CHECK(r.binder.GetCounters().noDepthInput == 1 && r.binder.GetCounters().passesBound == 0);
+        // the latch holds: later begins bind nothing and record no new consumer
+        r.Finish();
+        const size_t updates = r.fake.updates.size();
+        const int64_t seen = r.binder.GetConsumer(r.fake.now).seenMs;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput && r.binder.Status() == kNotTrusted);
+        CHECK(r.fake.updates.size() == updates && r.binder.GetConsumer(r.fake.now).seenMs == seen);
+        CHECK(r.binder.GetCounters().noDepthInput == 2);
+        // ... until the effects reload and a real reader is there
+        r.fake.vars = { DepthVar() };
+        r.fake.SetDepth(kOrig, kOrigSrgb);
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(r.Pass() && r.Clean());
+    }
+    { // a decoy that shows an effect-internal depth-family view: the entry ends EMPTY and never holds that view
+        Rig r;
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.Status() == kNotTrusted);
+        CHECK(!r.fake.hasDepth && lastUpdateIsErase(r));
+        for (const auto& u : r.fake.updates)
+            CHECK(u.srv != kOther && u.srgb != kOtherSrgb); // the decoy's view was never written into ReShade's map
+        CHECK(r.fake.CoreRefs(kOther) == 0 && r.fake.CoreRefs(kOtherSrgb) == 0);
+        // the decoy's texture dies with the next effect reload
+        r.fake.OwnerRelease(kOther);
+        r.fake.OwnerRelease(kOtherSrgb);
+        CHECK(!r.fake.DepthEntryDead() && r.fake.violations == 0 && r.Clean());
+        r.Finish();
+        CHECK(r.Clean());
+    }
+    { // a half pair after the bind does not verify: only a readback of (copy, copy) does
+        Rig r;
+        r.fake.vars = { { 0x900, "DepthInputTex", "", kOther, kOtherSrgb } };
+        bool done = false;
+        r.fake.afterCall = [&](const char* name)
+        {
+            if (!done && std::string(name) == "UpdateTextureBindings")
+            {
+                done = true;
+                r.fake.vars[0].srv = kCopy; // as if the variable showed the copy in one slot
+                r.fake.vars[0].srgb = kOther;
+            }
+        };
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.Status() == kNotTrusted && !r.fake.hasDepth && r.fake.updates.size() == 2);
+        CHECK(r.fake.CoreRefs(kCopy) == 0);
+    }
+    { // the erase cannot be done: the pass stays dirty with the copy referenced, and the next begin does it first
+        Rig r;
+        r.fake.vars = { { 0x900, "DepthInputTex", "", 0, 0 }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } };
+        r.fake.failRestore = true; // an update that does not bind a copy fails
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.Status() == kFailed);
+        CHECK(r.fake.MapHoldsCopy() && r.fake.BoundCopiesReferenced() && r.fake.CoreRefs(kCopy) == 1);
+        r.Finish(); // a stray finish retries, and fails again
+        CHECK(r.fake.MapHoldsCopy() && r.fake.CoreRefs(kCopy) == 1);
+        // the owner replaces the copy and frees the old one: the map still holds it, so it must stay alive
+        r.copyView = kCopy2;
+        r.fake.OwnerRelease(kCopy);
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Failed); // nothing is bound over it
+        CHECK(!r.fake.IsFreed(kCopy) && r.fake.violations == 0);
+        r.fake.failRestore = false;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput); // the retry erased the entry, the latch holds
+        CHECK(!r.fake.MapHoldsCopy() && r.fake.IsFreed(kCopy) && r.Clean());
+    }
+    { // a dirty runtime, then a reload whose only named variable is a decoy: the entry is erased, not trusted to the decoy
+        Rig r;
+        r.fake.failRestore = true;
+        r.Begin();
+        r.Finish();
+        CHECK(r.fake.MapHoldsCopy());
+        r.fake.failRestore = false;
+        r.fake.vars = { { 0x900, "DepthInputTex", "", kColor, kColor } };
+        r.binder.OnReloadedEffects(kRt);
+        CHECK(!r.fake.hasDepth && !r.fake.MapHoldsCopy() && lastUpdateIsErase(r));
+        CHECK(r.Clean());
+    }
+    { // ... and so is a retry at the next begin
+        Rig r;
+        r.fake.failRestore = true;
+        r.Begin();
+        r.Finish();
+        r.fake.failRestore = false;
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb } };
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput); // the decoy is a candidate now; the erase comes first, and the latch is new
+        CHECK(!r.fake.MapHoldsCopy());
+        for (const auto& u : r.fake.updates)
+            CHECK(u.srv != kOther);
+        CHECK(r.Clean());
+    }
+    { // the decoy has the better name: the candidate that reads the copy back is the DEPTH reader, and its own read is the original
+        Rig r;
+        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        const std::string before = r.fake.StateKey();
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.DepthIs(kCopy, kCopy));
+        CHECK(r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1 && r.fake.CoreRefs(kOther) == 0);
+        r.Finish();
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.fake.StateKey() == before && r.Clean());
+        CHECK(r.binder.GetCounters().noDepthInput == 0 && r.binder.GetCounters().passesBound == 1);
+    }
+    { // a candidate that already shows the copy is a bind that was never put back, whichever candidate it is
+        Rig r;
+        r.fake.vars = { DepthVar(), { 0x900, "DepthBufferTex", "", kCopy, kCopy } };
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.fake.updates.empty() && r.fake.CoreRefs(kCopy) == 0 && r.fake.Balanced());
+    }
+}
+
+// N3: the state "the binding holds the current copy and the core owns no reference to it" is unreachable. Every shape that could
+// lead there (decoys, partial pairs, restores that fail, reloads) is run with a fault at every backend call; whatever the fault,
+// the copy is never in ReShade's map without a reference of ours, no dead view is touched, and once the effects reload a begin
+// never ends in the "Failed" that this state would give.
+void StuckCopyIsUnreachable()
+{
+    struct Shape
+    {
+        const char* what;
+        void (*setup)(Rig&);
+        void (*run)(Rig&);
+    };
+    const Shape shapes[] = {
+        { "empty decoy", [](Rig& r) { r.fake.vars = { { 0x900, "DepthInputTex", "", 0, 0 }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } }; },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+          } },
+        { "internal view decoy",
+          [](Rig& r) { r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } }; },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+          } },
+        { "decoy with the better name",
+          [](Rig& r) { r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } }; },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+          } },
+        { "partial pair",
+          [](Rig&) {},
+          [](Rig& r)
+          {
+              if (r.Begin() == Outcome::Bound) // the foreign update only exists if there is a pass to interfere with
+                  r.fake.SetDepth(kCopy, kOtherSrgb);
+              r.Finish();
+          } },
+        { "erase that fails, then retried",
+          [](Rig& r)
+          {
+              r.fake.vars = { { 0x900, "DepthInputTex", "", 0, 0 }, { 0x901, "Real::Depth", "DEPTH", 0, 0 } };
+              r.fake.failRestore = true;
+          },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+              r.fake.failRestore = false;
+              r.NextFrame();
+              r.Begin();
+          } },
+        { "dirty runtime, reload with a decoy",
+          [](Rig& r) { r.fake.failRestore = true; },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+              r.fake.failRestore = false;
+              r.fake.vars = { { 0x900, "DepthInputTex", "", kColor, kColor } };
+              r.binder.OnReloadedEffects(kRt);
+          } },
+        { "restore that fails, owner recreates the copy",
+          [](Rig& r) { r.fake.failRestore = true; },
+          [](Rig& r)
+          {
+              r.Begin();
+              r.Finish();
+              r.copyView = kCopy2;
+              r.fake.OwnerRelease(kCopy);
+              r.NextFrame();
+              r.Begin();
+              r.fake.failRestore = false;
+              r.NextFrame();
+              r.Begin();
+              r.Finish();
+          } },
+    };
+    const Fault faults[] = { Fault::Throw, Fault::ThrowAfter, Fault::Fail };
+    for (const Shape& shape : shapes)
+    {
+        int total = 0;
+        {
+            Rig r;
+            shape.setup(r);
+            r.fake.calls = 0;
+            shape.run(r);
+            total = r.fake.calls;
+        }
+        CHECK(total > 5);
+        for (int n = 1; n <= total; ++n)
+            for (const Fault fault : faults)
+            {
+                Rig r;
+                shape.setup(r);
+                r.fake.calls = 0;
+                r.fake.faultAt = n;
+                r.fake.fault = fault;
+                bool escaped = false;
+                try
+                {
+                    shape.run(r);
+                }
+                catch (...)
+                {
+                    escaped = true;
+                }
+                // never in the map without a reference of ours, and nothing dead
+                const bool covered = !r.fake.MapHoldsCopy() || r.fake.BoundCopiesReferenced();
+                const bool alive = !r.fake.DepthEntryDead() && r.fake.violations == 0;
+                // with the fault gone and the effects reloaded (which repairs a dirty runtime and ends a latch)
+                r.fake.faultAt = 0;
+                r.fake.fault = Fault::None;
+                r.fake.failRestore = false;
+                r.binder.OnReloadedEffects(kRt);
+                r.NextFrame();
+                const Outcome outcome = r.Begin();
+                r.Finish();
+                const bool settled = !r.fake.HoldsCopy() && r.fake.CopyRefs() == 0 && !r.fake.DepthEntryDead() && r.fake.violations == 0;
+                if (escaped || !covered || !alive || outcome == Outcome::Failed || !settled)
+                    std::printf("  stuck copy: '%s' call #%d fault %d: escaped=%d covered=%d alive=%d outcome=%d settled=%d\n", shape.what, n,
+                                int(fault), escaped, covered, alive, int(outcome), settled);
+                CHECK(!escaped && covered && alive);
+                CHECK(outcome != Outcome::Failed);
+                CHECK(settled);
+                r.binder.OnDestroyRuntime(kRt);
+                CHECK(r.fake.Balanced());
+            }
+    }
+}
+
+void FailedCounter()
+{
+    { // every Outcome::Failed
+        Rig r;
+        r.fake.definitionError = true;
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.binder.GetCounters().failed == 1);
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.binder.GetCounters().failed == 2);
+    }
+    { // a restore left pending counts when it goes pending, and every refused begin counts
+        Rig r;
+        r.fake.failRestore = true;
+        r.Begin();
+        r.Finish();
+        CHECK(r.binder.GetCounters().failed == 1);
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Failed); // the retry fails again (1) and the begin is refused (1)
+        CHECK(r.binder.GetCounters().failed == 3);
+    }
+    { // the stuck copy answer
+        Rig r;
+        r.fake.SetDepth(kCopy, kCopy);
+        CHECK(r.Begin() == Outcome::Failed && r.binder.GetCounters().failed == 1);
+    }
+    { // the other counters do not move
+        Rig r;
+        r.fake.vars.clear();
+        r.Begin();
+        CHECK(r.binder.GetCounters().failed == 0);
     }
 }
 
@@ -791,26 +1151,31 @@ void DepthInputLookup()
         CHECK(r.fake.StateKey() == before && r.Clean());
         CHECK(r.binder.GetCounters().noDepthInput == 1 && r.binder.Status() == kNoInput);
     }
-    { // the list order decides, not the enumeration order
+    { // the list order decides which candidate is verified and used, not the enumeration order; every candidate is looked at
+      // before the bind, and after it the first one that reads the copy back is the DEPTH reader of the pass
         Rig r;
         r.fake.vars = { { 0x520, "DepthInputTex", "DEPTH", 0, 0 },
                         { 0x521, "DepthBufferTex", "DEPTH", 0, 0 },
                         { 0x522, "ReShade::DepthBufferTex", "DEPTH", 0, 0 } };
         CHECK(r.Begin() == Outcome::Bound);
-        CHECK(r.fake.bindingReads.size() == 1 && r.fake.bindingReads.count(0x522) == 1);
+        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] == 1 && r.fake.bindingReads[0x522] >= 3);
+        const int before = r.fake.bindingReads[0x522];
         r.Finish();
+        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] == 1 && r.fake.bindingReads[0x522] == before + 1);
         Rig q;
         q.fake.vars = { { 0x520, "DepthInputTex", "DEPTH", 0, 0 }, { 0x521, "DepthBufferTex", "DEPTH", 0, 0 } };
         CHECK(q.Begin() == Outcome::Bound);
-        CHECK(q.fake.bindingReads.size() == 1 && q.fake.bindingReads.count(0x521) == 1);
+        const int beforeQ = q.fake.bindingReads[0x521];
         q.Finish();
+        CHECK(q.fake.bindingReads[0x520] == 1 && q.fake.bindingReads[0x521] == beforeQ + 1);
     }
-    { // a name must match exactly, whatever the enumeration order says
+    { // a name must match exactly, whatever the enumeration order says: a near miss is never even looked at
         Rig r;
         r.fake.vars = { { 0x530, "DepthInputTexX", "DEPTH", 0, 0 }, { 0x531, "DepthInputTex", "DEPTH", 0, 0 } };
         CHECK(r.Begin() == Outcome::Bound);
-        CHECK(r.fake.bindingReads.size() == 1 && r.fake.bindingReads.count(0x531) == 1);
+        CHECK(r.fake.bindingReads.count(0x530) == 0 && r.fake.bindingReads.count(0x531) == 1);
         r.Finish();
+        CHECK(r.fake.bindingReads.count(0x530) == 0);
         CHECK(r.fake.UpdateAt(1).srv == kOrig);
     }
     { // enumerated every pass; handles are never kept for the next one
@@ -952,12 +1317,15 @@ void ReloadMidPass()
         CHECK(r.fake.log.empty());
         CHECK(r.Pass() && r.Clean());
     }
-    { // another add-on took the binding over before the reload: left alone, references released
+    { // another add-on took the binding over before the reload. The variables as the new effects know them cannot be vouched
+      // for (none reads the copy back), so the entry is erased rather than trusted: the other add-on's pick is lost until it
+      // selects again, and the copy is certainly gone. The original is not written back either.
         Rig r;
         CHECK(r.Begin() == Outcome::Bound);
         r.fake.SetDepth(kOther, kOtherSrgb);
         r.binder.OnReloadedEffects(kRt);
-        CHECK(r.fake.updates.size() == 1 && r.fake.DepthIs(kOther, kOtherSrgb));
+        CHECK(r.fake.updates.size() == 2 && r.fake.UpdateAt(1).srv == 0 && r.fake.UpdateAt(1).srgb == 0);
+        CHECK(!r.fake.hasDepth);
         CHECK(r.binder.GetCounters().overwrittenByOther == 0);
         CHECK(r.Clean());
     }
@@ -1342,6 +1710,7 @@ void FaultInjection()
         {
             Rig r;
             const std::string before = r.fake.StateKey();
+            const std::string beforeNoDepth = r.fake.StateKeyNoDepth();
             r.fake.faultAt = n;
             r.fake.fault = faults[f];
             bool escaped = false, cleanAfterBegin = true;
@@ -1361,8 +1730,11 @@ void FaultInjection()
             const bool pendingCovered = r.fake.BoundCopiesReferenced();
             // a begin that did not bind has already put everything back, without waiting for finish_effects
             const bool undone = outcome == Outcome::Bound || cleanAfterBegin;
-            const bool ok = !escaped && r.fake.violations == 0 && (clean || pendingCovered) && undone &&
-                            (!inBegin || (clean && r.fake.StateKey() == before));
+            // A bind that was not verified yet when the fault hit is undone with an erase: the entry is then empty, never
+            // anything else, and the rest of ReShade's state is as it was.
+            const bool asBefore =
+                r.fake.StateKey() == before || (r.fake.StateKeyNoDepth() == beforeNoDepth && !r.fake.hasDepth);
+            const bool ok = !escaped && r.fake.violations == 0 && (clean || pendingCovered) && undone && (!inBegin || (clean && asBefore));
             if (!ok)
                 std::printf("  fault: call #%d (%s) %s: escaped=%d violations=%d clean=%d covered=%d undone=%d\n", n,
                             sequence[n - 1].c_str(), names[f], escaped, int(r.fake.violations), clean, pendingCovered, undone);
@@ -1378,7 +1750,7 @@ void FaultInjection()
                 r.binder.OnReloadedEffects(kRt);
                 bound = r.Pass();
             }
-            const bool recovered = bound && r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb);
+            const bool recovered = bound && r.Clean() && (r.fake.DepthIs(kOrig, kOrigSrgb) || !r.fake.hasDepth);
             if (!recovered)
                 std::printf("  fault: call #%d (%s) %s: no recovery (bound=%d clean=%d)\n", n, sequence[n - 1].c_str(), names[f], bound,
                             r.Clean());
@@ -1430,53 +1802,69 @@ void BackendFailures()
 {
     int beginCalls = 0, totalCalls = 0;
     const std::vector<std::string> sequence = CleanSequence(beginCalls, totalCalls);
-    auto nthCall = [&](const std::string& method, int from) // 1-based call number of the first `method` call after `from` calls
+    auto nthCall = [&](const std::string& method, int from, int nth = 1) // 1-based call number of the nth `method` call after `from`
     {
         for (size_t i = size_t(from); i < sequence.size(); ++i)
-            if (sequence[i] == method)
+            if (sequence[i] == method && --nth == 0)
                 return int(i) + 1;
         return 0;
     };
     struct Case
     {
         const char* method;
+        int occurrence;
         Outcome whenItFails; // what a false / 0 / Error return leads to
+        bool mayErase;       // the bind may have landed without being verified: the entry is then erased, not restored
     };
     const Case cases[] = {
-        { "IsD3D11", Outcome::NotD3D11 },
-        { "SameDevice", Outcome::OtherDevice },
-        { "Definition", Outcome::Failed },
-        { "Techniques", Outcome::Failed },
-        { "TextureVariables", Outcome::Failed },
-        { "TextureBinding", Outcome::Failed },
-        { "IsDepthView", Outcome::NoDepthInput },
-        { "NowMs", Outcome::CaptureUnavailable },
-        { "Frame", Outcome::CaptureUnavailable },
-        { "BackBufferSize", Outcome::SizeMismatch },
-        { "UpdateTextureBindings", Outcome::Failed },
-        { "UniformVariables", Outcome::Failed },
-        { "GetUniformBool", Outcome::Failed },
-        { "SetUniformBool", Outcome::Failed },
+        { "IsD3D11", 1, Outcome::NotD3D11, false },
+        { "SameDevice", 1, Outcome::OtherDevice, false },
+        { "Definition", 1, Outcome::Failed, false },
+        { "Techniques", 1, Outcome::Failed, false },
+        { "TextureVariables", 1, Outcome::Failed, false },
+        { "TextureBinding", 1, Outcome::Failed, false }, // the first sight of the variable
+        { "IsDepthView", 1, Outcome::NoDepthInput, false },
+        { "BackBufferSize", 1, Outcome::Failed, false },
+        { "NowMs", 1, Outcome::CaptureUnavailable, false },
+        { "Frame", 1, Outcome::CaptureUnavailable, false },
+        { "TextureBinding", 2, Outcome::Failed, false }, // the read before the bind
+        { "UpdateTextureBindings", 1, Outcome::Failed, true },
+        { "TextureBinding", 3, Outcome::Failed, true }, // the read after the bind: a failed read is no verdict
+        { "UniformVariables", 1, Outcome::Failed, false },
+        { "GetUniformBool", 1, Outcome::Failed, false },
+        { "SetUniformBool", 1, Outcome::Failed, false },
     };
     for (const Case& c : cases)
         for (const Fault fault : { Fault::Fail, Fault::Throw })
         {
-            const int n = nthCall(c.method, 0);
+            const int n = nthCall(c.method, 0, c.occurrence);
             CHECK(n > 0 && n <= beginCalls);
             Rig r;
             const std::string before = r.fake.StateKey();
+            const std::string beforeNoDepth = r.fake.StateKeyNoDepth();
             r.fake.faultAt = n;
             r.fake.fault = fault;
             const Outcome expected = fault == Fault::Fail ? c.whenItFails : Outcome::Failed;
             const Outcome got = r.Begin();
             if (got != expected)
-                std::printf("  %s %s: outcome %d, expected %d\n", c.method, fault == Fault::Fail ? "fails" : "throws", int(got),
-                            int(expected));
+                std::printf("  %s #%d %s: outcome %d, expected %d\n", c.method, c.occurrence, fault == Fault::Fail ? "fails" : "throws",
+                            int(got), int(expected));
             CHECK(got == expected);
-            CHECK(r.Clean() && r.fake.StateKey() == before);
+            // A bind that may have landed without a reader that showed the copy is undone with an erase; every other failure
+            // leaves ReShade exactly as it was.
+            const bool latched = std::string(c.method) == "IsDepthView";
+            CHECK(r.Clean());
+            CHECK(r.fake.StateKey() == before || (c.mayErase && r.fake.StateKeyNoDepth() == beforeNoDepth && !r.fake.hasDepth));
             CHECK(r.binder.GetCounters().passesBound == 0);
             r.Finish();
-            CHECK(r.Clean() && r.fake.StateKey() == before);
+            CHECK(r.Clean());
+            CHECK(r.fake.StateKey() == before || (c.mayErase && r.fake.StateKeyNoDepth() == beforeNoDepth && !r.fake.hasDepth));
+            // a failed call is no verdict about the variable: the next pass binds (the IsDepthView answer "no" is one)
+            if (!latched && expected == Outcome::Failed)
+            {
+                r.fake.faultAt = 0;
+                CHECK(r.Pass() && r.Clean() && (r.fake.DepthIs(kOrig, kOrigSrgb) || (c.mayErase && !r.fake.hasDepth)));
+            }
         }
     { // AddRef cannot fail, but a throwing one is survived
         Rig r;
@@ -1527,7 +1915,31 @@ void BackendFailures()
         r.Finish();
         CHECK(r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb));
     }
-    { // a begin that fails before it bound anything puts nothing back and does not look at the binding again
+    { // a begin that fails before it bound anything has nothing to put back
+        int firstRead = 0;
+        {
+            Rig q;
+            CHECK(q.Pass());
+            q.fake.log.clear();
+            q.NextFrame();
+            q.Begin();
+            for (size_t i = 0; i < q.fake.log.size() && firstRead == 0; ++i)
+                if (q.fake.log[i] == "TextureBinding") // the read of the binding before the bind
+                    firstRead = int(i) + 1;
+        }
+        CHECK(firstRead > 0);
+        Rig r;
+        CHECK(r.Pass());
+        r.fake.log.clear();
+        r.fake.calls = 0;
+        r.fake.faultAt = firstRead;
+        r.fake.fault = Fault::Throw;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.fake.Calls("UpdateTextureBindings") == 0);
+        CHECK(r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb));
+    }
+    { // the AddRef of the original throws after the bind landed and was verified: the original goes back, not an erase
         int secondAddRef = 0;
         {
             Rig q;
@@ -1549,8 +1961,8 @@ void BackendFailures()
         r.fake.fault = Fault::Throw;
         r.NextFrame();
         CHECK(r.Begin() == Outcome::Failed);
-        CHECK(r.fake.Calls("TextureBinding") == 1 && r.fake.Calls("UpdateTextureBindings") == 0);
-        CHECK(r.Clean());
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
+        CHECK(r.binder.GetCounters().failed == 1);
     }
 
     // The calls of a finish. A restore that cannot be verified or done leaves the runtime dirty with its references; the bools
@@ -1586,7 +1998,10 @@ void BackendFailures()
             CHECK(r.binder.Status() == kFailed); // a failed restore step, of the binding or of a bool, is reported
             r.fake.faultAt = 0;
             r.fake.fault = Fault::None;
-            CHECK(r.Pass() && r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb));
+            // A restore that landed and then threw is pending; the retry finds no variable that shows the copy, so it cannot
+            // tell that the original is already back and erases the entry instead.
+            const bool landedAndThrew = fault == Fault::ThrowAfter && std::string(c.method) == "UpdateTextureBindings";
+            CHECK(r.Pass() && r.Clean() && (r.fake.DepthIs(kOrig, kOrigSrgb) || (landedAndThrew && !r.fake.hasDepth)));
             Rig d;
             d.fake.faultAt = n;
             d.fake.fault = fault;
@@ -1614,6 +2029,41 @@ void LogHook()
               g_logged[1] == std::make_pair(Counter::NoDepthInput, uint64_t(1000)) &&
               g_logged[2] == std::make_pair(Counter::NoDepthInput, uint64_t(2000)));
 
+    { // the counters that tick every frame (while ReShade runs without an evaluate, for a runtime that is not ours, per pass) log
+      // their first occurrence only; one that signals a real problem keeps its every 1000th line
+        struct Chatty
+        {
+            Counter counter;
+            size_t logged;
+            void (*breakIt)(Rig&);
+        };
+        const Chatty chatty[] = {
+            { Counter::StaleCaptures, 1, [](Rig& q) { q.fake.now += 300; } },
+            { Counter::OtherDevice, 1, [](Rig& q) { q.fake.sameDevice = false; } },
+            { Counter::Failed, 3, [](Rig& q) { q.fake.definitionError = true; } },
+            { Counter::SizeMismatches, 3, [](Rig& q) { q.fake.bbW = 1; } },
+        };
+        for (const Chatty& c : chatty)
+        {
+            Rig q;
+            c.breakIt(q);
+            for (int i = 0; i < 2001; ++i)
+                q.Begin();
+            CHECK(g_logged.size() == c.logged);
+            if (g_logged.size() >= 1)
+                CHECK(g_logged[0].first == c.counter && g_logged[0].second == 1);
+        }
+        Rig b; // passesBound
+        for (int i = 0; i < 2001; ++i)
+        {
+            b.NextFrame();
+            b.Begin();
+            b.Finish();
+        }
+        CHECK(b.binder.GetCounters().passesBound == 2001);
+        CHECK(g_logged.size() == 1 && g_logged[0] == std::make_pair(Counter::PassesBound, uint64_t(1)));
+    }
+
     // every counter reaches the hook on its first increment, with its own name
     struct Case
     {
@@ -1626,6 +2076,7 @@ void LogHook()
         { Counter::StaleCaptures, [](Rig& q) { q.fake.now += 300; } },
         { Counter::OtherDevice, [](Rig& q) { q.fake.sameDevice = false; } },
         { Counter::NoDepthInput, [](Rig& q) { q.fake.vars.clear(); } },
+        { Counter::Failed, [](Rig& q) { q.fake.definitionError = true; } },
     };
     for (const Case& c : cases)
     {
@@ -1704,6 +2155,8 @@ void Threads()
     // The capture side publishes a fresh copy every time and frees the previous one right after PublishCapture returns, a reader
     // polls the status and the counters, and a switch toggles the feature, while the event thread runs thousands of real
     // passes. The core's reference to the copy is taken under the capture lock; without it the AddRef would hit a freed view.
+    // Not verifiable here (no ThreadSanitizer on MSVC, and AddressSanitizer does not see data races): the guards in Status(),
+    // SetStatus() and OnTechniquesChanged(). Taking them out is not caught by this test, and they stay.
     Fake fake;
     fake.logCalls = false;
     fake.slowAddRef = true;
@@ -1758,7 +2211,7 @@ void Threads()
                 else if (s.empty())
                     ++torn;
                 (void)binder.GetCounters();
-                (void)binder.ConsumerSeen(fake.now);
+                (void)binder.GetConsumer(fake.now).seen;
             }
         });
     std::thread toggler(
@@ -1825,8 +2278,11 @@ int main()
     Gates();
     GateOrder();
     ClockAfterSnapshot();
-    ConsumerSeenWindow();
+    ConsumerInfoWindow();
     Untrusted();
+    DecoyShapes();
+    StuckCopyIsUnreachable();
+    FailedCounter();
     ManualTransform();
     ManualTransformCache();
     DepthInputLookup();

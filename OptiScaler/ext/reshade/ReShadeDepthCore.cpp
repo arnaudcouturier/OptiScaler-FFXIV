@@ -20,13 +20,16 @@ constexpr std::string_view kBufReadySource = "bufready_depth";
 // DepthInputTex.
 constexpr const char* kDepthInputNames[] = { "ReShade::DepthBufferTex", "DepthBufferTex", "DepthInputTex" };
 
-const TextureVar* FindDepthInput(const std::vector<TextureVar>& textures)
+// Every variable with one of the names, best name first. Which of them really reads the DEPTH semantic is not known until the
+// copy has been bound and one of them shows it.
+std::vector<const TextureVar*> FindDepthInputs(const std::vector<TextureVar>& textures)
 {
+    std::vector<const TextureVar*> found;
     for (const char* name : kDepthInputNames)
         for (const TextureVar& t : textures)
             if (t.name == name)
-                return &t;
-    return nullptr;
+                found.push_back(&t);
+    return found;
 }
 
 // The ReShade macros that scale or shift the depth input; any of them off its neutral value means the user (or a preset)
@@ -90,7 +93,11 @@ bool IsNeutralDefinition(std::string_view value, double neutral)
     return result.ec == std::errc() && result.ptr == end && parsed == neutral;
 }
 
-bool ShouldLog(uint64_t count) { return count == 1 || (count != 0 && count % 1000 == 0); }
+bool ShouldLog(Counter counter, uint64_t count)
+{
+    const bool everyFrame = counter == Counter::OtherDevice || counter == Counter::PassesBound || counter == Counter::StaleCaptures;
+    return count == 1 || (!everyFrame && count != 0 && count % 1000 == 0);
+}
 
 const char* DepthEventName(DepthEvent event)
 {
@@ -130,6 +137,8 @@ const char* CounterName(Counter counter)
         return "passesBound";
     case Counter::OtherDevice:
         return "otherDevice";
+    case Counter::Failed:
+        return "failed";
     case Counter::Count:
         break;
     }
@@ -176,10 +185,39 @@ void DepthBinder::PublishCapture(const DepthCapture& capture) noexcept
     }
 }
 
-bool DepthBinder::ConsumerSeen(int64_t nowMs) const noexcept
+ConsumerInfo DepthBinder::GetConsumer(int64_t nowMs) const noexcept
 {
-    const int64_t last = _consumerMs.load(std::memory_order_relaxed);
-    return last != INT64_MIN && nowMs - last <= kConsumerWindowMs;
+    ConsumerInfo info;
+    try
+    {
+        std::lock_guard lock(_publicMutex);
+        if (_consumerKnown)
+        {
+            info.seen = nowMs - _consumerMs <= kConsumerWindowMs;
+            info.seenMs = _consumerMs;
+            info.width = _consumerWidth;
+            info.height = _consumerHeight;
+        }
+    }
+    catch (...)
+    {
+    }
+    return info;
+}
+
+void DepthBinder::RecordConsumer(int64_t nowMs, uint32_t width, uint32_t height) noexcept
+{
+    try
+    {
+        std::lock_guard lock(_publicMutex);
+        _consumerKnown = true;
+        _consumerMs = nowMs;
+        _consumerWidth = width;
+        _consumerHeight = height;
+    }
+    catch (...)
+    {
+    }
 }
 
 std::string DepthBinder::Status() const noexcept
@@ -205,6 +243,8 @@ std::string DepthBinder::Status() const noexcept
             return "Manual ReShade depth transform retained";
         case StatusKind::NoInput:
             return "No depth input found; generic depth retained";
+        case StatusKind::NotTrusted:
+            return "Depth input not trusted; generic depth retained";
         case StatusKind::Failed:
             return "ReShade call failed; generic depth retained";
         case StatusKind::Bound:
@@ -230,6 +270,7 @@ Counters DepthBinder::GetCounters() const noexcept
     out.noDepthInput = n(Counter::NoDepthInput);
     out.passesBound = n(Counter::PassesBound);
     out.otherDevice = n(Counter::OtherDevice);
+    out.failed = n(Counter::Failed);
     return out;
 }
 
@@ -257,7 +298,7 @@ void DepthBinder::SetStatus(StatusKind kind, const DepthCapture* capture) noexce
 void DepthBinder::Bump(Counter counter) noexcept
 {
     const uint64_t count = _counts[static_cast<size_t>(counter)].fetch_add(1, std::memory_order_relaxed) + 1;
-    if (_log == nullptr || !ShouldLog(count))
+    if (_log == nullptr || !ShouldLog(counter, count))
         return;
     try
     {
@@ -293,6 +334,7 @@ Outcome DepthBinder::Done(Outcome outcome)
         SetStatus(StatusKind::NoInput);
         break;
     case Outcome::Failed:
+        Bump(Counter::Failed);
         SetStatus(StatusKind::Failed);
         break;
     case Outcome::Bound: // sets its own, with the sizes
@@ -339,6 +381,7 @@ Outcome DepthBinder::OnBeginEffects(uint64_t runtime) noexcept
     }
     catch (...)
     {
+        Bump(Counter::Failed);
         SetStatus(StatusKind::Failed);
         return Outcome::Failed;
     }
@@ -430,13 +473,14 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
     ViewRef copy { _backend };
     const DepthCapture capture = TakeCapture(copy.view);
 
-    // ---- is this runtime ours
+    // ---- is this runtime ours. Also before the first capture: device 0 then means the game's primary device, so a runtime of
+    // another device never counts as a consumer.
     if (!_backend.IsD3D11(runtime))
     {
         Bump(Counter::OtherDevice);
         return Done(Outcome::NotD3D11);
     }
-    if (capture.device != 0 && !_backend.SameDevice(runtime, capture.device))
+    if (!_backend.SameDevice(runtime, capture.device))
     {
         Bump(Counter::OtherDevice);
         return Done(Outcome::OtherDevice);
@@ -455,40 +499,48 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
         Bump(Counter::ManualTransformStandDowns);
         return Done(Outcome::ManualTransform);
     }
+    auto notTrusted = [&]
+    {
+        state.trust = Trust::Untrusted;
+        Bump(Counter::NoDepthInput);
+        SetStatus(StatusKind::NotTrusted);
+        return Outcome::NoDepthInput;
+    };
     if (state.trust == Trust::Untrusted)
     {
         Bump(Counter::NoDepthInput);
-        return Done(Outcome::NoDepthInput);
+        SetStatus(StatusKind::NotTrusted);
+        return Outcome::NoDepthInput;
     }
     std::vector<TextureVar> textures;
     if (!_backend.TextureVariables(runtime, textures))
         return Done(Outcome::Failed);
-    const TextureVar* input = FindDepthInput(textures);
-    if (input == nullptr)
+    const std::vector<const TextureVar*> candidates = FindDepthInputs(textures);
+    if (candidates.empty())
     {
         Bump(Counter::NoDepthInput);
         return Done(Outcome::NoDepthInput);
     }
-    uint64_t srv = 0, srgb = 0;
-    if (!_backend.TextureBinding(runtime, input->handle, srv, srgb))
-        return Done(Outcome::Failed);
     if (state.trust == Trust::Unknown)
     {
-        // The DEPTH semantic cannot be read through the API. A variable with the right name but without it would show some
-        // other binding, which is not an original to put back: trust the variable only if it shows nothing or a depth view.
+        // The DEPTH semantic cannot be read through the API. A variable with the right name but without it shows some other
+        // binding: trust the best candidate only if it shows nothing or a depth view. (The bind below checks it for real.)
+        uint64_t srv = 0, srgb = 0;
+        if (!_backend.TextureBinding(runtime, candidates.front()->handle, srv, srgb))
+            return Done(Outcome::Failed);
         auto depthOrEmpty = [&](uint64_t view) { return view == 0 || _backend.IsDepthView(view); };
         if (!depthOrEmpty(srv) || !depthOrEmpty(srgb))
-        {
-            state.trust = Trust::Untrusted;
-            Bump(Counter::NoDepthInput);
-            return Done(Outcome::NoDepthInput);
-        }
+            return notTrusted();
         state.trust = Trust::Trusted;
     }
 
-    // ---- the capture. Clock and frame are read after the capture was taken, so it is never "from the future".
+    // ---- the capture side is told about the consumer and the size of its back buffer before anything depends on a capture.
+    // Clock and frame are read after the capture was taken, so it is never "from the future".
+    uint32_t width = 0, height = 0;
+    if (!_backend.BackBufferSize(runtime, width, height))
+        return Done(Outcome::Failed);
     const int64_t now = _backend.NowMs();
-    _consumerMs.store(now, std::memory_order_relaxed);
+    RecordConsumer(now, width, height);
     if (!capture.valid)
         return Done(Outcome::NoCapture);
     const uint64_t frame = _backend.Frame();
@@ -497,45 +549,85 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
         Bump(Counter::StaleCaptures);
         return Done(Outcome::CaptureUnavailable);
     }
-    uint32_t width = 0, height = 0;
-    if (!_backend.BackBufferSize(runtime, width, height) || width != capture.outputW || height != capture.outputH)
+    if (width != capture.outputW || height != capture.outputH)
     {
         Bump(Counter::SizeMismatches);
         return Done(Outcome::SizeMismatch);
     }
-    // A binding that already holds our copy is a bind that was never put back, not an original: saved and restored later it
-    // would leave the copy bound for good.
-    if (srv == copy.view || srgb == copy.view)
-        return Done(Outcome::Failed);
 
-    // ---- bind. From here `state` owns every reference taken and every way out goes through EndPass.
+    // ---- what every candidate shows now. One that already shows our copy is a bind that was never put back, not an original:
+    // saved and restored later it would leave the copy bound for good.
+    struct Reading
+    {
+        uint64_t handle, srv, srgb;
+    };
+    std::vector<Reading> before;
+    before.reserve(candidates.size());
+    for (const TextureVar* c : candidates)
+    {
+        Reading r { c->handle, 0, 0 };
+        if (!_backend.TextureBinding(runtime, r.handle, r.srv, r.srgb))
+            return Done(Outcome::Failed);
+        if (r.srv == copy.view || r.srgb == copy.view)
+            return Done(Outcome::Failed);
+        before.push_back(r);
+    }
+
+    // ---- bind. From here `state` owns every reference taken and every way out goes through EndPass. Until a variable has read
+    // the copy back nothing is known about what the entry held, so an undo is an erase (the original stays empty, unverified).
     state.open = true;
     state.inPass = true;
     state.copy = copy.Take();
-    state.variable = input->handle;
-    state.origSrv = srv;
-    state.origSrgb = srgb;
-    if (srv != 0)
-    {
-        _backend.AddRef(srv);
-        state.refSrv = true;
-    }
-    if (srgb != 0)
-    {
-        _backend.AddRef(srgb);
-        state.refSrgb = true;
-    }
+    state.verified = false;
+    state.variable = state.origSrv = state.origSrgb = 0;
     auto fail = [&]
     {
         EndPass(runtime, state, End::Rollback);
         return Done(Outcome::Failed);
     };
 
-    state.bound = true; // set before the call: if it throws after changing the binding, EndPass finds out whether it is ours
+    state.bound = true; // set before the call: if it throws after changing the binding, EndPass undoes it
     if (!_backend.UpdateTextureBindings(runtime, kDepthSemantic, state.copy, state.copy))
     {
         state.bound = false; // refused: nothing changed
         return fail();
+    }
+
+    // The first candidate that reads exactly the copy back is the DEPTH reader of this pass, and what it showed before the bind
+    // is the original. A failed read is a failed pass, not a verdict about the variables.
+    const Reading* reader = nullptr;
+    for (const Reading& r : before)
+    {
+        uint64_t srv = 0, srgb = 0;
+        if (!_backend.TextureBinding(runtime, r.handle, srv, srgb))
+            return fail();
+        if (srv == state.copy && srgb == state.copy)
+        {
+            reader = &r;
+            break;
+        }
+    }
+    if (reader == nullptr)
+    {
+        // None of the named variables reads the DEPTH semantic. The bind is undone with an erase (never with what a decoy
+        // showed, which ReShade may free), and the runtime is not trusted until its effects reload.
+        notTrusted();
+        EndPass(runtime, state, End::Rollback);
+        return Outcome::NoDepthInput;
+    }
+    state.verified = true;
+    state.variable = reader->handle;
+    state.origSrv = reader->srv;
+    state.origSrgb = reader->srgb;
+    if (state.origSrv != 0)
+    {
+        _backend.AddRef(state.origSrv);
+        state.refSrv = true;
+    }
+    if (state.origSrgb != 0)
+    {
+        _backend.AddRef(state.origSrgb);
+        state.refSrgb = true;
     }
 
     // Effects that gate on ReShade having found a depth buffer read this uniform; it is forced on for the pass.
@@ -574,6 +666,7 @@ void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how) noexcept
         if (state.bound && !RestoreBinding(runtime, state, how))
         {
             state.inPass = false;
+            Bump(Counter::Failed);
             SetStatus(StatusKind::Failed);
             return;
         }
@@ -588,7 +681,7 @@ void DepthBinder::ReleasePass(Runtime& state) noexcept
         ReleaseView(state.origSrv);
     if (state.refSrgb)
         ReleaseView(state.origSrgb);
-    state.open = state.inPass = state.bound = false;
+    state.open = state.inPass = state.bound = state.verified = false;
     state.copy = state.variable = state.origSrv = state.origSrgb = 0;
     state.refSrv = state.refSrgb = false;
     state.bools.clear();
@@ -639,35 +732,50 @@ void DepthBinder::RestoreBools(uint64_t runtime, Runtime& state, End how) noexce
     }
 }
 
-// Puts the original binding back, but only if the DEPTH semantic still points at our copy. Another add-on (Generic Depth
-// picking a new buffer) may have replaced it, and its choice wins. True = ReShade holds nothing of ours any more; false = the
-// binding could not be checked or restored.
+// Takes the copy out of the DEPTH entry. True = ReShade holds nothing of ours any more; false = that could not be checked or
+// done (the pass stays dirty). Only a variable that was seen reading the copy back can vouch for what is in the entry:
+//  - a pass without such a variable (unverified) erases the entry;
+//  - at finish and rollback the variable of the pass is read: if the copy is in it (a half of the pair counts) the original that
+//    the variable showed before the bind goes back, otherwise another add-on replaced the entry and its choice stays;
+//  - at retry and reload the handle is stale, so the named variables are looked up again: one that shows the copy vouches for
+//    the entry and the original goes back; if none does, the entry is erased (a variable looked up now proves nothing).
+// Nothing but the original of a verified pass and "empty" is ever written, since ReShade frees views it knows nothing about.
 bool DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, End how) noexcept
 {
     try
     {
-        uint64_t variable = state.variable;
-        if (how == End::Retry || how == End::Reload)
-        {
-            // the handle from begin may be stale: find the variable again, by name
-            std::vector<TextureVar> textures;
-            if (!_backend.TextureVariables(runtime, textures))
-                return false;
-            const TextureVar* input = FindDepthInput(textures);
-            if (input == nullptr)
-                return false;
-            variable = input->handle;
-        }
+        auto holdsCopy = [&](uint64_t srv, uint64_t srgb) { return srv == state.copy || srgb == state.copy; };
+        if (!state.verified)
+            return _backend.UpdateTextureBindings(runtime, kDepthSemantic, 0, 0);
+
         uint64_t srv = 0, srgb = 0;
-        if (!_backend.TextureBinding(runtime, variable, srv, srgb))
-            return false;
-        if (srv != state.copy || srgb != state.copy)
+        if (how == End::Finish || how == End::Rollback)
         {
-            if (how == End::Finish)
-                Bump(Counter::OverwrittenByOther);
-            return true;
+            if (!_backend.TextureBinding(runtime, state.variable, srv, srgb))
+                return false;
+            if (!holdsCopy(srv, srgb))
+            {
+                if (how == End::Finish)
+                    Bump(Counter::OverwrittenByOther);
+                return true;
+            }
+            return _backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb);
         }
-        return _backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb);
+
+        std::vector<TextureVar> textures;
+        if (!_backend.TextureVariables(runtime, textures))
+            return false;
+        const std::vector<const TextureVar*> candidates = FindDepthInputs(textures);
+        if (candidates.empty())
+            return false;
+        for (const TextureVar* c : candidates)
+        {
+            if (!_backend.TextureBinding(runtime, c->handle, srv, srgb))
+                return false;
+            if (holdsCopy(srv, srgb))
+                return _backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb);
+        }
+        return _backend.UpdateTextureBindings(runtime, kDepthSemantic, 0, 0);
     }
     catch (...)
     {

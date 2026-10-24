@@ -186,6 +186,24 @@ struct Fake final : IBackend
                 return true;
         return false;
     }
+    // The DEPTH entry itself (not a variable) holds one of the capture side's views.
+    bool MapHoldsCopy() const { return hasDepth && (copyViews.count(depthSrv) || copyViews.count(depthSrgb)); }
+    // The DEPTH entry holds a view that was freed: ReShade would bind a dangling pointer into the next effects it loads.
+    bool DepthEntryDead() const
+    {
+        std::lock_guard lock(refMutex);
+        return hasDepth && ((depthSrv != 0 && freed.count(depthSrv)) || (depthSrgb != 0 && freed.count(depthSrgb)));
+    }
+    // Reference counts the core still holds on the capture side's views.
+    int CopyRefs() const
+    {
+        std::lock_guard lock(refMutex);
+        int n = 0;
+        for (const auto& [view, count] : core)
+            if (copyViews.count(view))
+                n += count;
+        return n;
+    }
     // While a restore is pending the copy may still be bound; the core must then still hold a reference to it.
     bool BoundCopiesReferenced() const
     {
@@ -206,7 +224,12 @@ struct Fake final : IBackend
     // ReShade's state as the tests compare it: the DEPTH map, the fixed bindings and the uniform values (not handles).
     std::string StateKey() const
     {
-        std::string s = hasDepth ? std::format("depth={:x}:{:x};", depthSrv, depthSrgb) : std::string("depth=none;");
+        return (hasDepth ? std::format("depth={:x}:{:x};", depthSrv, depthSrgb) : std::string("depth=none;")) + StateKeyNoDepth();
+    }
+    // The same without the DEPTH map: what a rollback that cannot tell what the entry held (and so erases it) must not change.
+    std::string StateKeyNoDepth() const
+    {
+        std::string s;
         for (const auto& v : vars)
             if (v.semantic.empty())
                 s += std::format("{}={:x}:{:x};", v.name, v.srv, v.srgb);
@@ -283,7 +306,8 @@ struct Fake final : IBackend
     bool IsD3D11(uint64_t) override { return Run<bool>("IsD3D11", false, [&]() -> bool { return d3d11; }); }
     bool SameDevice(uint64_t, uint64_t captureDevice) override
     {
-        return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice && captureDevice == kDevice; });
+        // 0 = no capture yet: the game's primary device
+        return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice && (captureDevice == 0 || captureDevice == kDevice); });
     }
     bool BackBufferSize(uint64_t, uint32_t& w, uint32_t& h) override
     {
@@ -493,6 +517,6 @@ struct Rig
         return bound;
     }
     // After a pass ended without a restore pending: ReShade holds nothing of ours and every reference is back.
-    bool Clean() const { return !fake.HoldsCopy() && fake.Balanced(); }
+    bool Clean() const { return !fake.HoldsCopy() && !fake.DepthEntryDead() && fake.Balanced(); }
 };
 } // namespace depthtest

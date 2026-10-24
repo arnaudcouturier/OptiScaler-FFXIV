@@ -99,17 +99,31 @@ void NeutralDefinition()
 
 void LogRule()
 {
-    CHECK(!ShouldLog(0));
-    CHECK(ShouldLog(1));
-    for (uint64_t n = 2; n < 1000; ++n)
-        CHECK(!ShouldLog(n));
-    CHECK(ShouldLog(1000));
-    CHECK(!ShouldLog(1001));
-    CHECK(!ShouldLog(1999));
-    CHECK(ShouldLog(2000));
-    CHECK(!ShouldLog(2500));
-    CHECK(ShouldLog(1'000'000));
-    CHECK(!ShouldLog(1'000'001));
+    // the counters that rarely tick: the first occurrence and every 1000th
+    for (Counter c : { Counter::OverwrittenByOther, Counter::SizeMismatches, Counter::ManualTransformStandDowns, Counter::NoDepthInput,
+                       Counter::Failed })
+    {
+        CHECK(!ShouldLog(c, 0));
+        CHECK(ShouldLog(c, 1));
+        for (uint64_t n = 2; n < 1000; ++n)
+            CHECK(!ShouldLog(c, n));
+        CHECK(ShouldLog(c, 1000));
+        CHECK(!ShouldLog(c, 1001));
+        CHECK(!ShouldLog(c, 1999));
+        CHECK(ShouldLog(c, 2000));
+        CHECK(!ShouldLog(c, 2500));
+        CHECK(ShouldLog(c, 1'000'000));
+        CHECK(!ShouldLog(c, 1'000'001));
+    }
+    // the counters that tick every frame while ReShade runs without an evaluate: the first occurrence only
+    for (Counter c : { Counter::OtherDevice, Counter::PassesBound, Counter::StaleCaptures })
+    {
+        CHECK(!ShouldLog(c, 0));
+        CHECK(ShouldLog(c, 1));
+        for (uint64_t n = 2; n <= 3000; ++n)
+            CHECK(!ShouldLog(c, n));
+        CHECK(!ShouldLog(c, 1'000'000));
+    }
 }
 
 void Names()
@@ -121,7 +135,8 @@ void Names()
     CHECK(std::string(CounterName(Counter::NoDepthInput)) == "noDepthInput");
     CHECK(std::string(CounterName(Counter::PassesBound)) == "passesBound");
     CHECK(std::string(CounterName(Counter::OtherDevice)) == "otherDevice");
-    static_assert(kCounters == 7);
+    CHECK(std::string(CounterName(Counter::Failed)) == "failed");
+    static_assert(kCounters == 8);
     static_assert(kConsumerWindowMs == 1000);
 
     CHECK(std::string(DepthEventName(DepthEvent::BeginEffects)) == "reshade_begin_effects");

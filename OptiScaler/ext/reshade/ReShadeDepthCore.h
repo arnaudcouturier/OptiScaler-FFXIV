@@ -10,15 +10,24 @@
 // The core never releases a copy reference that ReShade may still hold: ReShade's binding map does not own the view. A restore
 // that fails or cannot be verified keeps the runtime "dirty" (the copy and the original stay referenced) and every begin or
 // finish of that runtime retries it first. Only destroy_effect_runtime (the map is gone with the runtime) lets go without a
-// ReShade call.
+// ReShade call. (After ResizeBuffers ReShade creates a new runtime object, so a destroy never leaves a map behind.)
+//
+// The DEPTH semantic itself cannot be read through the API; a texture variable that is merely NAMED like a depth input may
+// not read it at all. So a variable counts as a DEPTH reader for a pass only if, after the bind, it reads back exactly the copy.
+// Only the binding that such a variable showed BEFORE the bind is ever written back as the original. If no variable reads the
+// copy back the bind is undone with an erase of the entry (update_texture_bindings with empty views): ReShade's own depth is
+// lost until Generic Depth selects again, which is visible but safe, and the runtime is not trusted until its effects reload.
+// Nothing that the core cannot vouch for is written into ReShade's map, because ReShade frees the views it knows nothing about.
 //
 // Threading: the capture side calls PublishCapture on the NGX thread. The ReShade events, Status(), GetCounters() and
-// ConsumerSeen() may come from any thread. One recursive mutex guards the per-runtime state and is taken inside each event,
-// never held from begin to finish. A second small mutex guards the capture record and the status, so PublishCapture and Status()
-// never wait for a ReShade call. Lock order: the runtime mutex, then the capture mutex.
+// GetConsumer() may come from any thread. One recursive mutex guards the per-runtime state and is taken inside each event,
+// never held from begin to finish. A second small mutex guards the capture record, the consumer record and the status, so
+// PublishCapture and Status() never wait for a ReShade call. Lock order: the runtime mutex, then the capture mutex.
 //
-// Backend contract: none of the backend calls the core makes fires a ReShade event, so a destroy or a reload cannot arrive inside
-// one. A reload between begin_effects and finish_effects can arrive, and is handled.
+// Backend contract: none of the backend calls the core makes fires one of the depth events or OnTechniquesChanged, so a destroy
+// or a reload cannot arrive inside one. SetUniformBool can fire reshade_set_uniform_value, which add-ons may veto or answer with
+// further API calls; the core does not depend on it taking effect (it checks nothing it set, and puts the old value back
+// whatever happened). A reload between begin_effects and finish_effects can arrive, and is handled.
 
 #include <array>
 #include <atomic>
@@ -40,7 +49,7 @@ namespace ext::reshade::depth
 // ---- pure helpers -------------------------------------------------------------------------------------------------------
 inline constexpr int64_t kMaxCaptureAgeMs = 250; // a capture older than this is stale (251 ms is stale)
 inline constexpr int64_t kMaxCaptureFrames = 1;  // ... and so is one more than this many frames old (or from the future)
-inline constexpr int64_t kConsumerWindowMs = 1000; // ConsumerSeen: the last begin that found a depth input is at most this old
+inline constexpr int64_t kConsumerWindowMs = 1000; // GetConsumer: the last begin that found a trusted depth input is at most this old
 
 // The capture the copy was made from (the capture side fills it after every successful evaluate).
 struct DepthCapture
@@ -48,10 +57,13 @@ struct DepthCapture
     bool valid = false;
     uint32_t outputW = 0, outputH = 0; // NGX Output size, which is also the size of the copy
     uint32_t renderW = 0, renderH = 0; // the feature's render size
-    uint64_t frame = 0;                // monotonically increasing; the SAME counter as IBackend::Frame()
-    int64_t tickMs = 0;                // IBackend::NowMs() at the capture
-    uint64_t copyView = 0;             // shader resource view of the copy (the core takes its own reference per pass)
-    uint64_t device = 0;               // the D3D11 device the copy lives on; 0 = unknown (the device gate is skipped)
+    // Monotonically increasing and the SAME counter as IBackend::Frame(): ONE counter that ticks once per GAME frame (the wiring
+    // has to check what it does under frame generation, where presents outnumber game frames).
+    uint64_t frame = 0;
+    int64_t tickMs = 0;    // IBackend::NowMs() at the capture
+    uint64_t copyView = 0; // shader resource view of the copy (the core takes its own reference per pass)
+    // The D3D11 device the copy lives on. 0 = no capture yet: the backend then decides for "the game's primary D3D11 device".
+    uint64_t device = 0;
 };
 
 // valid, at most kMaxCaptureAgeMs old and 0 or kMaxCaptureFrames frames behind `frame`. Signed arithmetic: a capture from the
@@ -61,9 +73,6 @@ bool IsFresh(const DepthCapture& capture, int64_t nowMs, uint64_t frame);
 // RESHADE_DEPTH_INPUT_* macro value check: true only if the whole string (surrounding white space removed, one trailing f/F
 // allowed) is a number exactly equal to `neutral`. Empty, unparsable, inf/nan, trailing junk and a leading '+' are not neutral.
 bool IsNeutralDefinition(std::string_view value, double neutral);
-
-// Log the first occurrence of a counter and every 1000th after it.
-bool ShouldLog(uint64_t count);
 
 // ---- late registration --------------------------------------------------------------------------------------------------
 // The ReShade events the depth binder subscribes, by the ReShade addon_event they map to. The last two only clear the manual
@@ -136,20 +145,22 @@ struct IBackend
     virtual ~IBackend() = default;
 
     virtual int64_t NowMs() = 0;  // monotonic milliseconds, the clock of DepthCapture::tickMs
-    virtual uint64_t Frame() = 0; // the current frame, from the counter of DepthCapture::frame
+    virtual uint64_t Frame() = 0; // the current game frame, from the counter of DepthCapture::frame (one counter, see there)
 
-    // COM reference counting of a shader resource view.
+    // COM reference counting of a shader resource view. The views come from ReShade's binding map, which holds raw pointers: the
+    // real backend calls these (and IsDepthView) through the same access violation guard as every other ReShade call.
     virtual void AddRef(uint64_t view) = 0;
     virtual void Release(uint64_t view) = 0;
-    // The resource of the view has a depth-family format (D16/D24/D32 and their typeless or single-channel views). False, also
-    // when the query itself fails, makes the core distrust the depth input of that runtime until its effects reload: it fails
-    // closed. A throw is a failed pass, not a verdict.
+    // The resource of the view has a depth-family format (D16/D24/D32 and their typeless or single-channel views). The handle
+    // is untrusted (it was read from ReShade's map). False, also when the query itself fails, makes the core distrust the depth
+    // input of that runtime until its effects reload: it fails closed. A throw is a failed pass, not a verdict.
     virtual bool IsDepthView(uint64_t view) = 0;
 
     // ---- one effect runtime
     virtual bool IsD3D11(uint64_t runtime) = 0;
     // The runtime's device is the capture's device (the backend unwraps ReShade's proxy device and may fall back the way the
-    // runtime choice of the HudLess boundary does).
+    // runtime choice of the HudLess boundary does). captureDevice 0 means there is no capture yet: the backend then decides for
+    // "the game's primary D3D11 device". The core always asks, so a runtime of another device never counts as a consumer.
     virtual bool SameDevice(uint64_t runtime, uint64_t captureDevice) = 0;
     virtual bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
 
@@ -174,7 +185,7 @@ enum class Outcome : uint8_t
     OtherDevice,        // the runtime is not ours: another device (no status text, see Counter::OtherDevice)
     NotD3D11,           // the runtime is not a D3D11 runtime (no status text)
     ManualTransform,    // a RESHADE_DEPTH_INPUT_* macro is set
-    NoDepthInput,       // no texture variable with a known depth input name, or one that cannot be trusted
+    NoDepthInput,       // no texture variable with a known depth input name, or none that reads the DEPTH semantic
     NoCapture,          // a depth input exists but the capture side has not published a capture yet ("waiting")
     CaptureUnavailable, // a capture exists but is stale or has no copy
     SizeMismatch,       // the runtime's back buffer is not the capture's output size
@@ -190,10 +201,15 @@ enum class Counter : uint8_t
     NoDepthInput,
     PassesBound,
     OtherDevice,
+    Failed,
     Count
 };
 inline constexpr size_t kCounters = static_cast<size_t>(Counter::Count);
 const char* CounterName(Counter counter);
+
+// Log the first occurrence of a counter and every 1000th after it. The counters that tick every frame while ReShade runs
+// without an evaluate (otherDevice, passesBound, staleCaptures) log their first occurrence only.
+bool ShouldLog(Counter counter, uint64_t count);
 
 struct Counters
 {
@@ -201,13 +217,22 @@ struct Counters
     uint64_t staleCaptures = 0;      // a capture that is too old, from the future, or has no copy (not: no capture yet)
     uint64_t sizeMismatches = 0;
     uint64_t manualTransformStandDowns = 0;
-    uint64_t noDepthInput = 0;
+    uint64_t noDepthInput = 0;       // no depth input, or one that is not trusted
     uint64_t passesBound = 0;
-    uint64_t otherDevice = 0; // begins of runtimes that are not ours: another device, or not D3D11
+    uint64_t otherDevice = 0;        // begins of runtimes that are not ours: another device, or not D3D11
+    uint64_t failed = 0;             // every Outcome::Failed, and every restore that had to be left pending
 };
 
-// Called for the first increment of a counter and every 1000th (ShouldLog), with the new value. May be null.
+// Called when ShouldLog says so, with the new value. May be null.
 using LogFn = void (*)(Counter counter, uint64_t count);
+
+// What the capture side needs to know before it has a capture: a depth consumer exists, and how big its back buffer is.
+struct ConsumerInfo
+{
+    bool seen = false;       // the last begin that found a trusted depth input is at most kConsumerWindowMs old
+    int64_t seenMs = 0;      // when that was (IBackend::NowMs); 0 if never
+    uint32_t width = 0, height = 0; // the back buffer of that runtime, as that begin read it; 0 if never
+};
 
 class DepthBinder
 {
@@ -222,9 +247,12 @@ class DepthBinder
     // returned.
     void PublishCapture(const DepthCapture& capture) noexcept;
 
-    // True if the last begin that found a trusted depth input is at most kConsumerWindowMs old: the capture side only runs
-    // while ReShade has an effect that reads depth. A begin with no capture yet records it, which is what opens the gate.
-    bool ConsumerSeen(int64_t nowMs) const noexcept;
+    // The capture side asks before every evaluate. It captures only while `seen`, and publishes a capture only if the NGX
+    // Output size equals width x height: that is the character-preview filter, and the size of the copy. A begin that found a
+    // trusted depth input records it (with the runtime's back buffer size) before it looks at the capture, so this works with
+    // no capture yet. With several runtimes the most recent such begin wins. A begin whose back buffer size cannot be read does
+    // not record anything.
+    ConsumerInfo GetConsumer(int64_t nowMs) const noexcept;
 
     // ReShade events (any thread, never throw). `runtime` = the effect_runtime pointer.
     // A begin while a pass of the same runtime is open ends that pass first and starts a new one; the finish of the pass that
@@ -236,7 +264,9 @@ class DepthBinder
     // Effects were reloaded: forgets the manual transform cache and the trust latch. An open pass is restored first (the
     // variable is looked up again, its handle from begin is stale); if that fails the runtime stays dirty with its references.
     void OnReloadedEffects(uint64_t runtime) noexcept;
-    // A technique was switched or the preset changed: forgets the manual transform cache only.
+    // A technique was switched or the preset changed: forgets the manual transform cache only. reshade_set_technique_state fires
+    // BEFORE the change, so the wiring clears on the preset-path event as well and the next begin asks again; the window in
+    // which a begin can still read the old state is narrow by design.
     void OnTechniquesChanged(uint64_t runtime) noexcept;
 
     // One line for the menu: why the last begin did what it did (last writer wins across runtimes; a runtime that is not ours
@@ -252,9 +282,9 @@ class DepthBinder
     };
     enum class Trust : uint8_t
     {
-        Unknown,   // the original binding of the depth input has not been looked at yet
-        Trusted,   // it was empty or a depth view
-        Untrusted, // it was something else: a variable with the right name but not the DEPTH semantic
+        Unknown,   // the binding of the depth input has not been looked at yet
+        Trusted,   // it was empty or a depth view, and a bind has not shown otherwise
+        Untrusted, // it was something else, or no variable read the copy back: right name, not the DEPTH semantic
     };
     struct Runtime
     {
@@ -267,8 +297,11 @@ class DepthBinder
         bool inPass = false;
         bool bound = false;
         uint64_t copy = 0;
-        uint64_t variable = 0;                // the depth input variable of the pass (valid until the pass ends)
-        uint64_t origSrv = 0, origSrgb = 0;   // the binding before the pass
+        // True once a variable read the copy back after the bind. Only then are `variable` (valid until the pass ends) and
+        // `orig*` (what that variable showed before the bind) meaningful; an unverified pass is undone with an erase.
+        bool verified = false;
+        uint64_t variable = 0;
+        uint64_t origSrv = 0, origSrgb = 0;
         bool refSrv = false, refSrgb = false; // a reference to the original view is held
         std::vector<SavedBool> bools;         // bufready_depth values before the pass
     };
@@ -288,6 +321,7 @@ class DepthBinder
         SizeMismatch,
         Manual,
         NoInput,
+        NotTrusted,
         Failed,
         Bound,
     };
@@ -308,6 +342,7 @@ class DepthBinder
     bool AnyNonNeutral(uint64_t runtime, const char* effect, bool& error);
     DepthCapture TakeCapture(uint64_t& copyView);
     void ReleaseView(uint64_t view) noexcept;
+    void RecordConsumer(int64_t nowMs, uint32_t width, uint32_t height) noexcept;
     Outcome Done(Outcome outcome);
     void SetStatus(StatusKind kind, const DepthCapture* capture = nullptr) noexcept;
     void Bump(Counter counter) noexcept;
@@ -315,14 +350,16 @@ class DepthBinder
     IBackend& _backend;
     LogFn _log;
     std::atomic<bool> _enabled { false };
-    std::atomic<int64_t> _consumerMs { INT64_MIN }; // INT64_MIN = no begin has found a depth input yet
     std::atomic<uint64_t> _counts[kCounters] {};
 
     std::recursive_mutex _mutex; // _runtimes
     std::map<uint64_t, Runtime> _runtimes;
 
-    mutable std::mutex _publicMutex; // _capture, _status
+    mutable std::mutex _publicMutex; // _capture, _consumer, _status
     DepthCapture _capture;
+    bool _consumerKnown = false; // a begin has found a trusted depth input
+    int64_t _consumerMs = 0;
+    uint32_t _consumerWidth = 0, _consumerHeight = 0;
     StatusInfo _status;
 };
 } // namespace ext::reshade::depth
