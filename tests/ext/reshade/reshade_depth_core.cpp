@@ -909,6 +909,20 @@ void EnableDisable()
     CHECK(r.Begin() == Outcome::Disabled);
     r.binder.SetEnabled(true);
 
+    { // a late failure of an earlier pass does not leave "failed" on a feature that is off: a begin says "disabled" again
+        Rig f;
+        f.fake.failRestore = true;
+        f.Begin();
+        f.binder.SetEnabled(false);
+        f.Finish();
+        CHECK(f.binder.Status() == kFailed);
+        f.fake.failRestore = false;
+        f.NextFrame();
+        CHECK(f.Begin() == Outcome::Disabled);
+        CHECK(f.binder.Status() == kDisabled);
+        CHECK(f.fake.DepthIs(kOrig, kOrigSrgb) && f.Clean());
+    }
+
     // switched off, then a new begin before the finish arrived: the old pass is put back first
     Rig q;
     CHECK(q.Begin() == Outcome::Bound);
@@ -1049,10 +1063,12 @@ void FailedRestoreRetry()
         CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
         CHECK(r.binder.Status() == kFailed);
         CHECK(!r.fake.unis[0].value); // the bools were put back anyway
+        CHECK(r.fake.Calls("SetUniformBool") == 2); // forced, restored
 
         r.fake.failRestore = false;
         r.NextFrame();
         CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.Calls("SetUniformBool") == 3); // the retry does not put the bools back a second time
         CHECK(r.fake.updates.size() == 3); // bind, the retried restore, bind
         CHECK(r.fake.UpdateAt(1).srv == kOrig && r.fake.UpdateAt(1).srgb == kOrigSrgb && r.fake.UpdateAt(2).srv == kCopy);
         CHECK(r.fake.CoreRefs(kCopy) == 1 && r.fake.CoreRefs(kOrig) == 1 && r.fake.CoreRefs(kOrigSrgb) == 1);
@@ -1468,6 +1484,48 @@ void BackendFailures()
         r.fake.fault = Fault::Throw;
         CHECK(r.Begin() == Outcome::Failed);
         CHECK(r.Clean());
+    }
+    { // the reference to the capture's copy is given back on every refusal, even when that Release throws
+        struct Refusal
+        {
+            void (*breakIt)(Rig&);
+        };
+        const Refusal refusals[] = {
+            { [](Rig& q) { q.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; } },
+            { [](Rig& q) { q.fake.bbW = 100; } },
+            { [](Rig& q) { q.fake.vars.clear(); } },
+            { [](Rig& q) { q.fake.now += 300; } },
+        };
+        for (const Refusal& f : refusals)
+        {
+            int release = 0;
+            {
+                Rig q;
+                f.breakIt(q);
+                q.Begin();
+                for (size_t i = 0; i < q.fake.log.size(); ++i)
+                    if (q.fake.log[i] == "Release")
+                        release = int(i) + 1;
+            }
+            CHECK(release > 0);
+            Rig r;
+            f.breakIt(r);
+            r.fake.faultAt = release;
+            r.fake.fault = Fault::ThrowAfter;
+            CHECK(r.Begin() != Outcome::Bound); // noexcept: an escaping exception would end the program
+            CHECK(r.Clean());
+        }
+    }
+    { // a pass that never finished is rolled back at the next begin; looking up its uniforms may throw
+        Rig r;
+        CHECK(r.Begin() == Outcome::Bound);
+        r.fake.calls = 0;
+        r.fake.faultAt = 1; // the first call of the next begin is the rollback's uniform lookup
+        r.fake.fault = Fault::Throw;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound); // the bools are skipped, the binding is still put back, the new pass binds
+        r.Finish();
+        CHECK(r.Clean() && r.fake.DepthIs(kOrig, kOrigSrgb));
     }
     { // a begin that fails before it bound anything puts nothing back and does not look at the binding again
         int secondAddRef = 0;

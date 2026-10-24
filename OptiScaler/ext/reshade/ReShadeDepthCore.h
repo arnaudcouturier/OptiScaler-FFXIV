@@ -141,7 +141,9 @@ struct IBackend
     // COM reference counting of a shader resource view.
     virtual void AddRef(uint64_t view) = 0;
     virtual void Release(uint64_t view) = 0;
-    // The resource of the view has a depth-family format (D16/D24/D32 and their typeless or single-channel views).
+    // The resource of the view has a depth-family format (D16/D24/D32 and their typeless or single-channel views). False, also
+    // when the query itself fails, makes the core distrust the depth input of that runtime until its effects reload: it fails
+    // closed. A throw is a failed pass, not a verdict.
     virtual bool IsDepthView(uint64_t view) = 0;
 
     // ---- one effect runtime
