@@ -4,7 +4,7 @@ Unofficial fork of OptiScaler (tracking nightly), not affiliated with the OptiSc
 
 > **Status (October 2026): first official release.** `ffxiv-2026.10.23-d9b62110` (on OptiScaler nightly `d9b62110`) is the current packaged build; it was played in game on 2026-10-23 on one RTX 4090 (SDR, DLSS-G 2x to 4x, recomposition HUD-less, preset Auto and a boot on Preset C, the NR model picker): download the zip from the Releases page. See the table below for what was played and what was not.
 
-An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler). It adds DLSS Neural Rendering with pre-SR multipass, DLSS-G multi frame generation unlocks for RTX 30/40, XeFG/XeMFG, OptiHDR, RenoDX scene HDR, a native FFXIV integration (character preview with DLSS, spatial AA and Neural Rendering, window-mode handling, an automatic frame generation multiplier, automatic mipmap bias, game jitter tools) and an FFXIV tab in the OptiScaler menu that is hidden in other games. All fork code lives under `OptiScaler/ext/`, so upstream files carry only small, listed seams (see [docs/SEAMS.md](../docs/SEAMS.md)). The upstream README is [README.md](../README.md).
+An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler). It bundles DLSS Neural Rendering with pre-SR multipass, DLSS-G multi frame generation unlocks for RTX 30/40, XeFG/XeMFG, OptiHDR, RenoDX scene HDR, a native FFXIV integration (character preview with DLSS, spatial AA and Neural Rendering, window-mode handling, an automatic frame generation multiplier, automatic mipmap bias, game jitter tools) and an FFXIV tab in the OptiScaler menu that is hidden in other games. Much of this was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) and the work it builds on; see [Credits](#credits) and [docs/ATTRIBUTION.md](../docs/ATTRIBUTION.md) for who wrote what. All code of this repository lives under `OptiScaler/ext/`, so upstream files carry only small, listed seams (see [docs/SEAMS.md](../docs/SEAMS.md)). The upstream README is [README.md](../README.md).
 
 ## Features
 
@@ -16,7 +16,7 @@ An FFXIV-focused build of [OptiScaler](https://github.com/optiscaler/OptiScaler)
 | RenoDX scene HDR | tested (RTX 4090) |
 | FFXIV native integration (render geometry, native quality, nameplates, companion) | tested (RTX 4090) |
 | HUD-less frame generation (`[HudLess] Mode`: `recomposition` lets DLSS-G recompose the UI, `ui_free` generates on the UI-free image and pastes the HUD back; ReShade presets via a built-in add-on) | opt-in, off by default; `recomposition` tested in SDR with DLSS-G 2x to 4x (RTX 4090); `ui_free` is experimental (in one scene its UI mask fell back for most frames); DLSS-G Preset A and C turn NVIDIA's recomposition off, so with them the fork does not request it and says so in the log and the menu; HDR untested; one GPU hang at the experimental 6x MFG |
-| Recovered from the collaborator's build: NR shader edit, "Linear light + composed" HDR mapping, HDR PNG with menu | untested in game (credit: [docs/ATTRIBUTION.md](../docs/ATTRIBUTION.md)) |
+| NR "Linear light" shader edit, "Linear light + composed" HDR mapping, HDR PNG with menu (the same features are in SirenBrink's v6.0 source) | untested in game (credit: [docs/ATTRIBUTION.md](../docs/ATTRIBUTION.md)) |
 | Character preview DLSS, spatial AA and Neural Rendering (CharaView), including the experimental "Run NR before DLSS" option | opt-in, off by default; tested (RTX 4090) |
 | Automatic mipmap bias (`[Mipmap] MipmapBiasAuto`: texture sharpening follows the upscaling ratio and a quality change) | on by default for FFXIV (bind-time mode; a hand-set `MipmapBiasOverride` in an existing ini disables it); ran in game (RTX 4090) at no measurable fps cost, the visual effect was not compared |
 | Window mode (`[Window] Mode`: border fix after leaving the borderless "fullscreen" and a held-back mode switch while frame generation runs; needs `[XeFG] ForceBorderless` and ReShade) | opt-in, off by default; tested (RTX 4090) |
@@ -51,11 +51,12 @@ Download `OptiScaler-FFXIV-<version>.zip` from the [Releases](../../releases) pa
 
 ## Credits
 
+Most of the feature code in this repository was written by other people. The full table, by area and with commits, is in [docs/ATTRIBUTION.md](../docs/ATTRIBUTION.md).
+
 - The [OptiScaler](https://github.com/optiscaler/OptiScaler) team, for OptiScaler itself.
-- Dagherbou, DLSS Neural Rendering base.
-- wilsjo2, reimplementation of multipass, pre-SR and the MFG unlock.
-- SirenBrink, FFXIV integration.
-- byunjoe and Nickle, contributions to the fork.
+- [SirenBrink](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV), whose community fork this repository carries over in large part: the FFXIV integration, OptiHDR and scene HDR, HDR PNG capture, XeFG/XeMFG, frame markers and pacing, the DLSS-G render preset, the NR model picker, the bind-time mip bias and the source-level jitter fix (as they stood at the import base `36c53a15` and in v6.0 `e17a7362`), and the NR linear-light mode, the HDR PNG menu option and the character preview (v6.0).
+- Dagherbou (DLSS Neural Rendering base), y4my4my4m (multipass, MFG unlock), wilsjo2 (pre-SR, native path, MFG unlock hardening), byunjoe (HUD-less frame generation).
+- janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, stegalloway, mavismmg and dashdogy, whose work SirenBrink's fork adapts; see the attribution table.
 - [RenoDX](https://github.com/clshortfuse/renodx) (clshortfuse), the HDR shaders behind scene HDR; its notice ships with the code that uses it.
 
 ## License

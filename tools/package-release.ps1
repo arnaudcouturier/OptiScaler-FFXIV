@@ -324,14 +324,18 @@ OptiScaler-FFXIV $tag - notices
 This archive contains OptiScaler-FFXIV, a fork of OptiScaler (https://github.com/optiscaler/OptiScaler), licensed GPL-3.0.
 The licence text is Licenses\OptiScaler-FFXIV_LICENSE_GPL-3.0.txt. The corresponding source code is at $srcUrl (tag $tag).
 
-Credits (details in Licenses\ATTRIBUTION.md):
+Credits (the table by area is in Licenses\ATTRIBUTION.md):
   * The OptiScaler team.
-  * Dagherbou (DLSS Neural Rendering base), wilsjo2 (multipass, pre-SR and the MFG unlock), SirenBrink (FFXIV integration),
-    byunjoe and other collaborators (named in the README credits).
-  * A collaborator: three behaviours of an unpublished build were reconstructed by reverse engineering and re-implemented
-    (the NR shader edit for the "Linear light" proxy, the NR HDR mapping "Linear light + composed", the HDR PNG option
-    "Include OptiScaler menu"). No source code of that build was used. See Licenses\ATTRIBUTION.md.
-  * RenoDX (clshortfuse): HDR shaders behind scene HDR. Licenses\RenoDX_LICENSE.txt, RenoDX_ATTRIBUTION.txt, RenoDX_FFXIV_NOTICE.md.
+  * SirenBrink (https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV, GPL-3.0): a large part of this archive's
+    code comes from this community fork: the FFXIV integration, OptiHDR and scene HDR, HDR PNG capture, XeFG/XeMFG, frame
+    markers and pacing, and the DLSS-G render preset, NR model picker, bind-time mip bias and source-level jitter fix (as in its
+    v6.0). Its v6.0 source also contains the NR "Linear light" mode, the HDR PNG option "Include OptiScaler menu" and the
+    character preview, which this archive has too.
+  * Dagherbou (DLSS Neural Rendering base), y4my4my4m (multipass, MFG unlock), wilsjo2 (pre-SR, native path, MFG unlock hardening),
+    byunjoe (HUD-less frame generation), and janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, stegalloway,
+    mavismmg and dashdogy, whose work that community fork adapts.
+  * RenoDX (clshortfuse): the NR colour composition (Licenses\RenoDX_ATTRIBUTION.txt) and the HDR shaders behind scene HDR
+    (Licenses\RenoDX_FFXIV_NOTICE.md). Licence: Licenses\RenoDX_LICENSE.txt.
   * ReShade API headers (BSD-3-Clause OR MIT), used unmodified for the built-in add-on. Licenses\ReShade_ATTRIBUTION.txt.
 
 Third-party binaries in OptiScaler\ and their licences:

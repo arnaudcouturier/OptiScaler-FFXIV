@@ -7,7 +7,7 @@ Source:   https://github.com/clshortfuse/renodx
 What is derived from it
 -----------------------
 
-The colour composition in OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl is taken
+The colour composition in OptiScaler/ext/nr/shaders/dlssnr.hlsl is taken
 from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
 
   * UpgradeToneMap -- the two-branch luminance ratio: below the proxy's luminance

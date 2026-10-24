@@ -1,34 +1,48 @@
 # Attribution
 
-Third-party work this fork builds on. Licences for vendored libraries stay next to their code
-(`external/`, `OptiScaler/ext/hdr/RenoDX_ATTRIBUTION.txt`, `OptiScaler/ext/hdr/shaders/renodx/NOTICE.md`).
-This file credits people whose work is **in the fork's own code**, and says plainly where that work came from.
+OptiScaler-FFXIV is licensed GPL-3.0, like OptiScaler. This file says whose work it contains. Licences of vendored libraries stay next to their code (`external/`, `OptiScaler/ext/hdr/RenoDX_ATTRIBUTION.txt`, `OptiScaler/ext/hdr/shaders/renodx/NOTICE.md`, `OptiScaler/ext/reshade/ReShade_ATTRIBUTION.txt`).
 
-## A collaborator - `depth-jitter-20261013` build (behavioural reconstruction from a binary)
+## Where the code comes from
 
-A collaborator of the fork's author shipped an unpublished build of this fork
-(`OptiScaler v10.0.0-dev (36c53a15-community-preview-depth-jitter-20261013)`, a `winmm.dll`). No source for it
-is available. The features below were **reconstructed from that binary by static reverse engineering**
-(a disassembly comparison for the shader, decompiler output read for the C++), then re-implemented from the
-observed behaviour. They are not the collaborator's source code, and nothing was copied from decompiler output. Where
-the reconstruction reproduces the collaborator's visible names (ini keys, ini values, menu labels, tooltip meaning) it does
-so on purpose, so that the collaborator's users can move between the two builds.
+A large part of the feature code under `OptiScaler/ext/` was carried over from SirenBrink's community fork, [`SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV`](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (GPL-3.0), as it stood at commit `36c53a15` (2026-10-09, called "the import base" in the docs). That fork in turn builds on work by Dagherbou, y4my4my4m and wilsjo2. The code was moved under `OptiScaler/ext/` behind a seam layer, so most upstream files stay untouched (see [SEAMS.md](SEAMS.md)). Licence files that came with moved code stay next to it, and many moved files say in their headers that they were moved.
 
-| ID | What | Where in this repo |
-|---|---|---|
-| F2 | The edit to the NR compute shader for the "Linear light" proxy (reproduced to the byte: the compiled shader is identical to the one in the collaborator's build) | `OptiScaler/ext/nr/shaders/dlssnr.hlsl` |
-| F3 | NR HDR mapping mode "Linear light + composed" (`ReversibleMode = 5`) | `OptiScaler/ext/nr/` (config, menu, presets), `OptiScaler/ext/ini/DlssNr.ini` |
-| F4 | HDR PNG option "Include OptiScaler menu" (`ScreenshotMenu`) | `OptiScaler/ext/hdr/screenshot/`, `OptiScaler/ext/ini/HDR.ini` |
-| F5 | CharaView: isolated treatment of the 3D character preview (configuration, shader recognition, the preview renderer's target table with its guards, the spatial anti-aliasing path with optional 2x upscaling, the hooks and menu card; the isolated DLSS pass follows) | `OptiScaler/ext/ffxiv/chara/`, `OptiScaler/ext/ini/FFXIV.ini`, `OptiScaler/ext/ini/HDR.ini` |
+A few features follow code SirenBrink published later, in v6.0 (commit `e17a7362`, 2026-10-20). The table says which.
 
-F5 deserves a plain note: it is the largest of these features and the only one that reads a structure of the game executable. It was reconstructed from the binary's behaviour and the shader source it embeds (read and described in words, not copied), then written fresh; the executable is read through a pattern scan and checks of this fork's own, stricter than the original's. The configuration keys, section name and visible menu texts are reproduced on purpose so ini files and menus match between the two builds.
+## By area
 
-What was observed and how sure the reconstruction is: `docs/RECONSTRUCTION-REFERENCE.md`.
+| Area | Source | Who | What this fork did |
+|---|---|---|---|
+| OptiScaler | upstream [optiscaler/OptiScaler](https://github.com/optiscaler/OptiScaler) | cdozdil, FakeMichau and the OptiScaler contributors | tracks the nightly; carries small listed seams |
+| DLSS Neural Rendering: core pass, colour pipeline, exposure scan, presets, compare views | import base | Dagherbou (base), wilsjo2, SirenBrink | moved to `ext/nr/` with a config binder and seams |
+| NR multipass, pre-SR, split frame work, native path, hybrid precision, Vulkan path | import base | y4my4my4m (multipass), wilsjo2 (pre-SR, native path, hybrid, Vulkan parity), SirenBrink | moved; added `VitCapture` and the verified-module table |
+| NR pass feedback, bottleneck reuse (`VitEvery`), NR direct-linear input | import base | SirenBrink, adapting janblade's work | moved |
+| AMD HIP pre-SR | import base | SirenBrink, adapting Ainquisition's `amd-v084-minimal` and MatheusGViana's AMD project | moved |
+| Spatial compression, ResidualFG | import base | SirenBrink and wilsjo2; `PeripheralWarp` by BeliyG3 and ShyVortex (MIT licence kept next to the code) | moved |
+| NR model version picker | follows SirenBrink's v6.0 (`5bfa6e92`, `50ca6733`) | SirenBrink | same `NR.<version>` folders, `[DlssNr] Runtime` key, selection with a revision, three search roots and switch order; this fork's catalog, scan, card and rebuild code is separate and has not been run in game |
+| HDR10 output (OptiHDR), FG HDR, HDR menu layer, HDR PNG capture | import base | SirenBrink | moved behind seams |
+| RenoDX scene HDR and its NR/DLSS scene input | import base | RenoDX by clshortfuse (Carlos Lopez Jr., MIT); the FFXIV shaders are by Ersh and Pumbo; adapted by SirenBrink | moved; notices in `OptiScaler/ext/hdr/shaders/renodx/` |
+| NR colour composition | RenoDX | clshortfuse (MIT) | see `OptiScaler/ext/hdr/RenoDX_ATTRIBUTION.txt` |
+| NR "Linear light" proxy and "Linear light + composed" mapping, HDR PNG option "Include OptiScaler menu", character preview (CharaView) | SirenBrink's v6.0 (`fe208a59`, 2026-10-16) | SirenBrink; the NR direct-linear idea cites janblade | see below |
+| HUD-less frame generation: mask, paste, UI image, defaults, `[DLSSG] UIRecomposition` | import base | byunjoe wrote it (nine commits, 2026-10-02/03); SirenBrink merged it and added the slot ring | this fork added native capture at the first FFXIV UI draw, an in-process ReShade add-on, a state machine with coverage guard and fenced slots |
+| FFXIV integration: native quality hooks, `ForcePerfQuality`, render size, colour scaling, nameplates (companion), composition swapchain hook, lighting scan, frame markers | import base | SirenBrink; the composition swapchain hook was started by janblade and wilsjo2 | moved; replaced fixed offsets with an executable identity check (`TimeDateStamp` and `SizeOfImage`) and kept the same guard bytes |
+| DLSS-G multi frame generation unlock (RTX 40) | import base | y4my4my4m wrote the original; wilsjo2 hardened it; SirenBrink reworked it; `AdaTemporal` adapts mavismmg's MFGAdaUnlock-RenoDx (MIT) and dashdogy's technique | moved |
+| RTX 30 MFG loader | import base | SirenBrink, adapting ShyVortex | moved |
+| Frame interval, guide matching, ordered swapchain submission, GPU lifetime and the `[UP]` Reflex and Streamline fixes | import base | SirenBrink; GPU lifetime tracking adapts stegalloway's work | moved |
+| XeFG / XeMFG: unlock, pacing, dynamic multiplier, camera, HDR | import base | Citrus333 (unlock, pacing base), SirenBrink (dynamic multiplier, camera, pacing rework, HDR) | moved; glue and context rebuild are this fork's |
+| DLSS-G render preset (`[DLSSG] RenderPreset`), live switching | follows SirenBrink's v6.0 (`5bfa6e92`, `50ca6733`) | SirenBrink | same setting id, hook points and byte anchors; the guards, instruction decoder and switch logic are this fork's |
+| Bind-time mipmap bias, quality change without the 500 ms pause, hook-install retry, frame pacing trace, hidden-present `DO_NOT_WAIT`, NR pause on focus loss | follow SirenBrink's v6.0 | SirenBrink | same approach; this fork's code is separate except the frame pacing trace line format and counters |
+| Source-level jitter fix (`[FFXIV] JitterSource`) | follows SirenBrink's `FfxivJitter` hooks (`5bfa6e92`) | SirenBrink | same hook points, strength range, phase-count rule, ring criteria and most guard blocks; the controller, verification, fall-back and install are this fork's |
+| Automatic DLSS-G multiplier (`[DLSSG] AutoMFG`) | selector rules from SirenBrink's XeFG selector (`XeFGDynamic.h`) | SirenBrink | controller, kill-switch, stall rule and self-test are this fork's |
+| Window mode, Ember menu style, FFXIV tab and card registry, create-time automatic mipmap bias, game jitter probe and learned correction, packaging and release tooling, patch runbook | this fork | arnaudcouturier | no counterpart in SirenBrink's tree |
 
-Five later features take their names and ideas from the collaborator's v6.0 build, whose source is published (GPL-3.0). Each is described in one sentence; where the sentence says the code is the fork's own, no source of his was copied. The NR model version picker follows his naming and idea: the `OptiScaler\NR.<version>` folders, the `[DlssNr] Runtime` key and one immutable selection with a revision that the scene pass compares; the code (catalog, scan, selection, switch, card, preview rebuild) is this fork's own and nothing was copied from his source. The DLSS-G render preset (`[DLSSG] RenderPreset`, 0 Auto / 1 A / 2 B / 3 C) and its live switching follow the approach of his `PresetCache`: answering the driver-settings query and, for the live change, rebuilding each new endpoint's private configuration through NVIDIA's own code by hooking the cached-settings reader, the endpoint create function and the configuration copy function; the structural guards (masked frame sizes, same-global and context checks), the provider choice, the readout and the switch state machine are written fresh for this fork. The bind-time mipmap bias (hooks on the six `SetSamplers`/`GetSamplers` entry points that bind an immutable sampler copy carrying log2(render/output), `GetSamplers` returning the game's sampler, the `[Mipmap] AutomaticFFXIV` name) follows the approach of his `Dx11AutomaticMipBias`; the table, the lock-free bind path, the add-or-replace detection and the settings precedence are the fork's own code. The idea of skipping the release sleep once the queues are drained, and of serialising the DX11 feature lifecycle, follows his v6.0 source; the code here is the fork's own, written fresh with a narrower lock, a closed/in-flight handle protocol and a three-way result, and nothing was copied. Two more pieces follow his source in the idea only: the install retry of the native-quality hooks follows his `IFeature.cpp` (up to three attempts, dead threads skipped before suspending), and the frame-pacing CPU trace (the line format, the phase names) and the idea of presenting the hidden DX11 swapchain with `DXGI_PRESENT_DO_NOT_WAIT` follow his `FramePacingTrace` work; the code of both is this fork's own and nothing was copied. The source-level jitter fix (`[FFXIV] JitterSource`: dividing the game's jitter generator output by the native strength so the full +-0.5 px lattice is drawn, NVIDIA's `8 * output/render area` phase count in place of the game's unbounded one, and telling the upscaler the offset projected from the same frame's NDC translation) follows the approach of his `FfxivJitter` hooks (v6.0 source, GPL-3.0); the controller, the pairing ring, the verification against the generator's own value, the fall-back, the instruction-guard table and the install are this fork's own code, with the pure arithmetic (phase count, native strength, normalisation, projection) re-derived from the executable's instructions.
+## Linear light, HDR PNG menu option and character preview
+
+SirenBrink's v6.0 source contains these features. This fork has them with the same ini keys and menu texts. The NR linear-light shader branch is identical to his, and the compiled shader has the same SHA-256 (`b9cbd405...aab8`). The "Linear light + composed" menu texts and the "Include OptiScaler menu" tooltip match word for word, and the CharaView anti-aliasing and guide shaders use the same constants and registers. The CharaView C++ is a separate implementation, and the fork's preview Neural Rendering works differently from his (NR on the 2x output, on the native image alone, or before DLSS).
+
+The fork first derived these features from an unpublished community build, a `winmm.dll` whose version string is `36c53a15-community-preview-depth-jitter-20261013`. The notes on that analysis are in [RECONSTRUCTION-REFERENCE.md](RECONSTRUCTION-REFERENCE.md). Git commit times cannot settle which side wrote a feature first, so treat SirenBrink's repository as the primary source for these three features.
+
+## People and projects
+
+Dagherbou, y4my4my4m, wilsjo2, byunjoe, SirenBrink, janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, stegalloway, mavismmg, dashdogy, clshortfuse (RenoDX), Ersh and Pumbo (RenoDX FFXIV mod), the OptiScaler team. If your work is here and credited wrongly or not at all, open an issue and it will be fixed.
 
 Thank you.
-
-## clshortfuse / RenoDX
-
-See `OptiScaler/ext/hdr/RenoDX_ATTRIBUTION.txt` and `OptiScaler/ext/hdr/shaders/renodx/NOTICE.md`.
