@@ -1,15 +1,15 @@
-# Reconstruction notes: features recovered from the collaborator's `depth-jitter-20261013` build
+# Binary-derived analysis of an unpublished 2026-10-13 community build
 
-The collaborator's build has no available source. F2, F3 and F4 were recovered from the binary and written fresh here, from
-the behaviour that was observed. Credit and provenance: [ATTRIBUTION.md](ATTRIBUTION.md). Nothing in this repo is
-pasted decompiler output; the notes below keep only addresses, string anchors and observed constants as evidence.
+SirenBrink's v6.0 source (commit `fe208a59`, 2026-10-16, contained in `e17a7362`) contains these features, and the fork's versions match it closely: the compiled F2 shader has the same SHA-256 as the one committed there, and the F3 menu strings and the F4 tooltip are identical. This file records what was observed in an earlier, unpublished community build (`36c53a15-community-preview-depth-jitter-20261013`, called "the community build" below) and how sure each point was. It is kept for its byte-level notes: hashes, addresses, string tables and open questions.
 
-**Binaries used (read-only).**
+F2 (an NR shader edit), F3 (an NR menu setting), F4 (an HDR screenshot option) and F5 (CharaView) are the labels used below. Credit and provenance: [ATTRIBUTION.md](ATTRIBUTION.md).
+
+**Binaries used (read-only; local copies, not part of this repository).**
 
 | Role | File | Size | Notes |
 |---|---|---|---|
-| The collaborator's build | `builds\winmm.dll` | 27,207,680 B | SHA-256 `8837e1d7dbffcac9...`, PE time 2026-10-13 11:51:26 UTC |
-| Baseline (closest) | `builds\winmm-ffxiv-20261013.dll` | 27,097,088 B | The fork before the collaborator's changes. Chosen over `winmm-ffxiv-overlayfix.dll`: the collaborator's build shares the older overlay-wait log text (`RenderImGui_DX12 DX12 overlay completion wait ...`, 2 hits in both); `overlayfix` has the newer `WaitForOverlayFence` text, which the collaborator's build lacks. A raw ASCII-string diff (strings >= 8 chars) gives 49 baseline-only / 126 collaborator-only strings for `20261013`, 47 / 128 for `overlayfix` - a close call, the overlay-wait string decides |
+| The community build | `builds\winmm.dll` | 27,207,680 B | SHA-256 `8837e1d7dbffcac9...`, PE time 2026-10-13 11:51:26 UTC |
+| Baseline (closest) | `builds\winmm-ffxiv-20261013.dll` | 27,097,088 B | The fork before the community build's changes. Chosen over `winmm-ffxiv-overlayfix.dll`: the community build shares the older overlay-wait log text (`RenderImGui_DX12 DX12 overlay completion wait ...`, 2 hits in both); `overlayfix` has the newer `WaitForOverlayFence` text, which the community build lacks. A raw ASCII-string diff (strings >= 8 chars) gives 49 baseline-only / 126 community-build-only strings for `20261013`, 47 / 128 for `overlayfix` - a close call, the overlay-wait string decides |
 
 Confidence words used below: **observed** (read directly from the binary), **inferred** (follows from observed
 facts), **unknown** (not established).
@@ -20,7 +20,7 @@ facts), **unknown** (not established).
 
 **Result: reproduced exactly.** The HLSL change in `OptiScaler/ext/nr/shaders/dlssnr.hlsl` compiles, with the
 project's own fxc and recipe (`-T cs_5_0 -E CSMain -O3`, the one in `ext/ext.props`), to a 40,748-byte DXBC
-container that is **byte-identical** to the one embedded in the collaborator's build (SHA-256
+container that is **byte-identical** to the one embedded in the community build (SHA-256
 `b9cbd405231c648f4d647fd36009298b51b63b37d28101a74f7de2247af2aab8`). Identical bytes mean the same shader
 semantics and the same instruction stream; they do not prove the same source text (comments, names and
 equivalent spellings of an expression are invisible in a compiled shader).
@@ -29,11 +29,11 @@ equivalent spellings of an expression are invisible in a compiled shader).
 
 | What | Where |
 |---|---|
-| The collaborator's blob | `winmm.dll` file offset `0x17eae00` (RVA `0x17ec000`), 40,748 B, cs_5_0, container hash `c830df5d58e7aa8bdf185a70d2fe7ddf` |
+| The community build's blob | `winmm.dll` file offset `0x17eae00` (RVA `0x17ec000`), 40,748 B, cs_5_0, container hash `c830df5d58e7aa8bdf185a70d2fe7ddf` |
 | Baseline blob | `winmm-ffxiv-20261013.dll` `0x17d7d50`, and `winmm-ffxiv-overlayfix.dll` `0x17d7f60`: both 40,424 B, container hash `11b7158f6461fe76a2e1d05c08dd7a23`, i.e. the same blob in both candidates |
 | Baseline source check | the unmodified `dlssnr.hlsl` of this repo, compiled with the same fxc and flags, is byte-identical to the baseline blob (so the baseline HLSL is the right starting point) |
-| Instruction slots | baseline 1244, the collaborator 1259 (`+15`), as the earlier string analysis found; the modified HLSL also gives 1259 |
-| Method | DXBC containers carved out of each DLL by magic and size, disassembled with `fxc -dumpbin` (Windows SDK 10.0.26100), diffed; the candidate HLSL was then compiled and its disassembly diffed against the collaborator's (0 differing lines) |
+| Instruction slots | baseline 1244, the community build 1259 (`+15`), as the earlier string analysis found; the modified HLSL also gives 1259 |
+| Method | DXBC containers carved out of each DLL by magic and size, disassembled with `fxc -dumpbin` (Windows SDK 10.0.26100), diffed; the candidate HLSL was then compiled and its disassembly diffed against the community build's (0 differing lines) |
 
 ### What the +15 instructions are
 
@@ -85,7 +85,7 @@ Nothing for F2 alone (it cannot be reached without F3). See F3.
 **Result: reconstructed, high confidence on what the setting is and does, medium on "nothing else changed".** It is
 the sixth value (`5`) of the existing NR setting `[DlssNr] ReversibleMode`, shown in the combo "HDR mapping
 (experimental)". It is not an HDR-output setting (it lives in `ext/nr`, not `ext/hdr`): it decides how a *linear* NR
-input surface is shown to the neural model. The brief expected `ext/hdr`; the code puts the setting in `ext/nr`.
+input surface is shown to the neural model.
 
 ### Evidence (all in `builds\winmm.dll`, Ghidra image base 0x180000000)
 
@@ -101,7 +101,7 @@ input surface is shown to the neural model. The brief expected `ext/hdr`; the co
 ### What the repo does
 
 * `ext/nr/shaders/dlssnr.hlsl`: F2.
-* `ext/nr/menu/DlssNr_Menu.cpp`: six entries, the clamp follows the table size, the collaborator's tooltip text.
+* `ext/nr/menu/DlssNr_Menu.cpp`: six entries, the clamp follows the table size, the community build's tooltip text.
 * `ext/nr/presets/NrUserPresets.h`: `ReversibleMode` range 0..5.
 * `ext/ini/DlssNr.ini` and `ext/nr/NrConfig.h` comments list mode 5.
 * No config code change (a `uint32` read with no clamp, as before). The two dispatch sites and the Vulkan site pass
@@ -115,23 +115,23 @@ is flagged as linear HDR (`frame.ColourIsLinearHdr`, a decision made before the 
 other frame the encode is a plain copy, which is what the tooltip's last sentence says. Linear HDR colour surfaces are
 floating-point (the code's own check, `FormatCanHoldLinearHdr`, lists R16G16B16A16_FLOAT, R32G32B32A32_FLOAT,
 R11G11B10_FLOAT), so mode 5 does not store linear values in an 8-bit target. No mode-dependent surface format exists in
-the clean repo's code path; whether the collaborator's build changed one was not exhaustively excluded (see unknowns).
+the clean repo's code path; whether the community build changed one was not exhaustively excluded (see unknowns).
 
 ### Interplay with the NR scene input (`[HDR] NRSceneInput`)
 
-Shader side, settled: the NR scene-input shader blob and both `DlssNr_Spatial` blobs in the collaborator's build are
-byte-identical to the baseline's (`analysis/dll-string-diff.md` section 5; only `DlssNr_Shader` differs), so the only
+Shader side, settled: the NR scene-input shader blob and both `DlssNr_Spatial` blobs in the community build are
+byte-identical to the baseline's (a string diff of the two builds, section 5 of it; only `DlssNr_Shader` differs), so the only
 shader that knows about mode 5 is the one reproduced in F2. C++ side: the scene-input code in this repo never reads the
-mapping mode, and nothing observed in the collaborator's build suggests it does (the scene path hands NR a linear surface and the
+mapping mode, and nothing observed in the community build suggests it does (the scene path hands NR a linear surface and the
 mapping setting then applies to it like to any other linear input). The C++ side was not searched exhaustively.
 
 ### Unknown / not established
 
-* Whether the collaborator's build changed any C++ besides the menu, the preset range and the cbuffer value. The `ReversibleMode`
-  field offset (0x1198 in the config object) is read from 33 places in the collaborator's text section against 31 in the
+* Whether the community build changed any C++ besides the menu, the preset range and the cbuffer value. The `ReversibleMode`
+  field offset (0x1198 in the config object) is read from 33 places in the community build's text section against 31 in the
   baseline (`winmm-ffxiv-20261013.dll`), but that offset is shared with unrelated structures and the two builds differ in
   many other ways, so the difference was not attributed.
-* The collaborator's default for `ReversibleMode` was not observed (the constructor write for the default byte at config offset
+* The community build's default for `ReversibleMode` was not observed (the constructor write for the default byte at config offset
   0x11a0 was not located). The menu resets an out-of-range value to 0, which says nothing about the default; this repo
   keeps `0` (soft knee), the baseline's default.
 
@@ -140,11 +140,11 @@ mapping setting then applies to it like to any other linear input). The C++ side
 1. NR on, an HDR (linear FP16) FFXIV session: choose **Linear light + composed**. The picture should stay stable and
    close to the other "composed" modes; compare against `Off (soft knee)`.
 2. Bright, saturated highlights (spell effects, sky): they may change hue (the model sees a clipped input). That is the
-   documented cost of the mode, not a bug; tell me if it looks worse than the other modes.
+   documented cost of the mode, not a bug; report it if it looks worse than the other modes.
 3. Shadows: look for banding (the proxy is FP16 on a linear HDR surface, so none is expected).
 4. SDR / tone-mapped input: the setting must do nothing (passthrough).
 5. Save a preset with the mode selected, reload it; set `ReversibleMode=5` in the ini and confirm the menu shows it.
-6. Paths no automated test runs with mode 5 (they run the same shaders as the collaborator's build, so the behaviour is faithful,
+6. Paths no automated test runs with mode 5 (they run the same shaders as the community build, so the behaviour is faithful,
    but they were not exercised here): working scale below 1 (the box downsample now averages the proxy in linear instead
    of sRGB), working scale above 1 (supersample), spatial compression on, and matched residual at a reduced scale. The
    matched-residual rebuild at full scale is covered by the WARP test.
@@ -174,9 +174,9 @@ existing clean capture is used unchanged.
 ### What the repo does (all inside `ext/`, zero upstream lines)
 
 * `ext/hdr/HdrConfig.{h,cpp}`: `screenshotMenu` bound to `[HDR] ScreenshotMenu`, default false. `ext/ini/HDR.ini` documents it.
-* `ext/hdr/menu/HdrMenu.cpp`: the checkbox, reset button and the collaborator's tooltip, in the same disabled block as the ICC option.
+* `ext/hdr/menu/HdrMenu.cpp`: the checkbox, reset button and the community build's tooltip, in the same disabled block as the ICC option.
 * `ext/hdr/screenshot/MenuCapture.h`: the pure five-condition decision; `HdrScreenshot.{h,cpp}`: `MenuCaptureWanted()` gathers the five inputs, `PrepareMenu()` runs the existing `Prepare` for the finished PQ output in RENDER_TARGET state.
-* `ext/hdr/menu/Overlay.cpp`: `OverlayScope`'s destructor calls `PrepareMenu` right after the menu layer was composited into the PQ output (the output is still a render target there; upstream transitions it to present afterwards, exactly the state the collaborator used). The existing GPU-owner after-execute callback submits the job when the overlay's command list executes (the collaborator submitted explicitly right after its own execute; same effect).
+* `ext/hdr/menu/Overlay.cpp`: `OverlayScope`'s destructor calls `PrepareMenu` right after the menu layer was composited into the PQ output (the output is still a render target there; upstream transitions it to present afterwards, exactly the state the community build used). The existing GPU-owner after-execute callback submits the job when the overlay's command list executes (the community build submitted explicitly right after its own execute; same effect).
 * `ext/hdr/BridgeHdr.cpp`: the bridge leaves the request alone while `MenuCaptureWanted()`.
 * SEAMS catalog: the `PrepareScreenshot` and `OverlayScope` rows note the new behaviour; no new seam.
 
@@ -188,8 +188,8 @@ existing clean capture is used unchanged.
 
 * The exact meaning of the two global bytes is inferred from use. 0x1819b93fb: in the overlay function the "HDR overlay on" flag (0x1819b91ad) is set from `0x1819b93fb != 0 && swapchain format == 0x18 (R10G10B10A2)`, which mirrors this repo's `OverlayRtvFormat` (`Active() && format == R10G10B10A2`), so it is the OptiHDR-active flag. 0x1819cc620: reset next to the menu's other visibility state in the overlay function, so it is the menu-visible flag.
 * What happens when a menu capture was requested but the overlay does not draw that frame (empty draw data, layer preparation failure): in the binary the request is simply not consumed and expires after one second with no message. The repo behaves the same.
-* The collaborator's `Prepare` and `Submit` were compared by reading against this repo's versions (not diffed byte for byte): no difference was seen.
-* **The one real design difference from the collaborator, and the top risk.** The collaborator submits the job explicitly right after its own `ExecuteCommandLists` on the overlay queue. This repo relies on the GPU-owner after-execute callback seeing the overlay's command list through the queue `ExecuteCommandLists` detour (which hooks the shared queue vtable, so it should). If the detour misses that list, no PNG is written and the capture stays prepared, blocking further screenshots until the next key press after about 5 seconds drops it.
+* The community build's `Prepare` and `Submit` were compared by reading against this repo's versions (not diffed byte for byte): no difference was seen.
+* **The one real design difference from the community build, and the top risk.** The community build submits the job explicitly right after its own `ExecuteCommandLists` on the overlay queue. This repo relies on the GPU-owner after-execute callback seeing the overlay's command list through the queue `ExecuteCommandLists` detour (which hooks the shared queue vtable, so it should). If the detour misses that list, no PNG is written and the capture stays prepared, blocking further screenshots until the next key press after about 5 seconds drops it.
 
 ### What to verify in-game
 
@@ -197,51 +197,50 @@ existing clean capture is used unchanged.
 2. Close the menu and press the key again: a clean capture, as before.
 3. Screenshot format = SDR PNG: the option is greyed out and the SDR PNG has no menu.
 4. Frame generation on (DLSS-G / XeFG): still exactly one file per key press, no hitch, no device-removed in `OptiScaler.log`.
-5. Does the screenshot key fire while the menu is open? (The key is polled in the menu's shortcut pass; if it does not fire with the menu up, the menu capture cannot be triggered by the key. That limitation would be shared with the collaborator's build.)
+5. Does the screenshot key fire while the menu is open? (The key is polled in the menu's shortcut pass; if it does not fire with the menu up, the menu capture cannot be triggered by the key. That limitation would be shared with the community build.)
 6. `OverlayMenu=false`: the menu cannot be open, so the capture is the clean one.
 
 ---
 
 ## F5 - CharaView: isolated treatment of the 3D character preview
 
-CharaView is the feature of the collaborator's build that gives the game's 3D character preview (the off-screen scene shown in the
+CharaView is the feature of the community build that gives the game's 3D character preview (the off-screen scene shown in the
 character, equipment and glamour windows) its own handling: an isolated DLSS Super Resolution pass with 2x output, and an
-optional spatial anti-aliasing pass on the equipment image. It is off by default and fails open in the collaborator's build (any doubt
+optional spatial anti-aliasing pass on the equipment image. It is off by default and fails open in the community build (any doubt
 leaves the native draw untouched), and it is reproduced that way here.
 
-**Status of this repo.** Reconstructed so far: everything the feature stands on (configuration, shader recognition, the
+**Status of this repo.** Implemented: everything the feature stands on (configuration, shader recognition, the
 preview renderer's target table with its guards, the draw classifier, the slot bookkeeping, the jitter sequence, the hook
-layer, the menu card and an identification log) and the **spatial anti-aliasing path with the optional 2x preview upscaling**.
-The isolated DLSS pass itself is **not** part of this revision: its menu checkbox and counters exist and stay inert, the
-interface it will plug into is fixed (`ext/ffxiv/chara/CharaDlssApi.h`) and the menu says "DLSS core: not in this build yet."
-The evidence for the DLSS path is kept below because the classifier, the slot rules and the jitter were written from it.
+layer, the menu card and an identification log), the spatial anti-aliasing path with the optional 2x preview upscaling, and the
+isolated DLSS pass (section "F5 DLSS core" below; its interface is `ext/ffxiv/chara/CharaDlssApi.h`).
+The evidence for the DLSS path is kept below because the classifier, the slot rules and the jitter follow from it.
 
 Confidence: **high** on the data flow, configuration, menu, shader recognition and the AA filter; **medium** on what each
 engine entity is (the names "finisher" and "equipment display" are inferred from structure, the engine names nothing at this
 level); **low** on which windows reach the preview renderer (needs one session in the game).
 
 Labels: **[O]** observed in the binary, **[I]** inferred from observed facts, **[U]** unknown. Addresses are Ghidra virtual
-addresses of the collaborator's `winmm.dll` (image base `0x180000000`) unless marked `exe RVA`.
+addresses of the community build's `winmm.dll` (image base `0x180000000`) unless marked `exe RVA`.
 
 ### Evidence
 
 | Observation | Where |
 |---|---|
-| Nothing of CharaView exists in the baseline build: the strings `FfxivPreviewDLSS`, `CharaView`, `PreviewAA`, `Camera[59]`, `Character preview (experimental)` have 0 hits there and 13 / 27 / 1 / 1 / 1 in the collaborator's build **[O]** | string search of both DLLs |
+| Nothing of CharaView exists in the baseline build: the strings `FfxivPreviewDLSS`, `CharaView`, `PreviewAA`, `Camera[59]`, `Character preview (experimental)` have 0 hits there and 13 / 27 / 1 / 1 / 1 in the community build **[O]** | string search of both DLLs |
 | Five new configuration keys, all `CustomOptional<bool>`: `[FFXIV] PreviewDLSS` (false), `PreviewAA` (false), `PreviewUpscale` (**true**), `PreviewGuideCapture` (false), `[HDR] PreviewNRTrace` (false). `[FFXIV]` is a new section **[O]** | key strings `0x1818d13c8..0x1818d1418`, load `0x1801fe521..0x1801fe6cb`, defaults `0x1801f2d1a..0x1801f2d53` (`mov dl,1` at `0x1801f2d45` for `PreviewUpscale`) |
 | Menu: a collapsible header `Character preview (experimental)` inside the NR card, checkbox `Preview DLSS (2x output, experimental)`, counter line `DLSS previews: %u active; %llu evaluations; %llu fallbacks`, two checkboxes `Preview spatial AA` and `2x preview upscaling` (disabled while DLSS is on), a wrapped note, and for AA the status lines `Processed preview draws: %llu`, `Native preview retained: deferred rendering needs a separate integration path.`, `Waiting for the native equipment preview texture.`, `Waiting for the equipment preview display shader.`. No tooltips, no reset buttons **[O]** | strings `0x1818fae00..0x1818faf78`, `0x1818fabf0..0x1818faba0`; code `0x1803510c6..0x180351346` (inside the NR menu function `0x180350f10`) |
-| The preview renderer is reached through **one** structure of the game executable: a 20-entry table of render targets. The table is found by a read-only scan of the running executable's `.text` for the 18-byte accessor `48 8B 05 ?? ?? ?? ?? 8B CA 48 8B 84 C8 C8 02 00 00 C3`; exactly one match is required, there is no RVA and no PE stamp check in the collaborator's code **[O]**. In the current game executable the pattern exists exactly once (exe RVA `0x26ABD0`) and the global it loads is exe RVA `0x290E490` **[O]** (a read-only byte scan of the executable, nothing was run) | accessor reader `0x18022e460` (cache), scan `0x18022ddc0`, read `0x18022e160` |
+| The preview renderer is reached through **one** structure of the game executable: a 20-entry table of render targets. The table is found by a read-only scan of the running executable's `.text` for the 18-byte accessor `48 8B 05 ?? ?? ?? ?? 8B CA 48 8B 84 C8 C8 02 00 00 C3`; exactly one match is required, there is no RVA and no PE stamp check in the community build's code **[O]**. In the current game executable the pattern exists exactly once (exe RVA `0x26ABD0`) and the global it loads is exe RVA `0x290E490` **[O]** (a read-only byte scan of the executable, nothing was run) | accessor reader `0x18022e460` (cache), scan `0x18022ddc0`, read `0x18022e160` |
 | Table layout: entry `i` is a pointer at manager `+0x2C8 + 8i` for `i` in 0..12, `+0x378 + 8(i-13)` for 13..17, `+0x360` (18) and `+0x368` (19); 0x400 bytes of the manager are read, then 0x70 bytes of each entry object: native texture pointer at `+0x68`, width (u32) at `+0x40`, height (u32) at `+0x44`. An entry with a width or height of 0 or above 0x4000 is zeroed. Meaning: 0-7 output images, 8-12 G-buffer, 13-17 transparent G-buffer, 18-19 depth candidates **[O]**; all targets are 576 x 960 in the current executable's initialiser (exe RVA `0x2D51E0`) **[O]**, entries 16 and 17 stay null **[I]** | exe constructor `0x2D4DE0`, factory `0x224870`; `companion.resourceWrapperOffset = 0x68` is the same engine wrapper offset **[I]** |
 | A texture matches an entry only if pointer **and** both sizes match; the table is re-read at most every 100 ms; an all-null table matches nothing **[O]** | `0x18022e160` |
 | Shaders are recognised by the CRC-32 of the DXBC at `CreatePixelShader`: seven geometry (G-buffer) pixel shaders, one "finisher" (`0xFDB2F4FC`), one "equipment display" (`0x7B40E31A`) **[O]**; the UI set that shows preview images is the one the HDR preview mask already uses **[O]** | `0x1802345f0` |
 | Spatial AA runs only when DLSS is off, only on `Draw`, only for the equipment display shader whose `t0` is table entry 0; the output is a private RGBA8 texture 1x or 2x the source, the draw runs with `t0` swapped and `t0` is restored afterwards; deferred contexts are counted and left native **[O]** | `0x1802404d0`, `0x1802308a0`, init `0x1802304b0` |
-| The AA filter is a luma-based, alpha-preserving edge filter in the style of FXAA 3.11 (one source texture, one bilinear clamp sampler, no constant buffer); texel size from the **source** dimensions also when the output is 2x **[O]** | HLSL string at file offset `0x18d7b50` (read and described in words, not copied) |
+| The AA filter is a luma-based, alpha-preserving edge filter in the style of FXAA 3.11 (one source texture, one bilinear clamp sampler, no constant buffer); texel size from the **source** dimensions also when the output is 2x **[O]** | HLSL string at file offset `0x18d7b50` |
 | DLSS path: per preview texture an NGX feature (render size N x M, output 2N x 2M, MaxPerf, flags `0x42` plus `0x8` when the depth is reversed), 16-phase Halton (2,3) jitter applied as a viewport shift to the depth-prepass and G-buffer draws, a replay of the G-buffer draws into a private RGBA16F target for signed motion, a copy of the pass camera constant buffer (59 float4, only element 58's `.zw` is read), a guides pass, the real NGX evaluate, an alpha re-composition from the native alpha, and an SRV swap for the UI draws; slots expire after 2000 ms, recent entries after 250 ms **[O]** | draw hook `0x1803b5400`, finish `0x1803b46c0`, replay `0x1803b7200`, camera `0x1803b2880` |
 
 ### What the repo does (`OptiScaler/ext/ffxiv/chara/`, zero upstream-file lines)
 
-* `CharaConfig.h`, `ext/ini/FFXIV.ini`, one append to `ext/ini/HDR.ini`: the five keys with the collaborator's names, sections and defaults.
-* `CharaTags.h`: the CRC lists; the roles of a shader are one bit mask in one private-data value (the collaborator uses one GUID per
+* `CharaConfig.h`, `ext/ini/FFXIV.ini`, one append to `ext/ini/HDR.ini`: the five keys with the community build's names, sections and defaults.
+* `CharaTags.h`: the CRC lists; the roles of a shader are one bit mask in one private-data value (the community build uses one GUID per
   role; the same recognition, fewer calls per draw).
 * `CharaTable.{h,cpp}`: the pattern scan (a pure function over a byte span, tested with 0, 1 and 2 hits, hits that straddle
   read windows and RIP-displacement decoding), the PE section lookup, the manager parse with the zeroing rules, the lookup
@@ -254,29 +253,29 @@ addresses of the collaborator's `winmm.dll` (image base `0x180000000`) unless ma
 * `CharaDispatch.{h,cpp}`: the dispatcher the lighting capture calls around every draw (`PreviewDLSS ? DLSS : PreviewAA ?
   spatial AA : native`), its own re-entrancy flags, a replay marker for the HDR replays of the same draw, forwarders for copies,
   `ClearRenderTargetView`, `Begin`/`End` and `CreateVertexShader`, and the frame callback.
-* `CharaEnhance.{h,cpp}`, `CharaEnhancePass.{h,cpp}`, `shaders/chara_fxaa.hlsl`: the spatial AA, written fresh from the
+* `CharaEnhance.{h,cpp}`, `CharaEnhancePass.{h,cpp}`, `shaders/chara_fxaa.hlsl`: the spatial AA, matching the
   observed behaviour. The pass runs inside a private device-context state so the game's pipeline state is untouched; the
   filtered image is bound as `t0` for the one draw and the game's `t0` is bound again afterwards.
 * `CharaIdentify.{h,cpp}`: log lines that work with `PreviewAA` alone: the table at the first draw and at the first preview
   activity, activity start and end with counts per draw kind, one line per distinct draw signature (kind, API, target entry
   and size, depth entry, sampled preview entry, shader roles). A signature is **not** a window name: the game gives no window
   identity at this level.
-* `CharaMenu.cpp`: the card, with the collaborator's visible strings verbatim.
+* `CharaMenu.cpp`: the card, with the community build's visible strings verbatim.
 * `CharaDlssApi.h` + `CharaDlssStub.cpp`: the fixed interface of the DLSS path and its inert placeholder.
 * Hooks and the frame callback attach in fork-owned files only: `ext/ffxiv/lighting/FfxivLightingCapture.h` (same Detours
   transaction as the existing hooks) and the `ext::dx11bridge::AfterSharedCopy` dispatcher in `ext/Seams.cpp`.
 
-### Differences from the collaborator's build (deliberate)
+### Differences from the community build (deliberate)
 
-* The diagnostics that write files are not reproduced as they were: the collaborator's build writes six texture dumps (about 35 MB per
+* The diagnostics that write files are not reproduced as they were: the community build writes six texture dumps (about 35 MB per
   phase) into the game folder after **every** successful DLSS evaluation, behind no configuration key. When the DLSS path
   arrives this behaviour will sit behind a diagnostics key that defaults to off.
 * HDR replays of a draw (the HDR preview mask, the scene replays) go through the draw lambda the preview layer wraps; here
   they are marked and skipped, so a replay is neither counted nor filtered twice. The HDR UI-mask replay of a UI draw
   therefore sees the native image, not the filtered one; the mask is built from alpha, which the filter never changes.
-* A UI draw only counts as a consumer when it samples a preview image (the collaborator lets every UI-set draw reach the consumer
+* A UI draw only counts as a consumer when it samples a preview image (the community build lets every UI-set draw reach the consumer
   branch and decides there).
-* The check of the executable is stricter than the collaborator's (build match, single pattern hit and the documented RVAs together).
+* The check of the executable is stricter than the community build's (build match, single pattern hit and the documented RVAs together).
 
 ### Tests (`tests/ext/ffxiv/chara/`)
 
@@ -291,7 +290,7 @@ output size, sRGB views, the game's pipeline state restored, the swapped `t0` se
 ### Unknown / not established
 
 * Which windows use the preview renderer (character, equipment, glamour, portrait editor, adventurer plate) and which of the
-  recognised shaders belong to which window **[U]**. The collaborator's own notes list portraits as still to do.
+  recognised shaders belong to which window **[U]**. The community build's own notes list portraits as still to do.
 * The meaning and sign of `Camera[58].zw`, the exact encoding of the game's motion output and whether the engine's depth is
   conventional or reversed **[U]** (the DLSS path decides the depth convention at run time).
 * What the global "disabled" byte at OptiScaler state `+0x930` is **[U]**; it is not used here.
@@ -318,8 +317,8 @@ output size, sRGB views, the game's pipeline state restored, the swapped `t0` se
 ### F5 DLSS core: isolated DLSS for the preview (`PreviewDLSS`)
 
 Source files: `ext/ffxiv/chara/CharaDlss*.{h,cpp}` (gate, slots, finish step, NGX composition), `CharaMotion*`, `CharaCamera*`,
-`CharaGuides.*` with `shaders/chara_guides.hlsl`, `CharaDiag*`. Written from the behaviour specification only; the shader is
-described there in words and formulas and was written fresh. The collaborator is credited as for the rest of CharaView.
+`CharaGuides.*` with `shaders/chara_guides.hlsl`, `CharaDiag*`. The behaviour matches the description in words and formulas below.
+Credit: [ATTRIBUTION.md](ATTRIBUTION.md).
 
 What it does, per preview render:
 
@@ -340,7 +339,7 @@ What it does, per preview render:
 6. Every failure keeps the native image: a slot failure is counted and sticks, a feature creation failure ends the path for
    the session, and a latched path releases its slots (after the GPU finished with them) before it goes quiet.
 
-Differences from the collaborator's build: the diagnostics are off by default and capped (12 files, 100 MiB, `PreviewGuideCapture`);
+Differences from the community build: the diagnostics are off by default and capped (12 files, 100 MiB, `PreviewGuideCapture`);
 the finish step also waits for the camera copy; the copy-chain trigger is not implemented (the dispatcher treats a UI draw that
 samples a table entry as the consumer); the NGX coverage counters of the exported shim are not reproduced (no seam without
 touching the upstream shim).
@@ -349,19 +348,19 @@ Not established: whether the game's NGX device is the immediate context's device
 D3D11 feature can be created while the bridge's own feature exists, the meaning and sign of the camera offset (the log prints
 it with `PreviewGuideCapture`), and the window coverage (portraits).
 
-## Preview Neural Rendering: new work, not reconstructed
+## Preview Neural Rendering: not part of the 2026-10-13 binary
 
 `[FFXIV] PreviewNR`, `PreviewNRLingerSeconds` and `PreviewNRLate` and the module behind them (`ext/ffxiv/chara/CharaNr*.{h,cpp}`, the small
-`ext/nr` seam) are not reconstructed from the collaborator's build. The unpublished build only carried a trace that records which draws read the
+`ext/nr` seam) are not taken from the community build. That build only carried a trace that records which draws read the
 preview images (the "preview NR trace"); it contains no NR call for previews, and its menu said "Preview NR and FG are not active".
-Both modes are new work: the bring-up (NR on the native preview image) and the production mode (NR on the Super Resolution output, between the
+SirenBrink's v6.0 source (`fe208a59`) has a preview NR of its own that works differently: NR runs at render size, its result is added after DLSS, and a `PreviewNRReuse` key exists. The fork's modes use a different mechanism: the bring-up (NR on the native preview image) and the production mode (NR on the Super Resolution output, between the
 Super Resolution evaluate and the alpha pass, with copies of the preview's depth and motion). The cyan debug tint (`PreviewDebugTint` for an image
-NR produced) is new as well; the magenta tint of the Super Resolution image is the collaborator's. What the production mode still needs from a game session
+NR produced) is the fork's own as well; the magenta tint of the Super Resolution image is the community build's. What the production mode still needs from a game session
 is listed in FEATURES.md (state tracking of the shared inputs under the debug layer, the model's handling of render-size guides under an
 output-size colour image, image quality on the alpha-masked silhouette, cost with several windows).
 The design, the reasons for running the model on the Direct3D 12 side of the bridge, and the independence of the NR and
 Super Resolution paths are described in the feature section of FEATURES.md. The debug probe (`PreviewProbe`, `PreviewDebugFlood`,
-`chara-probe.cmd`) is also new work and has no counterpart in that build.
-`[FFXIV] PreviewNRBeforeSR` (a third placement, NR on the render-size picture before the Super Resolution evaluate, off by default) is new work in the same way: the collaborator's build has no key or code for it.
+`chara-probe.cmd`) is also the fork's own work and has no counterpart in that build.
+`[FFXIV] PreviewNRBeforeSR` (a third placement, NR on the render-size picture before the Super Resolution evaluate, off by default) is the fork's own work in the same way: the community build has no key or code for it.
 
 **Jitter (CharaView, deliberate difference).** The preview's jitter cycle is 32 phases (`kJitterPhases`, derived from the fixed 2:1 preview scale by `RecommendedPhases`), where the community build's string-level reading suggests 16; the main scene is unchanged (the game's own generator never repeats in its DLSS mode). The read-only game-jitter probe and the experimental jitter correction are fork additions (`[FFXIV] JitterProbe`, `JitterCorrection`, both off by default; see FEATURES.md).

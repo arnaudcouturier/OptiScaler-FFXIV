@@ -2,7 +2,7 @@
 
 How to move the fork's stack onto a newer upstream commit. Everything the fork owns lives under `OptiScaler/ext/` (plus `docs/`, `tools/`, `tests/ext/`), and upstream files carry only the seams listed in [SEAMS-catalog.md](SEAMS-catalog.md). A sync is therefore: bring upstream in, resolve the few places where both sides edited the same lines, check that every seam still reaches the code it should, rebuild, test, play, tag.
 
-The upstream commit the stack is currently built on is recorded in [UPSTREAM-BASE](UPSTREAM-BASE) (`fd6c2870` at the time of writing). The weekly `ffxiv-upstream-watch` workflow draft compares it with upstream `master`; see [RELEASE.md](RELEASE.md) for why it is inactive.
+The upstream commit the stack is currently built on is recorded in [UPSTREAM-BASE](UPSTREAM-BASE) (`d9b62110` at the time of writing). The weekly `ffxiv-upstream-watch` workflow draft compares it with upstream `master`; see [RELEASE.md](RELEASE.md) for why it is inactive.
 
 Commands are PowerShell 7 unless they start with `git`. `<repo>` is your clone.
 
@@ -36,7 +36,7 @@ Also look at `git diff --name-only $base upstream/master -- .github/workflows`: 
 
 ## 2. Choose the strategy
 
-The stack is 198 commits on top of the base. There are two ways to put it on a new upstream commit.
+The stack was 198 commits on top of the base at the time of the example in section 8. There are two ways to put it on a new upstream commit.
 
 | | Merge | Rebase with `rerere` (recommended) |
 |---|---|---|
@@ -200,7 +200,7 @@ Use the freshly packaged build in a copy of the game folder (back up first; see 
 1. Update [UPSTREAM-BASE](UPSTREAM-BASE) to the new upstream sha, and the catalog for any seam that was added, removed or moved (a seam change and its catalog change belong in the same commit). The sha also appears, as history or as a fallback, in `OptiScaler/ext/ext.props` (banner fallback used only when no tag can be read) and in the fallbacks of `tools/footprint.ps1`; those were deliberately left alone in the first real sync: update them only if you rely on the fallback.
 2. Tag with the convention `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, for example `ffxiv-2026.10.23-d9b62110`: the date is the tag day, the sha8 is the upstream commit the stack sits on, `-rcN` marks a release candidate that has not been through the full play-test. An annotated tag: `git tag -a <tag> -m "<summary>"`.
 3. The packaging and the release steps are in [RELEASE.md](RELEASE.md). If GitHub Actions are enabled on the repository, enabling them also enabled upstream's six workflows, which are kept disabled one by one with `gh workflow disable` (exact procedure in RELEASE.md section 5). A sync can add a new upstream workflow file, and a new file starts active: before pushing, run `gh workflow list --all` and disable every workflow that is not one of the fork's own `ffxiv-*` drafts.
-4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag. This is the maintainer's step.
+4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag. The repository owner does this step.
 
 ## 11. Rollback
 

@@ -1,23 +1,24 @@
-# HUD-less engine (S10): design
+# HUD-less engine: design
 
-Status: **implemented, opt-in (`[HudLess] Mode = off` by default), tested in game on 2026-10-17; see sections 15 and 15a for what was verified and the known limits.** Statements marked **(inferred)** below come from reading code before the diagnostic sessions; section 15 records what those sessions found.
+Status: **implemented, opt-in (`[HudLess] Mode = off` by default), tested in game on 2026-10-17; see sections 15 and 15a for what was verified and the known limits.** Statements marked **(inferred)** below come from reading code before the diagnostic runs; section 15 records what those runs found.
+
+Source comments call this work S10 and name its parts as packages: A (FFXIV boundary detector, section 10), B (engine, config and menu), C (GPU mask and paste), D0 (ReShade probe), D1 (diagnostic build, section 12) and E (live source and ReShade integration, section 16).
 
 ## 1. Goal and decisions
 
 With DLSS-G at 2-4x the HUD stays sharp (no smear/ghost) in fast camera motion: frame generation interpolates the **UI-free image** and the UI is **pasted back at the real frame rate**. Nothing else about the picture changes.
 
-| Decision (user, 2026-10-16) | Consequence in this design |
+| Decision (2026-10-16) | Consequence in this design |
 |---|---|
-| The oracle's REST HUD never ran (the ReShade add-on was never built) | Nothing to stay compatible with; no old keys carried |
-| Clean redesign; oracle code and its WARP tests are a reference only | New modules; the oracle's mask maths and tests become test data (section 13) |
-| Provider parity with the oracle | Full engine (UI-free FG + paste) on DLSS-G only; FSR-FG / XeFG get the hud-less / UI image tags (section 9) |
+| The REST-based HUD path of SirenBrink's fork at the import base (36c53a15) never ran here (its ReShade add-on was never built) | Nothing to stay compatible with; no old keys carried |
+| New engine around the mask and paste maths of that fork's HUD-less code (written there by byunjoe); its code and WARP tests are a reference | New modules. The GPU module and shaders share code with that reference (mask maths, shaders, defaults, API names); its WARP tests become test data (section 13). New here: the state machine, coverage guard, fenced slots and native capture |
+| Provider parity with that fork | Full engine (UI-free FG + paste) on DLSS-G only; FSR-FG / XeFG get the hud-less / UI image tags (section 9) |
 | Difference-based UI mask | Threshold 0.008, dilation 1, three-level alpha cleanup (section 7) |
 | `[HudLess] Mode = off | recomposition | ui_free`, default off | Section 11 |
 | Fail open | Any doubt means today's behaviour (section 5) |
 | HDR via SDR capture + OptiHDR conversion; scene HDR keeps priority on frames it imports | Section 8 |
-| ReShade integrated as a built-in add-on (decided 2026-10-16, replaces option A) | Section 16: presets are applied in place at the UI boundary, the HUD stays unfiltered; fail open if ReShade is absent or the integration fails |
+| ReShade integrated as a built-in add-on (decided 2026-10-16) | Section 16: presets are applied in place at the UI boundary, the HUD stays unfiltered; fail open if ReShade is absent or the integration fails |
 | Dalamud overlays count as UI if the hook order allows | Measured by D1 |
-| Base branch `w5` | Footprint baseline 746 |
 
 ## 2. Frame flow
 
@@ -30,7 +31,7 @@ game draws scene -> game draws UI -> game calls Present (bridge wrapper)
   -> hidden real D3D11 Present (no wait) -> FG swapchain Present (DLSS-G dispatches; generated frames follow)
 ```
 
-With S10 (`ui_free`):
+With the engine in `ui_free` mode:
 
 ```
 game draws scene -> [boundary: first UI draw] source snapshots the bound scene RT (UI-free)
@@ -49,9 +50,9 @@ game draws scene -> [boundary: first UI draw] source snapshots the bound scene R
 
 ```
 OptiScaler/ext/hudless/                 generic engine, nothing FFXIV-specific
-  HudlessSource.h                       contract 4.1 (committed in W6-0)
-  HudlessGpu.h                          contract 4.2 (committed in W6-0)
-  HudlessState.{h,cpp}                  the shared Wanted() flag (committed in W6-0; B writes it, A and the hook sites read it)
+  HudlessSource.h                       contract 4.1
+  HudlessGpu.h                          contract 4.2
+  HudlessState.{h,cpp}                  the shared Wanted() flag (B writes it, A and the hook sites read it)
   HudlessEngine.{h,cpp}                 B: state machine, ring, fences, decisions, summary log, seam entry points
   HudlessConfig.{h,cpp}                 B: [HudLess] binder
   HudlessMenu.cpp                       B: MenuRegistry card
@@ -71,15 +72,15 @@ Existing fork-owned files that gain a few lines: `ext/ffxiv/lighting/FfxivLighti
 
 ## 4. Contracts
 
-### 4.1 `IHudlessSource` (game side; header committed)
+### 4.1 `IHudlessSource` (game side)
 
 `Active()` (cheap atomic), `Take(FrameImage&)` returning `NoSource | NotThisFrame | Rejected | Ok` (newest wins, never blocks), `LastReason()`, `EndFrame()`. `FrameImage` = D3D11 texture + typed format + size + sequence. The source snapshots the scene RT **at the boundary** into its own texture (one reused texture); the engine copies it into the shared slot at Present. This is one extra 4K RGBA8 copy per frame (about 33 MB read + write; negligible next to the frame's other traffic). A single-copy variant (source writes straight into the shared slot) is possible later if D1's cost numbers say so.
 
-### 4.2 GPU API (header committed)
+### 4.2 GPU API
 
-`UiPaste::{Produce, Invalidate, Ready, Release, Paste, SetPasteEnabled, SetDebugTint, SetSteadyTiming, Snapshot}` and `UiImage::{Build, Release}` with `MaskParams` / `PasteStatus`. Semantics follow the oracle's `UiPaste` (section 7) with three additions: `PasteStatus::coverage` (share of pixels flagged, from a one-counter readback that is read two frames later without stalling), an explicit `hdrFinalImage`, and `SetPasteEnabled(bool)`, an output-side gate (on at start): while it is off `Paste` returns at once, draws nothing and counts no skip, and `Produce` / `Invalidate` are not affected (section 5, paste hold).
+`UiPaste::{Produce, Invalidate, Ready, Release, Paste, SetPasteEnabled, SetDebugTint, SetSteadyTiming, Snapshot}` and `UiImage::{Build, Release}` with `MaskParams` / `PasteStatus`. Semantics follow the `UiPaste` of the import base (section 7) with three additions: `PasteStatus::coverage` (share of pixels flagged, from a one-counter readback that is read two frames later without stalling), an explicit `hdrFinalImage`, and `SetPasteEnabled(bool)`, an output-side gate (on at start): while it is off `Paste` returns at once, draws nothing and counts no skip, and `Produce` / `Invalidate` are not affected (section 5, paste hold).
 
-### 4.3 Engine entry points (B owns the exact signatures; they are registered in `SEAMS-catalog.md`)
+### 4.3 Engine entry points (exact signatures: `SEAMS-catalog.md`, group `hudless`)
 
 | Seam | Site | Does |
 |---|---|---|
@@ -88,10 +89,10 @@ Existing fork-owned files that gain a few lines: `ext/ffxiv/lighting/FfxivLighti
 | `ext::hudless::PostInteropCopy` (P3/P4) | after `_WaitForInteropCopyOnPresentQueue` | tags, builds UI image / paste image on the FG queue, advances the ring |
 | `ext::hudless::OnReleaseInterop` (P5) | the bridge's release / resize path | drops slots and paste images |
 | `ext::present::BeforeOverlay` (P6) | `LocalPresent`, before `MenuOverlayDx::Present` (`wrapped_swapchain.cpp` ~484) | `UiPaste::Paste` when mode is `ui_free` and a paste image is ready |
-| `ext::hudless::Wanted()` / `SetWanted()` | hook sites; defined in `HudlessState.cpp` (committed in W6-0) | atomic: `Mode != off` and the game source exists (zero-cost early-out). B calls `SetWanted` when the config loads or the menu changes Mode; A and the hook sites only read it |
+| `ext::hudless::Wanted()` / `SetWanted()` | hook sites; defined in `HudlessState.cpp` | atomic: `Mode != off` and the game source exists (zero-cost early-out). B calls `SetWanted` when the config loads or the menu changes Mode; A and the hook sites only read it |
 | DLSS-G option seam | `ext/fg/dlssg/DlssgSeams.cpp` `AdjustUiRecomposition` | reads engine state instead of the `HudlessLink` stub |
 
-Persistent footprint budget for all upstream-file lines of S10: **<= 25** (baseline 746).
+Persistent footprint budget for all upstream-file lines of this feature: **<= 25** (footprint baseline 746 before the feature).
 
 ## 5. Engine state machine and fail-open
 
@@ -113,18 +114,18 @@ otherwise: today's path, exactly (full-frame FG), reason recorded
 
 Fallback reasons (enum + text, all counted): `ModeOff`, `NoFrameGeneration`, `ProviderUnsupported`, `NoSource`, `NoBoundaryThisFrame`, `CaptureRejected`, `SizeMismatch`, `FormatUnsupported`, `MsaaOrArray`, `SlotBusy`, `PasteNotReady`, `SceneHdrOwnsFrame`, `MaskCoverage`, `DebugTintOn`, `PausedByPreset` (recomposition mode only: the DLSS-G render preset A or C turns NVIDIA's UI recomposition off, the fork does not request it and the engine captures and tags nothing; it applies only when recomposition was wanted at all, that is the mode, a hud-less source for the game build and `[DLSSG] UIRecomposition` not off).
 
-**Coverage guard:** the mask pass counts flagged pixels (the readback arrives one or two real frames late, and only a readback that is new counts as a sample). Reason: black/white fades and, if ReShade presets turn out to run before the capture, preset-changed pixels would make the mask cover most of the screen. The limit is `CoverageGuard` (initial 0.60, a starting guess that D1/D2 calibrate); the guard has four parts:
+**Coverage guard:** the mask pass counts flagged pixels (the readback arrives one or two real frames late, and only a readback that is new counts as a sample). Reason: black/white fades and, if ReShade presets turn out to run before the capture, preset-changed pixels would make the mask cover most of the screen. The limit is `CoverageGuard` (initial 0.60, a starting guess to calibrate from diagnostic runs); the guard has four parts:
 
 - **Trip.** 5 consecutive fresh samples over the limit: the engine falls back to the normal base with `MaskCoverage`.
 - **Silent probe.** While tripped the engine does not stop. Every present still asks the source, takes the capture and builds the paste image, so coverage keeps being measured and the source stays armed. The present only does not swap the base and sends no hud-less tag (section 9.1); its reason is `MaskCoverage` unless a capture step failed first (`NoBoundaryThisFrame`, `CaptureRejected`, `SizeMismatch`, `SlotBusy`, ... : the first failure of a present wins, so these now take precedence over `MaskCoverage` during a trip). `paste built` therefore counts nearly every present of a black screen, not only the captured ones. Under HDR output the probe prepares the slot's PQ conversion resources itself, because the usual caller (`PasteReady`) is skipped.
 - **Release.** After 30 consecutive fresh samples at or below 0.75 x the limit (0.45 at the default; no config key). A fresh sample above that level restarts the count, including samples between 0.45 and 0.60, which keep the guard tripped. Because the images were built all along, the first swapped present after the release already has a completed paste image (no `PasteNotReady`). Consequence: a cutscene whose mask sits between 0.45 and 0.60 stays on the normal base after the first trip, like `Mode = off`.
 - **Fail open.** 120 probed presents without a fresh sample release the guard (the producer stopped, so nothing could ever release it otherwise). Presents that took no capture (no boundary, loading screens) are not counted. If nothing completes a readback within 8 presents the guard reads "unknown" and never trips.
 
-**Paste hold.** When the base goes from the hud-less image back to the normal one (the guard trips, the boundary is lost, a swap is refused), the first output of that present is generated from the previous hud-less frame and the new normal frame; in a fade these differ everywhere. The paste hides that blend only while the ring is valid, so the paste stays visible (`Core::PasteVisible()`, `UiPaste::SetPasteEnabled`) for `kLeaveHold = 2` presents after the last swapped one. A present without a capture in that window gets `PasteAction::Hold`: the ring is neither produced nor invalidated. After the window it is `Invalidate` as before, and probing presents are not drawn (they still build images for the guard). A session that never swapped never holds, a swap the host undid grants no hold, and a mode change resets it.
+**Paste hold.** When the base goes from the hud-less image back to the normal one (the guard trips, the boundary is lost, a swap is refused), the first output of that present is generated from the previous hud-less frame and the new normal frame; in a fade these differ everywhere. The paste hides that blend only while the ring is valid, so the paste stays visible (`Core::PasteVisible()`, `UiPaste::SetPasteEnabled`) for `kLeaveHold = 2` presents after the last swapped one. A present without a capture in that window gets `PasteAction::Hold`: the ring is neither produced nor invalidated. After the window it is `Invalidate` as before, and probing presents are not drawn (they still build images for the guard). Before the first swapped present nothing is held, a swap the host undid grants no hold, and a mode change resets the hold.
 
-**Never** produce a black, partial or flickering frame: every failure path leaves the normal backbuffer copy as the FG base. The paste ring is invalidated (`UiPaste::Invalidate`) except during the two-present hold and while probing, where the ring stays valid but the paste is switched off once the hold is over.
+**Never** produce a black, partial or flickering frame: every failure path leaves the normal backbuffer copy as the FG base, and the paste ring is invalidated (`UiPaste::Invalidate`) except during the hold and while probing.
 
-### Periodic summary log (judging sessions from the log)
+### Periodic summary log (judging a play session from the log)
 
 Every 600 real presents, same style as the scene-HDR line:
 
@@ -137,12 +138,12 @@ Plus one line at every state change (`HudLess: state Searching -> Active`, `... 
 ## 6. Interop and synchronisation
 
 - **Ring:** one slot per FG buffer (`BUFFER_COUNT`, keyed like the bridge's fake index). A slot = a shared-NT-handle D3D11 texture (typed, RGBA8 or the capture's format), the opened D3D12 resource, and the D3D12 value of the last queue operation that reads it.
-- **Rule:** the D3D11 side may write slot i at Present N only if the D3D12 reader fence has **completed** that slot's last read (non-blocking `GetCompletedValue`). Otherwise this frame has no hud-less (`SlotBusy`). The oracle reused slots guarded only by the copy-allocator fence while FG-queue readers (the DLSS-G tag and the paste producer) were not fenced **(inferred)**; this design fences them.
-- **Ordering across APIs:** the hud-less copy is recorded on the D3D11 context before the existing D3D11 -> D3D12 signal, so the single existing `_WaitDx11ThenDx12` covers both copies (the oracle did the same).
+- **Rule:** the D3D11 side may write slot i at Present N only if the D3D12 reader fence has **completed** that slot's last read (non-blocking `GetCompletedValue`). Otherwise this frame has no hud-less (`SlotBusy`). The import base reuses slots guarded only by the copy-allocator fence while FG-queue readers (the DLSS-G tag and the paste producer) are not fenced **(inferred)**; this design fences them.
+- **Ordering across APIs:** the hud-less copy is recorded on the D3D11 context before the existing D3D11 -> D3D12 signal, so the single existing `_WaitDx11ThenDx12` covers both copies (the import base does the same).
 - **Paste images:** 4 slots; the producer reuses a slot only after its write and its last read completed and never waits on the GPU; the consumer picks the newest COMPLETED image, at most 250 ms old, never older than the last one pasted.
 - **Lifetime:** nothing is destroyed while the GPU may still read it; teardown retires resources behind the GPU fence (existing `GpuLifetime`).
 
-## 7. UI mask and paste algorithms (reference: oracle `UE_Common.h`, `UiPaste.cpp`; values are the oracle's tuned defaults)
+## 7. UI mask and paste algorithms (reference: `UE_Common.h` and `UiPaste.cpp` of the import base; the values are its tuned defaults)
 
 Per pixel `p` of the real frame, with `F` = final image, `H` = UI-free image:
 
@@ -151,16 +152,16 @@ Per pixel `p` of the real frame, with `F` = final image, `H` = UI-free image:
 - paste image: `isUi` -> `(F.rgb, 1.0)`; else if cleanup is on and the previous paste image had alpha > 0.75 here -> `(F.rgb, 0.5)` (clears ghosts of UI that just closed); else `(0,0,0,0)`.
 - Paste draw: full-screen triangle over the backbuffer, `discard` when alpha <= 0, output alpha 1, **no blend state** (pasted pixels overwrite).
 - Recomposition mode: `UiImage` writes `(F.rgb, 1)` or `(0,0,0,0)`, alpha strictly 0 or 1 (valid for premultiplied and straight consumers), R8G8B8A8_UNORM.
-- Known limit: full-screen black/white fades differ from the UI-free frame everywhere and read as UI (the coverage guard trips and the engine keeps the normal base while it probes; section 5). Nameplates can look displaced at low FPS because the held UI and the generated scene represent different times (oracle doc, unverified here).
+- Known limit: full-screen black/white fades differ from the UI-free frame everywhere and read as UI (the coverage guard trips and the engine keeps the normal base while it probes; section 5). Nameplates can look displaced at low FPS because the held UI and the generated scene represent different times (from that fork's documentation, unverified here).
 
 ## 8. HDR
 
-The user's HDR setup is OptiHDR with scene HDR (`[HDR] Mode = 1`, `FfxivHDR`, NR/DLSS scene input). Design (follows the oracle doc, which describes SDR/HDR gameplay tests of its own hud-less path; not re-verified here):
+The tested HDR setup is OptiHDR with scene HDR (`[HDR] Mode = 1`, `FfxivHDR`, NR/DLSS scene input). The design follows the documentation of the import base, which describes SDR and HDR gameplay tests of its own hud-less path; it is not re-verified here:
 
 1. The UI-free capture and the mask are **SDR** (the game's native SDR chain).
 2. The FG base in HDR is the hud-less image converted by the production OptiHDR converter (`Hdr10::Convert`, same call the bridge already makes on its copy source).
 3. The paste needs the converted **final** image too (one extra convert per real frame in `ui_free` + HDR). Paste storage in HDR: `R10G10B10A2` PQ with the three-level alpha.
-4. **Scene HDR priority:** on frames where `ISceneHdr::Open(presentation=true)` supplies a scene, the existing mode-1 HudlessColor re-tag (`BridgeHdr.cpp` ~94-117) keeps ownership: the engine does not swap the base on that frame (`SceneHdrOwnsFrame`) and invalidates the paste. These frames are rare in the user's last HDR session (the DLSS scene-HDR path alternated native-HDR and SDR-fallback periods; the Present-path counter showed 2 imports in 1,800 requests). Revisit with Session 2 data.
+4. **Scene HDR priority:** on frames where `ISceneHdr::Open(presentation=true)` supplies a scene, the existing mode-1 HudlessColor re-tag (`BridgeHdr.cpp` ~94-117) keeps ownership: the engine does not swap the base on that frame (`SceneHdrOwnsFrame`) and invalidates the paste. These frames were rare in the last HDR test run (the DLSS scene-HDR path alternated native-HDR and SDR-fallback periods; the Present-path counter showed 2 imports in 1,800 requests). Revisit with data from a second HDR diagnostic run.
 5. HDR10 output is carried by `ui_free` only (items 2 and 3). `recomposition` over HDR output is refused with `FormatUnsupported` (`ext/hudless/HudlessCore.h`): it would need a PQ UI image that DLSS-G refuses and a hud-less tag converted to PQ. HDR output is detected only through OptiHDR (`ext/hdr` sets the bridge's `hdrOutput` when it configures the frame generation swapchain); a game that reaches HDR10 by another route (for example FFXIV's own in-game HDR10 setting) is treated as SDR, so any refusal there comes from the format checks below; untested. `FormatUnsupported` is also returned when the captured UI-free image and the bridge's backbuffer copy differ in format (`HudlessEngine.cpp`, capture validation), and on SDR output when the frame generation swapchain format differs from the hud-less slot's at the base swap.
 
 ## 9. Providers
@@ -170,24 +171,24 @@ The user's HDR setup is OptiHDR with scene HDR (`[HDR] Mode = 1`, `FfxivHDR`, NR
 - Tags: `HudlessColor` -> `kBufferTypeHUDLessColor`, `UIColor` -> `kBufferTypeUIColorAndAlpha` (`DLSSG_Dx12.cpp` ~924-965), lifecycle `eOnlyValidNow` unless UntilPresent. `SetResource` gates (`FGDisableHudless`, `FGDisableUI`, ...) stay.
 - Which presents are tagged (`Core::WantsTags`): in `ui_free` only the presents whose base really was swapped to the hud-less image; a `PasteNotReady`, probing (section 5) or otherwise fallen-back present sends no tag, so DLSS-G gets the same inputs as with `Mode = off` instead of a normal base next to a hud-less tag that differs from it everywhere during a fade. `recomposition` tags every present that has a capture (the tags are that mode). Before this rule every present with a capture was tagged. What DLSS-G does with the tag set changing from present to present is not verified here.
 - Recomposition is a Streamline option read at feature **creation**: `AdjustUiRecomposition` (`ext/fg/dlssg/DlssgSeams.cpp`) now reads the engine (`Mode == recomposition`, last hud-less format) instead of the `HudlessLink` stub, which is deleted. Changing mode afterwards applies after a game restart (logged, as today).
-- `ui_free`: base swap + paste as in section 2. The oracle's menu showed a recomposition checkbox that contradicted `ui_free`; here one mode combo replaces both (section 11).
+- `ui_free`: base swap + paste as in section 2. The menu of the import base showed a recomposition checkbox that contradicted `ui_free`; here one mode combo replaces both (section 11).
 - Config note: `[DLSSG] UIRecomposition` stays; it only matters in `recomposition` mode.
 
 ### 9.2 FSR-FG and XeFG (parity: tags only, untested here)
 
-HudlessColor and UIColor are tagged exactly as the oracle did (FSR-FG: HUDLessColor into the FFX config, UI resource never registered; XeFG: `XEFG_SWAPCHAIN_RES_HUDLESS_COLOR` / `_UI`, UI only if the SDK exports `xefgSwapChainSetUiCompositionState` or Draw-UI-over-FG is on; XeFG HDR rejects UIColor). No UI-free, no paste for them. Labelled untested/community.
+HudlessColor and UIColor are tagged as the import base does (FSR-FG: HUDLessColor into the FFX config, UI resource never registered; XeFG: `XEFG_SWAPCHAIN_RES_HUDLESS_COLOR` / `_UI`, UI only if the SDK exports `xefgSwapChainSetUiCompositionState` or Draw-UI-over-FG is on; XeFG HDR rejects UIColor). No UI-free, no paste for them. Labelled untested/community.
 
 ### 9.3 Tag slot
 
 The tag slot must be the slot the provider's own Dispatch will use (next subsection).
 
-### 9.4 Dispatch index (a pre-existing mismatch S10 must not trip over)
+### 9.4 Dispatch index (a pre-existing mismatch the engine must not trip over)
 
 `IFGFeature::GetIndexWillBeDispatched()` (predictor, stateless) and `GetDispatchIndex()` (consumer, writes `_lastDispatchedFrame`, returns -1 for an already-dispatched frame) disagree in the resync branch **(read 2026-10-16)**: the consumer tests `HasResource(Depth|Velocity|UIColor|HudlessColor, GetIndex())`, the predictor only `HasResource(Depth)`. With a frame that carries only hud-less/UI resources the tag can land one frame off.
 
 - The bridge must **not** call `GetDispatchIndex` (it would consume the frame and make the provider skip it).
-- Fix: make the predictor mirror the consumer's resync predicate exactly (same four resource types, same index), still stateless. This is a small upstream-file edit (~6 lines) and an upstream-candidate fix; B implements it with a unit test (`framegen` has none today, so the test slices the two functions the way `nr_reuse_api` slices production code) and records it as `[UP]` if it stays generic.
-- If B finds the mirror cannot be made exact, the fallback design is tagging at a dispatch-time seam right after the provider's own `GetDispatchIndex` call; B reports before choosing.
+- Fix: make the predictor mirror the consumer's resync predicate exactly (same four resource types, same index), still stateless. This is a small upstream-file edit (~6 lines) and an upstream-candidate fix. It comes with a unit test (`framegen` has none today, so the test slices the two functions the way `nr_reuse_api` slices production code) and is recorded as `[UP]` if it stays generic.
+- If the mirror cannot be made exact, the fallback design is tagging at a dispatch-time seam right after the provider's own `GetDispatchIndex` call.
 
 ## 10. FFXIV boundary detector (`ext/ffxiv/ui/`, work package A)
 
@@ -197,16 +198,16 @@ The tag slot must be the slot the provider's own Dispatch will use (next subsect
 
 **UI shader set (starting point).** The seven CRCs of the HDR "UI only" stage (3865947726, 2966694105, 3759127293, 1898885941, 4076256744, 3915247300, 1823062889); the Companion's four are a subset. They are transmittance-related and may not cover every UI draw, and a shader created before the hook installs is never tagged; D1 measures both.
 
-**Boundary rule candidates (D1 decides, A implements the winner in v1):**
+**Boundary rule candidates (the diagnostic build D1 compared them; R1b is the live rule):**
 - **R1 (tag-based):** first draw whose pixel shader carries the UI tag, after the last scene/post stage of the frame.
 - **R2 (position-based, hash-independent):** first draw after the last stage-5 (fullscreen gamma) draw whose render target is the backbuffer.
 - **R3:** R1 or R2, whichever fires first (union), if neither alone is reliable.
-- **R1b (live rule, decided from Session 1 data, 2026-10-16):** the first UI-tagged draw after the last scene/post stage whose bound render target IS the full-size RGBA8 backbuffer. Draws into character-preview render targets (352x352, 1024x1024) before it are skipped, not rejected. R2/R3 never fire in FFXIV and are diagnostics only.
+- **R1b (live rule, decided from the first diagnostic run, 2026-10-16):** the first UI-tagged draw after the last scene/post stage whose bound render target IS the full-size RGBA8 backbuffer. Draws into character-preview render targets (352x352, 1024x1024) before it are skipped, not rejected. R2/R3 never fire in FFXIV and are diagnostics only.
 The capture: before the boundary draw executes, `OMGetRenderTargets` -> RTV 0 resource; require single sample, non-array, same size as the swapchain backbuffer; copy into the reused snapshot texture. D1 logs identity/size/format of that RT against the backbuffer (the engine ring assumes the capture matches the bridge copy source).
 
-**Arming and frame hooks (ownership, so A and B never edit the same lines).** A's `Armed()` is `[HudLess] Diagnostics` (A's own tiny binder `ext/ffxiv/ui/UiConfig`, same ini section as B's keys) **or** `ext::hudless::Wanted()`; `IHudlessSource::Active()` returns `Armed()`. D1 (A alone on top of `s10`) therefore arms from `Diagnostics = true` without any B code. A owns the bridge's `ext::dx11bridge::PresentScope` in `ext/hdr/BridgeHdr.cpp` (constructor runs at bridge `Present` entry, destructor at every exit): the constructor runs the ReShade/Dalamud probe and the per-frame bookkeeping, the destructor calls `ext::game::Current().hudless->EndFrame()` when the pointer is non-null. **B must not call `EndFrame()` and must not edit `PresentScope`.**
+**Arming and frame hooks (who owns which lines).** Package A's `Armed()` is `[HudLess] Diagnostics` (its own small binder `ext/ffxiv/ui/UiConfig`, same ini section as the engine's keys) **or** `ext::hudless::Wanted()`; `IHudlessSource::Active()` returns `Armed()`. The diagnostic build (package A alone) therefore arms from `Diagnostics = true` without any engine code. Package A owns the bridge's `ext::dx11bridge::PresentScope` in `ext/hdr/BridgeHdr.cpp` (constructor runs at bridge `Present` entry, destructor at every exit): the constructor runs the ReShade/Dalamud probe and the per-frame bookkeeping, the destructor calls `ext::game::Current().hudless->EndFrame()` when the pointer is non-null. **The engine (package B) must not call `EndFrame()` and must not edit `PresentScope`.**
 
-**Exclusions:** the Companion nameplate layer is a separate DirectComposition swapchain; it is not in the game's frame and not captured. Draws issued under `ext::core::BypassScope` (`HooksBypassed()`) are ignored. The Companion's `isolateReShade` stays false (as in the Phase 2 build; there is no ReShade marker any more).
+**Exclusions:** the Companion nameplate layer is a separate DirectComposition swapchain; it is not in the game's frame and not captured. Draws issued under `ext::core::BypassScope` (`HooksBypassed()`) are ignored. The Companion's `isolateReShade` stays false (there is no ReShade marker any more).
 
 **Cost:** with `Mode = off` the added code is one atomic load per draw. With the feature on, the per-draw cost is a pointer test plus `GetPrivateData` on candidate draws only; D1 reports draws per frame and hook ticks per frame.
 
@@ -222,8 +223,8 @@ PasteCleanup = true        ; advanced: clear ghosts of UI that just closed
 SteadyTiming = false       ; advanced: paste the UI of one real frame behind (steadier, slightly older)
 CoverageGuard = 0.60       ; advanced: fall back when more than this share of pixels is flagged; back after 30 readbacks at or below 0.75 x this (0 = off)
 ShowDetectedUi = false     ; debug tint on the pasted area
-Diagnostics = false        ; D1 / diagnostic builds only (bound by A's UiConfig, the rest by B's HudlessConfig)
-ReShadePresets = auto      ; auto | on | off: apply the user's ReShade presets in place at the UI boundary (S10 E); auto = a ReShade runtime exists and >= 1 technique is enabled
+Diagnostics = false        ; diagnostic use (bound by UiConfig; the other keys by HudlessConfig)
+ReShadePresets = auto      ; auto | on | off: apply the user's ReShade presets in place at the UI boundary (package E); auto = a ReShade runtime exists and >= 1 technique is enabled
 ```
 
 Menu card "HUD-less (UI-free frame generation)": status line (state, reason, counters), mode combo, an "Advanced" fold with the tuning keys, "Show detected UI (HUD-less)", a "ReShade presets at the UI boundary" combo (`[HudLess] ReShadePresets`; switching to Off applies at once, switching on again after a start with Off needs a restart) and, in the Advanced fold, a "UI recomposition (restart)" combo (`[DLSSG] UIRecomposition`). Changing Mode to/from `recomposition` shows "applies after a game restart". The old `[FrameGen] ExternalUI*` / `ExternalHudless` keys are not read or written.
@@ -247,8 +248,8 @@ Menu card "HUD-less diagnostics": run folder path, counters, the snapshot button
 
 | Test | Class | Package |
 |---|---|---|
-| `hudless_api_headers` (committed in W6-0) | cpu | W6-0 |
-| Mask / paste shaders on WARP: threshold, dilation, cleanup, unchanged scene, alpha levels, SDR + PQ, coverage counter, the paste gate (oracle `external_hudless_warp.cpp` is the data source) | warp | C |
+| `hudless_api_headers` | cpu | contracts |
+| Mask / paste shaders on WARP: threshold, dilation, cleanup, unchanged scene, alpha levels, SDR + PQ, coverage counter, the paste gate (`external_hudless_warp.cpp` of the import base is the data source) | warp | C |
 | Paste ring: producer never reuses a busy slot, consumer picks newest completed <= 250 ms, never goes back in time | cpu | C |
 | Engine state machine with a fake `IHudlessSource` and fake provider: every fallback reason, hysteresis, coverage guard (trip, release, starvation, probing), paste hold, tag gating; replays that close the producer / source feedback loop (no retry bursts, seamless release, cutscene with lost-boundary runs) | cpu | B |
 | Slot ring + reader-fence logic (no GPU) | cpu | B |
@@ -269,10 +270,10 @@ Menu card "HUD-less diagnostics": run folder path, counters, the snapshot button
 
 Every fork piece lives under `ext/`; the upstream-file edits are the seams listed in `docs/SEAMS.md`.
 
-## 15. What the diagnostic sessions answered
+## 15. What the diagnostic runs answered
 
 1. ReShade runs outermost on the game's D3D11 swapchain, before the bridge copy (section 16).
-2. The boundary rule that works is R1b: the first UI-tagged draw after the last scene stage whose render target is the full-size RGBA8 backbuffer. UI draws into other targets (the character preview) are ignored, not rejected. R2 and R3 never fire and are not used.
+2. The boundary rule that works is R1b (section 10). R2 and R3 never fire and are not used.
 3. UI shaders are stamped at creation whether or not the detector is armed, so a Mode switched on after the game loaded still finds the boundary.
 4. Dalamud overlays are drawn into the frame before the bridge copy, so they count as UI.
 5. The hook costs about 0.16 ms per frame in a city scene.
@@ -280,31 +281,31 @@ Every fork piece lives under `ext/`; the upstream-file edits are the seams liste
 
 ## 15a. Status and known limits
 
-- Opt-in: `[HudLess] Mode = off` by default. Tested in SDR with DLSS-G 2x to 4x on an RTX 4090: the engine stays Active on 96 to 100 % of presents in normal scenes and falls back (by design) on title screens, loading screens and fades. The maintainer saw no visible difference against Mode off, so treat the benefit as unproven.
+- Tested in SDR with DLSS-G 2x to 4x on an RTX 4090: the engine stays Active on 96 to 100 % of presents in normal scenes and falls back (by design) on title screens, loading screens and fades. The author saw no visible difference against `Mode = off`, so treat the benefit as unproven.
 - HDR output with `ui_free` is untested. FSR-FG and XeFG only receive tags and are untested. The paste producer cannot start under HDR output as the code stands (**inferred from reading, not run**): its first image needs the slot's PQ conversion resources, which are only prepared once a paste image already exists (`PasteReady`); only the probing path prepares them itself.
-- Guard rework (silent probe, release at 0.75 x the limit after 30 samples, two-present paste hold, hud-less tag only on swapped presents; section 5) is covered by CPU and WARP tests only and has not been seen in a game session. It targets a flash at the start and end of fades and loading screens and a flicker of cutscene text boxes that appeared with `Mode = ui_free` and not with `Mode = off`; whether it removes both is not confirmed. Probing builds the capture and the paste image on every present during a fade (**inferred**: about the GPU cost of an Active present).
+- Guard rework (silent probe, release at 0.75 x the limit after 30 samples, two-present paste hold, hud-less tag only on swapped presents; section 5). It targets a flash at the start and end of fades and loading screens and a flicker of cutscene text boxes that appeared with `ui_free` and not with `Mode = off`. In game on 2026-10-18 (cutscenes, fades, dialogue boxes and busy gameplay) neither appeared: Active periods of 212 s, 129 s and 384 s, only short (0.4-2 s) Fallback dips at fades, no flapping on high-coverage cutscene frames. Probing builds the capture and the paste image on every present during a fade (**inferred**: about the GPU cost of an Active present).
 - One GPU hang (`DXGI_ERROR_DEVICE_HUNG`) happened shortly after the Mode was switched off, on and off again within about seven seconds, at 6x frame generation (the experimental RTX 40 MFG unlock). The same switching at 2x to 4x ran 24 times without a problem. The cause was not isolated.
-- **`ui_free` can sit in fallback for a whole session (observed 2026-10-22).** In one SDR session on an RTX 4090 (Performance, DLSS-G 2x) the engine reported `Fallback(MaskCoverage)` for most windows: `600 presents: 154 captured, 446 fallbacks (MaskCoverage 444, ...); mask coverage avg 73.6% max 99.5%`, and in one window `0 captured, 600 fallbacks (MaskCoverage 600); mask coverage avg 100.0%`. The mask compares the final frame with the UI-free capture and counts the pixels that differ; when it covers almost everything the guard (correctly) refuses to paste, so frame generation runs on the full frame with NVIDIA's UI recomposition off (`AdjustUiRecomposition ... false (HudLess mode ui_free ...)`). The maintainer saw a faint micro-stutter in motion with frame generation on; switching live to `Mode = recomposition` gave `state Active; 600 presents: 600 captured, 0 fallbacks` and no artifact. Why the mask covered almost the whole picture in that scene is not known (INFERRED candidates: something applied between the capture point and the final frame that changes most pixels, a capture/paste timing offset; nothing was measured). Recommendation until investigated: use `recomposition`.
-- **Recomposition and the DLSS-G preset.** With the preset A or C NVIDIA's runtime forces its UI recomposition off (verified in nvngx_dlssg 310.9.16, `ApplyRenderPreset`), so the fork requests it only with Auto or B, from the first DLSS-G option call (`ext/fg/dlssg/UiRecompositionRule.h`). Before that rule a boot with `recomposition` and `RenderPreset = 3` created DLSS-G with the option on and paused it 0.09 s later, forcing a recreation after which only about 59 of about 132 presents per second were distinct on screen. Log of the rule at work: `AdjustUiRecomposition DLSSG UI recomposition: false (... dropped by the DLSS-G render preset (Preset C))` once, the sentence `Preset C turns NVIDIA's UI recomposition off on this runtime ...` once, engine `Fallback(PausedByPreset)`. The availability of the preset control that the rule uses is remembered once, at the first time the runtime asks the driver for its preset or at the first DLSS-G option call, whichever comes first. Known gap: if the boot latched the RTX 20/30 runtime and the user later unticks it, a live switch to A or C is allowed while the rule still reads Auto (not seen, not on an RTX 40 setup).
+- **`ui_free` can sit in fallback for a whole session (observed 2026-10-22).** In one SDR session on an RTX 4090 (Performance, DLSS-G 2x) the engine reported `Fallback(MaskCoverage)` for most windows: `600 presents: 154 captured, 446 fallbacks (MaskCoverage 444, ...); mask coverage avg 73.6% max 99.5%`, and in one window `0 captured, 600 fallbacks (MaskCoverage 600); mask coverage avg 100.0%`. The mask compares the final frame with the UI-free capture and counts the pixels that differ. When it covers almost everything, the guard correctly refuses to paste, and frame generation runs on the full frame with NVIDIA's UI recomposition off (`AdjustUiRecomposition ... false (HudLess mode ui_free ...)`). A faint micro-stutter was seen in motion with frame generation on. Switching live to `Mode = recomposition` gave `state Active; 600 presents: 600 captured, 0 fallbacks` and no artifact. The cause of the wide mask in that scene is not known (inferred candidates: something applied between the capture point and the final frame that changes most pixels, or a capture/paste timing offset; nothing was measured). Until this is investigated, use `recomposition`.
+- **Recomposition and the DLSS-G preset.** With preset A or C, NVIDIA's runtime forces its UI recomposition off (verified in nvngx_dlssg 310.9.16, `ApplyRenderPreset`). The fork therefore requests recomposition only with Auto or B, from the first DLSS-G option call (`ext/fg/dlssg/UiRecompositionRule.h`). Before that rule, a boot with `recomposition` and `RenderPreset = 3` created DLSS-G with the option on and paused it 0.09 s later. That forced a recreation, after which only about 59 of about 132 presents per second were distinct on screen. With the rule, the log shows `AdjustUiRecomposition DLSSG UI recomposition: false (... dropped by the DLSS-G render preset (Preset C))` once and the sentence `Preset C turns NVIDIA's UI recomposition off on this runtime ...` once, and the engine reports `Fallback(PausedByPreset)`. The rule remembers whether the preset control exists once, at the first time the runtime asks the driver for its preset or at the first DLSS-G option call, whichever comes first. Known gap (not seen, and not on an RTX 40 setup): if the boot latched the RTX 20/30 runtime and the user later unticks it, a live switch to A or C is allowed while the rule still reads Auto.
 - The capture is refused, with a one-line reason in `OptiScaler.log` (`HudLess: the UI-free capture was refused: ...`), if the capture and the bridge copy differ in device, size or format.
 
 
 ## 16. ReShade integration (built-in add-on; decided 2026-10-16)
 
-**Why:** the user's ReShade 6.8.0 is outermost on the game's D3D11 swapchain (`ReShade.log`: it "redirects" the game's `CreateSwapChain`, one runtime, on that chain). Its effect pass therefore runs in its Present hook, before the bridge copy, on the full frame including the HUD. A UI-free image snapshotted at the first UI draw is taken before that pass, so without help FG would drop the presets and the difference mask would flag every preset-changed pixel.
+**Why:** ReShade 6.8.0 (the tested setup) is outermost on the game's D3D11 swapchain (`ReShade.log`: it "redirects" the game's `CreateSwapChain`, one runtime, on that chain). Its effect pass therefore runs in its Present hook, before the bridge copy, on the full frame including the HUD. A UI-free image snapshotted at the first UI draw is taken before that pass, so without help FG would drop the presets and the difference mask would flag every preset-changed pixel.
 
-**Design (REST's behaviour, native, no REST / marker / extra file):**
+**Design (the behaviour of the external REST add-on of the import base, done natively: no REST, marker or extra file):**
 1. `ext/reshade/ReShadeAddon`: after OptiScaler loads ReShade (`dllmain.cpp` ~1165-1179, one seam call `ext::reshade::OnReshadeLoaded(module)`), register OptiScaler's own module with `ReShadeRegisterAddon(module, 20)` (header-only registration in ReShade's public API headers, vendored, `BSD-3-Clause OR MIT`) and subscribe to `init_effect_runtime`, `destroy_effect_runtime`, `reshade_begin_effects`, `reshade_finish_effects`, `reshade_present`.
 2. At the boundary (package A's detector) call `effect_runtime::render_effects(cmd_list, rtv, rtv_srgb)` for the runtime of the game chain, in place on the scene render target; then snapshot. The HUD is drawn afterwards and is not filtered.
 3. Suppress ReShade's own end-of-frame effect pass for that frame so the effects are not applied twice.
 4. Engine state: new fallback reasons `ReShadeUnavailable`, `ReShadeEffectsFailed`. Any failure in steps 1-3 means: no presets applied at the boundary, the end-of-frame pass is left alone, the engine falls back to normal full-frame FG (today's behaviour). Never a half-applied frame.
-5. The full integration (package D) is built only after the diagnostic build answers F1-F5 (below). The probe package D0 contains only registration, event logging and the guarded probes.
+5. The full integration (package E) was built after the diagnostic build answered F1-F5 (below). The probe (package D0) contains only registration, event logging and the guarded probes.
 
-**Feasibility questions F1-F5** (answered by D1 + D0 in Session 1, written to `reshade-probe.txt`):
+**Feasibility questions F1-F5** (answered by the D1 and D0 builds in the first diagnostic run, written to `reshade-probe.txt`):
 - **F1** registration succeeds in-process; the runtime on the game chain appears (device API, hwnd, technique names with enabled state, preset path).
 - **F2** `render_effects` can be called in place from a draw-time hook on the immediate context without corrupting game or ReShade state (probe armed from the menu, one frame; compare the render target before/after; run twice).
 - **F3** ReShade's end-of-frame pass can be skipped for that frame (event or effects state), checked by counting effect passes per frame.
 - **F4** depth-based techniques see valid depth at the boundary (log ReShade's depth-buffer detection state).
 - **F5** cost: effects run once per real frame; measured with QPC around the call.
 
-**Not in scope:** HDR-specific ReShade handling (effects stay SDR), ReShade versions other than the user's 6.8.0 (API 20; other versions fail the registration check and fall back).
+**Not in scope:** HDR-specific ReShade handling (effects stay SDR), ReShade versions other than the tested 6.8.0 (API 20; other versions fail the registration check and fall back).

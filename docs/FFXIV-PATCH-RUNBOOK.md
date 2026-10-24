@@ -2,7 +2,7 @@
 
 What to do when a game patch changes `ffxiv_dx11.exe`. Some of the fork's FFXIV features read the game's memory or hook its functions at fixed addresses. A patch moves those addresses; the fork notices and switches those features off instead of guessing. This runbook says how the check works, which addresses exist, how to find them again in the new executable, and how to prove the new values are right.
 
-Nothing in this document needs the game's source. Everything is recovered from the executable with a disassembler or decompiler (Ghidra, or the REA tools with a Ghidra back end).
+Nothing in this document needs the game's source. Everything is recovered from the executable with a disassembler or decompiler (Ghidra or a comparable tool).
 
 ## 1. How the build identity guard works
 
@@ -78,7 +78,7 @@ How to refresh: the game's shaders are created through `ID3D11Device::CreatePixe
 
 ## 4. Re-deriving the addresses
 
-Tools: a current Ghidra release (headless works; the previous remap used 12.1), or REA with its Ghidra back end. Import the **new** `ffxiv_dx11.exe` as a PE x64 with the default analysers and let auto-analysis finish; for this 50 MB image that takes a long time, and some tool deadlines will expire before it does, so prefer a headless import into a private project folder. Keep the **old** executable (or its notes) next to it, because the method is "find the same function again", not "search from scratch".
+Tools: a current Ghidra release (headless works; the previous remap used 12.1), or another decompiler. Import the **new** `ffxiv_dx11.exe` as a PE x64 with the default analysers and let auto-analysis finish; for this 50 MB image that takes a long time, and some tool deadlines will expire before it does, so prefer a headless import into a private project folder. Keep the **old** executable (or its notes) next to it, because the method is "find the same function again", not "search from scratch".
 
 ### 4.1 Read the PE identity
 
@@ -175,7 +175,7 @@ So after a patch that is not yet followed, the game still runs with the fork's g
 
 ## 7. Checklist
 
-Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd`, `SizeOfImage 0x381f000`, executable sha256 `46A52AB1DBE80B9A8D6C4D4531BF66693904200C5135FACACD053EF28A5DE14A` (51,976,960 bytes). The previous build (`TimeDateStamp 0x6ac3dc96`, `SizeOfImage 0x380a000`) is no longer matched. In 2026.10.16 every address moved (the globals by +0x15000, the nameplate module global by +0x15090, code by -0xa0 to +0x320), every guard was found again, and only the three guards that carry a RIP-relative displacement changed their bytes. The nameplate module global and the queue structure offsets (`+0x50`, `+0x68`, `+0x6c`, `+0x34`, `+0x3f0`) have no byte guard and were not proven offline: confirm them with the in-game log line of section 5.
+Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd` (2026-10-15 17:23 UTC), `SizeOfImage 0x381f000`, executable sha256 `46A52AB1DBE80B9A8D6C4D4531BF66693904200C5135FACACD053EF28A5DE14A` (51,976,960 bytes). The previous build (`TimeDateStamp 0x6ac3dc96`, `SizeOfImage 0x380a000`) is no longer matched. In 2026.10.16 every address moved (the globals by +0x15000, the nameplate module global by +0x15090, code by -0xa0 to +0x320), every guard was found again, and only the three guards that carry a RIP-relative displacement changed their bytes. The nameplate module global and the queue structure offsets (`+0x50`, `+0x68`, `+0x6c`, `+0x34`, `+0x3f0`) have no byte guard and were not proven offline: confirm them with the in-game log line of section 5.
 
 1. Patch released; install it, keep a copy of the previous executable.
 2. Check the new executable offline against the existing guards: run `scan.ps1` (section 4.2) with the exact guard bytes from `GameBuild.h`, without wildcards, and compare each hit with the RVA in `GameBuild.h`. Running the old fork build on the new executable cannot tell you this, because the new timestamp stops it before any byte guard is reached. If every guard is found at its old RVA, only `TimeDateStamp` and `SizeOfImage` need editing (the three globals loaded by the guards, `settingsPointerRva`, `managerPointerRva` and the stack cookie, are then unchanged as well; `devicePointerRva`, the nameplate module global and the slot table are not covered by a guard, so confirm those with the in-game log of section 5). If a guard is missing or sits elsewhere, re-derive it (section 4).
@@ -183,7 +183,7 @@ Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd`, `SizeOfImage
 4. Check the shader fingerprint tables if the lighting scan, scene HDR, HUD-less boundary or nameplate replay stay off although the addresses were accepted.
 5. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, the evidence for each moved RVA, and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
 
-### Game jitter chain (probe and correction, ext/ffxiv/jitter)
+## 8. Game jitter chain (probe and correction, `ext/ffxiv/jitter`)
 
 | Name in `GameBuild.h` | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
@@ -193,8 +193,8 @@ Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd`, `SizeOfImage
 
 **Fallback patch site (documented, NOT built).** The DLSS-mode cycle length is the immediate of `mov edx, 0xFFFFFFFF` at RVA `0x25f732` (bytes `BA FF FF FF FF`; guard: the 48 bytes at `0x25f721`: `48 8B 05 ?? ?? ?? ?? 0F 57 F6 48 8B 9F 78 02 00 00 BA FF FF FF FF 48 8B 88 28 04 00 00 48 8B F1 8B C1 48 C1 EE 20 F3 48 0F 2A F0 41 80 F8 02 74`). The game's own cycle never repeats in that mode, so it is not needed; a finite value there should only ever lengthen a finite cycle.
 
-### Jitter source hooks (`JitterSourceBuild`, ext/ffxiv/jitter)
+## 9. Jitter source hooks (`JitterSourceBuild`, `ext/ffxiv/jitter`)
 
-Guard blocks in `GameBuild.h`, all verified against the October 20 executable (SHA-256 46A52AB1...): the jitter generator (`0x2ebd90`), the camera getter (`0x25f610`, returns `[camera+0x278]`), the NGX packet producer call (`0x37411d`, return address `0x374122`), the camera head (`0x25f690`), the phases block (`0x25f721`, 120 bytes, runs up to the strength block), the strength block (`0x25f799`, the generator call, return address `0x25f79e`), and the device size reader (`0xd3f73`). Offsets: settings +0x4c scale, +0x54 mode (2 = DLSS), +0x78 amount; renderer +0x428 scene size, +0x700/+0x704 extents; device +0x8c/+0x90 output size. Globals: settings `0x290e470`, renderer `0x290e490`, device `0x2907d00`.
+Guard blocks in `GameBuild.h`, all verified against the supported executable (game version 2026.10.16, SHA-256 46A52AB1...): the jitter generator (`0x2ebd90`), the camera getter (`0x25f610`, returns `[camera+0x278]`), the NGX packet producer call (`0x37411d`, return address `0x374122`), the camera head (`0x25f690`), the phases block (`0x25f721`, 120 bytes, runs up to the strength block), the strength block (`0x25f799`, the generator call, return address `0x25f79e`), and the device size reader (`0xd3f73`). Offsets: settings +0x4c scale, +0x54 mode (2 = DLSS), +0x78 amount; renderer +0x428 scene size, +0x700/+0x704 extents; device +0x8c/+0x90 output size. Globals: settings `0x290e470`, renderer `0x290e490`, device `0x2907d00`.
 
 **Finding them again after a game patch.** The camera update contains the only call of the Halton generator; its output pointer is the jitter object base (`[camera+0x278]`) and the second output is base+4. The native strength is `(amount - 0.001f) * ratio^2 + 0.001f` with `ratio = extent0 / extent2 * scale`; the game doubles it, multiplies it by the jitter and divides by the render size to get the NDC translation. The NGX packet producer is the only caller of the camera getter that is followed by the DLSS evaluate descriptor. Re-verify every block with a byte dump of the new executable; any block that cannot be verified keeps the feature off (the log says `inactive (executable not matched)` or names the failed block).
