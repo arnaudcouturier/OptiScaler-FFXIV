@@ -366,6 +366,19 @@ void HappyPath()
     CHECK(q.binder.Status() == "Automatic scene depth: 3840x2160");
     q.Finish();
 
+    // render and output differing in one dimension only still print both
+    for (const auto& [w, h] : { std::pair { 3840u, 1080u }, std::pair { 1920u, 2160u } })
+    {
+        Rig t;
+        DepthCapture d = t.Capture();
+        d.renderW = w;
+        d.renderH = h;
+        t.binder.PublishCapture(d);
+        CHECK(t.Begin() == Outcome::Bound);
+        CHECK(t.binder.Status() == std::format("Automatic scene depth: {}x{} -> 3840x2160", w, h));
+        t.Finish();
+    }
+
     // a new capture replaces the copy that gets bound
     Rig p;
     DepthCapture c2 = p.Capture();
@@ -471,6 +484,8 @@ void RestoreOnlyIfOurs()
         CHECK(r.fake.updates.size() == 1);
         CHECK(r.fake.refs[kCopy] == 1 && r.fake.refs[kOrig] == 1 && r.fake.refs[kOrigSrgb] == 1);
         CHECK(!r.fake.unis[0].value);
+        CHECK(r.binder.GetCounters().overwrittenByOther == 0); // an unreadable binding is not "replaced by another add-on"
+        CHECK(r.binder.Status() == "ReShade call failed; generic depth retained");
     }
 }
 
@@ -631,6 +646,14 @@ void Gates()
                 r.binder.PublishCapture(c);
             },
             "capture without a copy");
+    Refuses(Outcome::CaptureUnavailable, kUnavailable,
+            [](Rig& r)
+            {
+                DepthCapture c = r.Capture();
+                c.device = 0;
+                r.binder.PublishCapture(c);
+            },
+            "capture without a device");
     Refuses(Outcome::CaptureUnavailable, kUnavailable, [](Rig& r) { r.fake.now += 251; }, "251 ms old");
     Refuses(Outcome::CaptureUnavailable, kUnavailable, [](Rig& r) { r.fake.frame += 2; }, "2 frames old");
     Refuses(Outcome::CaptureUnavailable, kUnavailable, [](Rig& r) { r.fake.frame -= 1; }, "from the future");
@@ -640,8 +663,31 @@ void Gates()
             [](Rig& r) { r.fake.bbH = 2161; }, "height");
     Refuses(Outcome::SizeMismatch, "ReShade size differs from the scene depth; generic depth retained",
             [](Rig& r) { r.fake.bbOk = false; }, "size unknown");
+    Refuses(Outcome::SizeMismatch, "ReShade size differs from the scene depth; generic depth retained",
+            [](Rig& r)
+            {
+                DepthCapture c = r.Capture();
+                c.outputW = c.outputH = 0; // an unreadable size must not pass as "0x0 equals 0x0"
+                r.binder.PublishCapture(c);
+                r.fake.bbOk = false;
+            },
+            "size unknown, empty capture");
     Refuses(Outcome::ManualTransform, kManual, [](Rig& r) { r.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; }, "manual");
     Refuses(Outcome::NoDepthInput, kNoInput, [](Rig& r) { r.fake.vars.clear(); }, "no variables");
+
+    { // a capture that cannot be bound is never referenced
+        for (int variant = 0; variant < 3; ++variant)
+        {
+            Rig r;
+            DepthCapture c = r.Capture();
+            c.valid = variant != 0;
+            c.copyView = variant == 1 ? 0 : kCopy;
+            c.device = variant == 2 ? 0 : kDevice;
+            r.binder.PublishCapture(c);
+            r.Begin();
+            CHECK(r.fake.Calls("AddRef") == 0 && r.fake.Calls("Release") == 0);
+        }
+    }
 
     // boundary values pass
     { // 250 ms old, 1 frame old
@@ -780,6 +826,13 @@ void ManualTransform()
         r.fake.techniques = { { "Mixed.fx", false }, { "Mixed.fx", true } };
         r.fake.effectDefs["Mixed.fx"]["RESHADE_DEPTH_INPUT_Y_SCALE"] = "2";
         CHECK(r.Begin() == Outcome::ManualTransform);
+    }
+    {
+        Rig r; // several enabled techniques of one effect: the effect is asked once
+        r.fake.techniques = { { "Dup.fx", true }, { "Dup.fx", true }, { "Dup.fx", true } };
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.defQueries == 12); // 6 macros globally, 6 for Dup.fx
+        r.Finish();
     }
     {
         Rig r; // the last of several effects
@@ -938,6 +991,7 @@ void DepthInputLookup()
         CHECK(r.Pass());
         CHECK(r.fake.textureEnums == 2);
         CHECK(r.fake.bindingReads.count(0x777) == 1);
+        CHECK(r.fake.vars[0].srv == kOrig && r.fake.vars[0].srgb == kOrigSrgb); // finish used the new handle, too
         CHECK(r.fake.Balanced());
     }
 }
@@ -987,6 +1041,12 @@ void BufReadyDepth()
         CHECK(r.fake.unis[0].value && r.fake.uniformEnums == 2);
         r.Finish();
         CHECK(!r.fake.unis[0].value);
+    }
+    { // nothing piles up: one set and one restore per pass
+        Rig r;
+        for (int i = 0; i < 3; ++i)
+            CHECK(r.Pass());
+        CHECK(r.fake.Calls("SetUniformBool") == 6);
     }
     { // every refusal leaves the uniforms alone
         Rig r;
@@ -1049,10 +1109,13 @@ void FaultInjection()
             const std::string before = r.fake.StateKey();
             r.fake.faultAt = n;
             r.fake.fault = faults[f];
-            bool escaped = false;
+            bool escaped = false, restoredAfterBegin = true, balancedAfterBegin = true;
+            Outcome outcome = Outcome::Failed;
             try
             {
-                r.Begin();
+                outcome = r.Begin();
+                restoredAfterBegin = r.fake.StateKey() == before;
+                balancedAfterBegin = r.fake.Balanced();
                 r.Finish();
             }
             catch (...)
@@ -1062,13 +1125,20 @@ void FaultInjection()
             const bool inBegin = n <= beginCalls;
             const bool restored = r.fake.StateKey() == before;
             const bool balanced = r.fake.Balanced();
-            if (escaped || !balanced || (inBegin && !restored))
-                std::printf("  fault: call #%d (%s) %s: escaped=%d balanced=%d restored=%d\n", n,
-                            n <= int(r.fake.log.size()) ? r.fake.log[n - 1].c_str() : "?", names[f], escaped, balanced, restored);
+            // A begin that did not bind has already put everything back, without waiting for finish_effects.
+            const bool undone = outcome == Outcome::Bound || (restoredAfterBegin && balancedAfterBegin);
+            if (escaped || !balanced || !undone || (inBegin && !restored))
+                std::printf("  fault: call #%d (%s) %s: escaped=%d balanced=%d undone=%d restored=%d\n", n,
+                            n <= int(r.fake.log.size()) ? r.fake.log[n - 1].c_str() : "?", names[f], escaped, balanced, undone,
+                            restored);
             CHECK(!escaped);
             CHECK(balanced);
+            CHECK(undone);
             if (inBegin)
+            {
                 CHECK(restored);
+                CHECK(r.binder.GetCounters().overwrittenByOther == 0); // an own failure is not "replaced by another add-on"
+            }
         }
     for (int release = 1; release <= 3; ++release) // a Release that throws must not keep the others from running
         for (int reload = 0; reload < 2; ++reload)
@@ -1100,6 +1170,103 @@ void FaultInjection()
         CHECK(r.Begin() == Outcome::Failed);
         CHECK(r.binder.Status() == "ReShade call failed; generic depth retained");
     }
+}
+
+// The first call of each kind in a pass fails (returns false / 0) or throws: the outcome says what happened and ReShade is left
+// exactly as it was.
+void BackendFailures()
+{
+    std::vector<std::string> sequence;
+    {
+        Rig r;
+        r.Begin();
+        sequence = r.fake.log;
+    }
+    auto firstCall = [&](const std::string& method)
+    {
+        for (size_t i = 0; i < sequence.size(); ++i)
+            if (sequence[i] == method)
+                return int(i) + 1;
+        return 0;
+    };
+    struct Case
+    {
+        const char* method;
+        Outcome whenItFails; // what a false / 0 return leads to
+    };
+    const Case cases[] = {
+        { "Frame", Outcome::CaptureUnavailable },
+        { "NowMs", Outcome::CaptureUnavailable },
+        { "Device", Outcome::OtherDevice },
+        { "IsD3D11", Outcome::NotD3D11 },
+        { "BackBufferSize", Outcome::SizeMismatch },
+        { "Definition", Outcome::Bound }, // "not defined"
+        { "Techniques", Outcome::Failed },
+        { "TextureVariables", Outcome::Failed },
+        { "TextureBinding", Outcome::Failed },
+        { "UpdateTextureBindings", Outcome::Failed },
+        { "UniformVariables", Outcome::Failed },
+        { "GetUniformBool", Outcome::Failed },
+        { "SetUniformBool", Outcome::Failed },
+    };
+    for (const Case& c : cases)
+        for (const Fault fault : { Fault::Fail, Fault::Throw })
+        {
+            const int n = firstCall(c.method);
+            CHECK(n > 0);
+            Rig r;
+            const std::string before = r.fake.StateKey();
+            r.fake.faultAt = n;
+            r.fake.fault = fault;
+            const Outcome expected = fault == Fault::Fail ? c.whenItFails : Outcome::Failed;
+            const Outcome got = r.Begin();
+            if (got != expected)
+                std::printf("  %s %s: outcome %d, expected %d\n", c.method, fault == Fault::Fail ? "fails" : "throws", int(got),
+                            int(expected));
+            CHECK(got == expected);
+            if (got != Outcome::Bound)
+            {
+                CHECK(r.fake.StateKey() == before && r.fake.Balanced());
+                CHECK(r.binder.GetCounters().passesBound == 0);
+            }
+            r.Finish();
+            CHECK(r.fake.StateKey() == before && r.fake.Balanced());
+        }
+    { // AddRef cannot fail, but a throwing one is survived
+        Rig r;
+        r.fake.faultAt = firstCall("AddRef");
+        r.fake.fault = Fault::Throw;
+        CHECK(r.Begin() == Outcome::Failed);
+        CHECK(r.fake.Balanced());
+    }
+}
+
+void ThrowingHook()
+{
+    // a log hook that throws neither changes the outcome nor leaves a pass half done
+    Fake fake;
+    DepthBinder binder(fake, [](Counter, uint64_t) { throw std::runtime_error("log"); });
+    binder.SetEnabled(true);
+    DepthCapture c;
+    c.valid = true;
+    c.outputW = 3840;
+    c.outputH = 2160;
+    c.renderW = 1920;
+    c.renderH = 1080;
+    c.frame = fake.frame;
+    c.tickMs = fake.now;
+    c.copyView = kCopy;
+    c.device = kDevice;
+    binder.PublishCapture(c);
+    const std::string before = fake.StateKey();
+    CHECK(binder.OnBeginEffects(kRt) == Outcome::Bound); // passesBound reaches the hook
+    binder.OnFinishEffects(kRt);
+    CHECK(fake.StateKey() == before && fake.Balanced());
+    ++fake.frame;
+    c.frame = fake.frame;
+    binder.PublishCapture(c);
+    fake.vars.clear();
+    CHECK(binder.OnBeginEffects(kRt) == Outcome::NoDepthInput); // so does noDepthInput
 }
 
 void LogHook()
@@ -1185,7 +1352,9 @@ int main()
     BufReadyDepth();
     EnableDisable();
     FaultInjection();
+    BackendFailures();
     LogHook();
+    ThrowingHook();
     Threads();
     if (g_fail)
     {
