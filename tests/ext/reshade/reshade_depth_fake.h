@@ -133,6 +133,18 @@ struct Fake final : IBackend
         depthSrv = hasDepth ? srv : 0;
         depthSrgb = hasDepth ? srgb : 0;
     }
+    // What a destroy of the runtime does to this map. Whether ResizeBuffers makes ReShade create a NEW runtime object (an empty map)
+    // or RESET the same one (the pointer value comes back with its map) is unverified, so tests run both worlds.
+    enum class DestroyWorld
+    {
+        MapDies, // a new object: the map starts empty
+        Reset,   // the same object: the map survives
+    };
+    void RuntimeDestroyed(DestroyWorld world)
+    {
+        if (world == DestroyWorld::MapDies)
+            SetDepth(0, 0);
+    }
     std::pair<uint64_t, uint64_t> Depth() const { return { depthSrv, depthSrgb }; }
     bool DepthIs(uint64_t srv, uint64_t srgb) const { return depthSrv == srv && depthSrgb == srgb; }
 

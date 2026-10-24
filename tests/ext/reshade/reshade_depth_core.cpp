@@ -1491,8 +1491,7 @@ void ReloadCannotResolve()
 void DestroyedRuntime(Rig& r, bool mapSurvives)
 {
     r.binder.OnDestroyRuntime(kRt);
-    if (!mapSurvives)
-        r.fake.SetDepth(0, 0); // a new object has a new, empty map
+    r.fake.RuntimeDestroyed(mapSurvives ? Fake::DestroyWorld::Reset : Fake::DestroyWorld::MapDies);
 }
 
 void OrphanedRuntimes()
