@@ -120,55 +120,69 @@ void Names()
     CHECK(std::string(CounterName(Counter::ManualTransformStandDowns)) == "manualTransformStandDowns");
     CHECK(std::string(CounterName(Counter::NoDepthInput)) == "noDepthInput");
     CHECK(std::string(CounterName(Counter::PassesBound)) == "passesBound");
-    static_assert(kCounters == 6);
+    CHECK(std::string(CounterName(Counter::OtherDevice)) == "otherDevice");
+    static_assert(kCounters == 7);
+    static_assert(kConsumerWindowMs == 1000);
 
     CHECK(std::string(DepthEventName(DepthEvent::BeginEffects)) == "reshade_begin_effects");
     CHECK(std::string(DepthEventName(DepthEvent::FinishEffects)) == "reshade_finish_effects");
     CHECK(std::string(DepthEventName(DepthEvent::DestroyEffectRuntime)) == "destroy_effect_runtime");
     CHECK(std::string(DepthEventName(DepthEvent::ReloadedEffects)) == "reshade_reloaded_effects");
+    CHECK(std::string(DepthEventName(DepthEvent::TechniqueState)) == "reshade_set_technique_state");
+    CHECK(std::string(DepthEventName(DepthEvent::PresetPath)) == "reshade_set_current_preset_path");
 }
 
 void LateEvents()
 {
-    // Exactly the four depth events: not the boundary tracking (init_effect_runtime, preset path, technique state), not the
-    // probe (present, reshade_present) and not the window mode (set_fullscreen_state).
+    // Exactly the six depth callbacks. The last two only clear the manual transform cache; the boundary tracking subscribes the
+    // same two ReShade events for its own callbacks, so the event kinds overlap but the callbacks do not. Not in the list: the
+    // probe (present, reshade_present, init_effect_runtime) and the window mode (set_fullscreen_state).
     const auto& events = LateRegistrationPlanner::kEvents;
-    static_assert(LateRegistrationPlanner::kEvents.size() == 4);
-    bool seen[4] = {};
+    static_assert(LateRegistrationPlanner::kEvents.size() == 6);
+    bool seen[6] = {};
     for (DepthEvent e : events)
     {
-        CHECK(static_cast<size_t>(e) < 4);
+        CHECK(static_cast<size_t>(e) < 6);
         seen[static_cast<size_t>(e)] = true;
         const std::string name = DepthEventName(e);
         CHECK(name == "reshade_begin_effects" || name == "reshade_finish_effects" || name == "destroy_effect_runtime" ||
-              name == "reshade_reloaded_effects");
+              name == "reshade_reloaded_effects" || name == "reshade_set_technique_state" ||
+              name == "reshade_set_current_preset_path");
     }
-    CHECK(seen[0] && seen[1] && seen[2] && seen[3]);
+    CHECK(seen[0] && seen[1] && seen[2] && seen[3] && seen[4] && seen[5]);
 }
 
 void LatePlanner()
 {
     using P = LateRegistrationPlanner;
     static_assert(P::kRetryIntervalMs == 1000);
-    // the one case that retries: enabled, an attempt found no ReShade, a second has passed
-    CHECK(P::ShouldRetry(true, true, RegisterStatus::NoModule, 5000, 4000));
-    CHECK(P::ShouldRetry(true, true, RegisterStatus::NoModule, 5001, 4000));
-    CHECK(P::ShouldRetry(true, true, RegisterStatus::NoModule, 100000, 0));
+    static_assert(P::kMaxAttempts == 60);
+    constexpr auto kNoModule = RegisterStatus::NoModule;
+    // the one case that retries: enabled, an attempt found no ReShade, a second has passed, the attempts are not used up
+    CHECK(P::ShouldRetry(true, true, kNoModule, 0, 5000, 4000));
+    CHECK(P::ShouldRetry(true, true, kNoModule, 0, 5001, 4000));
+    CHECK(P::ShouldRetry(true, true, kNoModule, 0, 100000, 0));
     // not before a second is over
-    CHECK(!P::ShouldRetry(true, true, RegisterStatus::NoModule, 4999, 4000));
-    CHECK(!P::ShouldRetry(true, true, RegisterStatus::NoModule, 4000, 4000));
-    CHECK(!P::ShouldRetry(true, true, RegisterStatus::NoModule, 3000, 4000)); // the clock went backwards
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 0, 4999, 4000));
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 0, 4000, 4000));
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 0, 3000, 4000)); // the clock went backwards
+    // a bounded window: 59 late attempts so far still retries, 60 does not
+    CHECK(P::ShouldRetry(true, true, kNoModule, 1, 5000, 4000));
+    CHECK(P::ShouldRetry(true, true, kNoModule, 59, 5000, 4000));
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 60, 5000, 4000));
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 61, 5000, 4000));
+    CHECK(!P::ShouldRetry(true, true, kNoModule, 100000, 5000, 4000));
     // option off
-    CHECK(!P::ShouldRetry(false, true, RegisterStatus::NoModule, 100000, 0));
+    CHECK(!P::ShouldRetry(false, true, kNoModule, 0, 100000, 0));
     // the load-time attempt has not run: it owns the first attempt
-    CHECK(!P::ShouldRetry(true, false, RegisterStatus::NoModule, 100000, 0));
+    CHECK(!P::ShouldRetry(true, false, kNoModule, 0, 100000, 0));
     // never register twice, and every other result is final
     const RegisterStatus finals[] = { RegisterStatus::Ok, RegisterStatus::NoSelf, RegisterStatus::ExportsMissing,
                                       RegisterStatus::Refused, RegisterStatus::Exception };
     for (RegisterStatus s : finals)
-        CHECK(!P::ShouldRetry(true, true, s, 100000, 0));
-    CHECK(!P::ShouldRetry(false, true, RegisterStatus::Ok, 100000, 0));
-    CHECK(!P::ShouldRetry(true, false, RegisterStatus::Ok, 100000, 0));
+        CHECK(!P::ShouldRetry(true, true, s, 0, 100000, 0));
+    CHECK(!P::ShouldRetry(false, true, RegisterStatus::Ok, 0, 100000, 0));
+    CHECK(!P::ShouldRetry(true, false, RegisterStatus::Ok, 0, 100000, 0));
 }
 } // namespace
 

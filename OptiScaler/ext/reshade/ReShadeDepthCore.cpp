@@ -12,50 +12,6 @@ namespace ext::reshade::depth
 {
 namespace
 {
-const char* const kStatusDisabled = "Automatic ReShade depth disabled";
-const char* const kStatusWaiting = "Waiting for ReShade depth effects";
-const char* const kStatusOtherDevice = "ReShade runs on another device; generic depth retained";
-const char* const kStatusNotD3D11 = "ReShade is not using D3D11; generic depth retained";
-const char* const kStatusUnavailable = "Scene depth unavailable; generic depth retained";
-const char* const kStatusSizeMismatch = "ReShade size differs from the scene depth; generic depth retained";
-const char* const kStatusManual = "Manual ReShade depth transform retained";
-const char* const kStatusNoInput = "No depth input found; generic depth retained";
-const char* const kStatusFailed = "ReShade call failed; generic depth retained";
-
-const char* OutcomeText(Outcome outcome)
-{
-    switch (outcome)
-    {
-    case Outcome::Disabled:
-        return kStatusDisabled;
-    case Outcome::OtherDevice:
-        return kStatusOtherDevice;
-    case Outcome::NotD3D11:
-        return kStatusNotD3D11;
-    case Outcome::CaptureUnavailable:
-        return kStatusUnavailable;
-    case Outcome::SizeMismatch:
-        return kStatusSizeMismatch;
-    case Outcome::ManualTransform:
-        return kStatusManual;
-    case Outcome::NoDepthInput:
-        return kStatusNoInput;
-    case Outcome::Failed:
-        return kStatusFailed;
-    case Outcome::Bound:
-    case Outcome::Duplicate:
-        break; // not a refusal: the status is left alone (Bound sets its own)
-    }
-    return "";
-}
-
-std::string BoundText(const DepthCapture& capture)
-{
-    if (capture.renderW == capture.outputW && capture.renderH == capture.outputH)
-        return std::format("Automatic scene depth: {}x{}", capture.outputW, capture.outputH);
-    return std::format("Automatic scene depth: {}x{} -> {}x{}", capture.renderW, capture.renderH, capture.outputW, capture.outputH);
-}
-
 const char* const kDepthSemantic = "DEPTH";
 constexpr std::string_view kBufReadySource = "bufready_depth";
 
@@ -148,6 +104,10 @@ const char* DepthEventName(DepthEvent event)
         return "destroy_effect_runtime";
     case DepthEvent::ReloadedEffects:
         return "reshade_reloaded_effects";
+    case DepthEvent::TechniqueState:
+        return "reshade_set_technique_state";
+    case DepthEvent::PresetPath:
+        return "reshade_set_current_preset_path";
     }
     return "?";
 }
@@ -168,15 +128,18 @@ const char* CounterName(Counter counter)
         return "noDepthInput";
     case Counter::PassesBound:
         return "passesBound";
+    case Counter::OtherDevice:
+        return "otherDevice";
     case Counter::Count:
         break;
     }
     return "?";
 }
 
-bool LateRegistrationPlanner::ShouldRetry(bool enabled, bool attempted, RegisterStatus status, int64_t nowMs, int64_t lastAttemptMs)
+bool LateRegistrationPlanner::ShouldRetry(bool enabled, bool attempted, RegisterStatus status, uint32_t attempts, int64_t nowMs,
+                                          int64_t lastAttemptMs)
 {
-    if (!enabled || !attempted)
+    if (!enabled || !attempted || attempts >= kMaxAttempts)
         return false;
     switch (status)
     {
@@ -192,22 +155,16 @@ bool LateRegistrationPlanner::ShouldRetry(bool enabled, bool attempted, Register
     return false;
 }
 
-// ---- the binder ---------------------------------------------------------------------------------------------------------
-DepthBinder::DepthBinder(IBackend& backend, LogFn log) : _backend(backend), _log(log), _status(kStatusDisabled) {}
+// ---- the binder: small members --------------------------------------------------------------------------------------------
+DepthBinder::DepthBinder(IBackend& backend, LogFn log) : _backend(backend), _log(log) {}
 
-void DepthBinder::SetEnabled(bool enabled)
+void DepthBinder::SetEnabled(bool enabled) noexcept
 {
-    try
-    {
-        if (_enabled.exchange(enabled) != enabled)
-            SetStatus(enabled ? kStatusWaiting : kStatusDisabled);
-    }
-    catch (...)
-    {
-    }
+    if (_enabled.exchange(enabled) != enabled)
+        SetStatus(enabled ? StatusKind::Waiting : StatusKind::Disabled);
 }
 
-void DepthBinder::PublishCapture(const DepthCapture& capture)
+void DepthBinder::PublishCapture(const DepthCapture& capture) noexcept
 {
     try
     {
@@ -219,20 +176,50 @@ void DepthBinder::PublishCapture(const DepthCapture& capture)
     }
 }
 
-std::string DepthBinder::Status() const
+bool DepthBinder::ConsumerSeen(int64_t nowMs) const noexcept
+{
+    const int64_t last = _consumerMs.load(std::memory_order_relaxed);
+    return last != INT64_MIN && nowMs - last <= kConsumerWindowMs;
+}
+
+std::string DepthBinder::Status() const noexcept
 {
     try
     {
-        std::lock_guard lock(_publicMutex);
-        return _status;
+        StatusInfo info;
+        {
+            std::lock_guard lock(_publicMutex);
+            info = _status;
+        }
+        switch (info.kind)
+        {
+        case StatusKind::Disabled:
+            return "Automatic ReShade depth disabled";
+        case StatusKind::Waiting:
+            return "Waiting for ReShade depth effects";
+        case StatusKind::Unavailable:
+            return "Scene depth unavailable; generic depth retained";
+        case StatusKind::SizeMismatch:
+            return "ReShade size differs from the scene depth; generic depth retained";
+        case StatusKind::Manual:
+            return "Manual ReShade depth transform retained";
+        case StatusKind::NoInput:
+            return "No depth input found; generic depth retained";
+        case StatusKind::Failed:
+            return "ReShade call failed; generic depth retained";
+        case StatusKind::Bound:
+            if (info.renderW == info.outputW && info.renderH == info.outputH)
+                return std::format("Automatic scene depth: {}x{}", info.outputW, info.outputH);
+            return std::format("Automatic scene depth: {}x{} -> {}x{}", info.renderW, info.renderH, info.outputW, info.outputH);
+        }
     }
     catch (...)
     {
-        return {};
     }
+    return {};
 }
 
-Counters DepthBinder::GetCounters() const
+Counters DepthBinder::GetCounters() const noexcept
 {
     auto n = [&](Counter c) { return _counts[static_cast<size_t>(c)].load(std::memory_order_relaxed); };
     Counters out;
@@ -242,22 +229,32 @@ Counters DepthBinder::GetCounters() const
     out.manualTransformStandDowns = n(Counter::ManualTransformStandDowns);
     out.noDepthInput = n(Counter::NoDepthInput);
     out.passesBound = n(Counter::PassesBound);
+    out.otherDevice = n(Counter::OtherDevice);
     return out;
 }
 
-void DepthBinder::SetStatus(std::string text)
+void DepthBinder::SetStatus(StatusKind kind, const DepthCapture* capture) noexcept
 {
     try
     {
+        StatusInfo info;
+        info.kind = kind;
+        if (capture != nullptr)
+        {
+            info.renderW = capture->renderW;
+            info.renderH = capture->renderH;
+            info.outputW = capture->outputW;
+            info.outputH = capture->outputH;
+        }
         std::lock_guard lock(_publicMutex);
-        _status = std::move(text);
+        _status = info;
     }
     catch (...)
     {
     }
 }
 
-void DepthBinder::Bump(Counter counter)
+void DepthBinder::Bump(Counter counter) noexcept
 {
     const uint64_t count = _counts[static_cast<size_t>(counter)].fetch_add(1, std::memory_order_relaxed) + 1;
     if (_log == nullptr || !ShouldLog(count))
@@ -271,13 +268,42 @@ void DepthBinder::Bump(Counter counter)
     }
 }
 
+// The status a refusal leaves. A runtime that is not ours (another device, not D3D11) writes none: with several effect runtimes
+// the line would flip with every frame.
 Outcome DepthBinder::Done(Outcome outcome)
 {
-    SetStatus(OutcomeText(outcome));
+    switch (outcome)
+    {
+    case Outcome::Disabled:
+        SetStatus(StatusKind::Disabled);
+        break;
+    case Outcome::NoCapture:
+        SetStatus(StatusKind::Waiting);
+        break;
+    case Outcome::CaptureUnavailable:
+        SetStatus(StatusKind::Unavailable);
+        break;
+    case Outcome::SizeMismatch:
+        SetStatus(StatusKind::SizeMismatch);
+        break;
+    case Outcome::ManualTransform:
+        SetStatus(StatusKind::Manual);
+        break;
+    case Outcome::NoDepthInput:
+        SetStatus(StatusKind::NoInput);
+        break;
+    case Outcome::Failed:
+        SetStatus(StatusKind::Failed);
+        break;
+    case Outcome::Bound: // sets its own, with the sizes
+    case Outcome::OtherDevice:
+    case Outcome::NotD3D11:
+        break;
+    }
     return outcome;
 }
 
-void DepthBinder::ReleaseView(uint64_t view)
+void DepthBinder::ReleaseView(uint64_t view) noexcept
 {
     try
     {
@@ -304,7 +330,7 @@ DepthCapture DepthBinder::TakeCapture(uint64_t& copyView)
 }
 
 // ---- events -------------------------------------------------------------------------------------------------------------
-Outcome DepthBinder::OnBeginEffects(uint64_t runtime)
+Outcome DepthBinder::OnBeginEffects(uint64_t runtime) noexcept
 {
     try
     {
@@ -313,37 +339,62 @@ Outcome DepthBinder::OnBeginEffects(uint64_t runtime)
     }
     catch (...)
     {
-        SetStatus(kStatusFailed);
+        SetStatus(StatusKind::Failed);
         return Outcome::Failed;
     }
 }
 
-void DepthBinder::OnFinishEffects(uint64_t runtime)
+void DepthBinder::OnFinishEffects(uint64_t runtime) noexcept
 {
     try
     {
         std::lock_guard lock(_mutex);
         if (const auto it = _runtimes.find(runtime); it != _runtimes.end())
-            EndPass(runtime, it->second, End::Finish);
+            EndPass(runtime, it->second, it->second.inPass ? End::Finish : End::Retry);
     }
     catch (...)
     {
     }
 }
 
-void DepthBinder::OnDestroyRuntime(uint64_t runtime) { Forget(runtime); }
-void DepthBinder::OnReloadedEffects(uint64_t runtime) { Forget(runtime); }
+void DepthBinder::OnDestroyRuntime(uint64_t runtime) noexcept { Forget(runtime, false); }
+void DepthBinder::OnReloadedEffects(uint64_t runtime) noexcept { Forget(runtime, true); }
 
-void DepthBinder::Forget(uint64_t runtime)
+void DepthBinder::OnTechniquesChanged(uint64_t runtime) noexcept
 {
     try
     {
         std::lock_guard lock(_mutex);
         if (const auto it = _runtimes.find(runtime); it != _runtimes.end())
+            it->second.manual.reset();
+    }
+    catch (...)
+    {
+    }
+}
+
+void DepthBinder::Forget(uint64_t runtime, bool reload) noexcept
+{
+    try
+    {
+        std::lock_guard lock(_mutex);
+        const auto it = _runtimes.find(runtime);
+        if (it == _runtimes.end())
+            return;
+        Runtime& state = it->second;
+        if (!reload)
         {
-            EndPass(runtime, it->second, End::Forget);
+            EndPass(runtime, state, End::Forget);
             _runtimes.erase(it);
+            return;
         }
+        // The effects are new: what was looked up is stale. An open pass is restored first (this also repairs a runtime that
+        // is dirty); if that is not possible the entry stays with its references until the runtime is destroyed.
+        EndPass(runtime, state, End::Reload);
+        state.manual.reset();
+        state.trust = Trust::Unknown;
+        if (!state.open)
+            _runtimes.erase(it);
     }
     catch (...)
     {
@@ -352,25 +403,20 @@ void DepthBinder::Forget(uint64_t runtime)
 
 Outcome DepthBinder::Begin(uint64_t runtime)
 {
+    // A pass an earlier frame never finished, or a restore that is still pending, comes first: before anything reads an
+    // "original" and even when the feature has been switched off since.
+    if (const auto it = _runtimes.find(runtime); it != _runtimes.end() && it->second.open)
+        EndPass(runtime, it->second, End::Retry);
     if (!_enabled.load(std::memory_order_relaxed))
-    {
-        // switched off with a pass still open (its finish never came): put it back now
-        if (const auto it = _runtimes.find(runtime); it != _runtimes.end())
-            EndPass(runtime, it->second, End::Rollback);
         return Done(Outcome::Disabled);
-    }
 
     Runtime& state = _runtimes[runtime];
-    const uint64_t frame = _backend.Frame();
-    if (state.hasFrame && state.frame == frame)
-        return Outcome::Duplicate;
-    state.hasFrame = true;
-    state.frame = frame;
-    EndPass(runtime, state, End::Rollback); // a pass an earlier frame never finished
+    if (state.open)
+        return Done(Outcome::Failed); // the copy may still be bound: nothing is bound over it
 
     try
     {
-        return Bind(runtime, state, frame);
+        return Bind(runtime, state);
     }
     catch (...)
     {
@@ -379,27 +425,24 @@ Outcome DepthBinder::Begin(uint64_t runtime)
     }
 }
 
-Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state, uint64_t frame)
+Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
 {
     ViewRef copy { _backend };
     const DepthCapture capture = TakeCapture(copy.view);
 
-    // ---- gates: each one leaves ReShade alone
-    if (capture.device != 0 && _backend.Device(runtime) != capture.device)
-        return Done(Outcome::OtherDevice);
+    // ---- is this runtime ours
     if (!_backend.IsD3D11(runtime))
+    {
+        Bump(Counter::OtherDevice);
         return Done(Outcome::NotD3D11);
-    if (copy.view == 0 || !IsFresh(capture, _backend.NowMs(), frame))
-    {
-        Bump(Counter::StaleCaptures);
-        return Done(Outcome::CaptureUnavailable);
     }
-    uint32_t width = 0, height = 0;
-    if (!_backend.BackBufferSize(runtime, width, height) || width != capture.outputW || height != capture.outputH)
+    if (capture.device != 0 && !_backend.SameDevice(runtime, capture.device))
     {
-        Bump(Counter::SizeMismatches);
-        return Done(Outcome::SizeMismatch);
+        Bump(Counter::OtherDevice);
+        return Done(Outcome::OtherDevice);
     }
+
+    // ---- is there a depth input to bind (independent of the capture: a begin that finds one is what starts the capture)
     if (!state.manual)
     {
         bool manual = false;
@@ -411,6 +454,11 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state, uint64_t frame)
     {
         Bump(Counter::ManualTransformStandDowns);
         return Done(Outcome::ManualTransform);
+    }
+    if (state.trust == Trust::Untrusted)
+    {
+        Bump(Counter::NoDepthInput);
+        return Done(Outcome::NoDepthInput);
     }
     std::vector<TextureVar> textures;
     if (!_backend.TextureVariables(runtime, textures))
@@ -424,9 +472,45 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state, uint64_t frame)
     uint64_t srv = 0, srgb = 0;
     if (!_backend.TextureBinding(runtime, input->handle, srv, srgb))
         return Done(Outcome::Failed);
+    if (state.trust == Trust::Unknown)
+    {
+        // The DEPTH semantic cannot be read through the API. A variable with the right name but without it would show some
+        // other binding, which is not an original to put back: trust the variable only if it shows nothing or a depth view.
+        auto depthOrEmpty = [&](uint64_t view) { return view == 0 || _backend.IsDepthView(view); };
+        if (!depthOrEmpty(srv) || !depthOrEmpty(srgb))
+        {
+            state.trust = Trust::Untrusted;
+            Bump(Counter::NoDepthInput);
+            return Done(Outcome::NoDepthInput);
+        }
+        state.trust = Trust::Trusted;
+    }
+
+    // ---- the capture. Clock and frame are read after the capture was taken, so it is never "from the future".
+    const int64_t now = _backend.NowMs();
+    _consumerMs.store(now, std::memory_order_relaxed);
+    if (!capture.valid)
+        return Done(Outcome::NoCapture);
+    const uint64_t frame = _backend.Frame();
+    if (copy.view == 0 || !IsFresh(capture, now, frame))
+    {
+        Bump(Counter::StaleCaptures);
+        return Done(Outcome::CaptureUnavailable);
+    }
+    uint32_t width = 0, height = 0;
+    if (!_backend.BackBufferSize(runtime, width, height) || width != capture.outputW || height != capture.outputH)
+    {
+        Bump(Counter::SizeMismatches);
+        return Done(Outcome::SizeMismatch);
+    }
+    // A binding that already holds our copy is a bind that was never put back, not an original: saved and restored later it
+    // would leave the copy bound for good.
+    if (srv == copy.view || srgb == copy.view)
+        return Done(Outcome::Failed);
 
     // ---- bind. From here `state` owns every reference taken and every way out goes through EndPass.
     state.open = true;
+    state.inPass = true;
     state.copy = copy.Take();
     state.variable = input->handle;
     state.origSrv = srv;
@@ -471,82 +555,147 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state, uint64_t frame)
     }
 
     Bump(Counter::PassesBound);
-    SetStatus(BoundText(capture));
+    SetStatus(StatusKind::Bound, &capture);
     return Outcome::Bound;
 }
 
-// Ends the open pass of `state` (if any) and drops the references it holds. Every backend call is guarded on its own so one
-// failure cannot keep the rest from running.
-void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how)
+// ---- ending a pass ------------------------------------------------------------------------------------------------------
+// Ends the open pass of `state` (if any). The references of the pass are given back only when ReShade holds nothing of ours;
+// if the restore fails or cannot be checked the runtime stays dirty (open, no longer in a pass) and keeps them. Every backend
+// call is guarded on its own so one failure cannot keep the rest from running.
+void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how) noexcept
 {
     if (!state.open)
         return;
     if (how != End::Forget)
     {
-        if (state.bound)
-            RestoreBinding(runtime, state, how == End::Finish);
-        for (const SavedBool& saved : state.bools)
+        if (state.inPass && how != End::Reload)
+            RestoreBools(runtime, state, how);
+        if (state.bound && !RestoreBinding(runtime, state, how))
         {
-            try
-            {
-                if (!_backend.SetUniformBool(runtime, saved.variable, saved.value))
-                    SetStatus(kStatusFailed);
-            }
-            catch (...)
-            {
-                SetStatus(kStatusFailed);
-            }
+            state.inPass = false;
+            state.bools.clear();
+            SetStatus(StatusKind::Failed);
+            return;
         }
     }
+    ReleasePass(state);
+}
+
+void DepthBinder::ReleasePass(Runtime& state) noexcept
+{
     ReleaseView(state.copy);
     if (state.refSrv)
         ReleaseView(state.origSrv);
     if (state.refSrgb)
         ReleaseView(state.origSrgb);
-
-    state.open = false;
-    state.bound = false;
+    state.open = state.inPass = state.bound = false;
     state.copy = state.variable = state.origSrv = state.origSrgb = 0;
     state.refSrv = state.refSrgb = false;
     state.bools.clear();
 }
 
-// Puts the original binding back, but only if the DEPTH semantic still points at our copy. Another add-on (Generic Depth
-// picking a new buffer) may have replaced it during the pass, and its choice wins.
-void DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, bool count)
+// Puts the bufready_depth values back. The handles of the pass are valid at finish; a pass that is ended later (Retry) matches
+// the uniforms as they are now, by position among the bufready_depth ones, and leaves them alone if their number changed.
+void DepthBinder::RestoreBools(uint64_t runtime, Runtime& state, End how) noexcept
 {
+    auto put = [&](uint64_t variable, bool value)
+    {
+        try
+        {
+            if (!_backend.SetUniformBool(runtime, variable, value))
+                SetStatus(StatusKind::Failed);
+        }
+        catch (...)
+        {
+            SetStatus(StatusKind::Failed);
+        }
+    };
+    if (how != End::Retry)
+    {
+        for (const SavedBool& saved : state.bools)
+            put(saved.variable, saved.value);
+        return;
+    }
     try
     {
-        uint64_t srv = 0, srgb = 0;
-        if (!_backend.TextureBinding(runtime, state.variable, srv, srgb))
+        std::vector<UniformVar> uniforms;
+        if (!_backend.UniformVariables(runtime, uniforms))
         {
-            SetStatus(kStatusFailed); // cannot tell whose binding it is: leave it
+            SetStatus(StatusKind::Failed);
             return;
         }
-        if (srv != state.copy || srgb != state.copy)
-        {
-            if (count)
-                Bump(Counter::OverwrittenByOther);
+        std::vector<uint64_t> handles;
+        for (const UniformVar& u : uniforms)
+            if (u.source == kBufReadySource)
+                handles.push_back(u.handle);
+        if (handles.size() != state.bools.size())
             return;
-        }
-        if (state.origSrv == state.copy || state.origSrgb == state.copy)
-            return; // the original is a copy of ours (a leaked earlier bind): never put that back
-        if (!_backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb))
-            SetStatus(kStatusFailed);
+        for (size_t i = 0; i < handles.size(); ++i)
+            put(handles[i], state.bools[i].value);
     }
     catch (...)
     {
-        SetStatus(kStatusFailed);
+        SetStatus(StatusKind::Failed);
+    }
+}
+
+// Puts the original binding back, but only if the DEPTH semantic still points at our copy. Another add-on (Generic Depth
+// picking a new buffer) may have replaced it, and its choice wins. True = ReShade holds nothing of ours any more; false = the
+// binding could not be checked or restored.
+bool DepthBinder::RestoreBinding(uint64_t runtime, Runtime& state, End how) noexcept
+{
+    try
+    {
+        uint64_t variable = state.variable;
+        if (how == End::Retry || how == End::Reload)
+        {
+            // the handle from begin may be stale: find the variable again, by name
+            std::vector<TextureVar> textures;
+            if (!_backend.TextureVariables(runtime, textures))
+                return false;
+            const TextureVar* input = FindDepthInput(textures);
+            if (input == nullptr)
+                return false;
+            variable = input->handle;
+        }
+        uint64_t srv = 0, srgb = 0;
+        if (!_backend.TextureBinding(runtime, variable, srv, srgb))
+            return false;
+        if (srv != state.copy || srgb != state.copy)
+        {
+            if (how == End::Finish)
+                Bump(Counter::OverwrittenByOther);
+            return true;
+        }
+        return _backend.UpdateTextureBindings(runtime, kDepthSemantic, state.origSrv, state.origSrgb);
+    }
+    catch (...)
+    {
+        return false;
     }
 }
 
 // ---- manual depth transform ---------------------------------------------------------------------------------------------
-bool DepthBinder::AnyNonNeutral(uint64_t runtime, const char* effect)
+// True if any macro of the scope is off its neutral value. `error` is set when a query failed.
+bool DepthBinder::AnyNonNeutral(uint64_t runtime, const char* effect, bool& error)
 {
     std::string value;
     for (const TransformMacro& macro : kTransformMacros)
-        if (_backend.Definition(runtime, effect, macro.name, value) && !IsNeutralDefinition(value, macro.neutral))
-            return true;
+    {
+        switch (_backend.Definition(runtime, effect, macro.name, value))
+        {
+        case DefinitionState::Undefined:
+            break;
+        case DefinitionState::Defined:
+            if (!IsNeutralDefinition(value, macro.neutral))
+                return true;
+            break;
+        case DefinitionState::Error:
+            error = true;
+            return false;
+        }
+    }
     return false;
 }
 
@@ -554,7 +703,10 @@ bool DepthBinder::AnyNonNeutral(uint64_t runtime, const char* effect)
 // effect that has an enabled technique.
 bool DepthBinder::ManualTransform(uint64_t runtime, bool& manual)
 {
-    manual = AnyNonNeutral(runtime, nullptr);
+    bool error = false;
+    manual = AnyNonNeutral(runtime, nullptr, error);
+    if (error)
+        return false;
     if (manual)
         return true;
     std::vector<EffectTechnique> techniques;
@@ -566,11 +718,11 @@ bool DepthBinder::ManualTransform(uint64_t runtime, bool& manual)
         if (!t.enabled || std::find(checked.begin(), checked.end(), t.effect) != checked.end())
             continue;
         checked.push_back(t.effect);
-        if (AnyNonNeutral(runtime, t.effect.c_str()))
-        {
-            manual = true;
+        manual = AnyNonNeutral(runtime, t.effect.c_str(), error);
+        if (error)
+            return false;
+        if (manual)
             return true;
-        }
     }
     return true;
 }
