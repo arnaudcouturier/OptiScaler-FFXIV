@@ -109,8 +109,10 @@ struct LateRegistrationPlanner
 {
     static constexpr int64_t kRetryIntervalMs = 1000;
     static constexpr uint32_t kMaxAttempts = 60; // late attempts in all: about a minute, then ReShade is considered absent
-    // The late path subscribes exactly these callbacks (the depth ones, never the HudLess probe, present or window events). The
-    // boundary tracking subscribes two of the same ReShade events for its own callbacks.
+    // The late path subscribes exactly these callbacks (the depth ones, never the HudLess probe, present or window events). Other
+    // callbacks of this add-on may sit on the same ReShade events: the HudLess boundary tracking subscribes destroy_effect_runtime,
+    // reshade_reloaded_effects, reshade_set_current_preset_path and reshade_set_technique_state with callbacks of its own, and the
+    // diagnostics probe begin, finish, destroy, reloaded and preset path with theirs.
     static constexpr std::array<DepthEvent, 6> kEvents { DepthEvent::BeginEffects,         DepthEvent::FinishEffects,
                                                          DepthEvent::DestroyEffectRuntime, DepthEvent::ReloadedEffects,
                                                          DepthEvent::TechniqueState,       DepthEvent::PresetPath };
@@ -158,7 +160,9 @@ struct IBackend
 {
     virtual ~IBackend() = default;
 
-    virtual int64_t NowMs() = 0;  // monotonic milliseconds, the clock of DepthCapture::tickMs
+    // Monotonic milliseconds, the clock of DepthCapture::tickMs. The core calls it (and the log hook, see LogFn) with the runtime
+    // mutex held, from whatever thread the ReShade event arrives on: the real one must be cheap, lock-free and never wait for ReShade.
+    virtual int64_t NowMs() = 0;
     virtual uint64_t Frame() = 0; // the current game frame, from the counter of DepthCapture::frame (one counter, see there)
 
     // COM reference counting of a shader resource view. The views come from ReShade's binding map, which holds raw pointers: the
@@ -233,13 +237,16 @@ struct Counters
     uint64_t otherDevice = 0;        // begins of runtimes that are not ours: another device, or not D3D11
     uint64_t failed = 0;             // every Outcome::Failed, and every restore that had to be left pending
     // Erases of the DEPTH entry that no readback of this pass vouched for: a pass in which no variable read the copy back, a
-    // retry or reload where no re-resolved variable shows it, and the case of no variable at all. Each one may have lost the
+    // retry or reload where no re-resolved variable shows it, and the case of no variable at all. Counted once the erase "went
+    // through", which is all the backend can say: the live update_texture_bindings returns void, so "went through" means it did
+    // not throw or fault (nothing reads the entry back afterwards). Each one may have lost the
     // pick of another add-on (Generic Depth) until it selects again; a deliberate trade-off against leaving the copy in a map
     // that ReShade frees views of. The in-game run shows how often that happens.
     uint64_t erasedUnverified = 0;
 };
 
-// Called when ShouldLog says so (first occurrence, then once per kLogIntervalMs), with the current count. May be null.
+// Called when ShouldLog says so (first occurrence, then once per kLogIntervalMs), with the current count. May be null. It runs with
+// the runtime mutex held, on the thread of the ReShade event (or of the capture side): it must not call back into the binder.
 using LogFn = void (*)(Counter counter, uint64_t count);
 
 // What the capture side needs to know before it has a capture: a depth consumer exists, and how big its back buffer is.
@@ -250,6 +257,9 @@ struct ConsumerInfo
     uint32_t width = 0, height = 0; // the back buffer of that runtime, as that begin read it; 0 if never
 };
 
+// What real ReShade answers for a genuine reader's get_texture_binding after the bind (exactly the copy) is not settled by reading the
+// headers; the pass relies on it (a variable counts as a DEPTH reader only if it reads back exactly the copy). The live backend logs the
+// readback of the first real bind once, so the in-game run shows what ReShade really returns.
 class DepthBinder
 {
   public:
@@ -260,7 +270,9 @@ class DepthBinder
     DepthBinder& operator=(const DepthBinder&) = delete;
 
     // Releases every reference the binder still holds (orphaned runtimes included) and forgets all runtimes, without a ReShade
-    // call: nothing is put back, the maps are assumed gone. Any thread; the destructor calls it.
+    // call: nothing is put back, the maps are assumed gone. It also disables the binder, so nothing binds after the end (a begin
+    // answers Disabled until SetEnabled(true)). Any thread; the destructor calls it. Not for a toggle of the option: while a
+    // ReShade runtime may be alive, switch it off with SetEnabled(false), which lets finish_effects put the binding back.
     void Shutdown() noexcept;
 
     // Starts disabled. Any thread. Disabling does not cut a pass short: finish_effects still puts the binding back.
@@ -301,9 +313,6 @@ class DepthBinder
     // never writes it). Copy; built here, so the refusal paths do not allocate.
     std::string Status() const noexcept;
     Counters GetCounters() const noexcept;
-
-    // What real ReShade answers for a genuine reader's get_texture_binding after the bind (exactly the copy) is not settled by
-    // reading the headers: the first real bind logs the readback in P3 so the in-game run shows it.
 
   private:
     struct SavedBool

@@ -1573,34 +1573,51 @@ void OrphanedRuntimes()
             r.Finish();
             CHECK(r.Clean());
         }
-        { // the uniforms of an orphan: the normal retry of a finish or a begin puts bufready_depth back; a reload does not touch
-          // uniforms (they are new objects), as for any other pass
+        { // the uniforms of an orphan: its uniform handles belong to a runtime that is gone, so the retry of a finish or a begin does
+          // not look at them at all (no enumeration, no write: a stale handle is a use after free inside ReShade), and neither does
+          // a reload (they are new objects). bufready_depth stays as the pass left it until the effects are loaded again.
             for (const int via : { 0, 1, 2 })
             {
                 Rig r;
                 CHECK(r.Begin() == Outcome::Bound);
                 CHECK(r.fake.unis[0].value);
                 const int sets = r.fake.Calls("SetUniformBool");
+                const int enums = r.fake.uniformEnums;
                 DestroyedRuntime(r, mapSurvives);
                 if (via == 0)
                 {
                     r.Finish();
-                    CHECK(!r.fake.unis[0].value);
+                    CHECK(r.fake.Calls("SetUniformBool") == sets && r.fake.uniformEnums == enums);
                 }
                 else if (via == 1)
                 {
                     r.NextFrame();
                     CHECK(r.Begin() == Outcome::Bound);
                     r.Finish();
-                    CHECK(!r.fake.unis[0].value); // put back by the retry, so the new pass saw the real value
+                    // only the new pass touches them: one enumeration at its bind, the forced write and its restore
+                    CHECK(r.fake.Calls("SetUniformBool") == sets + 2 && r.fake.uniformEnums == enums + 1);
                 }
                 else
                 {
                     r.binder.OnReloadedEffects(kRt);
-                    CHECK(r.fake.Calls("SetUniformBool") == sets);
+                    CHECK(r.fake.Calls("SetUniformBool") == sets && r.fake.uniformEnums == enums);
                 }
+                CHECK(r.fake.unis[0].value); // as the pass left it
                 CHECK(r.Clean());
             }
+        }
+        { // an orphan whose retry fails (the entry cannot be restored) still does not touch the uniforms
+            Rig r;
+            CHECK(r.Begin() == Outcome::Bound);
+            DestroyedRuntime(r, mapSurvives);
+            r.fake.failRestore = true;
+            const int sets = r.fake.Calls("SetUniformBool");
+            const int enums = r.fake.uniformEnums;
+            r.Finish();
+            CHECK(r.fake.Calls("SetUniformBool") == sets && r.fake.uniformEnums == enums);
+            r.fake.failRestore = false;
+            r.Finish();
+            CHECK(r.Clean());
         }
     }
 
@@ -1620,11 +1637,24 @@ void OrphanedRuntimes()
         r.binder.Shutdown(); // idempotent
         CHECK(r.fake.Balanced());
     }
+    { // Shutdown also disables the binder: nothing is bound after the end, and the status says so
+        Rig r;
+        CHECK(r.Pass());
+        r.binder.Shutdown();
+        CHECK(r.binder.Status() == kDisabled);
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Disabled);
+        CHECK(r.fake.updates.size() == 2); // the bind and the restore of the first pass, nothing since
+        r.Finish();
+        r.binder.SetEnabled(true); // ... until it is enabled again
+        CHECK(r.Pass());
+    }
     { // Shutdown also forgets the runtimes that hold nothing (a closed entry is not released, it has nothing to release)
         Rig r;
         CHECK(r.Pass());
         const int queries = r.fake.defQueries;
         r.binder.Shutdown();
+        r.binder.SetEnabled(true); // (Shutdown disabled it)
         CHECK(r.Clean());
         CHECK(r.Pass());
         CHECK(r.fake.defQueries > queries);

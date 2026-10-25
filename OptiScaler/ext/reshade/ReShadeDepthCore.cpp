@@ -183,9 +183,11 @@ DepthBinder::~DepthBinder() { Shutdown(); }
 
 // The process or the test is over: whatever is still held (orphaned runtimes, or a restore that never succeeded) is released,
 // with no ReShade call. A leaked view would be acceptable; a view freed while a map may still hold it is not, and that is
-// what a call into ReShade at this point could not rule out.
+// what a call into ReShade at this point could not rule out. The binder is disabled for good (until SetEnabled(true)): nothing binds
+// after the end, and a begin that arrives anyway is refused instead of opening a pass that nothing will finish.
 void DepthBinder::Shutdown() noexcept
 {
+    SetEnabled(false);
     try
     {
         std::lock_guard lock(_mutex);
@@ -706,7 +708,9 @@ void DepthBinder::EndPass(uint64_t runtime, Runtime& state, End how) noexcept
 {
     if (!state.open)
         return;
-    if (state.inPass && how != End::Reload)
+    // An orphan's uniform handles belong to a runtime that is gone (ReShade frees them with the effects): they are not used again, not
+    // even to put bufready_depth back. It stays as the pass left it until the effects are loaded again.
+    if (state.inPass && how != End::Reload && !state.orphaned)
         RestoreBools(runtime, state, how);
     if (state.bound && !RestoreBinding(runtime, state, how))
     {
