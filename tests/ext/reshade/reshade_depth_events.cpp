@@ -1,7 +1,7 @@
 // Automatic ReShade scene depth: what the six event callbacks do (ReShadeDepthDispatch.h) over the real binder and a fake ReShade
 // world: every event reaches the binder, the callbacks do not look at the enabled flag (a dirty or open runtime is repaired after the
-// option was switched off), the frame counter ticks once per finish of a runtime on our device and also when the pass was refused,
-// capture and begin of a frame agree on it, the runtime registry follows begin/finish/destroy, and nothing escapes a callback.
+// option was switched off), no event ever moves the frame counter (it belongs to the capture side: one tick per capture), many passes
+// between two captures all see the same stamp and bind, the runtime registry follows begin/finish/destroy, and nothing escapes a callback.
 #include "pch.h"
 
 #include "ext/reshade/ReShadeDepthDispatch.h"
@@ -17,9 +17,7 @@ namespace
 struct FakeHost final : IEventHost
 {
     std::vector<uint64_t> noted, forgotten;
-    bool ours = true;
     bool throws = false;
-    int ourChecks = 0;
     void NoteRuntime(uint64_t rt) override
     {
         if (throws)
@@ -32,30 +30,23 @@ struct FakeHost final : IEventHost
             throw std::runtime_error("forget");
         forgotten.push_back(rt);
     }
-    bool IsOurRuntime(uint64_t) override
-    {
-        ++ourChecks;
-        if (throws)
-            throw std::runtime_error("ours");
-        return ours;
-    }
 };
 
-// The capture side stamps its capture with the same counter the binder reads through Frame().
+// The capture side stamps its capture with the same counter the binder reads through Frame(), and ticks it once per capture.
 struct EvRig
 {
     Fake fake;
     FakeHost host;
     std::atomic<uint64_t> counter { 100 };
     DepthBinder binder { fake, nullptr };
-    EventDispatcher d { binder, host, counter };
+    EventDispatcher d { binder, host };
 
     EvRig()
     {
         fake.frameSource = &counter;
         binder.SetEnabled(true);
     }
-    void Capture() // the capture side, after an evaluate: stamped with the counter and the clock
+    void Capture() // the capture side, after an evaluate: one tick of the counter, the capture stamped with it, and the clock
     {
         DepthCapture c;
         c.valid = true;
@@ -63,7 +54,7 @@ struct EvRig
         c.outputH = 2160;
         c.renderW = 1920;
         c.renderH = 1080;
-        c.frame = counter.load();
+        c.frame = ++counter;
         c.tickMs = fake.now;
         c.copyView = kCopy;
         c.device = kDevice;
@@ -106,7 +97,6 @@ void EveryEventReachesTheBinder()
         q.d.Finish(kRt);
         const int queries = q.fake.defQueries;
         q.d.Destroy(kRt);
-        q.counter++;
         q.Capture();
         q.d.Begin(kRt);
         CHECK(q.fake.defQueries > queries);
@@ -120,7 +110,6 @@ void EveryEventReachesTheBinder()
             r.d.Begin(kRt);
             r.d.Finish(kRt);
             int queries = r.fake.defQueries;
-            r.counter++;
             r.Capture();
             r.d.Begin(kRt); // cached: no new definition queries
             r.d.Finish(kRt);
@@ -133,7 +122,6 @@ void EveryEventReachesTheBinder()
                 r.d.TechniqueState(kRt);
             else
                 r.d.PresetPath(kRt);
-            r.counter++;
             r.Capture();
             r.d.Begin(kRt);
             r.d.Finish(kRt);
@@ -164,13 +152,11 @@ void EveryEventReachesTheBinder()
         r.d.Begin(kRt);
         r.d.Finish(kRt);
         r.fake.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "2"; // set behind the cache's back
-        r.counter++;
         r.Capture();
         r.d.Begin(kRt);
         CHECK(r.fake.DepthIs(kCopy, kCopy)); // still bound: nobody told us
         r.d.Finish(kRt);
         r.d.PresetPath(kRt);
-        r.counter++;
         r.Capture();
         r.d.Begin(kRt);
         CHECK(!r.fake.HoldsCopy()); // told: stands down
@@ -211,7 +197,6 @@ void NotGatedByTheEnabledFlag()
         CHECK(r.fake.HoldsCopy());
         r.binder.SetEnabled(false);
         r.fake.failRestore = false;
-        r.counter++;
         r.Capture();
         r.d.Begin(kRt);
         CHECK(!r.fake.HoldsCopy() && r.Clean());
@@ -229,78 +214,95 @@ void NotGatedByTheEnabledFlag()
 
 void FrameCounter()
 {
-    { // one tick per finish of a runtime on our device
+    { // the counter belongs to the capture side: one tick per capture, and no event moves it
         EvRig r;
-        r.Capture();
         CHECK(r.counter == 100);
+        r.Capture();
+        CHECK(r.counter == 101);
         r.d.Begin(kRt);
-        CHECK(r.counter == 100); // a begin does not tick
+        CHECK(r.counter == 101);
         r.d.Finish(kRt);
         CHECK(r.counter == 101);
-        r.d.Finish(kRt); // a finish with no pass open is still a finish
-        CHECK(r.counter == 102);
+        r.d.Finish(kRt); // a finish with no pass open
         r.d.Reloaded(kRt);
         r.d.TechniqueState(kRt);
         r.d.PresetPath(kRt);
         r.d.Destroy(kRt);
-        CHECK(r.counter == 102);
-    }
-    { // a runtime of another device does not tick it
-        EvRig r;
-        r.host.ours = false;
-        r.Capture();
-        r.d.Begin(kRt);
-        r.d.Finish(kRt);
-        CHECK(r.counter == 100 && r.host.ourChecks == 1);
-    }
-    { // refused passes tick it, too (a counter that only ticked on bound passes would stall when a capture is missing)
-        EvRig r; // no capture yet
-        r.d.Begin(kRt);
-        r.d.Finish(kRt);
         CHECK(r.counter == 101);
-        r.binder.SetEnabled(false); // disabled
-        r.d.Begin(kRt);
-        r.d.Finish(kRt);
-        CHECK(r.counter == 102);
-        r.binder.SetEnabled(true);
-        r.Capture();
-        r.fake.now += 500; // stale
-        r.d.Begin(kRt);
-        r.d.Finish(kRt);
-        CHECK(r.counter == 103 && r.binder.GetCounters().staleCaptures == 1);
-        r.fake.d3d11 = true;
-        r.fake.sameDevice = false; // not our device for the binder
-        r.Capture();
-        r.d.Begin(kRt);
-        r.d.Finish(kRt);
-        CHECK(r.counter == 104);
     }
-    { // the capture side and the begin of one frame agree (delta 0); after the finish the next capture carries the next value
+    { // one capture, then five passes (frame generation: ReShade runs every OUTPUT frame, the evaluate once per real frame): all bind
         EvRig r;
-        for (int frame = 0; frame < 5; ++frame)
+        r.Capture();
+        for (int pass = 0; pass < 5; ++pass)
         {
-            r.fake.now += 16;
-            r.Capture();
-            const uint64_t stamped = r.counter.load();
             r.d.Begin(kRt);
             CHECK(r.fake.DepthIs(kCopy, kCopy));
             r.d.Finish(kRt);
-            CHECK(r.counter.load() == stamped + 1);
+            CHECK(r.fake.DepthIs(kOrig, kOrigSrgb));
         }
         CHECK(r.binder.GetCounters().passesBound == 5 && r.binder.GetCounters().staleCaptures == 0);
+        CHECK(r.counter == 101 && r.Clean());
     }
-    { // a second pass in the same frame (the boundary pass, then ReShade's own) is one behind and still binds; a third is too stale
+    { // a second capture replaces the stamp, the next pass binds, and the counter moved once for it
+        EvRig r;
+        r.Capture();
+        for (int pass = 0; pass < 3; ++pass)
+        {
+            r.d.Begin(kRt);
+            r.d.Finish(kRt);
+        }
+        r.fake.now += 16;
+        r.Capture();
+        CHECK(r.counter == 102);
+        r.d.Begin(kRt);
+        CHECK(r.fake.DepthIs(kCopy, kCopy));
+        r.d.Finish(kRt);
+        CHECK(r.binder.GetCounters().passesBound == 4 && r.binder.GetCounters().staleCaptures == 0);
+    }
+    { // no capture for more than 250 ms: stale by AGE (the real guard) although the passes continue; the counter did not move
         EvRig r;
         r.Capture();
         r.d.Begin(kRt);
         r.d.Finish(kRt);
+        r.fake.now += 250; // exactly the limit is still fresh
         r.d.Begin(kRt);
         CHECK(r.fake.DepthIs(kCopy, kCopy));
         r.d.Finish(kRt);
+        r.fake.now += 1; // 251 ms
         r.d.Begin(kRt);
         CHECK(!r.fake.HoldsCopy() && r.binder.GetCounters().staleCaptures == 1);
         r.d.Finish(kRt);
-        CHECK(r.counter == 103);
+        r.d.Begin(kRt);
+        r.d.Finish(kRt);
+        CHECK(r.binder.GetCounters().staleCaptures == 2 && r.counter == 101);
+        r.Capture(); // the evaluate is back
+        r.d.Begin(kRt);
+        CHECK(r.fake.DepthIs(kCopy, kCopy));
+        r.d.Finish(kRt);
+    }
+    { // refused passes never move the counter: no capture, disabled, stale, not our device
+        EvRig r; // no capture yet
+        r.d.Begin(kRt);
+        r.d.Finish(kRt);
+        CHECK(r.counter == 100);
+        r.binder.SetEnabled(false);
+        r.d.Begin(kRt);
+        r.d.Finish(kRt);
+        CHECK(r.counter == 100);
+        r.binder.SetEnabled(true);
+        r.Capture();
+        CHECK(r.counter == 101);
+        r.fake.now += 500; // stale
+        r.d.Begin(kRt);
+        r.d.Finish(kRt);
+        CHECK(r.counter == 101 && r.binder.GetCounters().staleCaptures == 1);
+        r.fake.sameDevice = false; // not our device for the binder
+        r.fake.now += 16;
+        r.Capture();
+        CHECK(r.counter == 102);
+        r.d.Begin(kRt);
+        r.d.Finish(kRt);
+        CHECK(r.counter == 102);
     }
 }
 
@@ -338,7 +340,7 @@ void NothingEscapes()
         escaped = true;
     }
     CHECK(!escaped);
-    CHECK(r.counter == 100); // a host that cannot answer is not "ours"
+    CHECK(r.counter == 101); // (the one capture of the rig; no event moved it)
     CHECK(r.binder.GetCounters().passesBound == 1); // the binder was reached all the same
 }
 } // namespace

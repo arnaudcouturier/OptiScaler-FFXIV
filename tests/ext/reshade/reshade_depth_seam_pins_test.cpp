@@ -155,12 +155,18 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "ConsumerInfo GetConsumer(int64_t nowMs) override { return _binder.GetConsumer(nowMs); }"));
         CHECK(Has(facade, "return ext::ffxiv::lighting::FfxivLightingCapture::installed.load() ? ext::ffxiv::lighting::FfxivLightingCapture::context : nullptr;"));
         CHECK(Has(facade, "DrawTriangleFn RawDraw() override { return &ext::ffxiv::chara::DrawFullscreenTriangle; }"));
-        CHECK(Has(facade, "EventDispatcher dispatcher { binder, backend, g_frame };"));
+        CHECK(Has(facade, "EventDispatcher dispatcher { binder, backend };"));
         CHECK(Has(facade, "DepthBinder binder { backend, &LogCounter };"));
         CHECK(Has(facade, "LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl } };"));
         CHECK(Has(facade, "CaptureEngine engine { g_gate, g_frame, *this, host };"));
         CHECK(Has(facade, "Facade() { binder.SetEnabled(g_gate.Enabled()); SetDispatcher(&dispatcher); }"));
-        CHECK(Has(facade, "backend.SetCaptureDevice(capture.valid ? capture.device : 0); binder.PublishCapture(capture);"));
+        CHECK(Has(facade, "void Publish(const DepthCapture& capture) noexcept override { binder.PublishCapture(capture); }"));
+        // the counter is ticked by the capture side only (the engine), never by an event
+        const auto dispatch = Normalize(Read(ext + "reshade/ReShadeDepthDispatch.h"));
+        CHECK(!Has(dispatch, "fetch_add") && !Has(dispatch, "_frame") && !Has(dispatch, "IsOurRuntime"));
+        const auto engine = Normalize(Read(ext + "reshade/ReShadeDepthEval.cpp"));
+        CHECK(Has(engine, "const uint64_t stamp = _frame.fetch_add(1, std::memory_order_relaxed) + 1;"));
+        CHECK(Has(engine, "args.frame = stamp;"));
         CHECK(Has(facade, "return glue::Extent { f->DisplayWidth(), f->DisplayHeight() };"));
         CHECK(Has(facade, "f->engine.OnEvaluated(context, parameters, DisplaySource { feature != nullptr ? &DisplayOf : nullptr, feature });"));
         // the game gate: the executable name, read once, after the one-load gate and before anything is built; the status says so

@@ -28,7 +28,7 @@ namespace
 // The option and the requests for the evaluate thread: one word. Config load and reload only STORE into it (they may run inside DllMain,
 // where nothing is constructed); the facade below is built by the first evaluate that finds the option on.
 glue::EvalGate g_gate;
-std::atomic<uint64_t> g_frame { 1 }; // the depth-owned frame counter (ticked by the finish_effects callback)
+std::atomic<uint64_t> g_frame { 1 }; // the depth-owned frame counter: one tick per capture, by the capture engine (no ReShade event moves it)
 
 int64_t NowMsImpl() { return static_cast<int64_t>(GetTickCount64()); }
 uint64_t FrameImpl() { return g_frame.load(std::memory_order_relaxed); }
@@ -71,7 +71,7 @@ struct Facade final : ICaptureSink
 {
     LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl } };
     DepthBinder binder { backend, &LogCounter };
-    EventDispatcher dispatcher { binder, backend, g_frame };
+    EventDispatcher dispatcher { binder, backend };
     ProcessHost host { binder };
     CaptureEngine engine { g_gate, g_frame, *this, host };
 
@@ -81,12 +81,8 @@ struct Facade final : ICaptureSink
         SetDispatcher(&dispatcher);
     }
 
-    // Every capture the pass publishes goes to the binder; the backend learns the device the copy lives on.
-    void Publish(const DepthCapture& capture) noexcept override
-    {
-        backend.SetCaptureDevice(capture.valid ? capture.device : 0);
-        binder.PublishCapture(capture);
-    }
+    // Every capture the pass publishes goes to the binder.
+    void Publish(const DepthCapture& capture) noexcept override { binder.PublishCapture(capture); }
 };
 
 std::atomic<Facade*> g_facade { nullptr };

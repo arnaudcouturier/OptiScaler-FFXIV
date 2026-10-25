@@ -1,13 +1,14 @@
 // Automatic ReShade scene depth, the whole loop of a session in one test: the REAL CaptureEngine over a WARP device (a fake parameter block
 // and host, the real copy pass), the REAL DepthBinder over the fake ReShade world of the core tests, and the REAL EventDispatcher between
 // them. The pieces have their own tests; this one checks that they agree where they meet:
-//  - the stamp the engine puts on a capture (the depth-owned counter) is the frame the binder reads (delta 0), the clock agrees, and
-//    the native device in the capture passes the backend's SameDevice;
+//  - the counter ticks once per CAPTURE (the engine ticks it before it publishes), never at begin or finish; the stamp on a capture is
+//    the frame the binder reads (delta 0), so every pass between two captures binds (frame generation runs several passes per
+//    evaluate), the clock agrees, and the native device in the capture passes the backend's SameDevice;
 //  - the consumer the binder records (the back buffer of the runtime that asked) is what the engine's size gate compares the NGX
 //    Output with: a full cycle ends in Outcome::Bound, the DEPTH entry points at the copy only until finish, and the next frame again;
 //  - a preview-sized Output, or a back buffer that is not the output size, never binds;
-//  - finish bumps the counter whether or not a pass was bound or a capture was made, so a capture that stops being made goes stale;
-//  - a refused capture still lets the counter tick.
+//  - a capture that stops being made goes stale by its AGE (250 ms), although the passes continue;
+//  - refused passes and refused captures never move the counter.
 #include "pch.h"
 
 #include "reshade_depth_eval_rig.h"
@@ -24,7 +25,6 @@ struct EventHost final : IEventHost
 {
     void NoteRuntime(uint64_t) override {}
     void ForgetRuntime(uint64_t) override {}
-    bool IsOurRuntime(uint64_t) override { return true; }
 };
 
 // The engine side (a rig on a WARP device) publishes into the binder; the binder's backend is the fake ReShade world, whose clock, frame
@@ -35,7 +35,7 @@ struct Loop final : ICaptureSink
     Fake fake;
     DepthBinder binder { fake, nullptr };
     EventHost events;
-    EventDispatcher dispatcher { binder, events, rig.frame };
+    EventDispatcher dispatcher { binder, events };
     uint64_t startFrame = 0;
 
     ~Loop() { rig.engine.reset(); } // its last publication (valid = false) still has a binder to go to
@@ -71,11 +71,12 @@ struct Loop final : ICaptureSink
         fake.depthViews.insert(view);
     }
 
-    void Tick() // a new frame, 16 ms later
+    void Advance(int64_t ms)
     {
-        rig.host.now += 16;
+        rig.host.now += ms;
         fake.now = rig.host.now;
     }
+    void Tick() { Advance(16); } // a new frame, 16 ms later
     void Eval() { rig.Eval(); }
     Outcome Begin() { return binder.OnBeginEffects(kRt); }
     void Finish() { dispatcher.Finish(kRt); }
@@ -106,14 +107,15 @@ void FullCycle()
     const ConsumerInfo consumer = l.binder.GetConsumer(l.fake.now);
     CHECK(consumer.seen && consumer.width == evaltest::kW && consumer.height == evaltest::kH);
     l.Finish();
-    CHECK(l.rig.frame == l.startFrame + 1); // finish ticks the counter, bound or not
+    CHECK(l.rig.frame == l.startFrame); // no capture, no tick (and a finish never ticks)
 
-    // frame 2: the consumer is known, the engine captures, the begin binds
+    // frame 2: the consumer is known, the engine captures (one tick), the begin binds
     l.Tick();
     l.Eval();
     CHECK(l.rig.sink.events.size() == 1);
     const DepthCapture c = l.LastCapture();
     CHECK(c.valid && c.copyView != 0);
+    CHECK(l.rig.frame == l.startFrame + 1);
     CHECK(c.frame == l.rig.frame && c.frame == l.fake.Frame()); // delta 0: the stamp is the counter the binder reads
     CHECK(c.tickMs == l.fake.now);
     CHECK(c.device == l.fake.device);                           // the native device, which the backend accepts as the runtime's
@@ -124,13 +126,14 @@ void FullCycle()
     l.Finish();
     CHECK(l.fake.DepthIs(kOrig, kOrigSrgb)); // ReShade's own binding is back
     CHECK(l.fake.Balanced() && !l.fake.HoldsCopy());
-    CHECK(l.rig.frame == l.startFrame + 2);
+    CHECK(l.rig.frame == l.startFrame + 1); // the finish did not tick
 
-    // the next frames: stamped with the ticked counter, still fresh, bound again
+    // the next frames: one tick each for the capture, stamped with it, bound again
     for (int i = 0; i < 3; ++i)
     {
         l.Tick();
         l.Eval();
+        CHECK(l.rig.frame == l.startFrame + 2 + i);
         CHECK(l.LastCapture().frame == l.rig.frame && l.LastCapture().frame == l.fake.Frame());
         CHECK(l.Begin() == Outcome::Bound);
         l.Finish();
@@ -140,22 +143,66 @@ void FullCycle()
     CHECK(l.fake.Balanced() && !l.fake.HoldsCopy());
 }
 
-void ACaptureThatStopsGoesStale()
+// Frame generation: ReShade runs an effect pass for every OUTPUT frame, the evaluate runs once per real frame. Every pass between two
+// evaluates sees the same stamp (delta 0) and binds, the depth of the real frame being the one that is there.
+void ManyPassesPerEvaluate()
+{
+    Loop l;
+    if (!l.Create())
+        return;
+    CHECK(l.Frame() == Outcome::NoCapture);
+    l.Tick();
+    l.Eval();
+    const uint64_t counter = l.rig.frame;
+    CHECK(l.rig.sink.events.size() == 1 && l.LastCapture().frame == counter);
+    for (int pass = 0; pass < 5; ++pass)
+    {
+        CHECK(l.Begin() == Outcome::Bound);
+        l.Finish();
+        CHECK(l.fake.DepthIs(kOrig, kOrigSrgb));
+        l.Tick(); // (a few ms between the passes of one real frame)
+    }
+    CHECK(l.binder.GetCounters().passesBound == 5 && l.binder.GetCounters().staleCaptures == 0);
+    CHECK(l.rig.frame == counter); // five passes: not one tick
+
+    // the next evaluate replaces the stamp, the next pass binds
+    l.Tick();
+    l.Eval();
+    CHECK(l.rig.frame == counter + 1 && l.LastCapture().frame == counter + 1 && l.fake.Frame() == counter + 1);
+    CHECK(l.Begin() == Outcome::Bound);
+    l.Finish();
+    CHECK(l.binder.GetCounters().passesBound == 6 && l.binder.GetCounters().staleCaptures == 0);
+    CHECK(l.fake.Balanced() && !l.fake.HoldsCopy());
+}
+
+// An evaluate that stops (a menu, a loading screen, a cutscene without the upscaler): the passes go on, the last capture is caught by its
+// AGE (250 ms), not by the counter, which only the capture side moves.
+void ACaptureThatStopsGoesStaleByAge()
 {
     Loop l;
     if (!l.Create())
         return;
     CHECK(l.Frame() == Outcome::NoCapture);
     CHECK(l.Frame() == Outcome::Bound);
-    CHECK(l.Frame() == Outcome::Bound);
-    // nobody evaluates any more (a loading screen, a different render path): the counter keeps ticking at every finish. The capture of
-    // the last evaluate is still fresh one frame later and stale after that.
-    CHECK(l.Frame(false) == Outcome::Bound);
+    const uint64_t counter = l.rig.frame;
+    l.Advance(250); // exactly the limit is still fresh
+    CHECK(l.Begin() == Outcome::Bound);
+    l.Finish();
     CHECK(l.binder.GetCounters().staleCaptures == 0);
-    CHECK(l.Frame(false) == Outcome::CaptureUnavailable);
+    l.Advance(1);
+    CHECK(l.Begin() == Outcome::CaptureUnavailable);
+    l.Finish();
     CHECK(l.binder.GetCounters().staleCaptures == 1);
+    for (int i = 0; i < 4; ++i)
+    {
+        l.Tick();
+        CHECK(l.Begin() == Outcome::CaptureUnavailable);
+        l.Finish();
+    }
+    CHECK(l.rig.frame == counter); // refused passes do not move the counter
     CHECK(l.fake.DepthIs(kOrig, kOrigSrgb)); // nothing of ours is in ReShade's map
     CHECK(l.Frame(true) == Outcome::Bound);  // and it recovers with the next evaluate
+    CHECK(l.rig.frame == counter + 1);
     CHECK(l.fake.Balanced() && !l.fake.HoldsCopy());
 }
 
@@ -220,7 +267,7 @@ void AnotherDeviceNeverBinds()
     CHECK(l.Frame() == Outcome::Bound);
 }
 
-void ARefusedCaptureStillTicksTheCounter()
+void ARefusedCaptureDoesNotMoveTheCounter()
 {
     Loop l;
     if (!l.Create(D3D11_BIND_DEPTH_STENCIL)) // no shader resource bind flag: the pass refuses every capture
@@ -229,7 +276,7 @@ void ARefusedCaptureStillTicksTheCounter()
     for (int i = 0; i < 3; ++i)
         CHECK(l.Frame() == Outcome::NoCapture);
     CHECK(l.rig.engine->Stats().refused == 3 && l.rig.engine->Stats().captured == 0);
-    CHECK(l.rig.frame == l.startFrame + 4); // one tick per finish
+    CHECK(l.rig.frame == l.startFrame); // nothing was published, nothing ticked
     CHECK(l.binder.GetCounters().passesBound == 0);
     CHECK(l.fake.DepthIs(kOrig, kOrigSrgb) && l.fake.Balanced());
 }
@@ -246,11 +293,12 @@ int main()
         }
     }
     FullCycle();
-    ACaptureThatStopsGoesStale();
+    ManyPassesPerEvaluate();
+    ACaptureThatStopsGoesStaleByAge();
     APreviewNeverBinds();
     TheBackBufferIsTheOutputSize();
     AnotherDeviceNeverBinds();
-    ARefusedCaptureStillTicksTheCounter();
+    ARefusedCaptureDoesNotMoveTheCounter();
     if (g_fail != 0)
     {
         std::printf("reshade_depth_loop: %d check(s) failed\n", g_fail);

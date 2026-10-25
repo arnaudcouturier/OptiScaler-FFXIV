@@ -872,7 +872,6 @@ void SameDeviceByResources()
         raw.R(kRt2).native = kDev2;
         const size_t lines = LogLines("device mismatch");
         CHECK(b.SameDevice(kRt, kDev));
-        CHECK(b.IsOurRuntime(kRt) == true); // no capture device set: the primary device, by the same rule
         CHECK(!b.SameDevice(kRt, kDev2));   // another capture device is refused
         CHECK(LogLines("device mismatch") == lines + 1);
         CHECK(b.SameDevice(kRt, 0));
@@ -961,27 +960,9 @@ void SameDeviceByResources()
     }
 }
 
-void RegistryAndOurRuntime()
+void Registry()
 {
     g_primary = kDev;
-    FakeRaw raw;
-    LiveDepthBackend b(raw, Env());
-    b.NoteRuntime(kRt);
-    b.NoteRuntime(kRt2); // two runtimes: the strict comparison stands
-    // IsOurRuntime follows the capture device that was set
-    CHECK(b.IsOurRuntime(kRt)); // no capture: the primary device
-    b.SetCaptureDevice(kDev);
-    CHECK(b.IsOurRuntime(kRt));
-    b.SetCaptureDevice(kDev2);
-    CHECK(!b.IsOurRuntime(kRt));
-    b.SetCaptureDevice(0);
-    CHECK(b.IsOurRuntime(kRt));
-    raw.R(kRt).d3d11 = false;
-    CHECK(!b.IsOurRuntime(kRt));
-    raw.R(kRt).d3d11 = true;
-    raw.faultAt = raw.calls + 1;
-    CHECK(!b.IsOurRuntime(kRt));
-
     // noting the same runtime twice remembers it once (a second runtime appears only for another pointer)
     FakeRaw r2;
     r2.R(kRt).native = kDev2;
@@ -1355,7 +1336,7 @@ int main()
         RuntimeQueries();
         SameDeviceSemantics();
         SameDeviceByResources();
-        RegistryAndOurRuntime();
+        Registry();
         StringContractLog();
         SameDeviceRefusalLog();
         NoCandidateLog();

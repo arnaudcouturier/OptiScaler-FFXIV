@@ -198,8 +198,6 @@ void LiveDepthBackend::ForgetRuntime(uint64_t runtime)
     _d3d11Runtimes.erase(std::remove(_d3d11Runtimes.begin(), _d3d11Runtimes.end(), runtime), _d3d11Runtimes.end());
 }
 
-bool LiveDepthBackend::IsOurRuntime(uint64_t runtime) { return SameDevice(runtime, _captureDevice.load(std::memory_order_relaxed)); }
-
 // ---- variables, bindings, uniforms, techniques ----------------------------------------------------------------------------------
 bool LiveDepthBackend::TextureVariables(uint64_t runtime, std::vector<TextureVar>& out)
 {

@@ -66,8 +66,9 @@ struct DepthCapture
     bool valid = false;
     uint32_t outputW = 0, outputH = 0; // NGX Output size, which is also the size of the copy
     uint32_t renderW = 0, renderH = 0; // the feature's render size
-    // Monotonically increasing and the SAME counter as IBackend::Frame(): ONE counter that ticks once per GAME frame (the wiring
-    // has to check what it does under frame generation, where presents outnumber game frames).
+    // Monotonically increasing and the SAME counter as IBackend::Frame(). It ticks once per CAPTURE (the capture side ticks it before it
+    // publishes), never per effect pass: under frame generation ReShade runs several passes between two evaluates, and all of them see
+    // this stamp (delta 0). A capture that stops being made is caught by its age (kMaxCaptureAgeMs), not by this counter.
     uint64_t frame = 0;
     int64_t tickMs = 0;    // IBackend::NowMs() at the capture
     uint64_t copyView = 0; // shader resource view of the copy (the core takes its own reference per pass)

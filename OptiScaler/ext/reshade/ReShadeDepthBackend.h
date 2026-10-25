@@ -137,8 +137,6 @@ struct IEventHost
     virtual ~IEventHost() = default;
     virtual void NoteRuntime(uint64_t runtime) = 0;   // a begin or finish of this runtime was seen
     virtual void ForgetRuntime(uint64_t runtime) = 0; // it was destroyed
-    // A D3D11 runtime of the capture's device (the one the frame counter follows).
-    virtual bool IsOurRuntime(uint64_t runtime) = 0;
 };
 
 // ---- the backend ----------------------------------------------------------------------------------------------------------------
@@ -172,7 +170,7 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     // does, the runtime is the only D3D11 runtime of the process (the way the boundary picks its runtime; see the top of this file for
     // why pointers cannot be trusted under ReShade's proxy). With two or more D3D11 runtimes only the exact matches count.
     bool SameDevice(uint64_t runtime, uint64_t captureDevice) override;
-    // Whether `runtime` is the only D3D11 runtime seen in begin/finish events (the registry behind IsOurRuntime).
+    // Whether `runtime` is the only D3D11 runtime seen in begin/finish events (the registry fed by NoteRuntime/ForgetRuntime).
     bool OnlyD3D11Runtime(uint64_t runtime);
     bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) override;
     bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) override;
@@ -189,10 +187,6 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     // IEventHost
     void NoteRuntime(uint64_t runtime) override;
     void ForgetRuntime(uint64_t runtime) override;
-    bool IsOurRuntime(uint64_t runtime) override;
-
-    // The device of the capture that is published now (0 = none): what IsOurRuntime compares with. Any thread.
-    void SetCaptureDevice(uint64_t device) noexcept { _captureDevice.store(device, std::memory_order_relaxed); }
 
   private:
     // Reads one string with the size query first. Yes = *out is the value; No = the thing does not exist; Fault = a call faulted, the
@@ -205,7 +199,6 @@ class LiveDepthBackend final : public IBackend, public IEventHost
 
     IRawApi& _raw;
     BackendEnv _env;
-    std::atomic<uint64_t> _captureDevice { 0 };
 
     std::mutex _registryMutex;
     std::vector<uint64_t> _d3d11Runtimes; // runtimes seen in begin/finish events that are D3D11 runtimes

@@ -70,7 +70,7 @@ void HappyPath()
     Rig r;
     if (!r.Create())
         return;
-    r.frame = 77;
+    r.frame = 77; // the depth-owned counter before this capture
     r.host.now = 123'456;
     const size_t identity = LogLines("contexts:");
     CHECK(r.Capture());
@@ -78,7 +78,7 @@ void HappyPath()
     const DepthCapture c = r.sink.events.back().capture;
     CHECK(c.valid && c.copyView != 0);
     CHECK(c.outputW == kW && c.outputH == kH && c.renderW == kW && c.renderH == kH);
-    CHECK(c.frame == 77 && c.tickMs == 123'456);                                   // the depth-owned counter and the clock
+    CHECK(c.frame == 78 && r.frame == 78 && c.tickMs == 123'456);                  // one tick for the capture, the stamp is the new value; the clock
     CHECK(c.device == reinterpret_cast<uintptr_t>(r.device.Get()));              // the NATIVE device
     CHECK(r.engine->PassReady());
     CHECK(r.engine->Stats().captured == 1 && r.engine->Stats().refused == 0 && r.engine->Stats().lastResult == 0);
@@ -98,6 +98,47 @@ void HappyPath()
     const size_t lines = LogLines("capture: the game's depth is");
     CHECK(r.Capture());
     CHECK(LogLines("capture: the game's depth is") == lines);
+}
+
+// The counter belongs to the capture side: one tick per capture, applied before the capture can be published (so a pass that reads the
+// counter never sees a stamp from the future); refused captures, previews, a lost consumer and the option off do not move it.
+void CounterTicksPerCapture()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    r.frame = 40;
+    for (int i = 1; i <= 4; ++i)
+    {
+        CHECK(r.Capture());
+        CHECK(r.frame == 40 + i && r.sink.events.back().capture.frame == 40 + i); // consecutive stamps, each equal to the counter
+    }
+    CHECK(r.engine->Stats().frame == 44);
+    // a preview-sized Output publishes nothing and moves nothing
+    r.params.uints["OutWidth"] = 576;
+    r.params.uints["OutHeight"] = 960;
+    r.Eval();
+    CHECK(r.frame == 44);
+    r.params.uints["OutWidth"] = kW;
+    r.params.uints["OutHeight"] = kH;
+    // nobody reads the depth: withdrawn, not captured, not ticked
+    r.host.consumer.seen = false;
+    r.Eval();
+    CHECK(r.frame == 44);
+    r.host.consumer.seen = true;
+    // a refused capture (no shader resource bind flag) is not a tick either, however often
+    Rig q;
+    if (!q.Create(D3D11_BIND_DEPTH_STENCIL))
+        return;
+    q.frame = 40;
+    for (int i = 0; i < 3; ++i)
+        CHECK(!q.Capture());
+    CHECK(q.frame == 40 && q.engine->Stats().refused == 3 && q.engine->Stats().frame == 40);
+    // the option off: nothing, not even a read
+    r.gate.SetEnabled(false);
+    r.gate.TakeRequests();
+    r.Eval();
+    CHECK(r.frame == 44);
 }
 
 void RenderSize()
@@ -682,6 +723,7 @@ int main()
     }
     OptionOffIsOneLoad();
     HappyPath();
+    CounterTicksPerCapture();
     RenderSize();
     PreviewPublishesNothing();
     OutputFallbacks();

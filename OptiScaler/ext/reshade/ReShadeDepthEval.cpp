@@ -261,13 +261,19 @@ void CaptureEngine::Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* param
     args.baseY = sizes.baseY;
     args.renderW = render.w;
     args.renderH = render.h;
-    args.frame = _frame.load(std::memory_order_relaxed);
+    // One tick of the depth-owned counter per capture, BEFORE it can be published: a pass that reads the counter (IBackend::Frame) then
+    // never sees a stamp from the future, and every pass between two captures sees this one (delta 0), however many output frames
+    // ReShade renders for one evaluate. Only this thread moves the counter.
+    const uint64_t stamp = _frame.fetch_add(1, std::memory_order_relaxed) + 1;
+    args.frame = stamp;
     args.tickMs = now;
 
     DepthCopy& pass = PassFor(glue::UseRawDraw(hooked, native.Get()));
     CaptureReport report;
     const bool ok = pass.Capture(native.Get(), depth, args, &report);
     _lastResult.store(static_cast<uint32_t>(report.result), std::memory_order_relaxed);
+    if (!ok)
+        _frame.fetch_sub(1, std::memory_order_relaxed); // a refused capture published nothing: it is not a tick
     if (ok)
     {
         _captured.fetch_add(1, std::memory_order_relaxed);

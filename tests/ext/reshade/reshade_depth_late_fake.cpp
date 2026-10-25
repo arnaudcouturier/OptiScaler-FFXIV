@@ -114,7 +114,6 @@ struct FakeHost final : IEventHost
 {
     void NoteRuntime(uint64_t) override {}
     void ForgetRuntime(uint64_t) override {}
-    bool IsOurRuntime(uint64_t) override { return true; }
 };
 
 effect_runtime* Rt() { return reinterpret_cast<effect_runtime*>(kRt); }
@@ -130,7 +129,7 @@ int Late(HMODULE& fake, const char* dll)
     std::atomic<uint64_t> counter { 100 };
     world.frameSource = &counter;
     DepthBinder binder(world, nullptr);
-    EventDispatcher dispatcher(binder, host, counter);
+    EventDispatcher dispatcher(binder, host);
     SetDispatcher(&dispatcher);
 
     // ---- ReShade is not loaded
@@ -209,7 +208,7 @@ int Late(HMODULE& fake, const char* dll)
         c.outputH = 2160;
         c.renderW = 1920;
         c.renderH = 1080;
-        c.frame = counter.load();
+        c.frame = ++counter; // one tick per capture
         c.tickMs = world.now;
         c.copyView = kCopy;
         c.device = kDevice;
@@ -232,8 +231,8 @@ int Late(HMODULE& fake, const char* dll)
         CHECK(LastLine("first begin_effects callback").find("on thread " + std::to_string(workerId)) != std::string::npos);
         CHECK(LastLine("first finish_effects callback").find("on thread " + std::to_string(workerId)) != std::string::npos);
     }
-    const uint64_t base = counter.load(); // (the two passes of the worker ticked it, bound or not)
-    CHECK(base == 102);
+    const uint64_t base = counter.load(); // (the passes of the worker ticked nothing: no event moves the counter)
+    CHECK(base == 100);
     publish();
     begin(Rt(), nullptr, resource_view {}, resource_view {});
     CHECK(LogLines("first begin_effects callback") == 1); // not again, from this thread
@@ -242,7 +241,7 @@ int Late(HMODULE& fake, const char* dll)
     binder.SetEnabled(false);
     finish(Rt(), nullptr, resource_view {}, resource_view {});
     CHECK(world.DepthIs(kOrig, kOrigSrgb) && !world.HoldsCopy());
-    CHECK(counter == base + 1);
+    CHECK(counter == base + 1); // (the one publish above)
 
     // the technique-state callback never vetoes and clears the cache; the others are plain
     binder.SetEnabled(true);
@@ -264,14 +263,13 @@ int Late(HMODULE& fake, const char* dll)
     // shutting down: the callbacks stand down
     State::Instance().isShuttingDown = true;
     const int before = world.calls;
-    const uint64_t ticks = counter.load();
     world.now += 16;
     publish();
     begin(Rt(), nullptr, resource_view {}, resource_view {});
     finish(Rt(), nullptr, resource_view {}, resource_view {});
     destroy(Rt());
     CHECK(technique(Rt(), effect_technique { 1 }, true) == false);
-    CHECK(world.calls == before && counter.load() == ticks);
+    CHECK(world.calls == before);
     State::Instance().isShuttingDown = false;
 
     // no dispatcher yet: nothing happens either
@@ -380,7 +378,7 @@ int Load(HMODULE& fake, const char* dll)
     std::atomic<uint64_t> counter { 100 };
     world.frameSource = &counter;
     DepthBinder binder(world, nullptr);
-    EventDispatcher dispatcher(binder, host, counter);
+    EventDispatcher dispatcher(binder, host);
     binder.SetEnabled(true);
     for (int i = 0; i < 3; ++i)
     {
@@ -402,7 +400,7 @@ int Load(HMODULE& fake, const char* dll)
     c.outputH = 2160;
     c.renderW = 1920;
     c.renderH = 1080;
-    c.frame = counter.load();
+    c.frame = ++counter; // one tick per capture
     c.tickMs = world.now;
     c.copyView = kCopy;
     c.device = kDevice;
@@ -421,7 +419,7 @@ int Failure(HMODULE& fake, const char* dll)
     FakeHost host;
     std::atomic<uint64_t> counter { 100 };
     DepthBinder binder(world, nullptr);
-    EventDispatcher dispatcher(binder, host, counter);
+    EventDispatcher dispatcher(binder, host);
     SetDispatcher(&dispatcher);
     fake = LoadLibraryA(dll);
     CHECK(fake != nullptr);
