@@ -61,6 +61,9 @@ constexpr Home kChara { "DrawDebugSection", "DrawCharaCard", "OptiScaler/ext/ffx
 constexpr Home kAmpere { "DrawAmpereAdvanced", "DrawFgUnlocks", "OptiScaler/ext/fg/MenuFgUnlocks.cpp",
                          "\"fg_unlocks\", \"Frame Gen\", \"Frame generation unlocks\", DrawFgUnlocks," };
 
+constexpr Home kDepth { "Draw", "Draw", "OptiScaler/ext/reshade/ReShadeDepthMenu.cpp",
+                        "\"reshade_depth\", \"FFXIV\", \"ReShade depth compatibility\", Draw," };
+
 struct Row
 {
     Home home;                        // where the control lives (function, entry, registration)
@@ -83,6 +86,15 @@ constexpr const char* kNrAdvanced = "ImGui::TreeNode(\"Advanced##nr_card\")"; //
 constexpr const char* kAmpereAdvanced = "ImGui::TreeNode(\"Advanced (RTX 20/30 runtime)##ampere_advanced\")"; // closed by default
 
 const Row kRows[] = {
+    // Automatic ReShade scene depth: [FFXIV] AutomaticReShadeDepth, the switch of the "ReShade depth compatibility" card. Read at every
+    // evaluate (the facade keeps it in one atomic word), so a change applies from the next frame, no restart; the tooltip says what it
+    // needs (ReShade 6.8 or newer) and what it stands down for, and the toggle goes through SetEnabled so the binder follows it.
+    { .home = kDepth, .file = "reshade/ReShadeDepthMenu.cpp", .widget = "ImGui::Checkbox(\"Automatic scene depth\"",
+      .write = "cfg.automaticReShadeDepth=on", .keyPrefix = "cfg.automaticReShadeDepth=",
+      .block = { "Needs ReShade 6.8 or newer (add-on API 20)", "RESHADE_DEPTH_INPUT_IS_REVERSED=1", "Takes effect from the next frame" },
+      .fileHas = { "ext::reshade::depth::SetEnabled(on);", "ext::reshade::depth::Status()", "ext::menu::SectionTitle(\"ReShade depth compatibility\");" },
+      .blockNot = { "restart" } },
+
     // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card. The mode is read at every UI boundary, so switching to Off
     // applies at once; but the ReShade runtime tracking is only installed at start when presets are not Off (ReShadeAddon.cpp
     // OnReshadeLoaded), so switching on again after a start with Off applies after a restart: the tooltip says both.

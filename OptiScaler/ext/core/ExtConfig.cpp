@@ -159,6 +159,7 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "JitterCorrection", jitterCorrection);
     b.Add("FFXIV", "JitterScaleOverride", jitterScaleOverride);
     b.Add("FFXIV", "JitterSource", jitterSource);
+    b.Add("FFXIV", "AutomaticReShadeDepth", automaticReShadeDepth);
     chara.Bind(b);
 }
 
@@ -219,6 +220,7 @@ void ExtConfig::PostLoad()
     hudless.PostLoad();
     upscaler.PostLoad();
     window.PostLoad();
+    ffxiv.PostLoad();
 }
 
 ExtConfig& Cfg()

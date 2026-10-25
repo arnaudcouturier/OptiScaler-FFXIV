@@ -84,14 +84,14 @@ void Cards(const std::string& repo)
     size_t tokens = 0;
     const auto regs = menuscan::ScanRegistrations(repo, tokens);
     CHECK(regs.size() == tokens);
-    CHECK(regs.size() == 14);
+    CHECK(regs.size() == 15);
 
     std::map<std::string, std::string> tabOf;
     for (const auto& r : regs)
         tabOf[r.id] = r.tab;
 
-    // the eight cards that need the FFXIV build match are in the tab, and nothing else is
-    const std::vector<std::string> ffxivCards = { "window_mode",     "ffxiv_hdr",       "ffxiv_jitter",  "ffxiv_character_preview",
+    // the nine cards that need the FFXIV build match are in the tab, and nothing else is
+    const std::vector<std::string> ffxivCards = { "window_mode",     "reshade_depth",   "ffxiv_hdr",    "ffxiv_jitter", "ffxiv_character_preview",
                                                   "fg_hudless",      "ffxiv_companion", "hudless_diag", "ffxiv_advanced" };
     for (const auto& id : ffxivCards)
         CHECK(tabOf.count(id) == 1 && tabOf[id] == "FFXIV");

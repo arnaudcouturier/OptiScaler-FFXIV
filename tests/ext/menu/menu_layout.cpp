@@ -301,7 +301,7 @@ void RealTable(const std::string& repo)
              "fg_selection fg_fsrfg fg_xefg fg_dlssg fg_reprojection fg_optifg fg_nvngx fg_fsrfg_inputs "
              "fg_sl_inputs fg_unlocks fg_auto_mfg");
     CHECK_EQ(tabIds("FFXIV"),
-             "window_mode ffxiv_hdr ffxiv_jitter ffxiv_character_preview fg_hudless ffxiv_companion hudless_diag "
+             "window_mode reshade_depth ffxiv_hdr ffxiv_jitter ffxiv_character_preview fg_hudless ffxiv_companion hudless_diag "
              "ffxiv_advanced");
     CHECK_EQ(tabIds("Textures"), "mipmap anisotropy mipmap_auto");
     CHECK_EQ(tabIds("Compatibility"),

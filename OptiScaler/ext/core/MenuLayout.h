@@ -51,7 +51,8 @@ inline constexpr Slot kSlots[] = {
     // FFXIV (tab hidden outside the FFXIV build match), after the Frame Gen cards, in the order of the tab:
     // display, image quality, HUD, diagnostics
     { "window_mode",              "FFXIV",         "fg_auto_mfg" },
-    { "ffxiv_hdr",                "FFXIV",         "window_mode" },
+    { "reshade_depth",            "FFXIV",         "window_mode" },
+    { "ffxiv_hdr",                "FFXIV",         "reshade_depth" },
     { "ffxiv_jitter",             "FFXIV",         "ffxiv_hdr" },
     { "ffxiv_character_preview",  "FFXIV",         "ffxiv_jitter" },
     { "fg_hudless",               "FFXIV",         "ffxiv_character_preview" },
