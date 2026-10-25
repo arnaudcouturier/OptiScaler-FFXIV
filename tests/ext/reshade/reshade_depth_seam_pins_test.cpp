@@ -169,7 +169,7 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "bool ScaleMotionImpl() { return ext::Cfg().ffxiv.automaticReShadeMotionScale.value_or_default(); }"));
         CHECK(Has(facade, "binder.SetSlotLog(&LogSlotCounter);"));
         CHECK(Has(facade, "CaptureEngine engine { g_gate, g_frame, *this, host };"));
-        CHECK(Has(facade, "Facade() { binder.SetSlotLog(&LogSlotCounter); binder.SetEnabled(g_gate.Enabled()); SetDispatcher(&dispatcher); }"));
+        CHECK(Has(facade, "Facade() { SetEvaluateThreadSource(&EvaluateThreadImpl); binder.SetSlotLog(&LogSlotCounter); binder.SetEnabled(g_gate.Enabled()); SetDispatcher(&dispatcher); }"));
         CHECK(Has(facade, "void Publish(const DepthCapture& capture) noexcept override { binder.PublishCapture(capture); }"));
         // the counter is ticked by the capture side only (the engine), never by an event
         const auto dispatch = Normalize(Read(ext + "reshade/ReShadeDepthDispatch.h"));

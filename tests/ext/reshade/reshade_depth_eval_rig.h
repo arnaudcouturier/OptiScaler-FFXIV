@@ -48,6 +48,7 @@ inline std::string LastLine(const char* needle)
 struct FakeParams final : NVSDK_NGX_Parameter
 {
     std::map<std::string, unsigned> uints;
+    std::map<std::string, float> floats;
     std::map<std::string, ID3D11Resource*> resources;
     mutable int gets = 0;
     mutable std::vector<std::string> asked;
@@ -64,7 +65,15 @@ struct FakeParams final : NVSDK_NGX_Parameter
     void Set(const char*, void*) override {}
 
     NVSDK_NGX_Result Get(const char* name, unsigned long long*) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, float*) const override { return Miss(name); }
+    NVSDK_NGX_Result Get(const char* name, float* out) const override
+    {
+        Note(name);
+        const auto it = floats.find(name);
+        if (it == floats.end())
+            return NVSDK_NGX_Result_Fail;
+        *out = it->second;
+        return NVSDK_NGX_Result_Success;
+    }
     NVSDK_NGX_Result Get(const char* name, double*) const override { return Miss(name); }
     NVSDK_NGX_Result Get(const char* name, unsigned int* out) const override
     {

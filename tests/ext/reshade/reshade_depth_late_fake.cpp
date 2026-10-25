@@ -275,7 +275,10 @@ int Late(HMODULE& fake, const char* dll)
     CHECK(base == 100);
     publish();
     begin(Rt(), nullptr, resource_view {}, resource_view {});
-    CHECK(LogLines("first begin_effects callback") == 1); // not again, from this thread
+    // once per THREAD: this (the main) thread is another begin path than the worker, so it gets its own line, with the evaluate thread next to it
+    CHECK(LogLines("first begin_effects callback") == 2);
+    CHECK(LastLine("first begin_effects callback").find("on thread " + std::to_string(GetCurrentThreadId())) != std::string::npos);
+    CHECK(LastLine("first begin_effects callback").find("evaluate thread not known yet") != std::string::npos);
     CHECK(world.DepthIs(kCopy, kCopy)); // the binder was reached through the registered pointer
     // the option is switched off while the pass is open: the registered finish callback still puts the binding back
     binder.SetEnabled(false);
@@ -528,6 +531,24 @@ int Load(HMODULE& fake, const char* dll)
     CHECK(world.DepthIs(kOrig, kOrigSrgb) && !world.HoldsCopy() && counter == 101);
     CHECK(LogLines("first begin_effects callback") == 1);
     g_sequence = nullptr;
+
+    // with the evaluate thread source set, the line of a new begin thread says whether it is the evaluate thread
+    SetEvaluateThreadSource([]() -> uint32_t { return 4242; });
+    {
+        DWORD otherId = 0;
+        std::thread t(
+            [&]
+            {
+                otherId = GetCurrentThreadId();
+                api.Dispatch(addon_event::reshade_begin_effects);
+                api.Dispatch(addon_event::reshade_finish_effects);
+            });
+        t.join();
+        CHECK(LogLines("first begin_effects callback") == 2);
+        CHECK(LastLine("first begin_effects callback").find("on thread " + std::to_string(otherId)) != std::string::npos);
+        CHECK(LastLine("first begin_effects callback").find("evaluate thread 4242, another thread") != std::string::npos);
+    }
+    SetEvaluateThreadSource(nullptr);
     return 0;
 }
 

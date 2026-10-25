@@ -229,6 +229,8 @@ const char* RemapDecisionName(RemapDecision decision)
         return "kept (size is neither the output's nor the render size)";
     case RemapDecision::KeepUnreadable:
         return "kept (the view could not be read or is not a plain 2D view)";
+    case RemapDecision::KeepSubrectBase:
+        return "kept (the depth's subrect base is not 0,0)";
     case RemapDecision::KeepNoSource:
         return "kept (nothing bound yet)";
     case RemapDecision::KeepAmbiguous:
@@ -449,6 +451,8 @@ void DepthBinder::Bump(Counter counter, size_t slot) noexcept
 {
     const size_t index = static_cast<size_t>(counter);
     const uint64_t count = _counts[slot][index].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (counter == Counter::Kept) // not an error (DLAA keeps every buffer at every begin): counted, never logged as a rate line
+        return;
     if (slot == 0 ? _log == nullptr : _slotLog == nullptr)
         return;
     try
@@ -962,9 +966,62 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
         return;
     }
 
-    // ---- what the add-on has bound: every candidate's binding. The semantic is one entry per runtime, so all readers show the same
-    // pair; variables of that name that do not read the semantic (an internal texture of an effect) show something else. Different
-    // pairs are ambiguous and left alone; the bind below checks the readers for real.
+    // ---- the decision is told once per change (the log); what is known from the capture needs no read of the add-on's bindings
+    GBufferNote note;
+    note.buffer = buffer;
+    note.renderW = bc.capture.renderW;
+    note.renderH = bc.capture.renderH;
+    note.outputW = bc.capture.outputW;
+    note.outputH = bc.capture.outputH;
+    note.baseX = bc.capture.baseX;
+    note.baseY = bc.capture.baseY;
+    auto tell = [&]
+    {
+        auto same = [](const GBufferNote& a, const GBufferNote& b)
+        {
+            return a.decision == b.decision && a.status == b.status && a.source.ok == b.source.ok && a.source.plain2D == b.source.plain2D &&
+                   a.source.width == b.source.width && a.source.height == b.source.height && a.source.format == b.source.format &&
+                   a.renderW == b.renderW && a.renderH == b.renderH && a.outputW == b.outputW && a.outputH == b.outputH &&
+                   a.baseX == b.baseX && a.baseY == b.baseY;
+        };
+        if (g.noted && same(g.lastNote, note))
+            return;
+        g.noted = true;
+        g.lastNote = note;
+        try
+        {
+            _backend.GBufferDecided(note);
+        }
+        catch (...)
+        {
+        }
+    };
+    auto keep = [&](RemapDecision decision)
+    {
+        note.decision = decision;
+        tell();
+        SetRealigned(k, false);
+        Bump(Counter::Kept, slot);
+    };
+    // render == output (DLAA, or a render scale of 100 %): there is nothing to realign, and no reason to read the add-on's bindings and
+    // describe its view at every begin. One log line per change of the sizes.
+    if (note.renderW == note.outputW && note.renderH == note.outputH)
+    {
+        keep(RemapDecision::KeepSameSize);
+        return;
+    }
+    // The remap stretches a render window that starts at 0,0; the depth honours Depth.Subrect.Base, the G-buffers do not (REST's copies
+    // are assumed to start at the corner). A game that reports another base keeps the add-on's bindings.
+    if (note.baseX != 0 || note.baseY != 0)
+    {
+        keep(RemapDecision::KeepSubrectBase);
+        return;
+    }
+
+    // ---- what the add-on has bound: EVERY candidate's binding, the empty ones too. The semantic is one entry per runtime, so all its
+    // readers show the same pair; a variable of that name that does not read the semantic (an effect's own texture) shows something
+    // else, and so does a decoy next to readers that show nothing yet. Any difference is ambiguous and left alone; all empty is
+    // "nothing bound yet". The bind below checks the readers for real.
     struct Reading
     {
         uint64_t handle, srv, srgb;
@@ -972,7 +1029,7 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
     std::vector<Reading> before;
     before.reserve(candidates.size());
     Reading source { 0, 0, 0 };
-    bool haveSource = false, ambiguous = false;
+    bool ambiguous = false;
     for (const TextureVar* c : candidates)
     {
         Reading r { c->handle, 0, 0 };
@@ -982,20 +1039,16 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
             Bump(Counter::Failed, slot);
             return;
         }
-        before.push_back(r);
-        if (r.srv == 0 && r.srgb == 0)
-            continue;
-        if (!haveSource)
-        {
+        if (before.empty())
             source = r;
-            haveSource = true;
-        }
         else if (r.srv != source.srv || r.srgb != source.srgb)
             ambiguous = true;
+        before.push_back(r);
     }
+    const bool haveSource = source.srv != 0;
 
     // does the add-on rebind a new view between frames? (the log says it once: the order of the callbacks depends on it)
-    if (haveSource && g.restoredKnown)
+    if (haveSource && !ambiguous && g.restoredKnown)
     {
         const bool same = source.srv == g.restoredSrv && source.srgb == g.restoredSrgb;
         try
@@ -1020,38 +1073,16 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
         }
     }
 
-    // ---- the decision (the log says every change of it once)
-    GBufferNote note;
-    note.buffer = buffer;
-    note.renderW = bc.capture.renderW;
-    note.renderH = bc.capture.renderH;
-    note.outputW = bc.capture.outputW;
-    note.outputH = bc.capture.outputH;
-    auto tell = [&]
+    if (ambiguous)
     {
-        auto same = [](const GBufferNote& a, const GBufferNote& b)
-        {
-            return a.decision == b.decision && a.status == b.status && a.source.ok == b.source.ok && a.source.plain2D == b.source.plain2D &&
-                   a.source.width == b.source.width && a.source.height == b.source.height && a.source.format == b.source.format &&
-                   a.renderW == b.renderW && a.renderH == b.renderH && a.outputW == b.outputW && a.outputH == b.outputH;
-        };
-        if (g.noted && same(g.lastNote, note))
-            return;
-        g.noted = true;
-        g.lastNote = note;
-        try
-        {
-            _backend.GBufferDecided(note);
-        }
-        catch (...)
-        {
-        }
-    };
-    if (!haveSource || source.srv == 0)
-        note.decision = RemapDecision::KeepNoSource;
-    else if (ambiguous)
-        note.decision = RemapDecision::KeepAmbiguous;
-    else
+        keep(RemapDecision::KeepAmbiguous);
+        return;
+    }
+    if (!haveSource)
+    {
+        keep(RemapDecision::KeepNoSource);
+        return;
+    }
     {
         ViewDesc desc;
         if (!_backend.DescribeView(source.srv, desc))
@@ -1061,12 +1092,9 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
     }
     if (note.decision != RemapDecision::Remap)
     {
-        tell();
-        SetRealigned(k, false);
-        Bump(Counter::Kept, slot);
+        keep(note.decision);
         return;
     }
-
     // ---- the copy, made now
     RemapRequest request;
     request.context = bc.context;
@@ -1078,6 +1106,8 @@ void DepthBinder::BindGBuffer(uint64_t runtime, Runtime& state, size_t k, const 
     request.outputW = note.outputW;
     request.outputH = note.outputH;
     request.stamp = bc.capture.frame;
+    request.motionScaleX = bc.capture.mvScaleX;
+    request.motionScaleY = bc.capture.mvScaleY;
     RemapOut out;
     const RemapStatus status = _backend.Remap(request, out);
     note.status = status;

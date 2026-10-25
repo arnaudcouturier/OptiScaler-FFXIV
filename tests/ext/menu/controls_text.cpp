@@ -93,7 +93,7 @@ const Row kRows[] = {
     { .home = kDepth, .file = "reshade/ReShadeDepthMenu.cpp", .widget = "ImGui::Checkbox(\"Automatic scene depth\"",
       .write = "cfg.automaticReShadeDepth=on", .keyPrefix = "cfg.automaticReShadeDepth=",
       .block = { "Keeps ReShade effects (ambient occlusion etc.) lined up with the picture when the game renders below the output size",
-                 "realigns the depth and the game's normals/motion/material automatically", "needs ReShade 6.8+", "no presets or shaders need editing" },
+                 "realigns the depth and the game's normals/motion/material automatically", "needs ReShade 6.8+", "presets need no edits unless you scaled or offset the depth by hand", "the status line says when it stands down" },
       .fileHas = { "ext::reshade::depth::SetEnabled(on);", "ext::reshade::depth::Status()", "ext::menu::SectionTitle(\"ReShade depth compatibility\");" },
       .blockNot = { "restart", "next frame" } },
 

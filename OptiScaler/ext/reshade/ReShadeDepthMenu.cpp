@@ -37,7 +37,7 @@ void Draw(ext::menu::Ctx&)
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     ext::menu::Tooltip("Keeps ReShade effects (ambient occlusion etc.) lined up with the picture when the game renders below the output size: "
-                       "realigns the depth and the game's normals/motion/material automatically; needs ReShade 6.8+; no presets or shaders need editing");
+                       "realigns the depth and the game's normals/motion/material automatically; needs ReShade 6.8+; presets need no edits unless you scaled or offset the depth by hand (the status line says when it stands down)");
 
     const std::string status = ext::reshade::depth::Status();
     ImGui::TextWrapped("%s", status.c_str());

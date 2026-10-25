@@ -74,6 +74,12 @@ struct DepthCapture
     uint64_t copyView = 0; // shader resource view of the copy (the core takes its own reference per pass)
     // The D3D11 device the copy lives on. 0 = no capture yet: the backend then decides for "the game's primary D3D11 device".
     uint64_t device = 0;
+    // Where the render window starts inside the game's buffers (NGX Depth.Subrect.Base). The depth copy honours it; the G-buffer remap
+    // assumes the window starts at 0,0 and keeps the add-on's binding when it does not.
+    uint32_t baseX = 0, baseY = 0;
+    // The motion vector scale the game tells the upscaler (NGX MV_Scale_X/Y); 0 = not reported. Under DLSS's convention the stored vector
+    // times this is a displacement in RENDER pixels, so the screen-UV multiplier of the motion vectors is this / render size per axis.
+    float mvScaleX = 0.0f, mvScaleY = 0.0f;
 };
 
 // valid, at most kMaxCaptureAgeMs old and 0 or kMaxCaptureFrames frames behind `frame`. Signed arithmetic: a capture from the
@@ -145,7 +151,7 @@ struct LateRegistrationPlanner
 // size those textures are output-sized with the picture only in their top-left render window, exactly like the depth. After the add-on's
 // own begin_effects the binder reads its binding, remaps the render window to the whole output (the same exact-integer nearest mapping
 // as the depth pass, origin 0,0) and binds the copy to the same semantic until finish_effects. Kept apart from the depth: the sources
-// are the add-on's views, not a capture, and the copy is made at begin_effects on the present thread (IRemapEngine).
+// are the add-on's views, not a capture, and the copy is made at begin_effects (IRemapEngine), on the thread that runs begin_effects.
 enum class GBuffer : uint8_t
 {
     Normals,
@@ -181,7 +187,10 @@ struct RemapRequest
     uint64_t srv = 0, srvSrgb = 0;   // the add-on's bindings (ID3D11ShaderResourceView*, untrusted); srvSrgb may be 0 or equal to srv
     uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
     uint64_t stamp = 0;              // the depth capture counter: with `srv` it keys the cache (same key = same copy, no draw)
-    bool scaleMotion = true;         // MotionVectors only: multiply the vector values by output/render per axis (DERIVED, see the docs)
+    bool scaleMotion = true;         // MotionVectors only: multiply the vector values per axis (DERIVED, see the docs)
+    // MotionVectors only: the MV scale the game reports (NGX MV_Scale_X/Y, 0 = unknown). When > 0 the multiplier is motionScale / render size
+    // per axis (a game that reports a scale equal to the render size gets 1); when 0 it falls back to output / render size.
+    float motionScaleX = 0.0f, motionScaleY = 0.0f;
 };
 enum class RemapStatus : uint8_t
 {
@@ -199,7 +208,7 @@ struct RemapOut
     uint32_t format = 0;           // DXGI format of the copy's srv
     bool cached = false;           // the key matched: nothing was drawn
 };
-// The D3D11 side of the realignment (ReShadeGBufferCopy.h). Runs on the thread of begin_effects (the present thread) and nowhere else.
+// The D3D11 side of the realignment (ReShadeGBufferCopy.h). Runs on the thread that runs begin_effects (two possible paths: the HudLess UI-boundary render_effects call and ReShade's own pass in Present) and nowhere else; the process-wide context-state mutex (ReShadeD3D11.h) serializes its draws with the depth pass.
 class IRemapEngine
 {
   public:
@@ -218,6 +227,7 @@ enum class RemapDecision : uint8_t
     KeepRenderSized,   // the source is already render-sized: ReShade's UV 0..1 already covers it
     KeepSizeMismatch,  // any other size (or a render window larger than the output)
     KeepUnreadable,    // the source view could not be described or is not a plain 2D view
+    KeepSubrectBase,   // (not from DecideRemap) the depth's render window does not start at 0,0, which the remap assumes
     KeepNoSource,      // (not from DecideRemap) the add-on has bound nothing to the semantic yet
     KeepAmbiguous,     // (not from DecideRemap) the variables of that name show different bindings: some of them are not the semantic's readers
 };
@@ -230,6 +240,7 @@ struct GBufferNote
     RemapDecision decision = RemapDecision::KeepNoSource;
     RemapStatus status = RemapStatus::Ok; // what IBackend::Remap answered (only for decision Remap)
     uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
+    uint32_t baseX = 0, baseY = 0; // of the render window (KeepSubrectBase)
 };
 // Told once per slot and runtime: whether the add-on's binding is a different view at our next begin than the one we put back at our last
 // finish. Answers (with the overwrittenByOther counter) whether REST rebinds every frame, which the order of the callbacks depends on.

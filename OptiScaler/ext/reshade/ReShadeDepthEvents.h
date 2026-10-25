@@ -59,6 +59,12 @@ enum class SubscribedVia : uint8_t
 };
 SubscribedVia SubscriptionPath() noexcept;
 
+// The thread that runs the NGX evaluate (the depth copy is made there), for the log line of the first begin_effects callback of each thread:
+// begin_effects arrives from at least two paths (the HudLess UI-boundary render_effects call and ReShade's own pass in Present), and the
+// line tells whether they, and the evaluate, are on the same thread. The facade sets the source; null = unknown.
+using ThreadIdFn = uint32_t (*)();
+void SetEvaluateThreadSource(ThreadIdFn source) noexcept;
+
 // Bit i is set when the DepthEvent with value i is subscribed / failed to subscribe.
 uint32_t SubscribedEvents() noexcept;
 uint32_t FailedEvents() noexcept;

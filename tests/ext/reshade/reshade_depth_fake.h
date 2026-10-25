@@ -101,17 +101,21 @@ struct Fake final : IBackend
     std::vector<RemapRequest> remaps;
     struct Held // what the engine keeps per G-buffer: the last copy and the key that made it (the engine's cache)
     {
-        bool valid = false;
+        bool valid = false, keyed = false;
         uint64_t srv = 0, stamp = 0;
         uint64_t a = 0, b = 0;
+        uint32_t outputW = 0, outputH = 0;
     };
     std::map<GBuffer, Held> held;
-    int remapMakes = 0, releaseRemaps = 0;
+    int remapMakes = 0; // targets made: like the real engine the views are kept across frames and only a new output size makes new ones
+    int draws = 0;      // copies drawn: a new (view, stamp) key, like the engine's cache
+    int releaseRemaps = 0;
     std::vector<GBufferNote> notes;
     std::vector<std::pair<GBuffer, GBufferEvent>> observed;
 
     // knobs for the restore paths
     bool failRestore = false; // update_texture_bindings with something that is not a copy returns false
+    std::string failSemantic; // ... only for this semantic (empty: for every semantic)
     bool texturesOk = true;   // false: the texture variables cannot be enumerated
     bool slowAddRef = false;  // widen the window between the core reading a capture and holding its view
     bool logCalls = true;     // keep the call log (off: the allocation test must not count the fake's own allocations)
@@ -178,7 +182,10 @@ struct Fake final : IBackend
     void RuntimeDestroyed(DestroyWorld world)
     {
         if (world == DestroyWorld::MapDies)
+        {
             SetDepth(0, 0);
+            sem.clear();
+        }
     }
     std::pair<uint64_t, uint64_t> Depth() const { return { depthSrv, depthSrgb }; }
     bool DepthIs(uint64_t srv, uint64_t srgb) const { return depthSrv == srv && depthSrgb == srgb; }
@@ -337,10 +344,10 @@ struct Fake final : IBackend
                                     if (remapStatus != RemapStatus::Ok)
                                         return remapStatus;
                                     Held& h = held[request.buffer];
-                                    out.cached = h.valid && h.srv == request.srv && h.stamp == request.stamp;
-                                    if (!out.cached)
+                                    const bool sameTarget = h.valid && h.outputW == request.outputW && h.outputH == request.outputH;
+                                    if (!sameTarget)
                                     {
-                                        // a new copy; the engine drops its reference to the previous one (the core's own keep it alive)
+                                        // a new target; the engine drops its reference to the previous one (the core's own keep it alive)
                                         const uint64_t a = NewView();
                                         const uint64_t b = remapTwin ? NewView() : a;
                                         if (h.valid)
@@ -349,10 +356,22 @@ struct Fake final : IBackend
                                             if (h.b != h.a)
                                                 OwnerRelease(h.b);
                                         }
-                                        h = Held { true, request.srv, request.stamp, a, b };
+                                        h = Held {};
+                                        h.valid = true;
+                                        h.a = a;
+                                        h.b = b;
+                                        h.outputW = request.outputW;
+                                        h.outputH = request.outputH;
                                         ++remapMakes;
                                     }
-                                    out.srv = h.a;
+                                    out.cached = h.keyed && h.srv == request.srv && h.stamp == request.stamp;
+                                    if (!out.cached)
+                                    {
+                                        h.keyed = true;
+                                        h.srv = request.srv;
+                                        h.stamp = request.stamp;
+                                        ++draws;
+                                    }                                    out.srv = h.a;
                                     out.srvSrgb = h.b;
                                     return RemapStatus::Ok;
                                 });
@@ -469,7 +488,7 @@ struct Fake final : IBackend
         return Run<bool>("UpdateTextureBindings", false,
                          [&]() -> bool
                          {
-                             if (failRestore && !copyViews.count(srv))
+                             if (failRestore && !copyViews.count(srv) && (failSemantic.empty() || failSemantic == semantic))
                                  return false;
                              updates.push_back({ semantic, srv, srgb });
                              for (uint64_t view : { srv, srgb })
@@ -584,6 +603,11 @@ struct Router final : IBackend
     {
         return For(rt).Definition(rt, e, n, v);
     }
+    bool DescribeView(uint64_t v, ViewDesc& d) override { return a.DescribeView(v, d); }
+    RemapStatus Remap(const RemapRequest& r, RemapOut& o) override { return a.Remap(r, o); }
+    void ReleaseRemaps() override { a.ReleaseRemaps(); }
+    void GBufferDecided(const GBufferNote& n) override { a.GBufferDecided(n); }
+    void GBufferObserved(GBuffer buf, GBufferEvent e) override { a.GBufferObserved(buf, e); }
 };
 
 inline std::vector<std::pair<Counter, uint64_t>> g_logged;

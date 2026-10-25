@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <string>
 
 namespace ext::reshade::depth
 {
@@ -46,7 +47,9 @@ EventDispatcher* Live()
 // The thread a callback runs on, once for init, begin and finish: the load path subscribes from the init callback, i.e. on the thread
 // that creates the effect runtime, and if ReShade delivers begin and finish on another one the log shows it (see the runbook).
 std::atomic<bool> g_initThreadLogged { false };
-std::atomic<bool> g_beginThreadLogged { false };
+// begin_effects: once per THREAD (the first four), with the evaluate thread next to it
+std::atomic<uint32_t> g_beginThreads[4] {};
+std::atomic<ThreadIdFn> g_evaluateThread { nullptr };
 std::atomic<bool> g_finishThreadLogged { false };
 
 void LogThreadOnce(std::atomic<bool>& flag, [[maybe_unused]] const char* what)
@@ -56,6 +59,26 @@ void LogThreadOnce(std::atomic<bool>& flag, [[maybe_unused]] const char* what)
 }
 
 void SubscribeRuntimeEvents(uint64_t runtime) noexcept;
+
+void LogBeginThreadOnce()
+{
+    const uint32_t thread = GetCurrentThreadId();
+    for (std::atomic<uint32_t>& slot : g_beginThreads)
+    {
+        uint32_t seen = slot.load(std::memory_order_relaxed);
+        if (seen == 0 && slot.compare_exchange_strong(seen, thread))
+        {
+            [[maybe_unused]] const ThreadIdFn source = g_evaluateThread.load(std::memory_order_acquire);
+            [[maybe_unused]] const uint32_t evaluate = source != nullptr ? source() : 0;
+            LOG_INFO("Automatic ReShade depth: first begin_effects callback on thread {} (evaluate thread {}{})", thread,
+                     evaluate != 0 ? std::to_string(evaluate) : std::string("not known yet"),
+                     evaluate == 0 ? "" : (evaluate == thread ? ", the same thread" : ", another thread"));
+            return;
+        }
+        if (seen == thread)
+            return;
+    }
+}
 
 // The init callback subscribes finish and begin (load path). It looks at neither the dispatcher nor the option: the facade does not exist
 // until the first evaluate with the option on, and the runtime is created long before that.
@@ -96,7 +119,7 @@ void DepthOnBegin(effect_runtime* runtime, command_list* list, resource_view, re
 {
     if (EventDispatcher* d = Live())
     {
-        LogThreadOnce(g_beginThreadLogged, "begin_effects");
+        LogBeginThreadOnce();
         d->Begin(Id(runtime), NativeContext(list));
     }
 }
@@ -235,6 +258,8 @@ void SubscribeRuntimeEvents([[maybe_unused]] uint64_t runtime) noexcept
 } // namespace
 
 void SetDispatcher(EventDispatcher* dispatcher) noexcept { g_dispatcher.store(dispatcher, std::memory_order_release); }
+
+void SetEvaluateThreadSource(ThreadIdFn source) noexcept { g_evaluateThread.store(source, std::memory_order_release); }
 
 uint32_t SubscribedEvents() noexcept { return g_subscribed.load(std::memory_order_acquire); }
 uint32_t FailedEvents() noexcept { return g_failed.load(std::memory_order_acquire); }

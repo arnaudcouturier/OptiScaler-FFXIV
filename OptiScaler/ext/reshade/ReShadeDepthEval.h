@@ -68,6 +68,7 @@ class CaptureEngine
 
     // Read by the status line and the tests, any thread.
     bool NativeContextMissing() const { return _nativeMissing.load(std::memory_order_relaxed); }
+    uint32_t EvalThread() const { return _evalThread.load(std::memory_order_relaxed); } // 0 until the first evaluate
     CaptureStats Stats() const;
     bool PassReady() const { return _copy != nullptr && _copy->Ready(); } // the evaluate thread's, or when it is not running
 

@@ -45,6 +45,8 @@ void LogSlotCounter(GBuffer buffer, Counter counter, uint64_t count)
     LOG_INFO("Automatic ReShade depth: {} ({}): {} = {}", GBufferSemantic(buffer), GBufferVariable(buffer), CounterName(counter), count);
 }
 
+uint32_t EvaluateThreadImpl();
+
 // [FFXIV] AutomaticReShadeMotionScale, read where it is used (ini only; a plain read of the config)
 bool ScaleMotionImpl() { return ext::Cfg().ffxiv.automaticReShadeMotionScale.value_or_default(); }
 
@@ -95,6 +97,7 @@ struct Facade final : ICaptureSink
 
     Facade()
     {
+        SetEvaluateThreadSource(&EvaluateThreadImpl);
         binder.SetSlotLog(&LogSlotCounter);
         binder.SetEnabled(g_gate.Enabled());
         SetDispatcher(&dispatcher);
@@ -128,6 +131,12 @@ Facade& Build()
     static Facade* facade = new Facade; // never destroyed
     g_facade.store(facade, std::memory_order_release);
     return *facade;
+}
+
+uint32_t EvaluateThreadImpl()
+{
+    Facade* f = g_facade.load(std::memory_order_acquire);
+    return f != nullptr ? f->engine.EvalThread() : 0;
 }
 
 glue::Extent DisplayOf(void* feature)

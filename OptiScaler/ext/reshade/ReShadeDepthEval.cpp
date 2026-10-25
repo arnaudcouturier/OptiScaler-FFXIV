@@ -43,6 +43,15 @@ unsigned GetUInt(NVSDK_NGX_Parameter* parameters, const char* name)
     return value;
 }
 
+// A positive finite float, 0 for anything else (not reported, zero, negative, NaN, infinite).
+float GetPositiveFloat(NVSDK_NGX_Parameter* parameters, const char* name)
+{
+    float value = 0.0f;
+    if (parameters->Get(name, &value) != NVSDK_NGX_Result_Success)
+        return 0.0f;
+    return value > 0.0f && value < 1.0e9f ? value : 0.0f; // (NaN fails the first comparison)
+}
+
 // ---- the reads on the upscaler's pointers ----------------------------------------------------------------------------------------
 // The parameter block, the Output and Depth resources, the depth's device and the feature are objects the upscaler has just used, so a
 // fault in them is not expected; but a C++ catch does not see a hardware access violation (/EHsc), so the reads run as POD thunks under
@@ -53,6 +62,7 @@ struct SizeReads
     DisplaySource display;
     glue::Extent render, output;
     uint32_t baseX = 0, baseY = 0;
+    float mvScaleX = 0.0f, mvScaleY = 0.0f; // the motion vector scale the game tells the upscaler, 0 = not reported
 };
 
 void ReadSizes(void* arg)
@@ -70,6 +80,9 @@ void ReadSizes(void* arg)
     // the base of the depth subrect is never clamped: a negative value becomes a huge one, which the pass refuses
     in.baseX = glue::BaseFromInt(static_cast<int>(GetUInt(p, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X)));
     in.baseY = glue::BaseFromInt(static_cast<int>(GetUInt(p, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y)));
+    // published with the capture: the G-buffer remap turns it into the multiplier of the motion vector values (DERIVED, see the docs)
+    in.mvScaleX = GetPositiveFloat(p, NVSDK_NGX_Parameter_MV_Scale_X);
+    in.mvScaleY = GetPositiveFloat(p, NVSDK_NGX_Parameter_MV_Scale_Y);
 }
 
 struct DepthReads
@@ -259,6 +272,8 @@ void CaptureEngine::Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* param
     args.outputH = output.h;
     args.baseX = sizes.baseX;
     args.baseY = sizes.baseY;
+    args.mvScaleX = sizes.mvScaleX;
+    args.mvScaleY = sizes.mvScaleY;
     args.renderW = render.w;
     args.renderH = render.h;
     // One tick of the depth-owned counter per capture, BEFORE it can be published: a pass that reads the counter (IBackend::Frame) then

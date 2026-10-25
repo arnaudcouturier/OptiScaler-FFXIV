@@ -7,8 +7,11 @@
 
 #include "reshade_depth_fake.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <tuple>
+#include <vector>
 
 using namespace depthtest;
 
@@ -69,7 +72,7 @@ void Realigns()
         CHECK(n.renderW == 1920 && n.renderH == 1080 && n.outputW == 3840 && n.outputH == 2160 && n.stamp == g.fake.frame);
         CHECK(m.buffer == GBuffer::MotionVectors && m.srv == kRestMv && m.srvSrgb == kRestMvs && m.scaleMotion);
     }
-    CHECK(g.fake.remapMakes == 2);
+    CHECK(g.fake.remapMakes == 2 && g.fake.draws == 2);
     // the semantics now hold the copies (not the add-on's views) until finish
     const auto n = g.fake.sem.at("NORMALS"), m = g.fake.sem.at("MOTIONVECTORS");
     CHECK(n.first != kRestN && g.fake.copyViews.count(n.first) && m.first != kRestMv && g.fake.copyViews.count(m.first));
@@ -98,7 +101,7 @@ void Realigns()
     // a new real frame makes a new copy; the old one is released by the backend while the core's references are gone already
     g.r.NextFrame();
     CHECK(g.Begin() == Outcome::Bound);
-    CHECK(g.fake.remapMakes == 4);
+    CHECK(g.fake.remapMakes == 2 && g.fake.draws == 4); // the targets are the same (kept across frames), only drawn again
     g.Finish();
     CHECK(g.Both(kRestN, kRestMv) && g.fake.Balanced() && g.fake.violations == 0);
 }
@@ -395,6 +398,9 @@ void Helpers()
     CHECK(DecideRemap(full, 3840, 2160, 4000, 2160, 3840, 2160) == RemapDecision::KeepSizeMismatch); // render larger than the output
     CHECK(DecideRemap(full, 3840, 2160, 0, 1080, 3840, 2160) == RemapDecision::KeepSizeMismatch);
     CHECK(DecideRemap(full, 1920, 1080, 960, 540, 3840, 2160) == RemapDecision::KeepSizeMismatch); // the back buffer is not the output
+    // the source IS the back buffer but the back buffer is not the output size: the clause "back buffer == output" decides
+    CHECK(DecideRemap(Plain(1920, 1080, kRgba8), 1920, 1080, 960, 540, 3840, 2160) == RemapDecision::KeepSizeMismatch);
+    CHECK(DecideRemap(Plain(1920, 1080, kRgba8), 1920, 1080, 960, 540, 1920, 1080) == RemapDecision::Remap); // ... and it remaps when it is
     ViewDesc bad = full;
     bad.plain2D = false;
     CHECK(DecideRemap(bad, 3840, 2160, 1920, 1080, 3840, 2160) == RemapDecision::KeepUnreadable);
@@ -409,6 +415,305 @@ void Helpers()
     CHECK(std::string(GBufferSemantic(GBuffer::Material)) == "MATERIAL" && std::string(GBufferVariable(GBuffer::Material)) == "texMaterial");
     CHECK(std::string(GBufferLabel(GBuffer::MotionVectors)) == "motion" && std::string(GBufferLabel(GBuffer::Normals)) == "normals");
     CHECK(std::string(GBufferSemantic(GBuffer::Count)) == "?");
+}
+
+// ---- the fix round: ambiguity with empty readings, the subrect base, the motion scale, DLAA, and the gate-lane cases -------------------
+std::vector<std::tuple<GBuffer, Counter, uint64_t>> g_slotLogged;
+void SlotHook(GBuffer buffer, Counter counter, uint64_t count) { g_slotLogged.emplace_back(buffer, counter, count); }
+
+// replaces the texNormals variables of the rig by `vars`, placed right after the depth variable
+void SetNormalsVars(GRig& g, const std::vector<Fake::Var>& vars)
+{
+    auto& v = g.fake.vars;
+    v.erase(std::remove_if(v.begin(), v.end(), [](const Fake::Var& x) { return x.name == "texNormals"; }), v.end());
+    v.insert(v.begin() + 1, vars.begin(), vars.end());
+}
+
+// A same-named texture that is NOT a reader (an effect's own render target) next to real readers: the readers show nothing while nobody
+// has bound the semantic, the decoy shows its own view. Comparing only the non-empty readings used to take the decoy's view as the source.
+void AmbiguityCountsEmptyReadings()
+{
+    for (const bool decoyFirst : { false, true })
+    {
+        GRig g;
+        g.fake.sem.erase("NORMALS");
+        const Fake::Var decoy { kVarN2, "texNormals", "", 0xE1, 0xE2 }, reader { kVarN, "texNormals", "NORMALS", 0, 0 };
+        g.fake.described[0xE1] = Plain(3840, 2160, kRgba8);
+        for (uint64_t v : { 0xE1ull, 0xE2ull })
+            g.fake.owner[v] = 1;
+        SetNormalsVars(g, decoyFirst ? std::vector<Fake::Var> { decoy, reader } : std::vector<Fake::Var> { reader, decoy });
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        CHECK(!g.fake.notes.empty() && g.fake.notes[0].buffer == GBuffer::Normals && g.fake.notes[0].decision == RemapDecision::KeepAmbiguous);
+        CHECK(g.fake.remaps.size() == 1 && g.fake.remaps[0].buffer == GBuffer::MotionVectors); // only the motion vectors were copied
+        CHECK(g.fake.sem.count("NORMALS") == 0);                                             // nothing was bound to the semantic
+        for (const auto& u : g.fake.updates)
+            CHECK(u.semantic != "NORMALS");
+        CHECK(g.binder.GetCounters(GBuffer::Normals).kept == 1 && g.binder.GetCounters(GBuffer::Normals).passesBound == 0);
+        g.Finish();
+        CHECK(g.fake.Balanced());
+    }
+    {   // several readers that all show the add-on's binding agree: copied
+        GRig g;
+        SetNormalsVars(g, { { kVarN, "texNormals", "NORMALS", 0, 0 }, { kVarN2, "texNormals", "NORMALS", 0, 0 } });
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        CHECK(g.binder.GetCounters(GBuffer::Normals).passesBound == 1 && g.fake.notes[0].decision == RemapDecision::Remap);
+        g.Finish();
+        CHECK(g.Both(kRestN, kRestMv) && g.fake.Balanced());
+    }
+    {   // several readers, nothing bound yet: nothing to copy
+        GRig g;
+        g.fake.sem.erase("NORMALS");
+        SetNormalsVars(g, { { kVarN, "texNormals", "NORMALS", 0, 0 }, { kVarN2, "texNormals", "NORMALS", 0, 0 } });
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        CHECK(g.fake.notes[0].decision == RemapDecision::KeepNoSource && g.fake.remaps.size() == 1);
+        g.Finish();
+        CHECK(g.fake.Balanced());
+    }
+}
+
+// The remap assumes the render window starts at 0,0; the depth honours Depth.Subrect.Base. A base that is not 0,0 keeps the add-on's bindings.
+void SubrectBaseAndMotionScale()
+{
+    for (const auto& base : { std::pair<uint32_t, uint32_t> { 3, 0 }, { 0, 5 }, { 7, 9 } })
+    {
+        GRig g;
+        DepthCapture c = g.r.Capture();
+        c.baseX = base.first;
+        c.baseY = base.second;
+        g.binder.PublishCapture(c);
+        CHECK(g.Begin() == Outcome::Bound); // the depth is bound all the same: it honours the base
+        CHECK(g.fake.remaps.empty() && g.fake.notes.size() == 2);
+        CHECK(g.fake.notes[0].decision == RemapDecision::KeepSubrectBase && g.fake.notes[0].baseX == base.first && g.fake.notes[0].baseY == base.second);
+        CHECK(g.fake.Calls("DescribeView") == 0 && g.fake.bindingReads.count(kVarN) == 0); // decided from the capture alone
+        CHECK(g.Both(kRestN, kRestMv));
+        CHECK(g.binder.GetCounters(GBuffer::Normals).kept == 1 && g.binder.GetCounters(GBuffer::MotionVectors).kept == 1 && g.binder.RealignedMask() == 0);
+        g.Finish();
+        CHECK(g.fake.Balanced());
+    }
+    {   // the reported motion vector scale travels with the request (0 = not reported)
+        GRig g;
+        DepthCapture c = g.r.Capture();
+        c.mvScaleX = 3840.0f;
+        c.mvScaleY = 2160.0f;
+        g.binder.PublishCapture(c);
+        CHECK(g.Begin() == Outcome::Bound && g.fake.remaps.size() == 2);
+        CHECK(g.fake.remaps[1].buffer == GBuffer::MotionVectors && g.fake.remaps[1].motionScaleX == 3840.0f && g.fake.remaps[1].motionScaleY == 2160.0f);
+        g.Finish();
+        GRig h;
+        CHECK(h.Begin() == Outcome::Bound && h.fake.remaps.size() == 2 && h.fake.remaps[1].motionScaleX == 0.0f && h.fake.remaps[1].motionScaleY == 0.0f);
+        h.Finish();
+    }
+}
+
+// DLAA (render == output): nothing to realign, so the add-on's bindings are not even read, one log line per change, no rate line for `kept`.
+void DlaaEarlyOut()
+{
+    GRig g;
+    g.binder.SetSlotLog(&SlotHook);
+    g_slotLogged.clear();
+    for (int i = 0; i < 6; ++i)
+    {
+        g.r.NextFrame();
+        DepthCapture c = g.r.Capture();
+        c.renderW = 3840;
+        c.renderH = 2160;
+        g.binder.PublishCapture(c);
+        CHECK(g.Begin() == Outcome::Bound);
+        g.Finish();
+    }
+    CHECK(g.fake.remaps.empty() && g.fake.Calls("DescribeView") == 0);
+    CHECK(g.fake.bindingReads.count(kVarN) == 0 && g.fake.bindingReads.count(kVarMv) == 0);
+    CHECK(g.fake.notes.size() == 2 && g.fake.notes[0].decision == RemapDecision::KeepSameSize && g.fake.notes[1].decision == RemapDecision::KeepSameSize);
+    CHECK(g.binder.GetCounters(GBuffer::Normals).kept == 6 && g.binder.GetCounters(GBuffer::MotionVectors).kept == 6);
+    CHECK(g.binder.GetCounters(GBuffer::Normals).failed == 0 && g.binder.RealignedMask() == 0);
+    for (const auto& e : g_slotLogged)
+        CHECK(std::get<1>(e) != Counter::Kept); // counted, never logged as a rate line
+    // the render scale changes: the copy is made and told again; the other counters still log
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    CHECK(g.fake.remaps.size() == 2 && g.fake.notes.size() == 4 && g.fake.notes[2].decision == RemapDecision::Remap);
+    bool bound = false;
+    for (const auto& e : g_slotLogged)
+        bound = bound || std::get<1>(e) == Counter::PassesBound;
+    CHECK(bound);
+    g.Finish();
+    CHECK(g.fake.Balanced());
+}
+
+// A slot whose restore keeps failing stays dirty (and referenced) while the depth and the other slot are clean.
+void DirtySlotCleanDepth()
+{
+    GRig g;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    g.fake.failRestore = true;
+    g.fake.failSemantic = "NORMALS";
+    g.Finish();
+    CHECK(g.fake.DepthIs(kOrig, kOrigSrgb) && g.fake.sem.at("MOTIONVECTORS").first == kRestMv);
+    const uint64_t stuck = g.fake.sem.at("NORMALS").first;
+    CHECK(stuck != kRestN && g.fake.copyViews.count(stuck) && g.fake.CoreRefs(stuck) == 1); // still ours, still referenced
+    CHECK(g.binder.GetCounters(GBuffer::Normals).failed == 1 && g.binder.GetCounters().failed == 0 && g.binder.GetCounters(GBuffer::MotionVectors).failed == 0);
+    // the next begin retries first; it fails again; the depth and the motion vectors bind as usual, normals are skipped
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    CHECK(g.binder.GetCounters(GBuffer::Normals).failed >= 2 && g.binder.GetCounters(GBuffer::Normals).passesBound == 1);
+    CHECK(g.binder.GetCounters(GBuffer::MotionVectors).passesBound == 2 && (g.binder.RealignedMask() & 1u) == 0);
+    CHECK(g.fake.sem.at("NORMALS").first == stuck && g.fake.CoreRefs(stuck) == 1);
+    g.Finish();
+    // restorable again: the retry puts the add-on's binding back, then the pass binds again
+    g.fake.failRestore = false;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound && g.binder.GetCounters(GBuffer::Normals).passesBound == 2);
+    g.Finish();
+    CHECK(g.Both(kRestN, kRestMv) && !g.fake.HoldsCopy() && g.fake.Balanced() && g.fake.violations == 0);
+}
+
+// Shutdown with passes open (depth and slots): every reference goes back, no ReShade call is made, and nothing binds afterwards.
+void ShutdownWithOpenSlots()
+{
+    GRig g;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    const size_t updates = g.fake.updates.size();
+    CHECK(g.fake.CopyRefs() > 0);
+    g.binder.Shutdown();
+    CHECK(g.fake.updates.size() == updates && g.fake.CopyRefs() == 0 && g.fake.Balanced());
+    CHECK(g.Begin() == Outcome::Disabled);
+}
+
+// A runtime destroyed while it holds copies is kept (orphaned) without a ReShade call. If the same pointer comes back with its map (a reset),
+// the next begin restores first; if it comes back with an empty map (a new object), no variable shows the copy: the entries are erased
+// (counted) and the add-on's fresh binding of that frame is lost, the next frame is fine.
+void DestroyOrphanReturns()
+{
+    {
+        GRig g;
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        const size_t updates = g.fake.updates.size();
+        g.binder.OnDestroyRuntime(kRt);
+        CHECK(g.fake.updates.size() == updates && g.fake.CopyRefs() > 0);
+        g.fake.RuntimeDestroyed(Fake::DestroyWorld::Reset); // the same object, its map survives
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound); // restored first, then bound again
+        g.Finish();
+        CHECK(g.Both(kRestN, kRestMv) && g.fake.DepthIs(kOrig, kOrigSrgb) && !g.fake.HoldsCopy() && g.fake.Balanced());
+        CHECK(g.binder.GetCounters(GBuffer::Normals).erasedUnverified == 0 && g.binder.GetCounters().erasedUnverified == 0);
+    }
+    {
+        GRig g;
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        g.binder.OnDestroyRuntime(kRt);
+        g.fake.RuntimeDestroyed(Fake::DestroyWorld::MapDies); // a new object: empty maps, then the add-on binds again
+        g.fake.sem["NORMALS"] = { kRestN, kRestNs };
+        g.fake.sem["MOTIONVECTORS"] = { kRestMv, kRestMvs };
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        CHECK(g.binder.GetCounters(GBuffer::Normals).erasedUnverified == 1 && g.binder.GetCounters(GBuffer::MotionVectors).erasedUnverified == 1);
+        CHECK(g.binder.GetCounters().erasedUnverified == 1);
+        CHECK(g.fake.notes.back().decision == RemapDecision::KeepNoSource); // this frame's binding was erased: nothing to copy
+        g.Finish();
+        g.fake.sem["NORMALS"] = { kRestN, kRestNs }; // the add-on binds again at its next begin
+        g.fake.sem["MOTIONVECTORS"] = { kRestMv, kRestMvs };
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound && g.binder.GetCounters(GBuffer::Normals).passesBound == 2);
+        g.Finish();
+        CHECK(g.Both(kRestN, kRestMv) && g.fake.Balanced());
+    }
+}
+
+// The option goes off between begin and finish: finish still puts everything back; the targets are dropped by the next begin.
+void SwitchedOffMidPass()
+{
+    GRig g;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    g.binder.SetEnabled(false);
+    g.Finish();
+    CHECK(g.Both(kRestN, kRestMv) && g.fake.DepthIs(kOrig, kOrigSrgb) && !g.fake.HoldsCopy() && g.fake.Balanced());
+    CHECK(g.fake.releaseRemaps == 0);
+    CHECK(g.Begin() == Outcome::Disabled && g.fake.releaseRemaps == 1);
+}
+
+// Two runtimes with the same buffers, passes overlapping: each gets its own copy bound and its own binding back.
+void TwoRuntimes()
+{
+    Fake a, b;
+    Router router(a, b);
+    DepthBinder binder(router, nullptr);
+    binder.SetEnabled(true);
+    constexpr uint64_t kRestN2 = 0xD5, kRestN2s = 0xD6;
+    for (Fake* f : { &a, &b })
+    {
+        f->vars.push_back({ kVarN, "texNormals", "NORMALS", 0, 0 });
+        f->sem["NORMALS"] = f == &a ? std::make_pair(kRestN, kRestNs) : std::make_pair(kRestN2, kRestN2s);
+    }
+    for (uint64_t v : { kRestN, kRestNs, kRestN2, kRestN2s })
+        a.owner[v] = 1;
+    a.described[kRestN] = Plain(3840, 2160, kRgba8);
+    a.described[kRestN2] = Plain(3840, 2160, kRgba8);
+    DepthCapture c;
+    c.valid = true;
+    c.outputW = 3840;
+    c.outputH = 2160;
+    c.renderW = 1920;
+    c.renderH = 1080;
+    c.frame = a.frame;
+    c.tickMs = a.now;
+    c.copyView = kCopy;
+    c.device = kDevice;
+    binder.PublishCapture(c);
+    CHECK(binder.OnBeginEffects(kRt, kCtx) == Outcome::Bound);
+    CHECK(binder.OnBeginEffects(kRt2, kCtx) == Outcome::Bound);
+    CHECK(a.sem.at("NORMALS").first != kRestN && b.sem.at("NORMALS").first != kRestN2);
+    CHECK(binder.GetCounters(GBuffer::Normals).passesBound == 2);
+    binder.OnFinishEffects(kRt);
+    CHECK(a.sem.at("NORMALS").first == kRestN && b.sem.at("NORMALS").first != kRestN2); // the other runtime is still in its pass
+    binder.OnFinishEffects(kRt2);
+    CHECK(b.sem.at("NORMALS").first == kRestN2 && b.sem.at("NORMALS").second == kRestN2s);
+    CHECK(a.Balanced() && b.Balanced() && !a.HoldsCopy() && !b.HoldsCopy());
+}
+
+// The engine keeps its target (and so its views) across frames: a stale bind of our own copy is no original and is refused.
+void StaleBindOfOurCopy()
+{
+    GRig g;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    g.Finish();
+    const uint64_t copy = g.fake.held.at(GBuffer::Normals).a;
+    g.fake.sem["NORMALS"] = { copy, copy };
+    g.fake.described[copy] = Plain(3840, 2160, kRgba8);
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    CHECK(g.binder.GetCounters(GBuffer::Normals).failed == 1 && g.binder.GetCounters(GBuffer::Normals).passesBound == 1); // refused this time
+    CHECK(g.fake.sem.at("NORMALS").first == copy);                                                                          // untouched
+    CHECK(g.binder.GetCounters(GBuffer::MotionVectors).passesBound == 2);
+    g.Finish();
+    CHECK(g.fake.Balanced());
+}
+
+// The add-on's view stays the one we put back for kStableLogAfter begins: told once per buffer.
+void ViewStableIsObserved()
+{
+    GRig g;
+    for (uint32_t i = 0; i < kStableLogAfter + 4; ++i)
+    {
+        g.r.NextFrame();
+        CHECK(g.Begin() == Outcome::Bound);
+        g.Finish();
+    }
+    size_t stable = 0, changed = 0;
+    for (const auto& e : g.fake.observed)
+    {
+        stable += e.second == GBufferEvent::ViewStable ? 1 : 0;
+        changed += e.second == GBufferEvent::ViewChanged ? 1 : 0;
+    }
+    CHECK(stable == 2 && changed == 0); // normals and motion, once each
 }
 } // namespace
 
@@ -426,6 +731,16 @@ int main()
     SlotFaultsStayInTheSlot();
     Disabled();
     RebindIsObserved();
+    AmbiguityCountsEmptyReadings();
+    SubrectBaseAndMotionScale();
+    DlaaEarlyOut();
+    DirtySlotCleanDepth();
+    ShutdownWithOpenSlots();
+    DestroyOrphanReturns();
+    SwitchedOffMidPass();
+    TwoRuntimes();
+    StaleBindOfOurCopy();
+    ViewStableIsObserved();
     if (g_fail != 0)
     {
         std::printf("reshade_depth_gbuffer: %d check(s) failed\n", g_fail);

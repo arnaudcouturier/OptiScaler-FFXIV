@@ -15,6 +15,8 @@
 
 #include "reshade_depth_eval_rig.h"
 
+#include <limits>
+
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <nvsdk_ngx_defs.h>
@@ -139,6 +141,37 @@ void CounterTicksPerCapture()
     r.gate.TakeRequests();
     r.Eval();
     CHECK(r.frame == 44);
+}
+
+// The base of the depth subrect and the motion vector scale the game reports travel with the capture; an unusable scale is "not reported".
+void BaseAndMotionScale()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.baseX == 0 && r.sink.events.back().capture.baseY == 0);
+    CHECK(r.sink.events.back().capture.mvScaleX == 0.0f && r.sink.events.back().capture.mvScaleY == 0.0f); // not reported
+    r.params.floats[NVSDK_NGX_Parameter_MV_Scale_X] = 3840.0f;
+    r.params.floats[NVSDK_NGX_Parameter_MV_Scale_Y] = 2160.0f;
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.mvScaleX == 3840.0f && r.sink.events.back().capture.mvScaleY == 2160.0f);
+    CHECK(r.params.Asked(NVSDK_NGX_Parameter_MV_Scale_X) && r.params.Asked(NVSDK_NGX_Parameter_MV_Scale_Y));
+    // per axis, and a value that cannot be a scale is not reported
+    r.params.floats[NVSDK_NGX_Parameter_MV_Scale_Y] = -1.0f;
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.mvScaleX == 3840.0f && r.sink.events.back().capture.mvScaleY == 0.0f);
+    r.params.floats[NVSDK_NGX_Parameter_MV_Scale_X] = std::numeric_limits<float>::quiet_NaN();
+    r.params.floats[NVSDK_NGX_Parameter_MV_Scale_Y] = std::numeric_limits<float>::infinity();
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.mvScaleX == 0.0f && r.sink.events.back().capture.mvScaleY == 0.0f);
+    // the subrect base of the depth is published (the copy honours it, the G-buffer remap keeps the add-on's binding when it is not 0,0)
+    r.params.uints[NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X] = 4;
+    r.params.uints[NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y] = 2;
+    r.params.uints["Width"] = 32;
+    r.params.uints["Height"] = 18;
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.baseX == 4 && r.sink.events.back().capture.baseY == 2);
 }
 
 void RenderSize()
@@ -725,6 +758,7 @@ int main()
     HappyPath();
     CounterTicksPerCapture();
     RenderSize();
+    BaseAndMotionScale();
     PreviewPublishesNothing();
     OutputFallbacks();
     HalfAnOutputSizeIsNoSize();
