@@ -217,6 +217,20 @@ int main(int argc, char** argv)
     CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeDepth { false };"));
     CHECK(Has(cfgHeader, "automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());"));
 
+    // ---- the six depth events are subscribed AT LOAD, right after the registration and before the boundary tracking, whatever the option says
+    {
+        const auto addon = Normalize(Read(ext + "reshade/ReShadeAddon.cpp"));
+        CHECK(Has(addon, "LOG_INFO(\"ReShade built-in add-on: registered (API {})\", kApiVersion); try { ext::reshade::depth::EnsureSubscribed(ext::reshade::depth::SubscribeWhen::Load); }"));
+        CHECK(Count(addon, "EnsureSubscribed(") == 1);
+        CHECK(addon.find("EnsureSubscribed(") < addon.find("InstallBoundaryTracking()"));
+        CHECK(Has(addon, "#include \"ext/reshade/ReShadeDepthEvents.h\""));
+        // the callbacks are not gated by the option and tolerate a facade that does not exist
+        const auto events = Normalize(Read(ext + "reshade/ReShadeDepthEvents.cpp"));
+        CHECK(Has(events, "EventDispatcher* Live() { if (State::Instance().isShuttingDown) return nullptr; return g_dispatcher.load(std::memory_order_acquire); }"));
+        CHECK(Has(events, "if (EventDispatcher* d = Live())") && !Has(events, "automaticReShadeDepth") && !Has(events, "Enabled()"));
+        CHECK(Has(events, "void SetDispatcher(EventDispatcher* dispatcher) noexcept { g_dispatcher.store(dispatcher, std::memory_order_release); }"));
+    }
+
     // ---- one writer of the registration state: the load-time attempt notes it the way the late attempt does
     {
         const auto addon = Normalize(Read(ext + "reshade/ReShadeAddon.cpp"));

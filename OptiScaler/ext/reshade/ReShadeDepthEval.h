@@ -8,7 +8,7 @@
 // The order of the work, cheapest first:
 //   1. one relaxed load of the gate word: nothing to do when the option is off and nothing is pending;
 //   2. requests (withdraw, release) from other threads;
-//   3. the option, shutdown, registration (a ReShade that loaded late is looked for, at most once a second), the lazy subscription;
+//   3. the option, shutdown, registration (a ReShade that loaded late is looked for, at most once a second), the subscription (done at load; only a late ReShade's is made here);
 //   4. a consumer: some effect runtime asked for depth lately (else a published capture is withdrawn);
 //   5. the sizes of this evaluate: render = per-axis minimum of the subrect and Width/Height, output = OutWidth/OutHeight, else the
 //      Output texture, else the display size of the feature; a capture is made only when the output is the size of the consumer's back

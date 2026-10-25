@@ -5,6 +5,7 @@
 #include "Util.h"
 #include "ext/reshade/ReShadeAddon.h"
 #include "ext/reshade/ReShadeBoundary.h"
+#include "ext/reshade/ReShadeDepthEvents.h"
 #include "ext/reshade/ReShadeEvents.h"
 #include "ext/reshade/ReShadeRegistrationState.h"
 #include "ext/window/WindowSeams.h"
@@ -104,6 +105,19 @@ void OnReshadeLoaded(HMODULE reshadeModule)
     if (result.status == RegisterStatus::Ok)
     {
         LOG_INFO("ReShade built-in add-on: registered (API {})", kApiVersion);
+
+        // The six events of the automatic scene depth, subscribed HERE, before anything can dispatch: a later register_event from the
+        // evaluate thread can race ReShade's dispatch loop on another thread (seen in game 2026-10-25: events delivered on thread 21584,
+        // subscribed from 34912). Unconditional, whatever the option says: the callbacks return at once while nothing was built (no
+        // dispatcher), so the menu switch needs no restart. Known ordering residual: they now run BEFORE Generic Depth's on each frame.
+        try
+        {
+            ext::reshade::depth::EnsureSubscribed(ext::reshade::depth::SubscribeWhen::Load);
+        }
+        catch (...)
+        {
+            LOG_WARN("ReShade built-in add-on: the depth event subscription threw during setup");
+        }
 
         // S10 E: the runtime tracking the UI boundary needs to apply the presets in place (skipped with ReShadePresets = off).
         try

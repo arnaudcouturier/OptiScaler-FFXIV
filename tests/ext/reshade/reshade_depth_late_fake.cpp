@@ -173,6 +173,7 @@ int Late(HMODULE& fake, const char* dll)
     // the subscription says which thread made it (whether that is ReShade's own dispatch thread decides if it can race its event lists)
     CHECK(LogLines("subscribed to") == 1);
     CHECK(LastLine("subscribed to").find("on thread " + std::to_string(GetCurrentThreadId())) != std::string::npos);
+    CHECK(LastLine("subscribed to").find("late (") != std::string::npos && LastLine("subscribed to").find("at load") == std::string::npos);
     // not one of the other events the add-on subscribes elsewhere (boundary tracking, probe, window mode, present)
     for (int i = 0; i < r.count; ++i)
     {
@@ -322,6 +323,98 @@ int Crash(HMODULE& fake, const char* dll)
     return 0;
 }
 
+// The normal case: ReShade is there when OptiScaler loads. OnReshadeLoaded registers and subscribes the six events right away, before
+// anything can dispatch and before the facade exists: no register_event from the evaluate thread, no race with ReShade's dispatch.
+int Load(HMODULE& fake, const char* dll)
+{
+    fake = LoadLibraryA(dll);
+    CHECK(fake != nullptr);
+    if (fake == nullptr)
+        return 1;
+    auto info = reinterpret_cast<InfoFn>(GetProcAddress(fake, "Fake_Info"));
+    CHECK(info != nullptr && ReadEvents(fake).count == 0);
+
+    // OnReshadeLoaded: register, note it, subscribe. (The test exe stands in for the add-on module.)
+    const RegisterResult result = RegisterAddon(GetModuleHandleW(nullptr), nullptr);
+    CHECK(result.status == RegisterStatus::Ok);
+    NoteRegistration(result.status);
+    CHECK(SubscribedEvents() == 0 && ReadEvents(fake).count == 0); // registering subscribes nothing by itself
+    SetDispatcher(nullptr);                                          // nothing built yet: no facade, no dispatcher
+    CHECK(EnsureSubscribed(SubscribeWhen::Load));
+
+    // exactly the six depth events, each once, begin last
+    Registered r = ReadEvents(fake);
+    CHECK(r.count == 6);
+    for (const addon_event ev : kSix)
+        CHECK(r.Times(ev) == 1);
+    CHECK(r.count == 6 && r.events[5] == static_cast<int>(addon_event::reshade_begin_effects));
+    CHECK(SubscribedEvents() == kAllDepthEvents && FailedEvents() == 0);
+    CHECK(LogLines("subscribed to") == 1);
+    CHECK(LastLine("subscribed to").find("at load") != std::string::npos && LastLine("subscribed to").find("late (") == std::string::npos);
+    CHECK(LastLine("subscribed to").find("on thread " + std::to_string(GetCurrentThreadId())) != std::string::npos);
+
+    // later: the first enable (EnsureSubscribed from the evaluate thread), the late planner and a second load call add nothing
+    CHECK(EnsureSubscribed());
+    CHECK(EnsureSubscribed(SubscribeWhen::Load));
+    CHECK(!TryLateRegister(true, 20'000)); // registered: the planner never registers twice
+    CHECK(GetLateStatus().attempts == 0);
+    int calls = 0, events = 0, lastEvent = 0;
+    uint32_t api = 0;
+    void* module = nullptr;
+    void* lastCallback = nullptr;
+    info(&api, &module, &calls, &events, &lastEvent, &lastCallback);
+    CHECK(calls == 1 && ReadEvents(fake).count == 6 && LogLines("subscribed to") == 1);
+
+    // the callbacks tolerate a facade that does not exist: nothing is read, nothing is called
+    auto begin = reinterpret_cast<BeginFn>(r.Find(addon_event::reshade_begin_effects));
+    auto finish = reinterpret_cast<BeginFn>(r.Find(addon_event::reshade_finish_effects));
+    auto destroy = reinterpret_cast<RuntimeFn>(r.Find(addon_event::destroy_effect_runtime));
+    auto reloaded = reinterpret_cast<RuntimeFn>(r.Find(addon_event::reshade_reloaded_effects));
+    auto technique = reinterpret_cast<TechniqueFn>(r.Find(addon_event::reshade_set_technique_state));
+    auto preset = reinterpret_cast<PresetFn>(r.Find(addon_event::reshade_set_current_preset_path));
+    CHECK(begin && finish && destroy && reloaded && technique && preset);
+    if (!(begin && finish && destroy && reloaded && technique && preset))
+        return 1;
+    Fake world;
+    FakeHost host;
+    std::atomic<uint64_t> counter { 100 };
+    world.frameSource = &counter;
+    DepthBinder binder(world, nullptr);
+    EventDispatcher dispatcher(binder, host, counter);
+    binder.SetEnabled(true);
+    for (int i = 0; i < 3; ++i)
+    {
+        begin(Rt(), nullptr, resource_view {}, resource_view {});
+        finish(Rt(), nullptr, resource_view {}, resource_view {});
+        destroy(Rt());
+        reloaded(Rt());
+        CHECK(!technique(Rt(), effect_technique { 1 }, true));
+        preset(Rt(), "preset.ini");
+    }
+    CHECK(world.log.empty() && counter == 100); // not one backend call, no frame tick
+    CHECK(LogLines("first begin_effects callback") == 0 && LogLines("first finish_effects callback") == 0);
+
+    // the facade is built at the first enable and installs its dispatcher: the same registered callbacks now reach the binder
+    SetDispatcher(&dispatcher);
+    DepthCapture c;
+    c.valid = true;
+    c.outputW = 3840;
+    c.outputH = 2160;
+    c.renderW = 1920;
+    c.renderH = 1080;
+    c.frame = counter.load();
+    c.tickMs = world.now;
+    c.copyView = kCopy;
+    c.device = kDevice;
+    binder.PublishCapture(c);
+    begin(Rt(), nullptr, resource_view {}, resource_view {});
+    CHECK(world.DepthIs(kCopy, kCopy));
+    finish(Rt(), nullptr, resource_view {}, resource_view {});
+    CHECK(world.DepthIs(kOrig, kOrigSrgb) && !world.HoldsCopy() && counter == 101);
+    CHECK(LogLines("first begin_effects callback") == 1);
+    return 0;
+}
+
 int Failure(HMODULE& fake, const char* dll)
 {
     Fake world;
@@ -389,7 +482,7 @@ int main(int argc, char** argv)
     if (argc < 3)
         return 2;
     const std::string mode = argv[1];
-    ext::reshade::Registration().attempted = true; // the load-time attempt ran (and found no ReShade)
+    ext::reshade::Registration().attempted = true; // the load-time attempt ran (and found no ReShade, except in the mode that IS the load)
     SetEnvironmentVariableA("FAKE_RESHADE_MODE", mode == "refuse" ? "refuse" : mode == "crash" ? "crash" : "ok");
     if (mode == "failure")
         SetEnvironmentVariableA("FAKE_RESHADE_CRASH_EVENT", std::to_string(static_cast<int>(addon_event::reshade_finish_effects)).c_str());
@@ -397,6 +490,8 @@ int main(int argc, char** argv)
     int rc = 2;
     if (mode == "late")
         rc = Late(fake, argv[2]);
+    else if (mode == "load")
+        rc = Load(fake, argv[2]);
     else if (mode == "bound")
         rc = Bound();
     else if (mode == "refuse")

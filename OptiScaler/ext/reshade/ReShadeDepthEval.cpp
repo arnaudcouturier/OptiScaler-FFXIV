@@ -203,7 +203,7 @@ void CaptureEngine::Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* param
     default:
         return;
     }
-    _host.EnsureSubscribed(); // lazily, at the first evaluate with the option on: our callbacks land after Generic Depth's
+    _host.EnsureSubscribed(); // normally done at load (OnReshadeLoaded) and then a no-op; for a ReShade that loaded late, at the first evaluate with the option on
 
     const ConsumerInfo consumer = _host.GetConsumer(now);
     if (glue::ConsumerGate(consumer) != glue::Gate::Go)

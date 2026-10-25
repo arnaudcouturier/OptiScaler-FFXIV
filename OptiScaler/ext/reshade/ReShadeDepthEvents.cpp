@@ -165,7 +165,7 @@ void SetDispatcher(EventDispatcher* dispatcher) noexcept { g_dispatcher.store(di
 uint32_t SubscribedEvents() noexcept { return g_subscribed.load(std::memory_order_acquire); }
 uint32_t FailedEvents() noexcept { return g_failed.load(std::memory_order_acquire); }
 
-bool EnsureSubscribed()
+bool EnsureSubscribed(SubscribeWhen when)
 {
     if (g_subscribed.load(std::memory_order_acquire) == kAllDepthEvents)
         return true;
@@ -196,7 +196,8 @@ bool EnsureSubscribed()
         }
         if (g_subscribed.load() == kAllDepthEvents && before != kAllDepthEvents)
             LOG_INFO("Automatic ReShade depth: subscribed to begin_effects, finish_effects, destroy_effect_runtime, reshade_reloaded_effects, "
-                     "reshade_set_technique_state and reshade_set_current_preset_path, on thread {}",
+                     "reshade_set_technique_state and reshade_set_current_preset_path, {}, on thread {}",
+                     when == SubscribeWhen::Load ? "at load" : "late (ReShade loaded after OptiScaler; its dispatch may be running on another thread)",
                      GetCurrentThreadId());
     }
     catch (...)

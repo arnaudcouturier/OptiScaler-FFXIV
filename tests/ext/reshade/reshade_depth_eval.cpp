@@ -82,7 +82,7 @@ void HappyPath()
     CHECK(c.device == reinterpret_cast<uintptr_t>(r.device.Get()));              // the NATIVE device
     CHECK(r.engine->PassReady());
     CHECK(r.engine->Stats().captured == 1 && r.engine->Stats().refused == 0 && r.engine->Stats().lastResult == 0);
-    CHECK(r.host.subscribes == 1);                                                // the lazy subscription is asked for at the first go
+    CHECK(r.host.subscribes == 1);                                                // the subscription is asked for at the first go (a no-op when it was made at load)
     CHECK(r.host.lateCalls == 0);
     // the identity line: NGX's context, the native one, the hooked one, the thread; once
     CHECK(LogLines("contexts:") == identity + 1);

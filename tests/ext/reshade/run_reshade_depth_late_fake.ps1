@@ -14,7 +14,7 @@ $ext = Join-Path $Repo 'OptiScaler\ext\reshade'
     (Join-Path $ext 'ReShadeDepthEvents.cpp') (Join-Path $ext 'ReShadeDepthCore.cpp') (Join-Path $ext 'ReShadeD3D11.cpp') (Join-Path $ext 'ReShadeRegistrationState.cpp') `
     "/Fo$Out\" "/Fe$exe" d3d11.lib dxgi.lib
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-foreach ($mode in 'late', 'bound', 'refuse', 'crash', 'failure', 'race') {
+foreach ($mode in 'late', 'load', 'bound', 'refuse', 'crash', 'failure', 'race') {
     & $exe $mode $dll
     if ($LASTEXITCODE -ne 0) { Write-Host "mode $mode failed with $LASTEXITCODE"; exit 1 }
 }
