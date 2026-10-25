@@ -566,8 +566,11 @@ void DepthBinder::OnFinishEffects(uint64_t runtime) noexcept
             const uint64_t srv = g.pass.origSrv, srgb = g.pass.origSrgb;
             const uint64_t overwrittenBefore = _counts[slot][static_cast<size_t>(Counter::OverwrittenByOther)].load(std::memory_order_relaxed);
             EndPass(runtime, g.pass, slot, howFor(g.pass));
-            if (verified && !g.pass.open &&
-                _counts[slot][static_cast<size_t>(Counter::OverwrittenByOther)].load(std::memory_order_relaxed) == overwrittenBefore)
+            const bool overwritten =
+                _counts[slot][static_cast<size_t>(Counter::OverwrittenByOther)].load(std::memory_order_relaxed) != overwrittenBefore;
+            if (overwritten)
+                SetRealigned(k, false); // another add-on bound over our copy after we did: the effects did not get it, and the status line must not say they did
+            else if (verified && !g.pass.open)
             {
                 g.restoredKnown = true;
                 g.restoredSrv = srv;

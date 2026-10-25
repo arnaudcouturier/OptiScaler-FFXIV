@@ -250,6 +250,8 @@ void RestoreRules()
         g.Finish();
         CHECK(g.fake.sem.at("NORMALS").first == 0xF1 && g.fake.sem.at("MOTIONVECTORS").first == kRestMv);
         CHECK(g.binder.GetCounters(GBuffer::Normals).overwrittenByOther == 1 && g.binder.GetCounters(GBuffer::MotionVectors).overwrittenByOther == 0);
+        // the status line must not claim a realignment that another add-on undid: normals cleared, motion (still ours) kept
+        CHECK((g.binder.RealignedMask() & (1u << static_cast<uint32_t>(GBuffer::Normals))) == 0 && (g.binder.RealignedMask() & (1u << static_cast<uint32_t>(GBuffer::MotionVectors))) != 0);
         CHECK(g.fake.Balanced());
     }
     {
