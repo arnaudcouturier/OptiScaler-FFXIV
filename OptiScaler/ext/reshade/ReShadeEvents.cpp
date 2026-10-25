@@ -4,6 +4,7 @@
 #include "ext/reshade/ReShadeBoundaryCore.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/reshade/ReShadeD3D11.h"
+#include "ext/reshade/ReShadeDepthBackend.h"
 #include "ext/reshade/ReShadeEvents.h"
 #include "ext/window/WindowSeams.h"
 
@@ -120,30 +121,9 @@ void ApplyThunk(void* p)
     a->state->Apply(a->context);
 }
 
-// Formats ReShade (and DXGI) use for depth buffers and the single-channel float copies of them.
-bool IsDepthFormat(format f)
-{
-    switch (f)
-    {
-    case format::d16_unorm:
-    case format::d16_unorm_s8_uint:
-    case format::d24_unorm_s8_uint:
-    case format::d32_float:
-    case format::d32_float_s8_uint:
-    case format::r16_typeless:
-    case format::r16_unorm:
-    case format::r24_g8_typeless:
-    case format::r24_unorm_x8_uint:
-    case format::x24_unorm_g8_uint:
-    case format::r32_typeless:
-    case format::r32_float:
-    case format::r32_g8_typeless:
-    case format::r32_float_x8_uint:
-        return true;
-    default:
-        return false;
-    }
-}
+// Formats ReShade (and DXGI) use for depth buffers and the single-channel float copies of them. One list, shared with the automatic
+// ReShade depth backend (ReShadeDepthBackend.h, whose raw layer pins the numeric values against ReShade's format enum).
+bool IsDepthFormat(format f) { return depth::IsDepthFormatValue(static_cast<uint32_t>(f)); }
 
 class LiveBackend final : public probe::IBackend
 {

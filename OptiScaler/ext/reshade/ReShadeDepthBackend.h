@@ -1,0 +1,200 @@
+#pragma once
+// Automatic ReShade scene depth, the live backend of the depth binder (ReShadeDepthCore.h): it implements depth::IBackend over a
+// small raw layer, IRawApi, one function per ReShade API call. No ReShade, D3D or ImGui types here, so the marshalling is tested
+// with a fake raw layer (tests/ext/reshade/reshade_depth_backend.cpp); the real one (ReShadeDepthRaw.cpp) is the only file that
+// touches effect_runtime, and every call it makes runs in a POD thunk under SEH (ReShade's handles are untrusted: a view read
+// from its binding map may be dangling).
+//
+// What the backend does on top of the raw calls:
+//  - Strings (variable, annotation, effect and technique names, preprocessor definitions) are read with ReShade's size query first:
+//    a null buffer gives the length INCLUDING the terminating NUL, then a buffer of exactly that size is filled. The NUL is not part
+//    of the value. There is never a fixed-size overload, so a value is never silently cut ("1.05" must not read as "1.0" and be taken
+//    for the neutral macro value). A second answer that disagrees with the first, a missing NUL or an absurd size is a failure.
+//  - A definition is tri-state: undefined, defined, error.
+//  - A call that faults makes the method answer false / Error / throw (see IBackend): the core never lets either reach ReShade.
+//  - SameDevice compares NATIVE devices (ReShade's device::get_native()), modelled on the runtime choice of the HudLess boundary
+//    (PickRuntime in ReShadeEvents.cpp). See SameDevice below for where it differs, on purpose.
+//  - The first real bind: the readback of ReShade's binding after the first update_texture_bindings with a view is logged once.
+//
+// Threading: the binder calls the backend under its own runtime mutex from whatever thread the ReShade event arrives on; the
+// registry and the capture device are the only state shared with other threads, and are guarded.
+
+#include "ext/reshade/ReShadeDepthCore.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace ext::reshade::depth
+{
+// ---- depth formats --------------------------------------------------------------------------------------------------------------
+// Formats ReShade (and DXGI) use for depth buffers and the single-channel float copies of them, by their numeric value: ReShade's
+// format enum has the DXGI numbering (the live raw layer static_asserts every value). One definition, shared with the probe
+// (ReShadeEvents.cpp IsDepthFormat).
+inline constexpr uint32_t kFmtR32G8X24Typeless = 19, kFmtD32FloatS8X24 = 20, kFmtR32FloatX8X24 = 21, kFmtR32Typeless = 39,
+                          kFmtD32Float = 40, kFmtR32Float = 41, kFmtR24G8Typeless = 44, kFmtD24UnormS8 = 45,
+                          kFmtR24UnormX8 = 46, kFmtX24TypelessG8 = 47, kFmtR16Typeless = 53, kFmtD16Unorm = 55,
+                          kFmtR16Unorm = 56, kFmtD16UnormS8 = 0x38363144; // 'D168', ReShade only
+constexpr bool IsDepthFormatValue(uint32_t format)
+{
+    switch (format)
+    {
+    case kFmtD16Unorm:
+    case kFmtD16UnormS8:
+    case kFmtD24UnormS8:
+    case kFmtD32Float:
+    case kFmtD32FloatS8X24:
+    case kFmtR16Typeless:
+    case kFmtR16Unorm:
+    case kFmtR24G8Typeless:
+    case kFmtR24UnormX8:
+    case kFmtX24TypelessG8:
+    case kFmtR32Typeless:
+    case kFmtR32Float:
+    case kFmtR32G8X24Typeless:
+    case kFmtR32FloatX8X24:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// ---- the raw layer --------------------------------------------------------------------------------------------------------------
+// Answer of a call that can also say "does not exist".
+enum class Call : uint8_t
+{
+    Fault, // the call faulted (an access violation or a C++ exception): outputs are unspecified
+    No,    // it ran and answered "not there" (an annotation or a definition that does not exist)
+    Yes,
+};
+
+// One function per ReShade API call (a few small groups). Runtimes, variables, techniques and views are opaque 64-bit handles: a
+// runtime is the effect_runtime pointer, a view an ID3D11View pointer. A bool result is false when the call faulted.
+// Strings follow ReShade's convention: buffer == nullptr asks for the length; the length INCLUDES the NUL (`*size` is the capacity
+// on entry, the length of the string on return).
+struct IRawApi
+{
+    virtual ~IRawApi() = default;
+
+    // the runtime's device: hasDevice false when it has none; d3d11 when its API is D3D11; native = device::get_native()
+    virtual bool DeviceInfo(uint64_t runtime, bool& hasDevice, bool& d3d11, uint64_t& native) = 0;
+    // the size of back buffer 0; 0x0 when there is none or it is not a 2D texture
+    virtual bool BackBuffer(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
+
+    // Enumerations. The handles go to out[0..min(count, cap)); `count` is how many ReShade reported, also beyond the capacity.
+    virtual bool ListTextures(uint64_t runtime, uint64_t* out, size_t cap, size_t& count) = 0;
+    virtual bool ListUniforms(uint64_t runtime, uint64_t* out, size_t cap, size_t& count) = 0;
+    virtual bool ListTechniques(uint64_t runtime, uint64_t* out, size_t cap, size_t& count) = 0;
+
+    virtual Call TextureName(uint64_t runtime, uint64_t variable, char* buffer, size_t* size) = 0;
+    virtual Call UniformSource(uint64_t runtime, uint64_t variable, char* buffer, size_t* size) = 0; // annotation "source"
+    virtual Call TechniqueEffect(uint64_t runtime, uint64_t technique, char* buffer, size_t* size) = 0;
+    // effect == nullptr: the global definition
+    virtual Call Definition(uint64_t runtime, const char* effect, const char* name, char* buffer, size_t* size) = 0;
+    virtual bool TechniqueState(uint64_t runtime, uint64_t technique, bool& enabled) = 0;
+
+    virtual bool TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb) = 0;
+    // The live ReShade call returns void: true means it ran without a fault.
+    virtual bool UpdateTextureBindings(uint64_t runtime, const char* semantic, uint64_t srv, uint64_t srvSrgb) = 0;
+    virtual bool GetUniformBool(uint64_t runtime, uint64_t variable, bool& value) = 0;
+    virtual bool SetUniformBool(uint64_t runtime, uint64_t variable, bool value) = 0;
+
+    // COM views (untrusted handles from ReShade's binding map)
+    virtual bool AddRefView(uint64_t view) = 0;
+    virtual bool ReleaseView(uint64_t view) = 0;
+    // The numeric format of the view's resource when that is a 2D texture, 0 otherwise.
+    virtual bool ViewFormat(uint64_t view, uint32_t& format) = 0;
+};
+
+// The one raw layer of the process (heap-allocated, never destroyed). Defined in ReShadeDepthRaw.cpp.
+IRawApi& LiveRawApi();
+
+// ---- what the events need from the backend ----------------------------------------------------------------------------------------
+struct IEventHost
+{
+    virtual ~IEventHost() = default;
+    virtual void NoteRuntime(uint64_t runtime) = 0;   // a begin or finish of this runtime was seen
+    virtual void ForgetRuntime(uint64_t runtime) = 0; // it was destroyed
+    // A D3D11 runtime of the capture's device (the one the frame counter follows).
+    virtual bool IsOurRuntime(uint64_t runtime) = 0;
+};
+
+// ---- the backend ----------------------------------------------------------------------------------------------------------------
+// What the backend takes from the outside (so tests supply their own). All may be null: the clock then reads 0, the frame 0 and the
+// primary device is unknown.
+struct BackendEnv
+{
+    int64_t (*nowMs)() = nullptr;           // lock-free and cheap: the binder calls it under its runtime mutex
+    uint64_t (*frame)() = nullptr;          // the depth-owned frame counter
+    uint64_t (*primaryDevice)() = nullptr;  // the game's primary D3D11 device, 0 = unknown
+};
+
+// Largest string the backend accepts from ReShade, and largest list it reads: bigger is a failure, never a cut.
+inline constexpr size_t kMaxStringBytes = 64 * 1024;
+inline constexpr size_t kMaxHandles = 64 * 1024;
+
+class LiveDepthBackend final : public IBackend, public IEventHost
+{
+  public:
+    LiveDepthBackend(IRawApi& raw, const BackendEnv& env);
+
+    // IBackend
+    int64_t NowMs() override;
+    uint64_t Frame() override;
+    void AddRef(uint64_t view) override;  // throws when the call faults: a COM AddRef either happened or not
+    void Release(uint64_t view) override; // ... and so does this
+    bool IsDepthView(uint64_t view) override;
+    bool IsD3D11(uint64_t runtime) override;
+    // The runtime's device (a native device) is the capture's device. captureDevice 0: no capture yet, so "the game's primary D3D11
+    // device" (BackendEnv::primaryDevice). When the devices differ as pointers, or the primary one is unknown, the only D3D11
+    // runtime of the process counts as ours (the way the boundary picks its runtime): ONLY while there is no capture yet. Once a
+    // capture exists its device is the native device of the game's depth texture, and a runtime of another device must never get a
+    // view of it: that is refused, also when it is the only runtime.
+    bool SameDevice(uint64_t runtime, uint64_t captureDevice) override;
+    bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) override;
+    bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) override;
+    bool TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb) override;
+    bool UpdateTextureBindings(uint64_t runtime, const char* semantic, uint64_t srv, uint64_t srvSrgb) override;
+    bool UniformVariables(uint64_t runtime, std::vector<UniformVar>& out) override;
+    bool GetUniformBool(uint64_t runtime, uint64_t variable, bool& value) override;
+    bool SetUniformBool(uint64_t runtime, uint64_t variable, bool value) override;
+    bool Techniques(uint64_t runtime, std::vector<EffectTechnique>& out) override;
+    DefinitionState Definition(uint64_t runtime, const char* effect, const char* name, std::string& value) override;
+
+    // IEventHost
+    void NoteRuntime(uint64_t runtime) override;
+    void ForgetRuntime(uint64_t runtime) override;
+    bool IsOurRuntime(uint64_t runtime) override;
+
+    // The device of the capture that is published now (0 = none): what IsOurRuntime compares with. Any thread.
+    void SetCaptureDevice(uint64_t device) noexcept { _captureDevice.store(device, std::memory_order_relaxed); }
+
+  private:
+    // Reads one string with the size query first. Yes = *out is the value; No = the thing does not exist; Fault = a call faulted, the
+    // sizes disagree or the string is not terminated (nothing is returned).
+    template <class Query> Call ReadString(Query&& query, std::string& out);
+    // Handles of an enumeration, grown once if the first capacity was too small.
+    template <class List> bool ReadHandles(List&& list, std::vector<uint64_t>& handles);
+    void LogFirstBind(uint64_t runtime, uint64_t variable, uint64_t srv, uint64_t srvSrgb);
+    bool OnlyD3D11Runtime(uint64_t runtime);
+
+    IRawApi& _raw;
+    BackendEnv _env;
+    std::atomic<uint64_t> _captureDevice { 0 };
+
+    std::mutex _registryMutex;
+    std::vector<uint64_t> _d3d11Runtimes; // runtimes seen in begin/finish events that are D3D11 runtimes
+
+    // The readback log of the first real bind: armed by the first update_texture_bindings with a view, it logs the next few readbacks
+    // of that runtime. Plain atomics: the binder serialises the calls, and a lost update only costs or repeats a log line.
+    std::atomic<int> _readbacksLeft { 0 };
+    std::atomic<uint64_t> _readbackRuntime { 0 };
+    std::atomic<uint64_t> _readbackView { 0 };
+    std::atomic<bool> _readbackLogged { false };
+    std::atomic<bool> _firstBindDone { false };
+    std::atomic<bool> _fallbackLogged { false };
+};
+} // namespace ext::reshade::depth
