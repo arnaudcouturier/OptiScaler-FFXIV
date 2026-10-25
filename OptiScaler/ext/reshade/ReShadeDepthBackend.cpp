@@ -306,6 +306,13 @@ void LiveDepthBackend::LogFirstBind(uint64_t runtime, uint64_t variable, uint64_
     _obsLogged.store(true, std::memory_order_relaxed);
     LOG_INFO("Automatic ReShade depth: first bind, ReShade reads variable {:#x} back as srv {:#x} / srgb {:#x} (bound {:#x} / {:#x}): {}",
              variable, srv, srvSrgb, boundSrv, boundSrgb, reader ? "the bound copy, a reader" : "not the copy, a decoy");
+    if (reader)
+    {
+        // The reader is the end of the depth's verification (the core stops at the first one): what is read after it, such as the
+        // G-buffer slots' own reads before their binds, is not part of this observation and must not be logged as depth decoys.
+        _obsRuntime.store(0, std::memory_order_relaxed);
+        _firstBindDone.store(true, std::memory_order_relaxed);
+    }
 }
 
 bool LiveDepthBackend::UniformVariables(uint64_t runtime, std::vector<UniformVar>& out)
