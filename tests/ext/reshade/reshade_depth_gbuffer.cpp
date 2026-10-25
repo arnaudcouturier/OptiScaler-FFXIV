@@ -571,6 +571,32 @@ void DirtySlotCleanDepth()
     CHECK(g.Both(kRestN, kRestMv) && !g.fake.HoldsCopy() && g.fake.Balanced() && g.fake.violations == 0);
 }
 
+// A dirty slot (its restore failed) is not bound over even when the engine would hand out NEW views (a new output size, say): the explicit
+// guard on the open pass decides, not the "this is our own copy" guard, which only sees the engine's reused views.
+void DirtySlotNewViews()
+{
+    GRig g;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound);
+    g.fake.failRestore = true;
+    g.fake.failSemantic = "NORMALS";
+    g.Finish();
+    const uint64_t stuck = g.fake.sem.at("NORMALS").first;
+    g.fake.forceNewTarget = true; // the engine now makes different views for every request
+    g.r.NextFrame();
+    const int remapsBefore = static_cast<int>(g.fake.remaps.size());
+    CHECK(g.Begin() == Outcome::Bound);
+    CHECK(g.binder.GetCounters(GBuffer::Normals).passesBound == 1 && g.binder.GetCounters(GBuffer::Normals).failed >= 2); // not bound over
+    CHECK(static_cast<int>(g.fake.remaps.size()) == remapsBefore + 1); // only the motion vectors asked the engine
+    CHECK(g.fake.sem.at("NORMALS").first == stuck && g.fake.CoreRefs(stuck) == 1); // the stuck copy is still bound and still referenced
+    g.Finish();
+    g.fake.failRestore = false;
+    g.r.NextFrame();
+    CHECK(g.Begin() == Outcome::Bound && g.binder.GetCounters(GBuffer::Normals).passesBound == 2); // the retry restored it, then it bound the new view
+    g.Finish();
+    CHECK(g.Both(kRestN, kRestMv) && !g.fake.HoldsCopy() && g.fake.Balanced() && g.fake.violations == 0);
+}
+
 // Shutdown with passes open (depth and slots): every reference goes back, no ReShade call is made, and nothing binds afterwards.
 void ShutdownWithOpenSlots()
 {
@@ -735,6 +761,7 @@ int main()
     SubrectBaseAndMotionScale();
     DlaaEarlyOut();
     DirtySlotCleanDepth();
+    DirtySlotNewViews();
     ShutdownWithOpenSlots();
     DestroyOrphanReturns();
     SwitchedOffMidPass();

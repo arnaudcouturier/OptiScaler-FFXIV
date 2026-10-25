@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -412,9 +413,16 @@ namespace
 // Once per change of the decision (sizes, format, outcome) of a buffer and runtime: what the add-on bound, the sizes and what was done.
 void LiveDepthBackend::GBufferDecided([[maybe_unused]] const GBufferNote& note)
 {
-    LOG_INFO("Automatic ReShade depth: {} ({}): the add-on's binding is {}x{} DXGI format {}{}, render {}x{} in an output of {}x{}: {}{}{}",
-             GBufferSemantic(note.buffer), GBufferVariable(note.buffer), note.source.width, note.source.height, note.source.format,
-             note.source.ok ? "" : " (unreadable)", note.renderW, note.renderH, note.outputW, note.outputH, RemapDecisionName(note.decision),
+    // The source part is only there when the view was read: a decision made without reading it (render == output, a subrect base, different
+    // bindings, nothing bound) says nothing about the binding, and "unreadable" would read like a failure on every normal DLAA line.
+    // Only a view that WAS asked about and could not be read says so.
+    std::string source;
+    if (note.source.ok)
+        source = std::format("the add-on's binding is {}x{} DXGI format {}, ", note.source.width, note.source.height, note.source.format);
+    else if (note.decision == RemapDecision::KeepUnreadable)
+        source = "the add-on's binding could not be read, ";
+    LOG_INFO("Automatic ReShade depth: {} ({}): {}render {}x{} in an output of {}x{}: {}{}{}", GBufferSemantic(note.buffer),
+             GBufferVariable(note.buffer), source, note.renderW, note.renderH, note.outputW, note.outputH, RemapDecisionName(note.decision),
              note.decision == RemapDecision::Remap ? ": " : "", note.decision == RemapDecision::Remap ? StatusName(note.status) : "");
 }
 

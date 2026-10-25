@@ -107,6 +107,7 @@ struct Fake final : IBackend
         uint32_t outputW = 0, outputH = 0;
     };
     std::map<GBuffer, Held> held;
+    bool forceNewTarget = false; // every Remap makes new views (the output size changed, say)
     int remapMakes = 0; // targets made: like the real engine the views are kept across frames and only a new output size makes new ones
     int draws = 0;      // copies drawn: a new (view, stamp) key, like the engine's cache
     int releaseRemaps = 0;
@@ -344,7 +345,7 @@ struct Fake final : IBackend
                                     if (remapStatus != RemapStatus::Ok)
                                         return remapStatus;
                                     Held& h = held[request.buffer];
-                                    const bool sameTarget = h.valid && h.outputW == request.outputW && h.outputH == request.outputH;
+                                    const bool sameTarget = !forceNewTarget && h.valid && h.outputW == request.outputW && h.outputH == request.outputH;
                                     if (!sameTarget)
                                     {
                                         // a new target; the engine drops its reference to the previous one (the core's own keep it alive)

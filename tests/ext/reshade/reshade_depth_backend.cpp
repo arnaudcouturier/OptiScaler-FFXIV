@@ -1423,6 +1423,33 @@ void GBufferCalls()
     note.decision = RemapDecision::KeepRenderSized;
     b.GBufferDecided(note);
     CHECK(LastLine("NORMALS (texNormals)").find("kept (already render-sized)") != std::string::npos);
+    // a decision made without reading the view says nothing about the binding: no source part, and above all no "unreadable" on a normal line
+    for (const RemapDecision decision : { RemapDecision::KeepSameSize, RemapDecision::KeepSubrectBase, RemapDecision::KeepAmbiguous, RemapDecision::KeepNoSource })
+    {
+        GBufferNote quiet;
+        quiet.buffer = GBuffer::Normals;
+        quiet.decision = decision; // (source.ok stays false: it was not read)
+        quiet.renderW = 3840;
+        quiet.renderH = 2160;
+        quiet.outputW = 3840;
+        quiet.outputH = 2160;
+        b.GBufferDecided(quiet);
+        const std::string l = LastLine("NORMALS (texNormals)");
+        CHECK(l.find("unreadable") == std::string::npos && l.find("could not be read") == std::string::npos);
+        CHECK(l.find("DXGI format") == std::string::npos && l.find("the add-on's binding is") == std::string::npos);
+        CHECK(l.find("render 3840x2160 in an output of 3840x2160: kept (") != std::string::npos);
+    }
+    {   // a view that WAS asked about and could not be read says so
+        GBufferNote bad;
+        bad.buffer = GBuffer::Normals;
+        bad.decision = RemapDecision::KeepUnreadable;
+        bad.renderW = 1920;
+        bad.renderH = 1080;
+        bad.outputW = 3840;
+        bad.outputH = 2160;
+        b.GBufferDecided(bad);
+        CHECK(LastLine("NORMALS (texNormals)").find("the add-on's binding could not be read, render 1920x1080") != std::string::npos);
+    }
     note.decision = RemapDecision::Remap;
     note.status = RemapStatus::UnsupportedFormat;
     b.GBufferDecided(note);

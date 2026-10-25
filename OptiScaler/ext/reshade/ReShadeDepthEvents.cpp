@@ -60,7 +60,7 @@ void LogThreadOnce(std::atomic<bool>& flag, [[maybe_unused]] const char* what)
 
 void SubscribeRuntimeEvents(uint64_t runtime) noexcept;
 
-void LogBeginThreadOnce()
+void LogBeginThreadOnce([[maybe_unused]] uint64_t nativeContext)
 {
     const uint32_t thread = GetCurrentThreadId();
     for (std::atomic<uint32_t>& slot : g_beginThreads)
@@ -70,9 +70,9 @@ void LogBeginThreadOnce()
         {
             [[maybe_unused]] const ThreadIdFn source = g_evaluateThread.load(std::memory_order_acquire);
             [[maybe_unused]] const uint32_t evaluate = source != nullptr ? source() : 0;
-            LOG_INFO("Automatic ReShade depth: first begin_effects callback on thread {} (evaluate thread {}{})", thread,
+            LOG_INFO("Automatic ReShade depth: first begin_effects callback on thread {} (evaluate thread {}{}), native context {:#x}", thread,
                      evaluate != 0 ? std::to_string(evaluate) : std::string("not known yet"),
-                     evaluate == 0 ? "" : (evaluate == thread ? ", the same thread" : ", another thread"));
+                     evaluate == 0 ? "" : (evaluate == thread ? ", the same thread" : ", another thread"), nativeContext);
             return;
         }
         if (seen == thread)
@@ -119,8 +119,9 @@ void DepthOnBegin(effect_runtime* runtime, command_list* list, resource_view, re
 {
     if (EventDispatcher* d = Live())
     {
-        LogBeginThreadOnce();
-        d->Begin(Id(runtime), NativeContext(list));
+        const uint64_t native = NativeContext(list);
+        LogBeginThreadOnce(native); // (the context object each thread's begin path draws on: the same one for every path, or not)
+        d->Begin(Id(runtime), native);
     }
 }
 

@@ -279,6 +279,7 @@ int Late(HMODULE& fake, const char* dll)
     CHECK(LogLines("first begin_effects callback") == 2);
     CHECK(LastLine("first begin_effects callback").find("on thread " + std::to_string(GetCurrentThreadId())) != std::string::npos);
     CHECK(LastLine("first begin_effects callback").find("evaluate thread not known yet") != std::string::npos);
+    CHECK(LastLine("first begin_effects callback").find("), native context 0x0") != std::string::npos); // (no command list in this test: no context)
     CHECK(world.DepthIs(kCopy, kCopy)); // the binder was reached through the registered pointer
     // the option is switched off while the pass is open: the registered finish callback still puts the binding back
     binder.SetEnabled(false);
