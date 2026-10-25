@@ -359,8 +359,7 @@ void DepthCopy::DrawThunk(void* p)
     if (j.previous == nullptr || j.previous == s._state)
     {
         // The game's state could not be captured (or the context was in the private state already, after a swap whose answer was
-        // lost): there is nothing to draw in and nothing to swap back to. Never swap the private state into itself again.
-        j.previous.Reset();
+        // lost): there is nothing to draw in. Never draw there, and never count it as the game's state.
         j.result = Result::Fault;
         return;
     }
@@ -371,7 +370,7 @@ void DepthCopy::DrawThunk(void* p)
     ID3D11RenderTargetView* rtv = target.rtv.Get();
     const D3D11_VIEWPORT viewport { 0.0f, 0.0f, static_cast<float>(a.outputW), static_cast<float>(a.outputH), 0.0f, 1.0f };
 
-    // Anything a failed unbind left in the private state goes first.
+    // Belt and braces: every slot this pass uses is set below, so a test cannot tell this from its absence.
     c->ClearState();
     // origin, render size and output size, the only thing that follows the quality mode and the subrect. Written here, in the private
     // state: the game's predication would skip an UpdateSubresource in its own state, and a fresh buffer is all zeros.
@@ -396,16 +395,12 @@ void DepthCopy::UnbindThunk(void* p)
     Job& j = *static_cast<Job*>(p);
     if (j.previous == nullptr)
         return; // never left the game's state
-    // Leave nothing bound in the private state: it must not keep the game's depth or our target alive. Explicit unbinds, not
-    // ClearState: if one of them fails, the swap back (its own step) still runs.
+    // Leave no view of the game's depth or of our target bound in the private state. Explicit unbinds, not ClearState: if one of
+    // them fails, the swap back (its own step) still runs.
     ID3D11DeviceContext* c = j.context;
     ID3D11ShaderResourceView* noView[1] = {};
-    ID3D11Buffer* noBuffer[1] = {};
     c->OMSetRenderTargets(0, nullptr, nullptr);
     c->PSSetShaderResources(0, 1, noView);
-    c->PSSetConstantBuffers(0, 1, noBuffer);
-    c->VSSetShader(nullptr, nullptr, 0);
-    c->PSSetShader(nullptr, nullptr, 0);
 }
 
 void DepthCopy::SwapBackThunk(void* p)

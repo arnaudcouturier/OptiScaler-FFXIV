@@ -1758,6 +1758,7 @@ struct SwapHook
     SwapFault fault = SwapFault::None;
     std::vector<ID3DDeviceContextState*> targets;  // the state asked for, per call
     std::vector<ID3DDeviceContextState*> previous; // the previous state returned, per call
+    std::vector<bool> bypassed;                    // the bypass scope was open, per call
     ID3DDeviceContextState* lost = nullptr;        // NullPreviousSwapped: the game's state whose reference was dropped
 };
 SwapHook g_swap;
@@ -1766,6 +1767,7 @@ void STDMETHODCALLTYPE HkSwap(ID3D11DeviceContext1* c, ID3DDeviceContextState* s
 {
     const int call = ++g_swap.calls;
     g_swap.targets.push_back(s);
+    g_swap.bypassed.push_back(ext::core::HooksBypassed());
     const bool faulty = call == g_swap.faultCall;
     if (faulty && g_swap.fault == SwapFault::CrashBefore)
         CrashNow();
@@ -1795,6 +1797,7 @@ void InstallSwapHook(Rig& rig, int faultCall, SwapFault fault)
     g_swap.fault = fault;
     g_swap.targets.clear();
     g_swap.previous.clear();
+    g_swap.bypassed.clear();
     g_swap.lost = nullptr;
     g_swap.patch.Install(c1.Get(), kCtx1Swap, reinterpret_cast<void*>(&HkSwap));
 }
@@ -1931,12 +1934,17 @@ void FaultsInTheRestore()
         CHECK(g_swap.targets[0] != gameState);
     }
     CHECK(SameState("after the retried swap back", before, DumpState(f.rig.context.Get())));
+    for (bool open : g_swap.bypassed) // the retry, too, is our own call
+        CHECK(open);
     // a Release while a swap back is outstanding retries it, too
     InstallSwapHook(f.rig, 2, SwapFault::CrashBefore);
     CHECK(!f.Run(src.Get(), args));
     g_swap.faultCall = 0;
     f.pass->Release();
     CHECK(SameState("after Release with a swap back outstanding", before, DumpState(f.rig.context.Get())));
+    CHECK(g_swap.calls == 3);
+    for (bool open : g_swap.bypassed) // the retry from Release is our own call, too
+        CHECK(open);
     CHECK(f.Run(src.Get(), args));
 
     // 3. the swap back is done and then crashes
@@ -1950,8 +1958,8 @@ void FaultsInTheRestore()
     g_swap.patch.Remove();
 }
 
-// A failed unbind leaves the game's depth bound in the private state; the next capture clears it first (ClearState at the start of
-// the draw step)
+// A failed unbind leaves the game's depth bound in the private state; the next capture replaces that binding (the draw step sets every
+// slot it uses), so the game's texture is not kept alive
 void StaleBindingsAreCleared()
 {
     static const GUID kCanary = { 0x1c9e7a42, 0x52d1, 0x4b6e, { 0x8a, 0x33, 0x0f, 0x9d, 0x6e, 0x21, 0xc4, 0x77 } };
@@ -1972,7 +1980,7 @@ void StaleBindingsAreCleared()
         g_patchOm.Remove();
     }
     f.rig.context->Flush();
-    CHECK(!firstDestroyed); // the private state still holds its view
+    CHECK(!firstDestroyed); // the private state still holds its view (the unbind crashed)
     auto second = MakeSource(f.rig, kFamilies[0], 40, 30);
     CHECK(f.Run(second.Get(), args));
     f.rig.context->Flush();
