@@ -8,6 +8,8 @@
 #include <cstring>
 #include <format>
 #include <limits>
+#include <mutex>
+#include <new>
 
 using Microsoft::WRL::ComPtr;
 
@@ -26,6 +28,12 @@ uint32_t GuardedCall(void (*fn)(void*), void* arg)
         return static_cast<uint32_t>(code != 0 ? code : 0xFFFFFFFFu);
     }
     return 0;
+}
+
+std::recursive_mutex& ContextStateMutex()
+{
+    static std::recursive_mutex* const mutex = new std::recursive_mutex; // (thread-safe initialisation; never destroyed on purpose)
+    return *mutex;
 }
 
 // ---- formats --------------------------------------------------------------------------------------------------------

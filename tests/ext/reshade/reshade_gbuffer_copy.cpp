@@ -8,16 +8,19 @@
 #include "pch.h"
 
 #include "ext/core/HooksBypass.h"
+#include "ext/reshade/ReShadeD3D11.h"
 #include "ext/reshade/ReShadeGBufferCopy.h"
 
 #include <GBufferRemap_Ps_Shader.h>
 #include <GBufferRemap_Vs_Shader.h>
 
 #include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -25,9 +28,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <future>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -281,6 +287,8 @@ void Checks()
     CHECK(CheckRemap(v, r) == RemapStatus::UnsupportedFormat);
 }
 
+float Ratio(uint32_t a, uint32_t b) { return float(a) / float(b); } // (not a constant expression)
+
 void Constants()
 {
     // the multiplier: only scaled motion vectors, per axis
@@ -309,6 +317,40 @@ void Constants()
     m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 0, 1080);
     CHECK(m.x == 1.0f && m.y == 2.0f);
 
+    // the scale the game reports (DLSS's convention: stored value x scale = displacement in RENDER pixels): multiplier = scale / render
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1920, 1080, 1920.0f, 1080.0f); // equal to the render size: exactly 1
+    CHECK(m.x == 1.0f && m.y == 1.0f);
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1920, 1080, 3840.0f, 2160.0f);
+    CHECK(m.x == 2.0f && m.y == 2.0f);
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1000, 500, 2000.0f, 1000.0f); // not the output over the render size
+    CHECK(m.x == 2.0f && m.y == 2.0f);
+    CHECK(Ratio(3840, 1000) != 2.0f && Ratio(2160, 500) != 2.0f); // (self-check: the fallback would give something else)
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1000, 500, 0.0f, 0.0f); // none reported: output / render
+    CHECK(m.x == float(3840) / float(1000) && m.y == float(2160) / float(500));
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1000, 500); // (the defaults are "none")
+    CHECK(m.x == float(3840) / float(1000) && m.y == float(2160) / float(500));
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1000, 500, 2000.0f, 0.0f); // per axis: x reported, y not
+    CHECK(m.x == 2.0f && m.y == float(2160) / float(500));
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1000, 500, 0.0f, 1000.0f); // y reported, x not
+    CHECK(m.x == float(3840) / float(1000) && m.y == 2.0f);
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1920, 1080, 1920.0f, 0.0f);
+    CHECK(m.x == 1.0f && m.y == 2.0f);
+    for (float bad : { -1920.0f, -0.0f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity() }) // not a scale: the fallback
+    {
+        m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 1920, 1080, bad, bad);
+        CHECK(m.x == 2.0f && m.y == 2.0f);
+    }
+    m = MotionMultiplier(GBuffer::MotionVectors, true, 3840, 2160, 0, 0, 1920.0f, 1080.0f); // a render size of 0 is not divided by, scale or not
+    CHECK(m.x == 1.0f && m.y == 1.0f);
+    for (GBuffer b : { GBuffer::Normals, GBuffer::Decals, GBuffer::DecalsWater, GBuffer::Material })
+    {
+        m = MotionMultiplier(b, true, 3840, 2160, 1920, 1080, 3840.0f, 2160.0f); // only motion vectors
+        CHECK(m.x == 1.0f && m.y == 1.0f);
+    }
+    m = MotionMultiplier(GBuffer::MotionVectors, false, 3840, 2160, 1920, 1080, 3840.0f, 2160.0f); // not scaled: exactly 1, scale or not
+    CHECK(m.x == 1.0f && m.y == 1.0f);
+
     // the constant buffer: the render pair, the output pair (x in the low 16 bits), the multiplier
     static_assert(offsetof(RemapConstants, render) == 0 && offsetof(RemapConstants, output) == 4);
     static_assert(offsetof(RemapConstants, mulX) == 8 && offsetof(RemapConstants, mulY) == 12);
@@ -325,6 +367,20 @@ void Constants()
     k = MakeRemapConstants(r);
     CHECK(k.mulX == 1.0f && k.mulY == 1.0f);
     r = GoodRequest(GBuffer::Normals);
+    k = MakeRemapConstants(r);
+    CHECK(k.mulX == 1.0f && k.mulY == 1.0f);
+    r = GoodRequest(GBuffer::MotionVectors); // 32x24 over 64x48: the fallback is 2 and 2
+    r.motionScaleX = 48.0f;                  // reported: 48 / 32 = 1.5 on x, none on y
+    k = MakeRemapConstants(r);
+    CHECK(k.mulX == 1.5f && k.mulY == 2.0f);
+    r.motionScaleY = 12.0f;
+    k = MakeRemapConstants(r);
+    CHECK(k.mulX == 1.5f && k.mulY == 0.5f);
+    r.scaleMotion = false;
+    k = MakeRemapConstants(r);
+    CHECK(k.mulX == 1.0f && k.mulY == 1.0f);
+    r = GoodRequest(GBuffer::Normals);
+    r.motionScaleX = r.motionScaleY = 64.0f;
     k = MakeRemapConstants(r);
     CHECK(k.mulX == 1.0f && k.mulY == 1.0f);
     r = GoodRequest(GBuffer::MotionVectors);
@@ -1507,6 +1563,10 @@ void CacheKey()
     redraws("scaleMotion back", b, r);
     r.stamp = 0; // stamp 0 is a stamp like any other
     redraws("stamp 0", b, r);
+    r.motionScaleX = 3.0f;
+    redraws("reported motion scale x", b, r);
+    r.motionScaleY = 5.0f;
+    redraws("reported motion scale y", b, r);
 
     // Release() ends the cache
     fx.pass->Release();
@@ -2860,6 +2920,381 @@ void EngineRouting()
     g_hookedContext = nullptr;
 }
 
+// ---- the motion scale the game reports ---------------------------------------------------------------------------------------
+// WARP values: multiplier = reportedScale / render per axis (not output / render), a missing scale falls back per axis
+void ReportedMotionScale()
+{
+    struct Row
+    {
+        const char* name;
+        float sx, sy; // reported
+        float mx, my; // expected multipliers (render 8x8 over output 16x12: the fallback would be 2.0 and 1.5)
+    };
+    const Row rows[] = {
+        { "reported 12 and 16: x1.5 on x, x2 on y (the fallback would be the other way round)", 12.0f, 16.0f, 1.5f, 2.0f },
+        { "reported equal to the render size: unscaled", 8.0f, 8.0f, 1.0f, 1.0f },
+        { "x reported, y not", 8.0f, 0.0f, 1.0f, 1.5f },
+        { "y reported, x not", 0.0f, 8.0f, 2.0f, 1.0f },
+        { "none reported: output / render", 0.0f, 0.0f, 2.0f, 1.5f },
+    };
+    for (const Fmt& f : kFmts)
+    {
+        if (!IsMotionClass(f))
+            continue;
+        for (const Row& row : rows)
+            for (int variant = 0; variant < 3; ++variant) // 0: scaled motion vectors, 1: scaleMotion false, 2: another buffer
+            {
+                Fixture fx;
+                if (!fx.Create(variant == 2 ? GBuffer::Normals : GBuffer::MotionVectors))
+                    return;
+                const Case c { row.name, 16, 12, 8, 8, 16, 12 };
+                const Source src = MakeSource(fx.rig, f, c.sw, c.sh, c.rw, c.rh, Motion(f, c.rw));
+                RemapRequest r = fx.Req(c.ow, c.oh, c.rw, c.rh, variant != 1);
+                r.motionScaleX = row.sx;
+                r.motionScaleY = row.sy;
+                const RemapStatus st = fx.Go(src, r);
+                CHECK(st == RemapStatus::Ok);
+                if (st != RemapStatus::Ok)
+                    continue;
+                const float mx = variant == 0 ? row.mx : 1.0f, my = variant == 0 ? row.my : 1.0f;
+                CheckImage(variant == 0 ? "reported motion scale" : "reported scale, not applied", f, c, ReadView(fx.rig, fx.out.srv),
+                           [&](uint32_t sx, uint32_t sy, uint8_t* o) { MotionTexel(f, sy * c.rw + sx + 1, mx, my, o); });
+            }
+    }
+}
+
+// ---- a target that cannot be made is not tried every frame -------------------------------------------------------------------
+struct TexHook
+{
+    SlotPatch patch;
+    bool active = false;
+    DXGI_FORMAT failFormat = DXGI_FORMAT_UNKNOWN;
+    int calls = 0;  // CreateTexture2D calls while active
+    int failed = 0; // ... that were refused
+};
+TexHook g_tex;
+constexpr int kDevCreateTexture2D = 5;
+using Tex2dFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
+HRESULT STDMETHODCALLTYPE HkCreateTex2d(ID3D11Device* d, const D3D11_TEXTURE2D_DESC* desc, const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out)
+{
+    if (g_tex.active)
+    {
+        ++g_tex.calls;
+        if (desc != nullptr && desc->Format == g_tex.failFormat)
+        {
+            ++g_tex.failed;
+            return E_FAIL;
+        }
+    }
+    return g_tex.patch.Original<Tex2dFn>()(d, desc, init, out);
+}
+
+void NegativeTargetCache()
+{
+    Fixture fx;
+    if (!fx.Create())
+        return;
+    const Fmt& bad = Rg16();
+    const Fmt& good = *FindFmt(DXGI_FORMAT_R16G16_UNORM);
+    const Source srcBad = MakeSource(fx.rig, bad, 40, 30, 8, 6, Pattern(bad, 8));
+    const Source srcGood = MakeSource(fx.rig, good, 40, 30, 8, 6, Pattern(good, 8));
+    g_tex = TexHook {};
+    g_tex.patch.Install(fx.rig.device.Get(), kDevCreateTexture2D, reinterpret_cast<void*>(&HkCreateTex2d));
+    g_tex.failFormat = bad.view;
+    g_tex.active = true;
+
+    // the first remap fails and tries once; the same format and size again fails without trying
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 1 && g_tex.failed == 1);
+    CHECK(fx.out.srv == 0);
+    for (int i = 0; i < 3; ++i)
+        CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 1);
+    CHECK(fx.Run(srcBad, 16, 12, 4, 3) == RemapStatus::Failed); // another render size, same output size: the same refusal
+    CHECK(g_tex.calls == 1);
+    CHECK(g_draw.draws == 0);
+    // a changed output size retries, and so does going back to the first size (the record is for one size)
+    CHECK(fx.Run(srcBad, 20, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 2);
+    CHECK(fx.Run(srcBad, 20, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 2);
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 3);
+    // a changed format retries (and this one works); a success clears the record, so the first format is tried again
+    CHECK(fx.Run(srcGood, 16, 12, 8, 6) == RemapStatus::Ok);
+    CHECK(g_tex.calls == 4);
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 5);
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == 5);
+    // the refusals did not touch the live target of the other format: it is still there and needs no new texture
+    CHECK(fx.Run(srcGood, 16, 12, 8, 6) == RemapStatus::Ok);
+    CHECK(g_tex.calls == 5);
+
+    // Release() clears it
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    const int before = g_tex.calls;
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before);
+    fx.pass->Release();
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+    CHECK(g_tex.calls == before + 1);
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 1);
+
+    // only the failure to make the target is remembered: a failed draw and a crash while the target is made are not
+    const int draws = g_draw.draws;
+    g_draw.mode = 1;
+    CHECK(fx.Run(srcGood, 24, 12, 8, 6) == RemapStatus::Failed);
+    g_draw.mode = 0;
+    CHECK(g_draw.draws == draws + 1);
+    CHECK(fx.Run(srcGood, 24, 12, 8, 6) == RemapStatus::Ok); // tried again, and works
+    InstallDeviceHooks(fx.rig);
+    g_dev.fault = DeviceFault::SrvCrash;
+    g_dev.active = true;
+    CHECK(fx.Run(srcGood, 28, 12, 8, 6) == RemapStatus::Failed); // a fault in the view of the new target
+    g_dev.active = false;
+    RemoveDeviceHooks();
+    CHECK(fx.Run(srcGood, 28, 12, 8, 6) == RemapStatus::Ok);
+    // a refusal of the request is no record, either
+    CHECK(fx.Run(srcGood, 0, 12, 8, 6) == RemapStatus::Refused);
+    CHECK(fx.Run(srcGood, 28, 12, 8, 6) == RemapStatus::Ok);
+
+    g_tex.active = false;
+    g_tex.patch.Remove();
+}
+
+// ---- the process-wide context-state mutex ------------------------------------------------------------------------------------
+struct NullSink final : ICaptureSink
+{
+    void Publish(const DepthCapture&) noexcept override {}
+};
+std::atomic<int> g_occupancy { 0 }, g_occupancyMax { 0 }, g_occupancyDraws { 0 };
+void SpinMicros(int us)
+{
+    LARGE_INTEGER freq, start, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    do
+        QueryPerformanceCounter(&now);
+    while ((now.QuadPart - start.QuadPart) * 1000000 / freq.QuadPart < us);
+}
+// The draw of both passes: it counts how many draws are inside the swap region at once (the region is swap-in .. draw .. swap-back,
+// the draw is in the middle of it), and stays there for a while so an overlap shows
+void OccupancyDraw(ID3D11DeviceContext* c)
+{
+    const int now = ++g_occupancy;
+    int seen = g_occupancyMax.load();
+    while (now > seen && !g_occupancyMax.compare_exchange_weak(seen, now))
+    {
+    }
+    ++g_occupancyDraws;
+    SpinMicros(200);
+    c->Draw(3, 0);
+    --g_occupancy;
+}
+
+ComPtr<ID3D11Texture2D> MakeDepthLike(Rig& rig)
+{
+    D3D11_TEXTURE2D_DESC td {};
+    td.Width = 40;
+    td.Height = 30;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> tex;
+    rig.device->CreateTexture2D(&td, nullptr, &tex);
+    return tex;
+}
+CaptureArgs DepthArgs(uint64_t frame)
+{
+    CaptureArgs a;
+    a.outputW = 16;
+    a.outputH = 12;
+    a.renderW = 16;
+    a.renderH = 12;
+    a.frame = frame;
+    return a;
+}
+
+// The depth pass on one thread and a G-buffer pass on another, on one device and context: the swap regions never overlap
+void ContextStateMutexSerializes()
+{
+    Fixture fx;
+    if (!fx.Create())
+        return;
+    ComPtr<ID3D11Multithread> mt; // each API call is atomic; the sequences are what the mutex serializes
+    fx.rig.context.As(&mt);
+    if (mt != nullptr)
+        mt->SetMultithreadProtected(TRUE);
+    GameState game;
+    CHECK(game.Set(fx.rig));
+    const Fmt& f = Rg16();
+    const Source src = MakeSource(fx.rig, f, 40, 30, 16, 12, Pattern(f, 16));
+    const ComPtr<ID3D11Texture2D> depthTex = MakeDepthLike(fx.rig);
+    CHECK(depthTex != nullptr);
+    if (depthTex == nullptr)
+        return;
+    NullSink sink;
+    DepthCopy depth(sink, &OccupancyDraw);
+    GBufferRemap gbuf(GBuffer::Normals, &OccupancyDraw);
+    ID3D11DeviceContext* const ctx = fx.rig.context.Get();
+    // set both up, outside the race, and look at the state
+    CHECK(depth.Capture(ctx, depthTex.Get(), DepthArgs(1)));
+    RemapOut o;
+    CHECK(gbuf.Remap(ctx, src.srv.Get(), nullptr, fx.Req(16, 12, 8, 6), o) == RemapStatus::Ok);
+    const Dump before = DumpState(ctx);
+
+    g_occupancy = 0;
+    g_occupancyMax = 0;
+    g_occupancyDraws = 0;
+    constexpr int kRounds = 150;
+    std::atomic<int> depthOk { 0 }, gbufOk { 0 };
+    std::vector<RemapRequest> requests;
+    for (int i = 0; i < kRounds; ++i)
+        requests.push_back(fx.Req(16, 12, 8, 6)); // a new stamp each: never a cache hit
+    std::thread a(
+        [&]
+        {
+            for (int i = 0; i < kRounds; ++i)
+                depthOk += depth.Capture(ctx, depthTex.Get(), DepthArgs(100 + uint64_t(i))) ? 1 : 0;
+        });
+    std::thread b(
+        [&]
+        {
+            RemapOut out;
+            for (int i = 0; i < kRounds; ++i)
+                gbufOk += gbuf.Remap(ctx, src.srv.Get(), nullptr, requests[size_t(i)], out) == RemapStatus::Ok ? 1 : 0;
+        });
+    a.join();
+    b.join();
+    if (g_occupancyMax != 1 || depthOk != kRounds || gbufOk != kRounds)
+        std::printf("  two threads: occupancy max %d, depth ok %d / %d, g-buffer ok %d / %d\n", g_occupancyMax.load(), depthOk.load(), kRounds,
+                    gbufOk.load(), kRounds);
+    CHECK(g_occupancyMax == 1); // never two swap regions at once
+    CHECK(g_occupancyDraws == 2 * kRounds);
+    CHECK(depthOk == kRounds && gbufOk == kRounds);
+    CHECK(SameState("after two threads' passes", before, DumpState(ctx)));
+}
+
+// A thread that holds the mutex until it is told to let go
+struct LockHolder
+{
+    std::thread thread;
+    std::atomic<bool> held { false }, release { false };
+    void Start()
+    {
+        thread = std::thread(
+            [this]
+            {
+                const std::lock_guard<std::recursive_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
+                held = true;
+                while (!release)
+                    std::this_thread::yield();
+            });
+        while (!held)
+            std::this_thread::yield();
+    }
+    void Stop()
+    {
+        release = true;
+        thread.join();
+    }
+};
+// Runs `call` on another thread while the mutex is held by a third one, and tells whether it came back within `ms`
+bool FinishesWhileLockHeld(const std::function<void()>& call, int ms)
+{
+    LockHolder holder;
+    holder.Start();
+    std::promise<void> done;
+    std::future<void> finished = done.get_future();
+    std::thread worker(
+        [&]
+        {
+            call();
+            done.set_value();
+        });
+    const bool ready = finished.wait_for(std::chrono::milliseconds(ms)) == std::future_status::ready;
+    holder.Stop();
+    worker.join();
+    return ready;
+}
+
+// The passes do hold the mutex around the swap region (a deterministic control for the race above), and a cache hit does not take it
+void ContextStateMutexIsTaken()
+{
+    Fixture fx;
+    if (!fx.Create())
+        return;
+    const Fmt& f = Rg16();
+    const Source src = MakeSource(fx.rig, f, 40, 30, 16, 12, Pattern(f, 16));
+    const ComPtr<ID3D11Texture2D> depthTex = MakeDepthLike(fx.rig);
+    NullSink sink;
+    DepthCopy depth(sink);
+    ID3D11DeviceContext* const ctx = fx.rig.context.Get();
+    CHECK(depth.Capture(ctx, depthTex.Get(), DepthArgs(1)));
+    const RemapRequest k = fx.Req(16, 12, 8, 6);
+    CHECK(fx.Go(src, k) == RemapStatus::Ok);
+
+    // a cache hit swaps nothing and does not wait for the mutex
+    bool hitOk = false;
+    CHECK(FinishesWhileLockHeld([&] { hitOk = fx.Go(src, k) == RemapStatus::Ok && fx.out.cached; }, 3000));
+    CHECK(hitOk);
+    // a refusal does not take it either
+    CHECK(FinishesWhileLockHeld([&] { fx.Go(src, fx.Req(0, 12, 8, 6)); }, 3000));
+    // a remap that draws waits until the mutex is free, then goes through
+    bool missOk = false;
+    const RemapRequest miss = fx.Req(16, 12, 8, 6);
+    CHECK(!FinishesWhileLockHeld([&] { missOk = fx.Go(src, miss) == RemapStatus::Ok; }, 300));
+    CHECK(missOk); // (it finished after the holder let go)
+    // so does a depth capture
+    bool captureOk = false;
+    CHECK(!FinishesWhileLockHeld([&] { captureOk = depth.Capture(ctx, depthTex.Get(), DepthArgs(2)); }, 300));
+    CHECK(captureOk);
+
+    // the mutex is recursive: a Release under it that has a swap back to recover (the recovery swaps) does not deadlock
+    GameState game;
+    CHECK(game.Set(fx.rig));
+    const Dump before = DumpState(ctx);
+    ID3DDeviceContextState* gs = MakeStuck(fx, src, false);
+    if (gs != nullptr)
+    {
+        g_swap.faultCall = 0;
+        {
+            const std::lock_guard<std::recursive_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
+            fx.pass->Release();
+        }
+        CHECK(SameState("after a Release under the mutex that recovered a swap back", before, DumpState(ctx)));
+        g_swap.patch.Remove();
+        gs->Release();
+    }
+
+    // the recovery of a swap back is a swap sequence, too: it waits for the mutex (G-buffer pass, then depth pass)
+    ID3DDeviceContextState* gs2 = MakeStuck(fx, src, false);
+    if (gs2 != nullptr)
+    {
+        g_swap.faultCall = 0;
+        CHECK(!FinishesWhileLockHeld([&] { fx.pass->Release(); }, 300));
+        CHECK(SameState("after a Release that waited for the mutex", before, DumpState(ctx)));
+        g_swap.patch.Remove();
+        gs2->Release();
+    }
+    InstallSwapHook(fx.rig, 2, SwapFault::CrashBefore);
+    CHECK(!depth.Capture(ctx, depthTex.Get(), DepthArgs(3))); // the swap back crashes: the depth pass owes it
+    ID3DDeviceContextState* gs3 = g_swap.previous.empty() ? nullptr : g_swap.previous[0];
+    CHECK(gs3 != nullptr);
+    if (gs3 != nullptr)
+    {
+        gs3->AddRef();
+        g_swap.faultCall = 0;
+        CHECK(!FinishesWhileLockHeld([&] { depth.Release(); }, 300));
+        CHECK(SameState("after a depth Release that waited for the mutex", before, DumpState(ctx)));
+        gs3->Release();
+    }
+    g_swap.patch.Remove();
+}
+
 // ---- the product shader, driven directly ---------------------------------------------------------------------------------
 // The pass never draws a pixel beyond the output size, so the clamp and the largest sizes are looked at here.
 Img RunShader(Rig& rig, ID3D11Texture2D* source, const RemapConstants& k, UINT tw, UINT th)
@@ -3090,6 +3525,11 @@ int main()
     std::fputs("engine...\n", stderr);
     DescribeViews();
     EngineRouting();
+    std::fputs("reported motion scale, negative cache, context-state mutex...\n", stderr);
+    ReportedMotionScale();
+    NegativeTargetCache();
+    ContextStateMutexIsTaken();
+    ContextStateMutexSerializes();
     std::fputs("shader...\n", stderr);
     ShaderClamp();
     ShaderStrips();

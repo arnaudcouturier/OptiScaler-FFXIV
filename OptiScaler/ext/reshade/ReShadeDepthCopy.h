@@ -3,7 +3,9 @@
 // texture of the effect runtime's back-buffer size, nearest-mapped from the render size, and hands the copy to the depth binder
 // (ReShadeDepthCore.h) through a sink. Shader: shaders/depth_crop.hlsl. Tests: tests/ext/reshade/reshade_depth_copy.cpp (WARP).
 //
-// Threading: Init, Capture, Withdraw and Release run on the thread that owns the immediate context (the NGX evaluate thread).
+// Threading: Init, Capture, Withdraw and Release run on the thread that owns the immediate context (the NGX evaluate thread). The
+// swap-in .. draw .. swap-back sequence (and the recovery of a swap back) holds d3d11::ContextStateMutex(), which the G-buffer passes
+// (ReShadeGBufferCopy.h, on the thread that runs begin_effects) take too.
 // Cost per Capture: one transient shader resource view of the game's depth, a 16-byte constant upload, two context-state swaps and one
 // full-screen draw into the R32_FLOAT target (about 33 MB at 3840x2160, created once per output size).
 //
@@ -64,6 +66,7 @@ struct CaptureArgs
     uint32_t renderW = 0, renderH = 0; // size of the rendered region
     uint64_t frame = 0;                // DepthCapture::frame
     int64_t tickMs = 0;                // DepthCapture::tickMs
+    float mvScaleX = 0.0f, mvScaleY = 0.0f; // the MV scale the game reports (NGX MV_Scale_X/Y), 0 = not reported: published with the capture
 };
 
 enum class Result : uint8_t

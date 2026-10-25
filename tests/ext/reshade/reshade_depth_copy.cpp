@@ -1154,7 +1154,10 @@ void PublishedFields()
         return;
     auto src = MakeSource(f.rig, kFamilies[0], 16, 12);
     CaptureReport report;
-    CHECK(f.Run(src.Get(), Args(10, 8, 2, 1, 8, 6, 12345, 987654), &report));
+    CaptureArgs args = Args(10, 8, 2, 1, 8, 6, 12345, 987654);
+    args.mvScaleX = 1920.0f; // what the game reports for the motion vectors: published with the capture
+    args.mvScaleY = 1080.5f;
+    CHECK(f.Run(src.Get(), args, &report));
     CHECK(f.sink.events.size() == 1);
     if (f.sink.events.size() != 1)
         return;
@@ -1164,6 +1167,8 @@ void PublishedFields()
     CHECK(c.renderW == 8 && c.renderH == 6);
     CHECK(c.frame == 12345);
     CHECK(c.tickMs == 987654);
+    CHECK(c.baseX == 2 && c.baseY == 1);                    // the subrect base the copy honoured
+    CHECK(c.mvScaleX == 1920.0f && c.mvScaleY == 1080.5f); // the reported motion vector scale
     CHECK(c.copyView != 0);
     CHECK(c.device == reinterpret_cast<uintptr_t>(f.rig.device.Get()));
     CHECK(f.sink.events[0].heldRefs == 0);
@@ -1188,6 +1193,16 @@ void PublishedFields()
     CHECK(f.Run(src.Get(), Args(10, 8, 2, 1, 8, 6, 12346, 987700), &second));
     CHECK(!second.targetCreated);
     CHECK(f.sink.events.size() == 2 && f.sink.events[1].capture.frame == 12346 && f.sink.events[1].capture.tickMs == 987700);
+    // nothing reported: 0 (not reported), and the base follows the request
+    CHECK(f.sink.events[1].capture.mvScaleX == 0.0f && f.sink.events[1].capture.mvScaleY == 0.0f);
+    CHECK(f.sink.events[1].capture.baseX == 2 && f.sink.events[1].capture.baseY == 1);
+    CHECK(f.Run(src.Get(), Args(10, 8, 0, 0, 8, 6, 12347, 987800)));
+    CHECK(f.sink.events.size() == 3 && f.sink.events[2].capture.baseX == 0 && f.sink.events[2].capture.baseY == 0);
+    args = Args(10, 8, 5, 4, 8, 6, 12348, 987900);
+    args.mvScaleY = 540.0f; // an axis at a time
+    CHECK(f.Run(src.Get(), args));
+    CHECK(f.sink.events.size() == 4 && f.sink.events[3].capture.baseX == 5 && f.sink.events[3].capture.baseY == 4);
+    CHECK(f.sink.events[3].capture.mvScaleX == 0.0f && f.sink.events[3].capture.mvScaleY == 540.0f);
 }
 
 void RecreateOnlyOnOutputSize()

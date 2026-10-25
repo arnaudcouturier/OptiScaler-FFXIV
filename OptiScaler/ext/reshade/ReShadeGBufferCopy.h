@@ -22,20 +22,27 @@
 // same bytes read through the twin, as with the add-on's own binding.
 //
 // Values: the copy keeps the source's values. The one exception is MotionVectors with scaleMotion: the vectors are in render pixels
-// (or a fraction of the render frame), the copy has the output size, so the first two channels are multiplied by output/render per
-// axis (MotionMultiplier). That scaling is DERIVED, not yet confirmed in game; it is only allowed where the format can hold the
-// scaled values (float and SNORM, ClassifyRemapFormat::valueScalable).
+// (or a fraction of the render frame), the copy has the output size, so the first two channels are multiplied per axis by
+// reportedScale / render (the MV scale the game tells the upscaler: under DLSS's convention stored value x scale = displacement in render
+// pixels), or by output / render when the game reports none (MotionMultiplier). That scaling is DERIVED, not yet confirmed in game; it
+// is only allowed where the format can hold the scaled values (float and SNORM, ClassifyRemapFormat::valueScalable).
 //
 // Lifetime: the views handed out (RemapOut) are NOT AddRef'd by the pass. The binder takes its own reference before it binds (same
 // thread, no gap), so a reference the caller took keeps a copy alive after the pass dropped its own: a new target (new output size
 // or format) is made and drawn FIRST, and the old views are released only after the new ones are ready. A failed draw keeps the old
 // target and clears the cache key.
 //
-// Cache: the key is (the add-on's view, the stamp, the render size, the output size, scaleMotion). The same key as the last successful
-// Remap on a live target returns the same views with out.cached = true and draws nothing, not even a state swap.
+// Cache: the key is (the add-on's view, the stamp, the render size, the output size, scaleMotion, the two reported motion scales). The
+// same key as the last successful Remap on a live target returns the same views with out.cached = true and draws nothing, not even a
+// state swap (and without the context-state mutex).
 //
-// Threading: Init, Remap and Release run on the thread that owns the immediate context (the present thread of begin_effects).
-// The destructor must not run from a static destructor at DLL unload: call Release() while the device is alive.
+// Negative cache: a target that could not be created (a format the GPU cannot render to) is remembered per (view format, output size)
+// until either changes, the pass is released or the device changes; Remap then fails at once without a D3D call that creates anything.
+// Failures of the transient steps (reading the view, the draw) are never remembered.
+//
+// Threading: Init, Remap and Release run on the thread that runs begin_effects (two possible paths: the HudLess UI-boundary
+// render_effects call and ReShade's own pass in Present); the process-wide context-state mutex (d3d11::ContextStateMutex) serializes
+// the swap-in .. draw .. swap-back sequence with the depth pass and the other G-buffer passes. The destructor must not run from a static destructor at DLL unload: call Release() while the device is alive.
 
 #include "ext/reshade/ReShadeDepthCopy.h" // kMaxEdge, kMaxRecoverAttempts, PackPair, DrawTriangleFn
 #include "ext/reshade/ReShadeDepthCore.h" // GBuffer, ViewDesc, RemapRequest, RemapStatus, RemapOut, IRemapEngine
@@ -70,14 +77,16 @@ RemapFormat ClassifyRemapFormat(DXGI_FORMAT view);
 // the pass can run. Whether the request is for the pass's own G-buffer kind is the pass's business (it refuses a mismatch as Refused).
 RemapStatus CheckRemap(const ViewDesc& source, const RemapRequest& request);
 
-// The multiplier of the first two channels. MotionVectors with scaleMotion: output / render per axis (2.0 at 3840 over 1920, 1.5 at
-// 3840 over 2560), 1.0 for a render size of 0. Every other buffer, or scaleMotion false: exactly 1.0f (so the shader's multiply is
-// bit exact). DERIVED, not yet confirmed in game.
+// The multiplier of the first two channels. MotionVectors with scaleMotion, per axis: mvScale / render when the game reported a usable
+// scale on that axis (finite and > 0; 1920 over 1920 is exactly 1), else output / render (2.0 at 3840 over 1920, 1.5 at 3840 over 2560);
+// 1.0 for a render size of 0. Every other buffer, or scaleMotion false: exactly 1.0f (so the shader's multiply is bit exact). DERIVED, not
+// yet confirmed in game.
 struct ValueMultiplier
 {
     float x = 1.0f, y = 1.0f;
 };
-ValueMultiplier MotionMultiplier(GBuffer buffer, bool scaleMotion, uint32_t outputW, uint32_t outputH, uint32_t renderW, uint32_t renderH);
+ValueMultiplier MotionMultiplier(GBuffer buffer, bool scaleMotion, uint32_t outputW, uint32_t outputH, uint32_t renderW, uint32_t renderH,
+                                float mvScaleX = 0.0f, float mvScaleY = 0.0f);
 
 // Layout of cbuffer Remap (register b0), 16 bytes: the render size and the output size (x in the low 16 bits, sizes are at most
 // kMaxEdge), then the multiplier. Mirrors gbuffer_remap.hlsl.
@@ -156,6 +165,14 @@ class GBufferRemap
         uint64_t stamp = 0;
         uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
         bool scaleMotion = false;
+        uint32_t motionScaleX = 0, motionScaleY = 0; // the bits of the reported scales (so a NaN is a key like any other)
+    };
+    // A target that could not be created: remembered per (view format, output size) until one changes, Release or a device change.
+    struct TargetFailure
+    {
+        bool valid = false;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        uint32_t width = 0, height = 0;
     };
     struct InitJob;
     struct Job;
@@ -186,6 +203,7 @@ class GBufferRemap
     Microsoft::WRL::ComPtr<ID3D11Buffer> _constants;
     Target _target;
     Key _key;
+    TargetFailure _targetFailure;
     // A swap back that failed: the game's state object and the context it belongs to, until a later call has done it again (or the
     // pass gave up, see the top). _stuckAttempts counts the failed attempts since.
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _stuckPrevious;

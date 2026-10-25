@@ -6,10 +6,13 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 using namespace ext::reshade::d3d11;
@@ -30,6 +33,29 @@ void TestGuardedCall()
     assert(GuardedCall(&Ok, &v) == 0 && v == 42);
     assert(GuardedCall(&Crash, nullptr) == 0xC0000005u);
     assert(GuardedCall(&Throw, nullptr) != 0); // a C++ exception crossing the frame is reported, not propagated
+}
+
+// The process-wide context-state mutex: one object, recursive on a thread, exclusive between threads
+void TestContextStateMutex()
+{
+    std::recursive_mutex& m = ContextStateMutex();
+    assert(&m == &ContextStateMutex());
+    {
+        std::lock_guard<std::recursive_mutex> outer(m);
+        std::lock_guard<std::recursive_mutex> inner(ContextStateMutex()); // recursive: a Release under a capture takes it again
+        std::atomic<int> other { -1 };
+        std::thread t([&] { other = m.try_lock() ? 1 : 0; if (other == 1) m.unlock(); });
+        t.join();
+        assert(other == 0); // held by this thread: another thread does not get in
+    }
+    std::atomic<int> after { -1 };
+    std::thread t([&] { after = m.try_lock() ? 1 : 0; if (after == 1) m.unlock(); });
+    t.join();
+    assert(after == 1); // and free again once released
+    std::recursive_mutex* seenByThread = nullptr;
+    std::thread t2([&] { seenByThread = &ContextStateMutex(); });
+    t2.join();
+    assert(seenByThread == &m); // one object for the whole process
 }
 
 void TestFamilies()
@@ -256,6 +282,8 @@ int main()
 {
     std::fputs("guarded call...\n", stderr);
     TestGuardedCall();
+    std::fputs("context state mutex...\n", stderr);
+    TestContextStateMutex();
     std::fputs("families...\n", stderr);
     TestFamilies();
 
@@ -269,6 +297,6 @@ int main()
     TestStateBlock(d);
     std::fputs("snapshot...\n", stderr);
     TestSnapshot(d);
-    std::puts("PASS: guarded call (AV and C++ exception), format families, D3D11 state block round trip, target snapshot diff (8-bit, FP16, unchanged, unsupported)");
+    std::puts("PASS: guarded call (AV and C++ exception), the context-state mutex (one object, recursive, exclusive), format families, D3D11 state block round trip, target snapshot diff (8-bit, FP16, unchanged, unsupported)");
     return 0;
 }

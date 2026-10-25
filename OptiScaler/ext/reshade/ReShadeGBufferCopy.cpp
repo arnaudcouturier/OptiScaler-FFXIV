@@ -9,6 +9,9 @@
 #include <GBufferRemap_Ps_Shader.h>
 #include <GBufferRemap_Vs_Shader.h>
 
+#include <bit>
+#include <cmath>
+#include <mutex>
 #include <utility>
 
 namespace ext::reshade::depth
@@ -105,17 +108,22 @@ RemapStatus CheckRemap(const ViewDesc& source, const RemapRequest& request)
 
 // The product build is /fp:fast; the multiplier must be the correctly rounded quotient (2.0 at 3840 over 1920 exactly), not a reciprocal.
 #pragma float_control(precise, on, push)
-ValueMultiplier MotionMultiplier(GBuffer buffer, bool scaleMotion, uint32_t outputW, uint32_t outputH, uint32_t renderW, uint32_t renderH)
+ValueMultiplier MotionMultiplier(GBuffer buffer, bool scaleMotion, uint32_t outputW, uint32_t outputH, uint32_t renderW, uint32_t renderH,
+                                 float mvScaleX, float mvScaleY)
 {
     ValueMultiplier m;
     if (buffer != GBuffer::MotionVectors || !scaleMotion)
         return m;
-    // DERIVED, not yet confirmed in game: the vectors are measured in render pixels (or a fraction of the render frame), the copy has
-    // the output size. A render size of 0 is not divided by (the request check refuses it before any draw).
+    // DERIVED, not yet confirmed in game. Under DLSS's convention the stored vector times the scale the game reports is a displacement in
+    // RENDER pixels, so the screen-UV multiplier is that scale / render size per axis (a game that reports a scale equal to the render
+    // size gets exactly 1). Without a usable reported scale (0, negative, NaN, infinite) the vectors are taken to be in render pixels or a
+    // fraction of the render frame and the multiplier is output / render. A render size of 0 is not divided by (the request check
+    // refuses it before any draw).
+    const auto usable = [](float scale) { return std::isfinite(scale) && scale > 0.0f; };
     if (renderW != 0)
-        m.x = static_cast<float>(outputW) / static_cast<float>(renderW);
+        m.x = (usable(mvScaleX) ? mvScaleX : static_cast<float>(outputW)) / static_cast<float>(renderW);
     if (renderH != 0)
-        m.y = static_cast<float>(outputH) / static_cast<float>(renderH);
+        m.y = (usable(mvScaleY) ? mvScaleY : static_cast<float>(outputH)) / static_cast<float>(renderH);
     return m;
 }
 
@@ -126,7 +134,8 @@ RemapConstants MakeRemapConstants(const RemapRequest& request)
     RemapConstants k;
     k.render = PackPair(request.renderW, request.renderH);
     k.output = PackPair(request.outputW, request.outputH);
-    const ValueMultiplier m = MotionMultiplier(request.buffer, request.scaleMotion, request.outputW, request.outputH, request.renderW, request.renderH);
+    const ValueMultiplier m = MotionMultiplier(request.buffer, request.scaleMotion, request.outputW, request.outputH, request.renderW, request.renderH,
+                                            request.motionScaleX, request.motionScaleY);
     k.mulX = m.x;
     k.mulY = m.y;
     return k;
@@ -247,6 +256,7 @@ struct GBufferRemap::Job
     ComPtr<IUnknown> contextIdentity, stuckIdentity;
     // PrepareThunk
     bool prepared = false;
+    bool targetFailed = false; // a resource of the target could not be created (not: a fault) - remembered, see _targetFailure
     Target fresh; // the new target when the output size or the format changed
     // DrawThunk, UnbindThunk, SwapBackThunk, ScrubThunk
     bool drawn = false; // the draw was started: the target may be half written
@@ -278,6 +288,7 @@ GBufferRemap::~GBufferRemap()
 void GBufferRemap::Teardown()
 {
     _key = Key {};
+    _targetFailure = TargetFailure {};
     _target = Target {};
     _constants.Reset();
     _ps.Reset();
@@ -421,6 +432,7 @@ void GBufferRemap::PrepareThunk(void* p)
     if (!ok)
     {
         j.fresh = Target {};
+        j.targetFailed = true;
         return;
     }
     j.fresh.width = a.outputW;
@@ -518,6 +530,9 @@ bool GBufferRemap::RecoverState()
     if (_stuckPrevious == nullptr)
         return true;
     ext::core::BypassScope bypass;
+    // The swaps below are a swap-in sequence like the remap's own: no other pass may be inside the private state meanwhile (recursive, so
+    // a Release that is called under the lock, or by a remap that holds it, is fine).
+    const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
     Job job;
     job.self = this;
     job.context1 = _stuckContext;
@@ -593,7 +608,8 @@ RemapStatus GBufferRemap::RemapImpl(ID3D11DeviceContext* context, ID3D11ShaderRe
     // The same key as the last successful remap, on the live target: the same views, nothing drawn, not even a state swap.
     if (_key.valid && _target.texture != nullptr && SUCCEEDED(job.removed) && job.device.Get() == _device.Get() && _key.srv == srv &&
         _key.stamp == request.stamp && _key.renderW == request.renderW && _key.renderH == request.renderH && _key.outputW == request.outputW &&
-        _key.outputH == request.outputH && _key.scaleMotion == request.scaleMotion)
+        _key.outputH == request.outputH && _key.scaleMotion == request.scaleMotion &&
+        _key.motionScaleX == std::bit_cast<uint32_t>(request.motionScaleX) && _key.motionScaleY == std::bit_cast<uint32_t>(request.motionScaleY))
     {
         Fill(_target, out);
         out.cached = true;
@@ -628,18 +644,38 @@ RemapStatus GBufferRemap::RemapImpl(ID3D11DeviceContext* context, ID3D11ShaderRe
 
     // From here on the target may be written: whatever happens, this key is not the live one any more.
     _key = Key {};
-    if (d3d11::GuardedCall(&PrepareThunk, &job) != 0 || !job.prepared)
+    // A target that could not be made for this view format and output size is not tried again every frame: the GPU will refuse it
+    // again. Only the failure to create the target's resources is remembered, never a fault or a failure of the source side.
+    if (_targetFailure.valid && _targetFailure.format == job.viewFormat && _targetFailure.width == request.outputW &&
+        _targetFailure.height == request.outputH)
         return RemapStatus::Failed;
+    if (d3d11::GuardedCall(&PrepareThunk, &job) != 0)
+        return RemapStatus::Failed;
+    if (!job.prepared)
+    {
+        if (job.targetFailed)
+            _targetFailure = TargetFailure { true, job.viewFormat, request.outputW, request.outputH };
+        return RemapStatus::Failed;
+    }
+    _targetFailure = TargetFailure {}; // (a record is for one format and size; this one works)
 
     // The draw runs in the private state. The way back is its own guarded step, so a failed draw cannot skip it.
-    const uint32_t drawCode = d3d11::GuardedCall(&DrawThunk, &job);
-    const uint32_t unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
-    const uint32_t swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);
-    if (swapCode != 0)
+    // The whole swap-in .. draw .. unbind .. swap-back sequence is one critical section process-wide (d3d11::ContextStateMutex): begin_effects
+    // can run on two paths (the HudLess UI-boundary render_effects call and ReShade's own pass in Present) next to the depth pass on the
+    // evaluate thread, and an interleaved sequence would put the wrong state back. Nothing else is under the lock: not the target's
+    // creation above, not the publishing below, and a cache hit (which swaps nothing) never takes it.
+    uint32_t drawCode = 0, unbindCode = 0, swapCode = 0;
     {
-        // It may not have happened: the next call (or Release) does it again, and the game's state object must not die before.
-        _stuckContext = job.context1;
-        _stuckPrevious = job.previous;
+        const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+        drawCode = d3d11::GuardedCall(&DrawThunk, &job);
+        unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
+        swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);
+        if (swapCode != 0)
+        {
+            // It may not have happened: the next call (or Release) does it again, and the game's state object must not die before.
+            _stuckContext = job.context1;
+            _stuckPrevious = job.previous;
+        }
     }
     if (drawCode != 0 || unbindCode != 0 || swapCode != 0 || job.drawFailed)
         return RemapStatus::Failed; // the new target (if any) is discarded with the job, the old one is kept
@@ -658,6 +694,8 @@ RemapStatus GBufferRemap::RemapImpl(ID3D11DeviceContext* context, ID3D11ShaderRe
     _key.outputW = request.outputW;
     _key.outputH = request.outputH;
     _key.scaleMotion = request.scaleMotion;
+    _key.motionScaleX = std::bit_cast<uint32_t>(request.motionScaleX);
+    _key.motionScaleY = std::bit_cast<uint32_t>(request.motionScaleY);
     Fill(_target, out);
     return RemapStatus::Ok;
 }

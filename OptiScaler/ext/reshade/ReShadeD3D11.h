@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,14 @@ namespace ext::reshade::d3d11
 // (an access violation is 0xC0000005, a C++ exception that crosses the frame is 0xE06D7363). The function holds no C++
 // objects, which is what makes SEH legal next to the project's /EHsc.
 uint32_t GuardedCall(void (*fn)(void*), void* arg);
+
+// ONE process-wide mutex for every sequence that swaps the immediate context into a private ID3DDeviceContextState (the depth copy,
+// the five G-buffer remaps): begin_effects can arrive from the HudLess UI-boundary render_effects call and from ReShade's own pass in
+// Present while the depth pass runs on the evaluate thread, and a swap-in .. draw .. swap-back that is interleaved with another one
+// puts the wrong state back. Recursive (a Release that recovers a swap back holds it already). Held ONLY around the swap-in, draw,
+// unbind and swap-back (and the recovery of a swap back), never around view creation, publishing, or a call out to ReShade. Heap
+// allocated and never destroyed: a pass may still run while the process shuts down.
+std::recursive_mutex& ContextStateMutex();
 
 // ---- formats ------------------------------------------------------------------------------------------------------------
 struct FormatFamily

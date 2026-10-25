@@ -443,6 +443,9 @@ bool DepthCopy::RecoverState()
     if (_stuckPrevious == nullptr)
         return true;
     ext::core::BypassScope bypass;
+    // The swaps below are a swap-in sequence like the capture's own: no other pass may be inside the private state meanwhile (recursive,
+    // so a Release that is called under the lock, or by a capture that holds it, is fine).
+    const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
     Job job;
     job.self = this;
     job.context1 = _stuckContext;
@@ -485,6 +488,10 @@ void DepthCopy::PublishValid(const Target& target, const CaptureArgs& args)
     c.renderH = args.renderH;
     c.frame = args.frame;
     c.tickMs = args.tickMs;
+    c.baseX = args.baseX;
+    c.baseY = args.baseY;
+    c.mvScaleX = args.mvScaleX;
+    c.mvScaleY = args.mvScaleY;
     c.copyView = reinterpret_cast<uintptr_t>(target.srv.Get());
     c.device = reinterpret_cast<uintptr_t>(_device.Get());
     _published = true;
@@ -583,14 +590,21 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
     }
 
     // The draw runs in the private state. The way back is its own guarded step, so a failed draw cannot skip it.
-    const uint32_t drawCode = d3d11::GuardedCall(&DrawThunk, &job);
-    const uint32_t unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
-    const uint32_t swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);
-    if (swapCode != 0)
+    // The whole swap-in .. draw .. unbind .. swap-back sequence is one critical section process-wide (d3d11::ContextStateMutex): the
+    // HudLess UI-boundary pass and ReShade's own pass can run the G-buffer remaps on other threads, and an interleaved sequence would
+    // put the wrong state back. Nothing else is under the lock: not the view creation above, not the publishing below.
+    uint32_t drawCode = 0, unbindCode = 0, swapCode = 0;
     {
-        // It may not have happened: the next call (or Release) does it again, and the game's state object must not die before.
-        _stuckContext = job.context1;
-        _stuckPrevious = job.previous;
+        const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+        drawCode = d3d11::GuardedCall(&DrawThunk, &job);
+        unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
+        swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);
+        if (swapCode != 0)
+        {
+            // It may not have happened: the next call (or Release) does it again, and the game's state object must not die before.
+            _stuckContext = job.context1;
+            _stuckPrevious = job.previous;
+        }
     }
     if (drawCode != 0 || unbindCode != 0 || swapCode != 0 || job.result != Result::Ok)
     {
