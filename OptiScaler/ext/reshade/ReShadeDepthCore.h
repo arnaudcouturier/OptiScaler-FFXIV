@@ -182,8 +182,23 @@ struct IBackend
     // "the game's primary D3D11 device". The core always asks, so a runtime of another device never counts as a consumer.
     virtual bool SameDevice(uint64_t runtime, uint64_t captureDevice) = 0;
     virtual bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
+    // The runtime is the only D3D11 effect runtime of the process. A refusal by device identity of THAT runtime is worth a line in the
+    // status ("ReShade runs on another device than the game's depth"); one of several is a foreign runtime and says nothing. Inert by default.
+    virtual bool OnlyD3D11Runtime(uint64_t runtime)
+    {
+        (void)runtime;
+        return false;
+    }
 
     virtual bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) = 0;
+    // Told once per runtime (and again after its effects were reloaded) when its texture variables contain a known depth input: the
+    // names of those variables, best first, so the first run shows the form real ReShade reports (ReShade mangles a variable's unique name,
+    // "V__ReShade__DepthBufferTex" for ReShade::DepthBufferTex). Inert by default; an exception is swallowed by the core.
+    virtual void DepthInputsFound(uint64_t runtime, const std::vector<std::string>& names)
+    {
+        (void)runtime;
+        (void)names;
+    }
     // Told once per runtime (and again after its effects were reloaded) when its texture variables contain no known depth input: the
     // live backend logs the names that contain "depth", so the first run answers which names real presets use (an MXAO-only preset
     // declares DepthInputTex only). Inert by default; an exception is swallowed by the core.
@@ -340,6 +355,7 @@ class DepthBinder
         std::optional<bool> manual; // RESHADE_DEPTH_INPUT_* macros non-neutral; known until reload, destroy or a technique change
         Trust trust = Trust::Unknown; // until reload or destroy
         bool noCandidateNoted = false; // IBackend::NoDepthCandidate was called (until reload or destroy)
+        bool foundNoted = false;       // IBackend::DepthInputsFound was called (until reload or destroy)
 
         // The pass. open = references held; inPass = between begin and finish; bound = update_texture_bindings(copy) was
         // issued and the binding is not known to be put back. open && !inPass is the "dirty" state.
@@ -375,6 +391,7 @@ class DepthBinder
         NoInput,
         NotTrusted,
         Failed,
+        OtherDevice,
         Bound,
     };
     struct StatusInfo

@@ -39,8 +39,12 @@ constexpr uint64_t kCopy = 0xC0, kOrig = 0xA1, kOrigSrgb = 0xA2;
 constexpr uint64_t kDepthVar = 0x501;
 
 // ---- the fake raw layer ----------------------------------------------------------------------------------------------------------
-// ReShade's string convention: buffer == nullptr -> the length including the NUL; otherwise copy what fits (the capacity includes the
-// NUL), and `*size` becomes the length copied including the NUL.
+// ReShade's string convention, as OBSERVED in game 2026-10-25 (ReShade 6.8.0.2155, std::string::copy semantics): buffer == nullptr ->
+// the length + 1 (the NUL counted); otherwise copy what fits (the capacity includes the NUL: min(capacity - 1, length) characters, then
+// the NUL), and `*size` becomes the NUMBER OF CHARACTERS COPIED, without the NUL. The second mode is the vendored header's wording
+// (`*size` becomes the count including the NUL); the backend accepts both, and every test runs under both.
+bool g_headerWording = false;
+
 void CopyString(const std::string& s, char* buffer, size_t* size)
 {
     if (buffer == nullptr)
@@ -54,7 +58,7 @@ void CopyString(const std::string& s, char* buffer, size_t* size)
     const size_t n = std::min(capacity - 1, s.size());
     std::memcpy(buffer, s.data(), n);
     buffer[n] = '\0';
-    *size = n + 1;
+    *size = g_headerWording ? n + 1 : n;
 }
 
 struct FakeRaw final : IRawApi
@@ -64,6 +68,7 @@ struct FakeRaw final : IRawApi
         bool hasDevice = true;
         bool d3d11 = true;
         uint64_t native = kDev;
+        uint64_t backDevice = 0; // the device of the back buffer's resource; 0 = the same as `native`
     };
     struct Tex
     {
@@ -110,6 +115,10 @@ struct FakeRaw final : IRawApi
     bool growBetween = false;       // the second string call returns a longer string
     bool noTerminator = false;      // the second string call leaves the last byte as it is
     bool interiorNul = false;       // ... or puts a NUL inside
+    bool shrinkBetween = false;     // the second string call returns a shorter string (the last character gone)
+    bool writesNothing = false;     // the second string call answers "yes" and leaves the buffer as it is
+    bool lyingSize = false;         // the second string call reports more than the capacity
+    std::vector<size_t> needs, capacities; // the size query answers, and the capacities of the copies
     bool hugeSize = false;          // the size query answers an absurd length
     bool zeroSize = false;          // the size query answers "exists, length 0"
     uint32_t updates = 0;
@@ -138,6 +147,16 @@ struct FakeRaw final : IRawApi
             return false;
         w = bbW;
         h = bbH;
+        return true;
+    }
+    int backDeviceCalls = 0;
+    bool BackBufferDevice(uint64_t rt, uint64_t& device) override
+    {
+        ++backDeviceCalls;
+        if (Hit("BackBufferDevice"))
+            return false;
+        const Rt& r = R(rt);
+        device = r.backDevice != 0 ? r.backDevice : r.native;
         return true;
     }
     bool List(const char* name, size_t n, uint64_t first, uint64_t* out, size_t cap, size_t& count)
@@ -188,18 +207,24 @@ struct FakeRaw final : IRawApi
         if (buffer == nullptr)
         {
             CopyString(value, buffer, size);
+            needs.push_back(*size);
             if (hugeSize)
                 *size = kMaxStringBytes + 2;
             if (zeroSize)
                 *size = 0;
             return Call::Yes;
         }
-        std::string v = growBetween ? value + "XYZ" : value;
+        capacities.push_back(*size);
+        if (writesNothing)
+            return Call::Yes;
+        std::string v = growBetween ? value + "XYZ" : shrinkBetween && !value.empty() ? value.substr(0, value.size() - 1) : value;
         CopyString(v, buffer, size);
-        if (noTerminator && *size > 0)
-            buffer[*size - 1] = 'Q';
-        if (interiorNul && *size > 2)
+        if (noTerminator)
+            buffer[std::strlen(buffer)] = 'Q';
+        if (interiorNul && std::strlen(buffer) > 1)
             buffer[0] = '\0';
+        if (lyingSize)
+            *size = capacities.back() + 5;
         return Call::Yes;
     }
     Call TextureName(uint64_t, uint64_t variable, char* buffer, size_t* size) override
@@ -364,6 +389,15 @@ size_t LogLines(const char* needle)
     return n;
 }
 
+std::string LastLine(const char* needle)
+{
+    std::string found;
+    for (const std::string& l : depthtest_log::Lines())
+        if (l.find(needle) != std::string::npos)
+            found = l;
+    return found;
+}
+
 // ---- strings ---------------------------------------------------------------------------------------------------------------------
 void TextureNames()
 {
@@ -417,9 +451,90 @@ void TextureNames()
     CHECK(none.empty()); // nothing half-filled is left behind
 }
 
+// The contract in numbers: the backend asks for `need` (length + 1), copies into need + 1 bytes, and takes the string if it ends exactly
+// at need - 1. Both wordings of the second size are accepted; a string that came back different is not.
+void StringContract()
+{
+    { // the capacity of every copy is the query's answer plus one, and the value is whole (also an empty one)
+        FakeRaw raw;
+        raw.textures.push_back({ 0x502, "", "", 0, 0 });
+        raw.textures.push_back({ 0x503, "a", "", 0, 0 });
+        raw.textures.push_back({ 0x504, std::string(kMaxStringBytes - 1, 'z'), "", 0, 0 }); // need == the limit: accepted
+        LiveDepthBackend b(raw, Env());
+        std::vector<TextureVar> t;
+        CHECK(b.TextureVariables(kRt, t) && t.size() == 4);
+        if (t.size() == 4)
+            CHECK(t[1].name.empty() && t[2].name == "a" && t[3].name.size() == kMaxStringBytes - 1);
+        CHECK(raw.needs.size() == 4 && raw.capacities.size() == 4);
+        for (size_t i = 0; i < raw.needs.size() && i < raw.capacities.size(); ++i)
+            CHECK(raw.capacities[i] == raw.needs[i] + 1);
+        CHECK(raw.needs.size() == 4 && raw.needs[1] == 1 && raw.needs[2] == 2); // an empty string asks for 1 (just the NUL)
+    }
+    { // one character more than the limit allows: a failure, not a cut
+        FakeRaw raw;
+        raw.textures.push_back({ 0x502, std::string(kMaxStringBytes, 'z'), "", 0, 0 }); // need == limit + 1
+        LiveDepthBackend b(raw, Env());
+        std::vector<TextureVar> t;
+        CHECK(!b.TextureVariables(kRt, t));
+        CHECK(raw.capacities.size() == 1); // only the first variable's copy; the long one was refused after its query
+    }
+    { // an interior NUL cannot be a ReShade name: the C string would be shorter than the query said
+        FakeRaw raw;
+        raw.textures.push_back({ 0x502, std::string("ab\0cd", 5), "", 0, 0 });
+        LiveDepthBackend b(raw, Env());
+        std::vector<TextureVar> t;
+        const size_t lines = LogLines("string contract");
+        CHECK(!b.TextureVariables(kRt, t) && t.empty());
+        CHECK(LogLines("string contract") == lines + 1);
+        const std::string line = LastLine("string contract");
+        CHECK(line.find("first size 6") != std::string::npos && line.find("string length 2") != std::string::npos);
+    }
+    { // a copy that writes nothing leaves an empty C string: only the empty value is acceptable that way
+        FakeRaw raw;
+        raw.writesNothing = true;
+        LiveDepthBackend b(raw, Env());
+        std::vector<TextureVar> t;
+        CHECK(!b.TextureVariables(kRt, t));
+        FakeRaw empty;
+        empty.writesNothing = true;
+        empty.textures = { { 0x502, "", "", 0, 0 } };
+        LiveDepthBackend e(empty, Env());
+        CHECK(e.TextureVariables(kRt, t) && t.size() == 1 && t[0].name.empty());
+    }
+    { // a size that exceeds the capacity is a lie, whatever the buffer holds
+        FakeRaw raw;
+        raw.lyingSize = true;
+        LiveDepthBackend b(raw, Env());
+        std::vector<TextureVar> t;
+        CHECK(!b.TextureVariables(kRt, t));
+        const std::string line = LastLine("string contract");
+        CHECK(line.find("answers disagree") != std::string::npos);
+    }
+    { // grown / shrunk between the two calls
+        for (int shrink = 0; shrink < 2; ++shrink)
+        {
+            FakeRaw raw;
+            raw.growBetween = shrink == 0;
+            raw.shrinkBetween = shrink == 1;
+            LiveDepthBackend b(raw, Env());
+            std::vector<TextureVar> t;
+            CHECK(!b.TextureVariables(kRt, t));
+        }
+    }
+    { // a definition: defined with an empty value is defined; the neutral value is read whole
+        FakeRaw raw;
+        raw.globalDefs["E"] = "";
+        raw.globalDefs["ONE"] = "1";
+        LiveDepthBackend b(raw, Env());
+        std::string v = "junk";
+        CHECK(b.Definition(kRt, nullptr, "E", v) == DefinitionState::Defined && v.empty());
+        CHECK(b.Definition(kRt, nullptr, "ONE", v) == DefinitionState::Defined && v == "1");
+    }
+}
+
 void BadStrings()
 {
-    for (int knob = 0; knob < 6; ++knob)
+    for (int knob = 0; knob < 9; ++knob)
     {
         FakeRaw raw;
         raw.growBetween = knob == 0;
@@ -427,6 +542,9 @@ void BadStrings()
         raw.interiorNul = knob == 2;
         raw.hugeSize = knob == 3;
         raw.zeroSize = knob == 4;
+        raw.shrinkBetween = knob == 5;
+        raw.writesNothing = knob == 6;
+        raw.lyingSize = knob == 7;
         raw.globalDefs["RESHADE_DEPTH_INPUT_X_SCALE"] = "1.05";
         raw.unis[0].source = "bufready_depth";
         LiveDepthBackend b(raw, Env());
@@ -434,7 +552,7 @@ void BadStrings()
         std::vector<UniformVar> u;
         std::vector<EffectTechnique> e;
         std::string v;
-        if (knob < 5)
+        if (knob < 8)
         {
             // every string of a read that disagrees with itself fails the whole read, and a definition is an error
             CHECK(!b.TextureVariables(kRt, t));
@@ -493,6 +611,8 @@ void Definitions()
     gone.vanishOnSecond = true;
     LiveDepthBackend gb(gone, Env());
     CHECK(gb.Definition(kRt, nullptr, "A", v) == DefinitionState::Error);
+    gone.globalDefs["E"] = ""; // an empty value that is gone by the second call: the empty buffer must not read as "defined, empty"
+    CHECK(gb.Definition(kRt, nullptr, "E", v) == DefinitionState::Error);
     // a fault while asking whether it exists at all
     FakeRaw f;
     LiveDepthBackend fb(f, Env());
@@ -722,6 +842,88 @@ void SameDeviceSemantics()
     }
 }
 
+// The device identity that counts is the device of real resources: the runtime's back buffer against the capture (the game's depth
+// texture). ReShade's get_native() came back as its own wrapper object in game (0x228aa25f390 against the game's 0x228b20940d0).
+void SameDeviceByResources()
+{
+    constexpr uint64_t kWrapper = 0xF390; // what get_native() answers
+    g_primary = kDev;
+    { // the case of the log: native differs from the game's device, the back buffer's device is the game's
+        FakeRaw raw;
+        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).backDevice = kDev;
+        LiveDepthBackend b(raw, Env());
+        const size_t lines = LogLines("device mismatch");
+        CHECK(b.SameDevice(kRt, kDev));  // a capture exists: equal by the resource's device
+        CHECK(b.IsOurRuntime(kRt) == true);
+        CHECK(!b.SameDevice(kRt, kDev2)); // ... and another capture device is refused
+        CHECK(LogLines("device mismatch") == lines + 1);
+        CHECK(b.SameDevice(kRt, 0));      // no capture yet: equal to the primary device by the same rule
+    }
+    { // equal by get_native() alone still counts (and then the resource is not even asked)
+        FakeRaw raw;
+        raw.R(kRt).native = kDev;
+        raw.R(kRt).backDevice = kDev2;
+        LiveDepthBackend b(raw, Env());
+        CHECK(b.SameDevice(kRt, kDev));
+        CHECK(raw.backDeviceCalls == 0);
+    }
+    { // neither matches once a capture exists: refused, also when it is the only runtime, with ALL the pointers in the one line
+        FakeRaw raw;
+        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).backDevice = kDev2;
+        LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        CHECK(b.OnlyD3D11Runtime(kRt));
+        const size_t lines = LogLines("device mismatch");
+        CHECK(!b.SameDevice(kRt, kDev) && !b.SameDevice(kRt, kDev));
+        CHECK(LogLines("device mismatch") == lines + 1);
+        const std::string line = LastLine("device mismatch");
+        CHECK(line.find("0xf390") != std::string::npos && line.find("0xd3d1") != std::string::npos && line.find("0xd3d0") != std::string::npos);
+        CHECK(line.find("primary 0xd3d0") != std::string::npos);
+        // a second runtime: this one is no longer the only one (the binder then says nothing for it)
+        b.NoteRuntime(kRt2);
+        CHECK(!b.OnlyD3D11Runtime(kRt));
+        CHECK(!b.OnlyD3D11Runtime(kRt3));
+    }
+    { // no capture yet: the primary device matched through the back buffer needs no fallback (and says nothing about one)
+        FakeRaw raw;
+        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).backDevice = kDev;
+        LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        b.NoteRuntime(kRt2);
+        raw.R(kRt2).native = kWrapper;
+        raw.R(kRt2).backDevice = kDev2;
+        CHECK(b.SameDevice(kRt, 0));   // by the resource's device, although a second runtime exists
+        CHECK(!b.SameDevice(kRt2, 0)); // a runtime of another device with a rival: no fallback
+    }
+    { // no capture yet and nothing matches: the only D3D11 runtime is taken, the line says all the pointers
+        FakeRaw raw;
+        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).backDevice = kDev2;
+        LiveDepthBackend b(raw, Env());
+        const size_t lines = LogLines("only D3D11 runtime");
+        CHECK(b.SameDevice(kRt, 0));
+        CHECK(LogLines("only D3D11 runtime") == lines + 1);
+        const std::string line = LastLine("only D3D11 runtime");
+        CHECK(line.find("0xf390") != std::string::npos && line.find("0xd3d1") != std::string::npos && line.find("0xd3d0") != std::string::npos);
+    }
+    { // a faulting back buffer query is "unknown": the rest decides (never a crash, never a match)
+        FakeRaw raw;
+        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).backDevice = kDev;
+        LiveDepthBackend b(raw, Env());
+        raw.faultAt = raw.calls + 2; // DeviceInfo is the next call, BackBufferDevice the one after
+        CHECK(!b.SameDevice(kRt, kDev));
+        CHECK(b.SameDevice(kRt, kDev)); // and the next query is fine
+        // a back buffer whose device is the runtime's own pointer again (backDevice 0 follows native)
+        raw.R(kRt).backDevice = 0;
+        raw.R(kRt).native = kWrapper;
+        CHECK(!b.SameDevice(kRt, kDev));
+    }
+}
+
 void RegistryAndOurRuntime()
 {
     g_primary = kDev;
@@ -764,19 +966,12 @@ void RegistryAndOurRuntime()
 }
 
 // ---- one-shot logs that settle what the headers cannot ----------------------------------------------------------------------------
-std::string LastLine(const char* needle)
-{
-    std::string found;
-    for (const std::string& l : depthtest_log::Lines())
-        if (l.find(needle) != std::string::npos)
-            found = l;
-    return found;
-}
 
 // The first string that breaks ReShade's size contract is described once: the query kind, both sizes and the length found
 void StringContractLog()
 {
-    { // a string that grows between the two calls: first size 24, second 25 (the spare byte), 24 characters
+    { // a string that grows between the two calls: first size 24 (the query), the copy has one byte more than that and writes 24
+      // characters (the second size says 24 characters, or 25 in the header's wording), the length found is 24
         FakeRaw raw;
         raw.growBetween = true;
         LiveDepthBackend b(raw, Env());
@@ -789,7 +984,8 @@ void StringContractLog()
         CHECK(LogLines("string contract") == before + 1); // the first one only
         const std::string line = LastLine("string contract");
         CHECK(line.find("texture name") != std::string::npos);
-        CHECK(line.find("first size 24") != std::string::npos && line.find("second size 25") != std::string::npos);
+        CHECK(line.find("first size 24") != std::string::npos);
+        CHECK(line.find(g_headerWording ? "second size 25" : "second size 24") != std::string::npos);
         CHECK(line.find("string length 24") != std::string::npos);
     }
     { // a call that faults: no sizes to report, and it says so
@@ -1099,20 +1295,30 @@ void FaultAtEveryRawCall()
 
 int main()
 {
-    TextureNames();
-    BadStrings();
-    Definitions();
-    UniformsAndTechniques();
-    Views();
-    RuntimeQueries();
-    SameDeviceSemantics();
-    RegistryAndOurRuntime();
-    StringContractLog();
-    SameDeviceRefusalLog();
-    NoCandidateLog();
-    FirstBindReadback();
-    BinderOverTheBackend();
-    FaultAtEveryRawCall();
+    for (const bool header : { false, true })
+    {
+        g_headerWording = header; // the observed behaviour first, then the vendored header's wording
+        g_now = 5000; // (the tests leave these as they like)
+        g_frame = 77;
+        g_primary = kDev;
+        std::printf("reshade_depth_backend: string wording %s\n", header ? "header" : "observed");
+        StringContract();
+        TextureNames();
+        BadStrings();
+        Definitions();
+        UniformsAndTechniques();
+        Views();
+        RuntimeQueries();
+        SameDeviceSemantics();
+        SameDeviceByResources();
+        RegistryAndOurRuntime();
+        StringContractLog();
+        SameDeviceRefusalLog();
+        NoCandidateLog();
+        FirstBindReadback();
+        BinderOverTheBackend();
+        FaultAtEveryRawCall();
+    }
     if (g_fail != 0)
     {
         std::printf("reshade_depth_backend: %d check(s) failed\n", g_fail);

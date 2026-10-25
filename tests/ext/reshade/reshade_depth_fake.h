@@ -115,6 +115,19 @@ struct Fake final : IBackend
     std::map<uint64_t, int> bindingReads;
     int defQueries = 0, textureEnums = 0, uniformEnums = 0;
 
+    bool onlyRuntime = false; // OnlyD3D11Runtime
+    int foundCalls = 0;       // DepthInputsFound calls and the names of the last one
+    std::vector<std::string> foundNames;
+    bool foundThrows = false;
+    bool OnlyD3D11Runtime(uint64_t) override { return onlyRuntime; }
+    void DepthInputsFound(uint64_t, const std::vector<std::string>& names) override
+    {
+        ++foundCalls;
+        foundNames = names;
+        if (foundThrows)
+            throw std::runtime_error("DepthInputsFound");
+    }
+
     int noCandidateCalls = 0; // NoDepthCandidate calls (the texture list is not kept: the allocation test counts the fake's allocations)
     size_t noCandidateTextures = 0;
     bool noCandidateThrows = false;
@@ -484,6 +497,8 @@ struct Router final : IBackend
     bool BackBufferSize(uint64_t rt, uint32_t& w, uint32_t& h) override { return For(rt).BackBufferSize(rt, w, h); }
     bool TextureVariables(uint64_t rt, std::vector<TextureVar>& o) override { return For(rt).TextureVariables(rt, o); }
     void NoDepthCandidate(uint64_t rt, const std::vector<TextureVar>& t) override { For(rt).NoDepthCandidate(rt, t); }
+    void DepthInputsFound(uint64_t rt, const std::vector<std::string>& n) override { For(rt).DepthInputsFound(rt, n); }
+    bool OnlyD3D11Runtime(uint64_t rt) override { return For(rt).OnlyD3D11Runtime(rt); }
     bool TextureBinding(uint64_t rt, uint64_t v, uint64_t& s, uint64_t& g) override { return For(rt).TextureBinding(rt, v, s, g); }
     bool UpdateTextureBindings(uint64_t rt, const char* sem, uint64_t s, uint64_t g) override
     {

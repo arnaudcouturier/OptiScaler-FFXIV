@@ -15,6 +15,7 @@ namespace
 constexpr size_t kFirstHandles = 512; // the first capacity of a handle list; a longer list is read again with the right one
 constexpr int kDecoyLogs = 3;         // readbacks of the first bind that are not the reader and are logged all the same
 constexpr int kNoCandidateLogs = 3;   // lines about runtimes without a depth input candidate, per process
+constexpr int kFoundLogs = 3;         // ... and about runtimes with one
 constexpr size_t kDepthNamesShown = 8;
 const char* const kDepthSemantic = "DEPTH";
 } // namespace
@@ -25,14 +26,16 @@ int64_t LiveDepthBackend::NowMs() { return _env.nowMs != nullptr ? _env.nowMs() 
 uint64_t LiveDepthBackend::Frame() { return _env.frame != nullptr ? _env.frame() : 0; }
 
 // ---- strings and lists ---------------------------------------------------------------------------------------------------------
-// The size query first (a null buffer: the length including the NUL), then a buffer of that size. The second call gets ONE byte more
-// capacity than asked for: a string that grew in between would then come back longer than the first answer instead of cut to fit, and
-// the difference shows. The NUL is checked and stripped; a length of 0 with "exists", an absurd length, a missing terminator or one
-// inside the value are failures, never a shortened value.
+// The size query first (a null buffer: the length + 1), then a buffer of need + 1 bytes (see the contract at the top of
+// ReShadeDepthBackend.h). The second call gets ONE byte more capacity than asked for: a string that grew in between would then come
+// back one character longer instead of cut to fit, and the difference shows. The string is accepted only if the buffer holds a NUL
+// exactly at need - 1 (strnlen == need - 1), which rejects a string that grew, one that shrank, an interior NUL and a copy that never
+// wrote; the second *size is not compared with the first (real ReShade says the characters copied, the header the count with the NUL)
+// except that it may not exceed the capacity. A length of 0 or more than 64 KiB, or a missing string, is a failure, never a cut value.
 template <class Query> Call LiveDepthBackend::ReadString(Query&& query, std::string& out, const char* kind)
 {
-    size_t size = 0;
-    const Call first = query(nullptr, &size);
+    size_t need = 0;
+    const Call first = query(nullptr, &need);
     if (first == Call::Fault)
     {
         LogStringFault(kind, "call faulted", 0, 0, 0);
@@ -40,29 +43,31 @@ template <class Query> Call LiveDepthBackend::ReadString(Query&& query, std::str
     }
     if (first != Call::Yes)
         return first; // not there
-    if (size == 0 || size > kMaxStringBytes)
+    if (need == 0 || need > kMaxStringBytes)
     {
-        LogStringFault(kind, "unusable length", size, 0, 0);
+        LogStringFault(kind, "unusable length", need, 0, 0);
         return Call::Fault;
     }
-    std::vector<char> buffer(size + 1, '\0');
-    size_t capacity = size + 1;
-    if (query(buffer.data(), &capacity) != Call::Yes) // gone a moment after it was there: not "not there"
+    const size_t capacity = need + 1;
+    std::vector<char> buffer(capacity, '\0');
+    size_t size = capacity;
+    if (query(buffer.data(), &size) != Call::Yes) // gone a moment after it was there: not "not there"
     {
-        LogStringFault(kind, "second call faulted or answered no", size, 0, 0);
+        LogStringFault(kind, "second call faulted or answered no", need, 0, 0);
         return Call::Fault;
     }
-    if (capacity != size || buffer[size - 1] != '\0' || std::memchr(buffer.data(), 0, size - 1) != nullptr)
+    const size_t length = strnlen(buffer.data(), capacity);
+    if (size > capacity || length != need - 1)
     {
-        LogStringFault(kind, "answers disagree", size, capacity, strnlen(buffer.data(), size + 1));
+        LogStringFault(kind, "answers disagree", need, size, length);
         return Call::Fault;
     }
-    out.assign(buffer.data(), size - 1);
+    out.assign(buffer.data(), length);
     return Call::Yes;
 }
 
-// Said once: the first string that breaks the size contract, whatever its kind. What the headers promise (the length includes the NUL,
-// the second call returns the same length) is what real ReShade must keep; if it does not, this line shows how it differs.
+// Said once: the first string that breaks the size contract, whatever its kind: the kind, the first answer (length + 1), the second
+// *size and the length found in the buffer, so a ReShade that differs from the observed behaviour shows how.
 void LiveDepthBackend::LogStringFault([[maybe_unused]] const char* kind, [[maybe_unused]] const char* why, [[maybe_unused]] size_t firstSize,
                                       [[maybe_unused]] size_t secondSize, [[maybe_unused]] size_t length)
 {
@@ -136,21 +141,29 @@ bool LiveDepthBackend::SameDevice(uint64_t runtime, uint64_t captureDevice)
     const uint64_t target = captureDevice != 0 ? captureDevice : primary;
     if (target != 0 && native == target)
         return true;
-    // A real capture was made on the native device of the game's depth texture: another device never gets a view of it.
+    // get_native() is not the device of the game's resources in every setup (ReShade's own wrapper object came back in game): ask the
+    // resource that really is on the runtime's side, its back buffer. A fault or no back buffer leaves it 0 = unknown.
+    uint64_t resourceDevice = 0;
+    if (!_raw.BackBufferDevice(runtime, resourceDevice))
+        resourceDevice = 0;
+    if (target != 0 && resourceDevice == target)
+        return true;
+    // A real capture was made on the device of the game's depth texture: another device never gets a view of it.
     if (captureDevice != 0)
     {
         if (!_deviceRefusalLogged.exchange(true))
-            LOG_WARN("Automatic ReShade depth: device mismatch: the runtime's device {:#x} is not the capture's device {:#x} (primary {:#x}); "
-                     "runtimes of this device get no depth copy",
-                     native, captureDevice, primary);
+            LOG_WARN("Automatic ReShade depth: device mismatch: the runtime's device {:#x} (its back buffer's device {:#x}) is not the capture's "
+                     "device {:#x} (primary {:#x}); runtimes of this device get no depth copy",
+                     native, resourceDevice, captureDevice, primary);
         return false;
     }
     // No capture yet. The primary device may be known under another pointer (a proxy) or not at all: the only D3D11 runtime is ours.
     if (!OnlyD3D11Runtime(runtime))
         return false;
     if (!_fallbackLogged.exchange(true))
-        LOG_INFO("Automatic ReShade depth: the runtime's device {:#x} is not the game's device {:#x}; taking the only D3D11 runtime (no capture yet)",
-                 native, target);
+        LOG_INFO("Automatic ReShade depth: the runtime's device {:#x} (its back buffer's device {:#x}) is not the game's device {:#x}; taking "
+                 "the only D3D11 runtime (no capture yet)",
+                 native, resourceDevice, target);
     return true;
 }
 
@@ -233,6 +246,17 @@ void LiveDepthBackend::NoDepthCandidate([[maybe_unused]] uint64_t runtime, const
     }
     LOG_INFO("Automatic ReShade depth: runtime {:#x} has {} texture variables and no known depth input; {} contain 'depth' in the name: {}",
              runtime, textures.size(), matching, names.empty() ? std::string("(none)") : names);
+}
+
+// The first runtimes with a depth input say which variables matched, so the first run shows the unique-name form ReShade really reports.
+void LiveDepthBackend::DepthInputsFound([[maybe_unused]] uint64_t runtime, const std::vector<std::string>& names)
+{
+    if (_foundLogs.fetch_add(1, std::memory_order_relaxed) >= kFoundLogs)
+        return;
+    std::string list;
+    for (const std::string& name : names)
+        list += (list.empty() ? "" : ", ") + name;
+    LOG_INFO("Automatic ReShade depth: runtime {:#x} has depth input variables: {}", runtime, list);
 }
 
 bool LiveDepthBackend::TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb)

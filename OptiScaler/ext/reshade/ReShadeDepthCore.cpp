@@ -17,8 +17,12 @@ constexpr std::string_view kBufReadySource = "bufready_depth";
 
 // Texture variables ReShade effects declare for the depth buffer, by priority. A variable that is merely named like "depth"
 // may be an internal texture of an effect (it dangles after a reload) and is never used. Some effects (MXAO) declare only
-// DepthInputTex.
-constexpr const char* kDepthInputNames[] = { "ReShade::DepthBufferTex", "DepthBufferTex", "DepthInputTex" };
+// DepthInputTex. The runtime API reports ReShade's UNIQUE names, which are mangled: 'V' + the scope ("::" for the global one,
+// "::ReShade::" for namespace ReShade) with every ':' turned into '_' (seen in game: V__Deferred__GeoNormalsTexV4 for
+// Deferred::GeoNormalsTexV4), so both the declared and the mangled forms are listed. Matching stays exact (a decoy such as MXAODepth is
+// rejected); the readback after the bind is what verifies the pick.
+constexpr const char* kDepthInputNames[] = { "ReShade::DepthBufferTex", "V__ReShade__DepthBufferTex", "DepthBufferTex",
+                                             "V__DepthBufferTex",       "DepthInputTex",             "V__DepthInputTex" };
 
 // Every variable with one of the names, best name first. Which of them really reads the DEPTH semantic is not known until the
 // copy has been bound and one of them shows it.
@@ -283,6 +287,8 @@ std::string DepthBinder::Status() const noexcept
             return "Depth input not trusted; generic depth retained";
         case StatusKind::Failed:
             return "ReShade call failed; generic depth retained";
+        case StatusKind::OtherDevice:
+            return "ReShade runs on another device than the game's depth; generic depth retained";
         case StatusKind::Bound:
             if (info.renderW == info.outputW && info.renderH == info.outputH)
                 return std::format("Automatic scene depth: {}x{}", info.outputW, info.outputH);
@@ -382,7 +388,7 @@ Outcome DepthBinder::Done(Outcome outcome)
         SetStatus(StatusKind::Failed);
         break;
     case Outcome::Bound: // sets its own, with the sizes
-    case Outcome::OtherDevice:
+    case Outcome::OtherDevice: // sets its own when it is the only runtime (see Bind), none for a foreign one
     case Outcome::NotD3D11:
         break;
     }
@@ -534,6 +540,10 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
     if (!_backend.SameDevice(runtime, capture.device))
     {
         Bump(Counter::OtherDevice);
+        // A runtime that is clearly foreign (another one is the game's) says nothing. The ONLY D3D11 runtime refused by device identity
+        // is the user's ReShade not working: that is said in the status instead of leaving it at "waiting".
+        if (_backend.OnlyD3D11Runtime(runtime))
+            SetStatus(StatusKind::OtherDevice);
         return Done(Outcome::OtherDevice);
     }
 
@@ -582,6 +592,21 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
         }
         Bump(Counter::NoDepthInput);
         return Done(Outcome::NoDepthInput);
+    }
+    if (!state.foundNoted)
+    {
+        state.foundNoted = true;
+        try
+        {
+            std::vector<std::string> names;
+            names.reserve(candidates.size());
+            for (const TextureVar* candidate : candidates)
+                names.push_back(candidate->name);
+            _backend.DepthInputsFound(runtime, names);
+        }
+        catch (...)
+        {
+        }
     }
     if (state.trust == Trust::Unknown)
     {

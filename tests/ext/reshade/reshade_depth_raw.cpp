@@ -281,6 +281,8 @@ void GarbageHandlesAreSurvived()
     CHECK(!raw.DeviceInfo(kGarbage, flag, flag2, a));
     CHECK(!raw.DeviceInfo(0, flag, flag2, a));
     CHECK(!raw.BackBuffer(kGarbage, w, h));
+    CHECK(!raw.BackBufferDevice(kGarbage, a));
+    CHECK(!raw.BackBufferDevice(0, a));
     CHECK(!raw.ListTextures(kGarbage, handles, 4, count));
     CHECK(!raw.ListUniforms(kGarbage, handles, 4, count));
     CHECK(!raw.ListTechniques(kGarbage, handles, 4, count));
@@ -317,6 +319,7 @@ void FaultsInsideReShade()
         char buffer[8] = {};
         CHECK(!raw.DeviceInfo(id, f1, f2, a));
         CHECK(!raw.BackBuffer(id, w, h));
+        CHECK(!raw.BackBufferDevice(id, a));
         CHECK(!raw.ListTextures(id, handles, 4, count));
         CHECK(!raw.ListUniforms(id, handles, 4, count));
         CHECK(!raw.ListTechniques(id, handles, 4, count));
@@ -561,6 +564,57 @@ void ViewFormats()
     }
 }
 
+// The device of the resource behind back buffer 0 (ID3D11Resource::GetDevice), which is NOT device::get_native() of the runtime's device:
+// the comparison with the game's depth texture is made on the devices of real resources
+void BackBufferDeviceIsTheResourceDevice()
+{
+    using Microsoft::WRL::ComPtr;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0, got {};
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device, &got, &context)))
+    {
+        std::puts("SKIP: no WARP device (the back buffer device check did not run)");
+        return;
+    }
+    D3D11_TEXTURE2D_DESC td {};
+    td.Width = td.Height = 16;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> texture;
+    CHECK(SUCCEEDED(device->CreateTexture2D(&td, nullptr, &texture)));
+    IRawApi& raw = LiveRawApi();
+    FakeDevice dev; // its get_native() is 0xD3D0: a pointer that is not the resource's device
+    FakeRuntime rt;
+    rt.dev = &dev;
+    rt.backBuffer = reinterpret_cast<uint64_t>(texture.Get());
+    uint64_t d = 7;
+    CHECK(raw.BackBufferDevice(Id(rt), d));
+    CHECK(d == reinterpret_cast<uint64_t>(device.Get()) && d != 0xD3D0);
+    CHECK(rt.backBufferIndex == 0); // back buffer 0
+    // the reference the query takes is given back
+    device->AddRef();
+    const ULONG before = device->Release();
+    CHECK(raw.BackBufferDevice(Id(rt), d));
+    device->AddRef();
+    CHECK(device->Release() == before);
+    // no back buffer, or an empty handle: device 0, no fault
+    rt.backBuffers = 0;
+    rt.backBufferIndex = ~0u;
+    d = 7;
+    CHECK(raw.BackBufferDevice(Id(rt), d) && d == 0 && rt.backBufferIndex == ~0u);
+    rt.backBuffers = 1;
+    rt.backBuffer = 0;
+    d = 7;
+    CHECK(raw.BackBufferDevice(Id(rt), d) && d == 0);
+    // a back buffer handle that is garbage: caught, not crashed
+    rt.backBuffer = 0x77;
+    CHECK(!raw.BackBufferDevice(Id(rt), d));
+}
+
 // the layer calls nothing but what it needs
 void NothingElse() { CHECK(g_unexpected.empty()); }
 } // namespace
@@ -575,6 +629,7 @@ int main()
     Bindings();
     ViewReferences();
     ViewFormats();
+    BackBufferDeviceIsTheResourceDevice();
     NothingElse();
     if (!g_unexpected.empty())
         for (const std::string& u : g_unexpected)

@@ -38,6 +38,7 @@ const char* const kManual = "Manual ReShade depth transform retained";
 const char* const kNoInput = "No depth input found; generic depth retained";
 const char* const kNotTrusted = "Depth input not trusted; generic depth retained";
 const char* const kFailed = "ReShade call failed; generic depth retained";
+const char* const kOtherDevice = "ReShade runs on another device than the game's depth; generic depth retained";
 
 // every public entry is noexcept in the declaration
 static_assert(noexcept(std::declval<DepthBinder&>().OnBeginEffects(0)));
@@ -1177,13 +1178,19 @@ void DepthInputLookup()
         return o;
     };
     uint64_t srv = 0;
-    for (const char* name : { "ReShade::DepthBufferTex", "DepthBufferTex", "DepthInputTex" })
+    // the declared names and ReShade's mangled unique names of the same variables ('V' + the scope, ':' turned into '_': seen in game as
+    // V__Deferred__GeoNormalsTexV4)
+    for (const char* name : { "ReShade::DepthBufferTex", "V__ReShade__DepthBufferTex", "DepthBufferTex", "V__DepthBufferTex", "DepthInputTex",
+                              "V__DepthInputTex" })
     {
         CHECK(restoredOriginal(name, srv) == Outcome::Bound);
         CHECK(srv == kOrig);
     }
     for (const char* name : { "MXAODepth", "texDepthMip", "depthbuffertex", "DepthBufferTex2", " DepthBufferTex", "DepthBufferTex ",
-                              "ReShade::DepthBufferTexture", "Depth", "ReShade::depthbuffertex", "" })
+                              "ReShade::DepthBufferTexture", "Depth", "ReShade::depthbuffertex", "",
+                              // near misses of the mangled forms stay rejected: exact matching only
+                              "V__MXAO__DepthTex", "V_DepthBufferTex", "V__DepthBufferTex2", "V__Foo__DepthBufferTex", "VReShade__DepthBufferTex",
+                              "v__reshade__depthbuffertex", "V__ReShade__DepthInputTex", "V__DepthInputTexX", "V__" })
         CHECK(restoredOriginal(name, srv) == Outcome::NoDepthInput);
 
     { // an MXAO-only runtime: DepthInputTex and decoys, no DepthBufferTex anywhere
@@ -1227,6 +1234,18 @@ void DepthInputLookup()
         q.Finish();
         CHECK(q.fake.bindingReads[0x520] == 1 && q.fake.bindingReads[0x521] == beforeQ + 1);
     }
+    { // the mangled forms rank with their declared names: ReShade's own buffer first, then DepthBufferTex, then DepthInputTex
+        Rig r;
+        r.fake.vars = { { 0x540, "V__DepthInputTex", "DEPTH", 0, 0 },
+                        { 0x541, "V__DepthBufferTex", "DEPTH", 0, 0 },
+                        { 0x542, "V__ReShade__DepthBufferTex", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.foundCalls == 1);
+        CHECK(r.fake.foundNames == std::vector<std::string>({ "V__ReShade__DepthBufferTex", "V__DepthBufferTex", "V__DepthInputTex" }));
+        CHECK(r.fake.bindingReads[0x540] == 1 && r.fake.bindingReads[0x541] == 1 && r.fake.bindingReads[0x542] >= 3);
+        r.Finish();
+        CHECK(r.Clean());
+    }
     { // a name must match exactly, whatever the enumeration order says: a near miss is never even looked at
         Rig r;
         r.fake.vars = { { 0x530, "DepthInputTexX", "DEPTH", 0, 0 }, { 0x531, "DepthInputTex", "DEPTH", 0, 0 } };
@@ -1246,6 +1265,80 @@ void DepthInputLookup()
         CHECK(r.fake.bindingReads.count(0x777) >= 1);
         CHECK(r.fake.DepthIs(kOrig, kOrigSrgb)); // finish used the new handle, too
         CHECK(r.Clean());
+    }
+}
+
+// The first sight of a runtime WITH depth input candidates is reported to the backend once, with their names in the order they rank (the live
+// backend logs them, so the first run shows the form real ReShade reports); it is not reported for a runtime without one
+void DepthInputsFoundNote()
+{
+    { // once, however often it begins; with the names
+        Rig r;
+        for (int i = 0; i < 4; ++i)
+            CHECK(r.Pass());
+        CHECK(r.fake.foundCalls == 1 && r.fake.foundNames == std::vector<std::string>({ "ReShade::DepthBufferTex" }));
+        r.binder.OnReloadedEffects(kRt); // new effects: said again
+        CHECK(r.Pass() && r.fake.foundCalls == 2);
+        CHECK(r.Pass() && r.fake.foundCalls == 2);
+        r.binder.OnTechniquesChanged(kRt); // (not new effects)
+        CHECK(r.Pass() && r.fake.foundCalls == 2);
+        r.binder.OnDestroyRuntime(kRt); // the runtime is gone
+        CHECK(r.Pass() && r.fake.foundCalls == 3);
+    }
+    { // no candidate: the other note, not this one
+        Rig r;
+        r.fake.vars = { { 0x510, "MXAODepth", "", kOther, kOtherSrgb } };
+        CHECK(!r.Pass());
+        CHECK(r.fake.foundCalls == 0 && r.fake.noCandidateCalls == 1);
+    }
+    { // a candidate that is not trusted is reported all the same (the names are known)
+        Rig r;
+        r.fake.vars[0].semantic = "";
+        r.fake.vars[0].srv = kColor;
+        CHECK(!r.Pass());
+        CHECK(r.fake.foundCalls == 1);
+    }
+    { // a hook that throws costs the line only
+        Rig r;
+        r.fake.foundThrows = true;
+        CHECK(r.Pass());
+        CHECK(r.Clean());
+    }
+}
+
+// A refusal by device identity of the ONLY D3D11 runtime is said in the status; a foreign runtime says nothing
+void OtherDeviceStatus()
+{
+    { // the only D3D11 runtime: the user's ReShade is not on the game's device. Said, and counted.
+        Rig r;
+        r.fake.sameDevice = false;
+        r.fake.onlyRuntime = true;
+        CHECK(r.Begin() == Outcome::OtherDevice);
+        CHECK(r.binder.Status() == kOtherDevice);
+        CHECK(r.binder.GetCounters().otherDevice == 1);
+        r.Finish();
+        CHECK(r.fake.updates.empty() && r.Clean());
+        // once the devices agree it binds and the line is replaced
+        r.fake.sameDevice = true;
+        CHECK(r.Pass() && r.binder.Status() != kOtherDevice);
+    }
+    { // one of several runtimes: foreign, no status of its own (the line would flip with every frame)
+        Rig r;
+        CHECK(r.Pass()); // the status of a bound pass
+        const std::string before = r.binder.Status();
+        r.fake.sameDevice = false;
+        r.fake.onlyRuntime = false;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::OtherDevice);
+        CHECK(r.binder.Status() == before);
+        r.Finish();
+    }
+    { // not D3D11 is not this
+        Rig r;
+        r.fake.d3d11 = false;
+        r.fake.onlyRuntime = true;
+        CHECK(r.Begin() == Outcome::NotD3D11);
+        CHECK(r.binder.Status() != kOtherDevice);
     }
 }
 
@@ -2719,6 +2812,8 @@ int main()
     ManualTransformCache();
     DepthInputLookup();
     NoCandidateNote();
+    DepthInputsFoundNote();
+    OtherDeviceStatus();
     BufReadyDepth();
     EnableDisable();
     ReloadMidPass();

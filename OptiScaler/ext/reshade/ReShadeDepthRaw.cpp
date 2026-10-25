@@ -95,6 +95,29 @@ void BackBufferThunk(void* p)
     j.height = desc.texture.height;
 }
 
+struct BackBufferDeviceJob
+{
+    effect_runtime* runtime;
+    uint64_t device;
+};
+void BackBufferDeviceThunk(void* p)
+{
+    auto& j = *static_cast<BackBufferDeviceJob*>(p);
+    j.device = 0;
+    if (j.runtime->get_back_buffer_count() == 0)
+        return;
+    const resource back = j.runtime->get_back_buffer(0);
+    if (back.handle == 0)
+        return;
+    // For D3D11 a ReShade resource handle is the ID3D11Resource pointer itself.
+    ID3D11Device* device = nullptr;
+    reinterpret_cast<ID3D11Resource*>(back.handle)->GetDevice(&device);
+    if (device == nullptr)
+        return;
+    j.device = reinterpret_cast<uint64_t>(device);
+    device->Release();
+}
+
 // The enumeration callbacks only count and store handles: ReShade calls them, so they must not throw or allocate.
 struct ListJob
 {
@@ -278,6 +301,14 @@ class LiveRaw final : public IRawApi
             return false;
         width = j.width;
         height = j.height;
+        return true;
+    }
+    bool BackBufferDevice(uint64_t runtime, uint64_t& device) override
+    {
+        BackBufferDeviceJob j { Rt(runtime), 0 };
+        if (!Run(&BackBufferDeviceThunk, &j))
+            return false;
+        device = j.device;
         return true;
     }
     bool ListTextures(uint64_t runtime, uint64_t* out, size_t cap, size_t& count) override

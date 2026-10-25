@@ -6,14 +6,21 @@
 // from its binding map may be dangling).
 //
 // What the backend does on top of the raw calls:
-//  - Strings (variable, annotation, effect and technique names, preprocessor definitions) are read with ReShade's size query first:
-//    a null buffer gives the length INCLUDING the terminating NUL, then a buffer of exactly that size is filled. The NUL is not part
-//    of the value. There is never a fixed-size overload, so a value is never silently cut ("1.05" must not read as "1.0" and be taken
-//    for the neutral macro value). A second answer that disagrees with the first, a missing NUL or an absurd size is a failure.
+//  - Strings (variable, annotation, effect and technique names, preprocessor definitions) are read with ReShade's size query first.
+//    The contract, OBSERVED in game 2026-10-25 (ReShade 6.8.0.2155; the vendored header's "including the null-terminator" is only
+//    right for the query): a query with a null buffer returns the length + 1 (the NUL counted); a copy with capacity N writes
+//    min(N - 1, length) characters, then the NUL, and sets *size to the NUMBER OF CHARACTERS COPIED, WITHOUT the NUL (it is
+//    std::string::copy). So the backend asks for need, copies into need + 1, and accepts the string only if a NUL ends it exactly at
+//    need - 1: a string that grew in between would come back one character longer (not cut), one that shrank or holds an interior NUL
+//    shorter. The second *size is only required to be <= the capacity, which accepts the observed behaviour and the header's wording.
+//    There is never a fixed-size overload, so a value is never silently cut ("1.05" must not read as "1.0" and be taken for the neutral
+//    macro value). A missing string, an absurd size (0 or more than 64 KiB) or a second answer that disagrees is a failure.
 //  - A definition is tri-state: undefined, defined, error.
 //  - A call that faults makes the method answer false / Error / throw (see IBackend): the core never lets either reach ReShade.
-//  - SameDevice compares NATIVE devices (ReShade's device::get_native()), modelled on the runtime choice of the HudLess boundary
-//    (PickRuntime in ReShadeEvents.cpp). See SameDevice below for where it differs, on purpose.
+//  - SameDevice compares the devices of REAL RESOURCES: ID3D11Resource::GetDevice() of the runtime's back buffer against the device
+//    of the capture (GetDevice() of the game's depth texture). ReShade's device::get_native() is not that device in this setup (seen in
+//    game 2026-10-25: 0x228aa25f390, ReShade's own wrapper, against the game's 0x228b20940d0), so it is only a second accepted match.
+//    See SameDevice below.
 //  - The first real bind: the readback of ReShade's binding after the first update_texture_bindings with a view is logged once.
 //  - What the headers cannot settle is logged once each, so the first run in the game answers it: the first string that breaks the size
 //    contract (query kind, both sizes, the length found), the first refusal of a runtime by a device that differs once a capture
@@ -76,8 +83,9 @@ enum class Call : uint8_t
 
 // One function per ReShade API call (a few small groups). Runtimes, variables, techniques and views are opaque 64-bit handles: a
 // runtime is the effect_runtime pointer, a view an ID3D11View pointer. A bool result is false when the call faulted.
-// Strings follow ReShade's convention: buffer == nullptr asks for the length; the length INCLUDES the NUL (`*size` is the capacity
-// on entry, the length of the string on return).
+// Strings follow ReShade's convention (observed 2026-10-25, see the top of this file): buffer == nullptr asks for the length + 1; with a
+// buffer `*size` is the capacity on entry (it includes the NUL) and the number of characters copied, without the NUL, on return. A
+// fake that wants the header's wording instead returns the count including the NUL; the backend accepts both.
 struct IRawApi
 {
     virtual ~IRawApi() = default;
@@ -86,6 +94,9 @@ struct IRawApi
     virtual bool DeviceInfo(uint64_t runtime, bool& hasDevice, bool& d3d11, uint64_t& native) = 0;
     // the size of back buffer 0; 0x0 when there is none or it is not a 2D texture
     virtual bool BackBuffer(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
+    // The device of the resource behind back buffer 0 (ID3D11Resource::GetDevice, the pointer value; the reference taken is given back);
+    // 0 when there is no back buffer. true means the call ran without a fault.
+    virtual bool BackBufferDevice(uint64_t runtime, uint64_t& device) = 0;
 
     // Enumerations. The handles go to out[0..min(count, cap)); `count` is how many ReShade reported, also beyond the capacity.
     virtual bool ListTextures(uint64_t runtime, uint64_t* out, size_t cap, size_t& count) = 0;
@@ -151,15 +162,18 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     void Release(uint64_t view) override; // ... and so does this
     bool IsDepthView(uint64_t view) override;
     bool IsD3D11(uint64_t runtime) override;
-    // The runtime's device (a native device) is the capture's device. captureDevice 0: no capture yet, so "the game's primary D3D11
-    // device" (BackendEnv::primaryDevice). When the devices differ as pointers, or the primary one is unknown, the only D3D11
-    // runtime of the process counts as ours (the way the boundary picks its runtime): ONLY while there is no capture yet. Once a
-    // capture exists its device is the native device of the game's depth texture, and a runtime of another device must never get a
-    // view of it: that is refused, also when it is the only runtime.
+    // The runtime's device is the capture's device: the device of the runtime's back buffer resource (GetDevice), or the runtime's
+    // get_native(), equals it. captureDevice 0: no capture yet, so "the game's primary D3D11 device" (BackendEnv::primaryDevice). When
+    // neither matches, or the primary one is unknown, the only D3D11 runtime of the process counts as ours (the way the boundary picks
+    // its runtime): ONLY while there is no capture yet. Once a capture exists its device is the device of the game's depth texture, and a
+    // runtime of another device must never get a view of it: that is refused, also when it is the only runtime (the binder then says so
+    // in the status, see OnlyD3D11Runtime).
     bool SameDevice(uint64_t runtime, uint64_t captureDevice) override;
+    bool OnlyD3D11Runtime(uint64_t runtime) override;
     bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) override;
     bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) override;
     void NoDepthCandidate(uint64_t runtime, const std::vector<TextureVar>& textures) override;
+    void DepthInputsFound(uint64_t runtime, const std::vector<std::string>& names) override;
     bool TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb) override;
     bool UpdateTextureBindings(uint64_t runtime, const char* semantic, uint64_t srv, uint64_t srvSrgb) override;
     bool UniformVariables(uint64_t runtime, std::vector<UniformVar>& out) override;
@@ -184,7 +198,6 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     // Handles of an enumeration, grown once if the first capacity was too small.
     template <class List> bool ReadHandles(List&& list, std::vector<uint64_t>& handles);
     void LogFirstBind(uint64_t runtime, uint64_t variable, uint64_t srv, uint64_t srvSrgb);
-    bool OnlyD3D11Runtime(uint64_t runtime);
 
     IRawApi& _raw;
     BackendEnv _env;
@@ -208,5 +221,6 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     std::atomic<bool> _stringFaultLogged { false };
     std::atomic<bool> _deviceRefusalLogged { false };
     std::atomic<int> _noCandidateLogs { 0 };
+    std::atomic<int> _foundLogs { 0 };
 };
 } // namespace ext::reshade::depth
