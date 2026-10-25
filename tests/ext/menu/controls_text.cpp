@@ -87,13 +87,16 @@ constexpr const char* kAmpereAdvanced = "ImGui::TreeNode(\"Advanced (RTX 20/30 r
 
 const Row kRows[] = {
     // Automatic ReShade scene depth: [FFXIV] AutomaticReShadeDepth, the switch of the "ReShade depth compatibility" card. Read at every
-    // evaluate (the facade keeps it in one atomic word), so a change applies from the next frame, no restart; the tooltip says what it
-    // needs (ReShade 6.8 or newer) and what it stands down for, and the toggle goes through SetEnabled so the binder follows it.
+    // evaluate (the facade keeps it in one atomic word), so a change applies without a restart: switching it on takes effect within a few
+    // frames (the first evaluate builds it, a begin records the consumer, the next evaluate captures); the tooltip says what it needs
+    // (ReShade 6.8 or newer), that it stands down only for NON-NEUTRAL values of the six macros, what to do about the reverse-Z depth,
+    // and the toggle goes through SetEnabled so the binder follows it.
     { .home = kDepth, .file = "reshade/ReShadeDepthMenu.cpp", .widget = "ImGui::Checkbox(\"Automatic scene depth\"",
       .write = "cfg.automaticReShadeDepth=on", .keyPrefix = "cfg.automaticReShadeDepth=",
-      .block = { "Needs ReShade 6.8 or newer (add-on API 20)", "RESHADE_DEPTH_INPUT_IS_REVERSED=1", "Takes effect from the next frame" },
+      .block = { "Needs ReShade 6.8 or newer (add-on API 20)", "stands down only for NON-NEUTRAL values", "defined with the neutral value",
+                 "looks inverted with this on, set RESHADE_DEPTH_INPUT_IS_REVERSED=1", "takes effect within a few frames" },
       .fileHas = { "ext::reshade::depth::SetEnabled(on);", "ext::reshade::depth::Status()", "ext::menu::SectionTitle(\"ReShade depth compatibility\");" },
-      .blockNot = { "restart" } },
+      .blockNot = { "restart", "next frame" } },
 
     // WP4 item 1: [HudLess] ReShadePresets, main part of the HUD-less card. The mode is read at every UI boundary, so switching to Off
     // applies at once; but the ReShade runtime tracking is only installed at start when presets are not Off (ReShadeAddon.cpp
