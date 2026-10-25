@@ -1003,6 +1003,112 @@ void ContextState()
     }
 }
 
+// At NGX evaluate time the game's own state may still have the depth bound (as the depth-stencil target, or read-only together with a
+// shader resource view in a pixel shader slot). The pass reads it from its private state and must neither disturb those bindings nor
+// read an unbound (all zero) view.
+void SourceBoundInGameState()
+{
+    struct Row
+    {
+        const char* name;
+        DXGI_FORMAT tex, dsv;
+        UINT readOnly;
+        float tolerance;
+    };
+    const Row rows[] = {
+        { "R32_TYPELESS/D32_FLOAT", DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, D3D11_DSV_READ_ONLY_DEPTH, 0.0f },
+        { "R24G8_TYPELESS/D24_UNORM_S8_UINT", DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT,
+          D3D11_DSV_READ_ONLY_DEPTH | D3D11_DSV_READ_ONLY_STENCIL, 1e-6f },
+    };
+    for (const Row& row : rows)
+        for (int readOnly = 0; readOnly < 2; ++readOnly)
+        {
+            Fixture f;
+            if (!f.Create())
+                return;
+            D3D11_TEXTURE2D_DESC td {};
+            td.Width = 16;
+            td.Height = 12;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = row.tex;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> tex;
+            ComPtr<ID3D11DepthStencilView> writable, readOnlyView;
+            ComPtr<ID3D11ShaderResourceView> srv;
+            D3D11_DEPTH_STENCIL_VIEW_DESC dd {};
+            dd.Format = row.dsv;
+            dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+            D3D11_DEPTH_STENCIL_VIEW_DESC ro = dd;
+            ro.Flags = row.readOnly;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd {};
+            sd.Format = SrvFormatFor(row.tex);
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MipLevels = 1;
+            CHECK(SUCCEEDED(f.rig.device->CreateTexture2D(&td, nullptr, &tex)));
+            if (tex == nullptr)
+                continue;
+            CHECK(SUCCEEDED(f.rig.device->CreateDepthStencilView(tex.Get(), &dd, &writable)));
+            CHECK(SUCCEEDED(f.rig.device->CreateDepthStencilView(tex.Get(), &ro, &readOnlyView)));
+            CHECK(SUCCEEDED(f.rig.device->CreateShaderResourceView(tex.Get(), &sd, &srv)));
+            if (writable == nullptr || readOnlyView == nullptr || srv == nullptr)
+                continue;
+            f.rig.context->ClearDepthStencilView(writable.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.25f, 3);
+
+            GameState game; // colour target, shaders, buffers and the other states as in the state test
+            CHECK(game.Set(f.rig));
+            // a colour target of the depth buffer's size (the two must agree for the output merger)
+            D3D11_TEXTURE2D_DESC cd = td;
+            cd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> colour;
+            ComPtr<ID3D11RenderTargetView> colourView;
+            CHECK(SUCCEEDED(f.rig.device->CreateTexture2D(&cd, nullptr, &colour)));
+            if (colour == nullptr || FAILED(f.rig.device->CreateRenderTargetView(colour.Get(), nullptr, &colourView)))
+                continue;
+            ID3D11RenderTargetView* rtvs[1] = { colourView.Get() };
+            ID3D11ShaderResourceView* srvs[1] = { srv.Get() };
+            if (readOnly != 0)
+            {
+                f.rig.context->OMSetRenderTargets(1, rtvs, readOnlyView.Get());
+                f.rig.context->PSSetShaderResources(3, 1, srvs);
+            }
+            else
+                f.rig.context->OMSetRenderTargets(1, rtvs, writable.Get());
+            const Dump before = DumpState(f.rig.context.Get());
+            uint64_t boundDsv = 0, boundSrv = 0;
+            for (const auto& entry : before)
+            {
+                if (entry.first == "dsv")
+                    boundDsv = entry.second;
+                if (entry.first == "psSrv3")
+                    boundSrv = entry.second;
+            }
+            CHECK(boundDsv != 0);
+            CHECK(readOnly == 0 || boundSrv != 0);
+
+            CaptureReport r;
+            const bool ok = f.Run(tex.Get(), Args(10, 8, 2, 1, 8, 6), &r);
+            if (!ok)
+                std::printf("  %s (%s): refused: %s\n", row.name, readOnly != 0 ? "read-only view + shader resource view" : "writable view",
+                            ResultName(r.result));
+            CHECK(ok);
+            const char* what = readOnly != 0 ? "depth bound read-only with a shader resource view" : "depth bound as the depth-stencil target";
+            CHECK(SameState(what, before, DumpState(f.rig.context.Get())));
+            if (!ok)
+                continue;
+            const Image img = ReadView(f.rig, f.LastView());
+            bool allSame = img.px.size() == 80;
+            for (float v : img.px)
+                allSame = allSame && std::fabs(v - 0.25f) <= row.tolerance + 1e-6f;
+            if (!allSame)
+                std::printf("  %s (%s): first pixel %.9g, want 0.25\n", row.name, readOnly != 0 ? "read-only" : "writable",
+                            img.px.empty() ? -1.0f : img.px[0]);
+            CHECK(allSame);
+        }
+}
+
 void BypassScopeIsOn()
 {
     Fixture f;
@@ -1750,6 +1856,7 @@ int main()
     DepthStencilSources();
     std::fputs("context state...\n", stderr);
     ContextState();
+    SourceBoundInGameState();
     BypassScopeIsOn();
     std::fputs("publish...\n", stderr);
     PublishedFields();
@@ -1776,6 +1883,6 @@ int main()
         std::printf("FAIL: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::puts("PASS: depth copy (formats, request checks, constants, crop and nearest remap on 6 source families x 12 cases, context state, bypass scope, publish order on recreate / Release / destroy / device change, refusals, faults, product shader clamp and largest edge)");
+    std::puts("PASS: depth copy (formats, request checks, constants, crop and nearest remap on 6 source families x 12 cases, context state (also with the depth bound in it), bypass scope, publish order on recreate / Release / destroy / device change, refusals, faults, product shader clamp and largest edge)");
     return 0;
 }
