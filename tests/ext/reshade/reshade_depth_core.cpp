@@ -38,7 +38,6 @@ const char* const kManual = "Manual ReShade depth transform retained";
 const char* const kNoInput = "No depth input found; generic depth retained";
 const char* const kNotTrusted = "Depth input not trusted; generic depth retained";
 const char* const kFailed = "ReShade call failed; generic depth retained";
-const char* const kOtherDevice = "ReShade runs on another device than the game's depth; generic depth retained";
 
 // every public entry is noexcept in the declaration
 static_assert(noexcept(std::declval<DepthBinder&>().OnBeginEffects(0)));
@@ -52,7 +51,7 @@ static_assert(noexcept(std::declval<const DepthBinder&>().Status()));
 static_assert(noexcept(std::declval<const DepthBinder&>().GetCounters()));
 static_assert(noexcept(std::declval<const DepthBinder&>().GetConsumer(0).seen));
 
-Fake::Var DepthVar() { return { kDepthVar, "ReShade::DepthBufferTex", "DEPTH", 0, 0 }; }
+Fake::Var DepthVar() { return { kDepthVar, "DepthBufferTex", "DEPTH", 0, 0 }; }
 
 // ---- binding and restoring ------------------------------------------------------------------------------------------------
 void HappyPath()
@@ -742,7 +741,7 @@ void DecoyShapes()
     }
     { // retry/reload: the real reader is the second candidate; the first one is a decoy that does not show the copy
         Rig r;
-        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
         r.fake.failRestore = true;
         CHECK(r.Begin() == Outcome::Bound);
         r.Finish();
@@ -754,7 +753,7 @@ void DecoyShapes()
     }
     { // retry/reload: a candidate that cannot be read leaves the runtime dirty, and a later reload repairs it
         Rig r;
-        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
         r.fake.failRestore = true;
         r.Begin();
         r.Finish();
@@ -770,7 +769,7 @@ void DecoyShapes()
     }
     { // the decoy has the better name: the candidate that reads the copy back is the DEPTH reader, and its own read is the original
         Rig r;
-        r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
         const std::string before = r.fake.StateKey();
         CHECK(r.Begin() == Outcome::Bound);
         CHECK(r.fake.DepthIs(kCopy, kCopy));
@@ -814,7 +813,7 @@ void StuckCopyIsUnreachable()
               r.Finish();
           } },
         { "decoy with the better name",
-          [](Rig& r) { r.fake.vars = { { 0x900, "ReShade::DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } }; },
+          [](Rig& r) { r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } }; },
           [](Rig& r)
           {
               r.Begin();
@@ -1178,19 +1177,16 @@ void DepthInputLookup()
         return o;
     };
     uint64_t srv = 0;
-    // the declared names and ReShade's mangled unique names of the same variables ('V' + the scope, ':' turned into '_': seen in game as
-    // V__Deferred__GeoNormalsTexV4)
-    for (const char* name : { "ReShade::DepthBufferTex", "V__ReShade__DepthBufferTex", "DepthBufferTex", "V__DepthBufferTex", "DepthInputTex",
-                              "V__DepthInputTex" })
+    // ReShade answers the SHORT declared name (measured against ReShade 6.8.0.2155: no "ReShade::" prefix, no "V__" form), so exactly these
+    // two match; the qualified and the mangled spellings are not names the runtime ever reports
+    for (const char* name : { "DepthBufferTex", "DepthInputTex" })
     {
         CHECK(restoredOriginal(name, srv) == Outcome::Bound);
         CHECK(srv == kOrig);
     }
-    for (const char* name : { "MXAODepth", "texDepthMip", "depthbuffertex", "DepthBufferTex2", " DepthBufferTex", "DepthBufferTex ",
-                              "ReShade::DepthBufferTexture", "Depth", "ReShade::depthbuffertex", "",
-                              // near misses of the mangled forms stay rejected: exact matching only
-                              "V__MXAO__DepthTex", "V_DepthBufferTex", "V__DepthBufferTex2", "V__Foo__DepthBufferTex", "VReShade__DepthBufferTex",
-                              "v__reshade__depthbuffertex", "V__ReShade__DepthInputTex", "V__DepthInputTexX", "V__" })
+    for (const char* name : { "MXAODepth", "texDepthMip", "depthbuffertex", "DepthBufferTex2", " DepthBufferTex", "DepthBufferTex ", "ReShade::DepthBufferTexture",
+                              "Depth", "ReShade::depthbuffertex", "", "ReShade::DepthBufferTex", "V__ReShade__DepthBufferTex", "V__DepthBufferTex",
+                              "V__DepthInputTex", "ReShade::DepthInputTex", "VReShade__DepthBufferTex", "V__Foo__DepthBufferTex", "V__MXAO__DepthTex", "V__" })
         CHECK(restoredOriginal(name, srv) == Outcome::NoDepthInput);
 
     { // an MXAO-only runtime: DepthInputTex and decoys, no DepthBufferTex anywhere
@@ -1219,32 +1215,12 @@ void DepthInputLookup()
     { // the list order decides which candidate is verified and used, not the enumeration order; every candidate is looked at
       // before the bind, and after it the first one that reads the copy back is the DEPTH reader of the pass
         Rig r;
-        r.fake.vars = { { 0x520, "DepthInputTex", "DEPTH", 0, 0 },
-                        { 0x521, "DepthBufferTex", "DEPTH", 0, 0 },
-                        { 0x522, "ReShade::DepthBufferTex", "DEPTH", 0, 0 } };
+        r.fake.vars = { { 0x520, "DepthInputTex", "DEPTH", 0, 0 }, { 0x521, "DepthBufferTex", "DEPTH", 0, 0 } };
         CHECK(r.Begin() == Outcome::Bound);
-        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] == 1 && r.fake.bindingReads[0x522] >= 3);
-        const int before = r.fake.bindingReads[0x522];
+        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] >= 3);
+        const int before = r.fake.bindingReads[0x521];
         r.Finish();
-        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] == 1 && r.fake.bindingReads[0x522] == before + 1);
-        Rig q;
-        q.fake.vars = { { 0x520, "DepthInputTex", "DEPTH", 0, 0 }, { 0x521, "DepthBufferTex", "DEPTH", 0, 0 } };
-        CHECK(q.Begin() == Outcome::Bound);
-        const int beforeQ = q.fake.bindingReads[0x521];
-        q.Finish();
-        CHECK(q.fake.bindingReads[0x520] == 1 && q.fake.bindingReads[0x521] == beforeQ + 1);
-    }
-    { // the mangled forms rank with their declared names: ReShade's own buffer first, then DepthBufferTex, then DepthInputTex
-        Rig r;
-        r.fake.vars = { { 0x540, "V__DepthInputTex", "DEPTH", 0, 0 },
-                        { 0x541, "V__DepthBufferTex", "DEPTH", 0, 0 },
-                        { 0x542, "V__ReShade__DepthBufferTex", "DEPTH", 0, 0 } };
-        CHECK(r.Begin() == Outcome::Bound);
-        CHECK(r.fake.foundCalls == 1);
-        CHECK(r.fake.foundNames == std::vector<std::string>({ "V__ReShade__DepthBufferTex", "V__DepthBufferTex", "V__DepthInputTex" }));
-        CHECK(r.fake.bindingReads[0x540] == 1 && r.fake.bindingReads[0x541] == 1 && r.fake.bindingReads[0x542] >= 3);
-        r.Finish();
-        CHECK(r.Clean());
+        CHECK(r.fake.bindingReads[0x520] == 1 && r.fake.bindingReads[0x521] == before + 1);
     }
     { // a name must match exactly, whatever the enumeration order says: a near miss is never even looked at
         Rig r;
@@ -1272,11 +1248,18 @@ void DepthInputLookup()
 // backend logs them, so the first run shows the form real ReShade reports); it is not reported for a runtime without one
 void DepthInputsFoundNote()
 {
+    { // in the order they rank, best first
+        Rig r;
+        r.fake.vars = { { 0x540, "DepthInputTex", "DEPTH", 0, 0 }, { 0x541, "DepthBufferTex", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.foundCalls == 1 && r.fake.foundNames == std::vector<std::string>({ "DepthBufferTex", "DepthInputTex" }));
+        r.Finish();
+    }
     { // once, however often it begins; with the names
         Rig r;
         for (int i = 0; i < 4; ++i)
             CHECK(r.Pass());
-        CHECK(r.fake.foundCalls == 1 && r.fake.foundNames == std::vector<std::string>({ "ReShade::DepthBufferTex" }));
+        CHECK(r.fake.foundCalls == 1 && r.fake.foundNames == std::vector<std::string>({ "DepthBufferTex" }));
         r.binder.OnReloadedEffects(kRt); // new effects: said again
         CHECK(r.Pass() && r.fake.foundCalls == 2);
         CHECK(r.Pass() && r.fake.foundCalls == 2);
@@ -1306,39 +1289,45 @@ void DepthInputsFoundNote()
     }
 }
 
-// A refusal by device identity of the ONLY D3D11 runtime is said in the status; a foreign runtime says nothing
-void OtherDeviceStatus()
+// Namespaced textures come back under their SHORT names, so a texture that is not the depth input can read like it (a decoy
+// Foo::DepthBufferTex). The readback after the bind is the guard; a decoy that shows something that is not a depth view fails closed.
+void ShortNameDecoys()
 {
-    { // the only D3D11 runtime: the user's ReShade is not on the game's device. Said, and counted.
+    { // a decoy first that shows no depth view: the runtime is not trusted, nothing is bound, even though a real reader follows
         Rig r;
-        r.fake.sameDevice = false;
-        r.fake.onlyRuntime = true;
-        CHECK(r.Begin() == Outcome::OtherDevice);
-        CHECK(r.binder.Status() == kOtherDevice);
-        CHECK(r.binder.GetCounters().otherDevice == 1);
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kColor, kColor }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.Status() == kNotTrusted && r.binder.GetCounters().noDepthInput == 1);
         r.Finish();
         CHECK(r.fake.updates.empty() && r.Clean());
-        // once the devices agree it binds and the line is replaced
-        r.fake.sameDevice = true;
-        CHECK(r.Pass() && r.binder.Status() != kOtherDevice);
-    }
-    { // one of several runtimes: foreign, no status of its own (the line would flip with every frame)
-        Rig r;
-        CHECK(r.Pass()); // the status of a bound pass
-        const std::string before = r.binder.Status();
-        r.fake.sameDevice = false;
-        r.fake.onlyRuntime = false;
         r.NextFrame();
-        CHECK(r.Begin() == Outcome::OtherDevice);
-        CHECK(r.binder.Status() == before);
+        CHECK(r.Begin() == Outcome::NoDepthInput && r.fake.updates.empty()); // and it stays so until the effects reload
         r.Finish();
+        // the effects reload without the decoy: the real reader is the only candidate, trusted, bound
+        r.binder.OnReloadedEffects(kRt);
+        r.fake.vars = { { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::Bound);
+        r.Finish();
+        CHECK(r.Clean());
     }
-    { // not D3D11 is not this
+    { // a decoy first that shows a depth view (an internal depth texture): the real reader found second still wins, the decoy is left alone
         Rig r;
-        r.fake.d3d11 = false;
-        r.fake.onlyRuntime = true;
-        CHECK(r.Begin() == Outcome::NotD3D11);
-        CHECK(r.binder.Status() != kOtherDevice);
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthInputTex", "DEPTH", 0, 0 } };
+        const std::string before = r.fake.StateKey();
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.DepthIs(kCopy, kCopy));
+        CHECK(r.fake.vars[0].srv == kOther && r.fake.vars[0].srgb == kOtherSrgb); // the decoy keeps its own view
+        r.Finish();
+        CHECK(r.fake.StateKey() == before && r.Clean());
+    }
+    { // two variables with the same short name (a namespaced decoy and the real input): the one that reads the copy back is the reader
+        Rig r;
+        r.fake.vars = { { 0x900, "DepthBufferTex", "", kOther, kOtherSrgb }, { 0x901, "DepthBufferTex", "DEPTH", 0, 0 } };
+        CHECK(r.Begin() == Outcome::Bound);
+        CHECK(r.fake.DepthIs(kCopy, kCopy) && r.fake.vars[0].srv == kOther);
+        r.Finish();
+        CHECK(r.fake.DepthIs(kOrig, kOrigSrgb) && r.Clean());
     }
 }
 
@@ -2813,7 +2802,7 @@ int main()
     DepthInputLookup();
     NoCandidateNote();
     DepthInputsFoundNote();
-    OtherDeviceStatus();
+    ShortNameDecoys();
     BufReadyDepth();
     EnableDisable();
     ReloadMidPass();

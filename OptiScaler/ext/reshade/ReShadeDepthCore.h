@@ -138,7 +138,7 @@ struct LateRegistrationPlanner
 struct TextureVar
 {
     uint64_t handle = 0;
-    std::string name; // unique name as ReShade reports it, e.g. "ReShade::DepthBufferTex"
+    std::string name; // the SHORT declared name ReShade reports (no namespace, no mangling): "DepthBufferTex", "DepthInputTex"
 };
 struct UniformVar
 {
@@ -177,23 +177,19 @@ struct IBackend
 
     // ---- one effect runtime
     virtual bool IsD3D11(uint64_t runtime) = 0;
-    // The runtime's device is the capture's device (the backend unwraps ReShade's proxy device and may fall back the way the
-    // runtime choice of the HudLess boundary does). captureDevice 0 means there is no capture yet: the backend then decides for
-    // "the game's primary D3D11 device". The core always asks, so a runtime of another device never counts as a consumer.
+    // The runtime's device is the capture's device. The game (and ReShade's runtime) see ReShade's PROXY objects: context->GetDevice() and
+    // GetDevice() of the resources created on them answer the proxy, while the runtime's device::get_native() is the real d3d11.dll
+    // device; the two pointers never compare equal and nothing in this layer unwraps one into the other, so the live backend compares
+    // through the runtime's back buffer resource and falls back to "the only D3D11 runtime" (see LiveDepthBackend::SameDevice).
+    // captureDevice 0 means there is no capture yet: the backend then decides for "the game's primary D3D11 device". The core always
+    // asks, so a runtime of another device never counts as a consumer.
     virtual bool SameDevice(uint64_t runtime, uint64_t captureDevice) = 0;
     virtual bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
-    // The runtime is the only D3D11 effect runtime of the process. A refusal by device identity of THAT runtime is worth a line in the
-    // status ("ReShade runs on another device than the game's depth"); one of several is a foreign runtime and says nothing. Inert by default.
-    virtual bool OnlyD3D11Runtime(uint64_t runtime)
-    {
-        (void)runtime;
-        return false;
-    }
 
     virtual bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) = 0;
     // Told once per runtime (and again after its effects were reloaded) when its texture variables contain a known depth input: the
-    // names of those variables, best first, so the first run shows the form real ReShade reports (ReShade mangles a variable's unique name,
-    // "V__ReShade__DepthBufferTex" for ReShade::DepthBufferTex). Inert by default; an exception is swallowed by the core.
+    // names of those variables, best first, so the log shows which ones matched (the short declared names). Inert by default; an exception
+    // is swallowed by the core.
     virtual void DepthInputsFound(uint64_t runtime, const std::vector<std::string>& names)
     {
         (void)runtime;
@@ -391,7 +387,6 @@ class DepthBinder
         NoInput,
         NotTrusted,
         Failed,
-        OtherDevice,
         Bound,
     };
     struct StatusInfo

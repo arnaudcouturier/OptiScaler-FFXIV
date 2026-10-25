@@ -115,11 +115,9 @@ struct Fake final : IBackend
     std::map<uint64_t, int> bindingReads;
     int defQueries = 0, textureEnums = 0, uniformEnums = 0;
 
-    bool onlyRuntime = false; // OnlyD3D11Runtime
     int foundCalls = 0;       // DepthInputsFound calls and the names of the last one
     std::vector<std::string> foundNames;
     bool foundThrows = false;
-    bool OnlyD3D11Runtime(uint64_t) override { return onlyRuntime; }
     void DepthInputsFound(uint64_t, const std::vector<std::string>& names) override
     {
         ++foundCalls;
@@ -138,7 +136,7 @@ struct Fake final : IBackend
 
     Fake()
     {
-        vars.push_back({ kDepthVar, "ReShade::DepthBufferTex", "DEPTH", 0, 0 });
+        vars.push_back({ kDepthVar, "DepthBufferTex", "DEPTH", 0, 0 });
         unis.push_back({ 0x601, "bufready_depth", false });
         techniques.push_back({ "Main.fx", true });
         for (uint64_t v : { kCopy, kCopy2, kOrig, kOrigSrgb, kOther, kOtherSrgb, kColor })
@@ -498,7 +496,6 @@ struct Router final : IBackend
     bool TextureVariables(uint64_t rt, std::vector<TextureVar>& o) override { return For(rt).TextureVariables(rt, o); }
     void NoDepthCandidate(uint64_t rt, const std::vector<TextureVar>& t) override { For(rt).NoDepthCandidate(rt, t); }
     void DepthInputsFound(uint64_t rt, const std::vector<std::string>& n) override { For(rt).DepthInputsFound(rt, n); }
-    bool OnlyD3D11Runtime(uint64_t rt) override { return For(rt).OnlyD3D11Runtime(rt); }
     bool TextureBinding(uint64_t rt, uint64_t v, uint64_t& s, uint64_t& g) override { return For(rt).TextureBinding(rt, v, s, g); }
     bool UpdateTextureBindings(uint64_t rt, const char* sem, uint64_t s, uint64_t g) override
     {

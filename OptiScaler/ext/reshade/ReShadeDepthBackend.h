@@ -17,10 +17,15 @@
 //    macro value). A missing string, an absurd size (0 or more than 64 KiB) or a second answer that disagrees is a failure.
 //  - A definition is tri-state: undefined, defined, error.
 //  - A call that faults makes the method answer false / Error / throw (see IBackend): the core never lets either reach ReShade.
-//  - SameDevice compares the devices of REAL RESOURCES: ID3D11Resource::GetDevice() of the runtime's back buffer against the device
-//    of the capture (GetDevice() of the game's depth texture). ReShade's device::get_native() is not that device in this setup (seen in
-//    game 2026-10-25: 0x228aa25f390, ReShade's own wrapper, against the game's 0x228b20940d0), so it is only a second accepted match.
-//    See SameDevice below.
+//  - SameDevice: ReShade hands the game PROXY objects. Measured against ReShade 6.8.0.2155 on 2026-10-25: D3D11CreateDeviceAndSwapChain
+//    returns a proxy device, context and swap chain; context->GetDevice() and GetDevice() of any resource created on them answer the
+//    proxy; the runtime's device::get_native() is the REAL d3d11.dll device, and never equals a pointer the game sees (the game log:
+//    0x228aa25f390 = get_native() against the game's 0x228b20940d0). The capture's device is GetDevice() of the game's depth texture,
+//    i.e. the proxy. So a match is any of: get_native() == the target, or GetDevice() of the runtime's back buffer == the target (that
+//    answer was the native device early in a process and the proxy later in the offline harness: mechanism unknown, hence not the only
+//    rule); and otherwise the ONLY D3D11 runtime of the process counts as the game's. FFXIV has exactly one D3D11 device, one
+//    proxy/native pair, so one runtime is the game's runtime; with two or more D3D11 runtimes the strict comparison stands and a
+//    runtime that matches neither pointer is refused (both pointers go to the log, once).
 //  - The first real bind: the readback of ReShade's binding after the first update_texture_bindings with a view is logged once.
 //  - What the headers cannot settle is logged once each, so the first run in the game answers it: the first string that breaks the size
 //    contract (query kind, both sizes, the length found), the first refusal of a runtime by a device that differs once a capture
@@ -162,14 +167,13 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     void Release(uint64_t view) override; // ... and so does this
     bool IsDepthView(uint64_t view) override;
     bool IsD3D11(uint64_t runtime) override;
-    // The runtime's device is the capture's device: the device of the runtime's back buffer resource (GetDevice), or the runtime's
-    // get_native(), equals it. captureDevice 0: no capture yet, so "the game's primary D3D11 device" (BackendEnv::primaryDevice). When
-    // neither matches, or the primary one is unknown, the only D3D11 runtime of the process counts as ours (the way the boundary picks
-    // its runtime): ONLY while there is no capture yet. Once a capture exists its device is the device of the game's depth texture, and a
-    // runtime of another device must never get a view of it: that is refused, also when it is the only runtime (the binder then says so
-    // in the status, see OnlyD3D11Runtime).
+    // The runtime's device is the capture's device: get_native() of the runtime's device, or GetDevice() of its back buffer resource,
+    // equals it (captureDevice 0: no capture yet, so "the game's primary D3D11 device", BackendEnv::primaryDevice); or, when neither
+    // does, the runtime is the only D3D11 runtime of the process (the way the boundary picks its runtime; see the top of this file for
+    // why pointers cannot be trusted under ReShade's proxy). With two or more D3D11 runtimes only the exact matches count.
     bool SameDevice(uint64_t runtime, uint64_t captureDevice) override;
-    bool OnlyD3D11Runtime(uint64_t runtime) override;
+    // Whether `runtime` is the only D3D11 runtime seen in begin/finish events (the registry behind IsOurRuntime).
+    bool OnlyD3D11Runtime(uint64_t runtime);
     bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) override;
     bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) override;
     void NoDepthCandidate(uint64_t runtime, const std::vector<TextureVar>& textures) override;

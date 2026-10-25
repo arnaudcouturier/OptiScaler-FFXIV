@@ -141,30 +141,29 @@ bool LiveDepthBackend::SameDevice(uint64_t runtime, uint64_t captureDevice)
     const uint64_t target = captureDevice != 0 ? captureDevice : primary;
     if (target != 0 && native == target)
         return true;
-    // get_native() is not the device of the game's resources in every setup (ReShade's own wrapper object came back in game): ask the
-    // resource that really is on the runtime's side, its back buffer. A fault or no back buffer leaves it 0 = unknown.
+    // The game sees ReShade's PROXY device (and the capture carries it), while get_native() is the real device: the pointers differ even
+    // for the same device. The resource that really is on the runtime's side, its back buffer, tells the proxy or the native one (which
+    // one it says changed during a process in the harness). A fault or no back buffer leaves it 0 = unknown.
     uint64_t resourceDevice = 0;
     if (!_raw.BackBufferDevice(runtime, resourceDevice))
         resourceDevice = 0;
     if (target != 0 && resourceDevice == target)
         return true;
-    // A real capture was made on the device of the game's depth texture: another device never gets a view of it.
-    if (captureDevice != 0)
+    // Neither pointer is the target's. FFXIV has exactly one D3D11 device (one proxy/native pair), so the only D3D11 runtime of the
+    // process is the game's, whatever pointers say; with two or more runtimes the strict comparison stands.
+    if (OnlyD3D11Runtime(runtime))
     {
-        if (!_deviceRefusalLogged.exchange(true))
-            LOG_WARN("Automatic ReShade depth: device mismatch: the runtime's device {:#x} (its back buffer's device {:#x}) is not the capture's "
-                     "device {:#x} (primary {:#x}); runtimes of this device get no depth copy",
-                     native, resourceDevice, captureDevice, primary);
-        return false;
+        if (!_fallbackLogged.exchange(true))
+            LOG_INFO("Automatic ReShade depth: the runtime's device {:#x} (its back buffer's device {:#x}) is not the {} device {:#x}; taking the "
+                     "only D3D11 runtime (ReShade's proxy and native device differ as pointers)",
+                     native, resourceDevice, captureDevice != 0 ? "capture's" : "game's", target);
+        return true;
     }
-    // No capture yet. The primary device may be known under another pointer (a proxy) or not at all: the only D3D11 runtime is ours.
-    if (!OnlyD3D11Runtime(runtime))
-        return false;
-    if (!_fallbackLogged.exchange(true))
-        LOG_INFO("Automatic ReShade depth: the runtime's device {:#x} (its back buffer's device {:#x}) is not the game's device {:#x}; taking "
-                 "the only D3D11 runtime (no capture yet)",
-                 native, resourceDevice, target);
-    return true;
+    if (!_deviceRefusalLogged.exchange(true))
+        LOG_WARN("Automatic ReShade depth: device mismatch: the runtime's device {:#x} (its back buffer's device {:#x}) is not the {} device {:#x} "
+                 "(primary {:#x}) and it is not the only D3D11 runtime; this runtime gets no depth copy",
+                 native, resourceDevice, captureDevice != 0 ? "capture's" : "game's", target, primary);
+    return false;
 }
 
 bool LiveDepthBackend::BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height)

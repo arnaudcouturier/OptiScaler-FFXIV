@@ -55,7 +55,7 @@ void CopyString(const std::string& s, char* buffer, size_t* size)
     const size_t n = std::min(capacity - 1, s.size());
     std::memcpy(buffer, s.data(), n);
     buffer[n] = '\0';
-    *size = n + 1;
+    *size = n; // the characters copied, without the NUL
 }
 
 struct FakeDevice final : device
@@ -99,7 +99,7 @@ struct FakeRuntime final : effect_runtime
     std::vector<uint64_t> textures { 0x11, 0x12, 0x13 };
     std::vector<uint64_t> uniforms { 0x21, 0x22 };
     std::vector<uint64_t> techniques { 0x31 };
-    std::map<uint64_t, std::string> names { { 0x11, "ReShade::DepthBufferTex" }, { 0x31, "Main.fx" } };
+    std::map<uint64_t, std::string> names { { 0x11, "DepthBufferTex" }, { 0x31, "Main.fx" } };
     std::map<uint64_t, std::string> sources { { 0x21, "bufready_depth" } }; // 0x22 has no "source" annotation
     std::map<std::string, std::string> globalDefs { { "A", "1.05" } };
     std::map<std::string, std::string> effectDefs { { "Main.fx|A", "0.5" } };
@@ -414,17 +414,17 @@ void Strings()
     FakeRuntime rt;
     size_t size = 0;
     // the size query first: a null buffer, and the answer includes the NUL
-    CHECK(raw.TextureName(Id(rt), 0x11, nullptr, &size) == Call::Yes && size == 24);
+    CHECK(raw.TextureName(Id(rt), 0x11, nullptr, &size) == Call::Yes && size == 15);
     CHECK(rt.stringCalls.back().nullBuffer && rt.stringCalls.back().handle == 0x11);
     std::vector<char> buffer(25, 'Q');
     size = buffer.size();
     CHECK(raw.TextureName(Id(rt), 0x11, buffer.data(), &size) == Call::Yes);
-    CHECK(size == 24 && std::string(buffer.data()) == "ReShade::DepthBufferTex");
+    CHECK(size == 14 && std::string(buffer.data()) == "DepthBufferTex"); // the characters copied, without the NUL (observed in ReShade 6.8.0.2155)
     CHECK(!rt.stringCalls.back().nullBuffer && rt.stringCalls.back().sizeIn == 25); // the capacity went in
     // too tiny a buffer: what ReShade answers (a cut string) is reported as it is, for the caller to refuse
     std::vector<char> tiny(5, 'Q');
     size = tiny.size();
-    CHECK(raw.TextureName(Id(rt), 0x11, tiny.data(), &size) == Call::Yes && size == 5);
+    CHECK(raw.TextureName(Id(rt), 0x11, tiny.data(), &size) == Call::Yes && size == 4);
 
     // the uniform's "source" annotation, and no annotation at all
     size = 0;

@@ -93,7 +93,7 @@ struct FakeRaw final : IRawApi
 
     std::map<uint64_t, Rt> runtimes;
     uint32_t bbW = 3840, bbH = 2160;
-    std::vector<Tex> textures { { kDepthVar, "ReShade::DepthBufferTex", "DEPTH", 0, 0 } };
+    std::vector<Tex> textures { { kDepthVar, "DepthBufferTex", "DEPTH", 0, 0 } };
     std::vector<Uni> unis { { 0x601, true, "bufready_depth", false } };
     std::vector<Tech> techs { { 0x701, "Main.fx", true } };
     std::map<std::string, std::string> globalDefs;
@@ -411,8 +411,8 @@ void TextureNames()
     CHECK(out.size() == 4);
     if (out.size() == 4)
     {
-        CHECK(out[0].handle == kDepthVar && out[0].name == "ReShade::DepthBufferTex"); // the NUL is not part of the name
-        CHECK(out[0].name.size() == 23);
+        CHECK(out[0].handle == kDepthVar && out[0].name == "DepthBufferTex"); // the NUL is not part of the name
+        CHECK(out[0].name.size() == 14);
         CHECK(out[1].handle == 0x502 && out[1].name.empty());
         CHECK(out[2].name == std::string(300, 'n'));  // never cut
         CHECK(out[3].name == std::string(5000, 'm'));
@@ -777,14 +777,28 @@ void RuntimeQueries()
 void SameDeviceSemantics()
 {
     g_primary = kDev;
-    { // an existing capture: native devices must be equal
+    { // an existing capture: equal devices match; with a second runtime around, a different device is refused
         FakeRaw raw;
         LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        b.NoteRuntime(kRt2);
         CHECK(b.SameDevice(kRt, kDev));
         CHECK(!b.SameDevice(kRt, kDev2));
         raw.R(kRt).native = kDev2;
-        CHECK(!b.SameDevice(kRt, kDev)); // a different device is refused also when it is the only runtime (never bind another device's view)
+        CHECK(!b.SameDevice(kRt, kDev)); // two runtimes: the strict comparison stands
         CHECK(b.SameDevice(kRt, kDev2));
+    }
+    { // the ONLY D3D11 runtime is the game's, whatever pointers say (ReShade's proxy and native device never compare equal)
+        FakeRaw raw;
+        LiveDepthBackend b(raw, Env());
+        raw.R(kRt).native = kDev2;
+        CHECK(b.SameDevice(kRt, kDev)); // with a capture, too
+        b.NoteRuntime(kRt);
+        CHECK(b.SameDevice(kRt, kDev));
+        b.NoteRuntime(kRt2); // a second D3D11 runtime: the fallback is gone
+        CHECK(!b.SameDevice(kRt, kDev));
+        b.ForgetRuntime(kRt2);
+        CHECK(b.SameDevice(kRt, kDev));
     }
     { // captureDevice 0 = the game's primary device
         FakeRaw raw;
@@ -846,19 +860,33 @@ void SameDeviceSemantics()
 // texture). ReShade's get_native() came back as its own wrapper object in game (0x228aa25f390 against the game's 0x228b20940d0).
 void SameDeviceByResources()
 {
-    constexpr uint64_t kWrapper = 0xF390; // what get_native() answers
+    constexpr uint64_t kReal = 0xF390; // what get_native() answers: the REAL device, never the pointer the game sees
     g_primary = kDev;
-    { // the case of the log: native differs from the game's device, the back buffer's device is the game's
+    { // the log of 2026-10-25: the capture carries the proxy (kDev); get_native() is the real device; the back buffer answers the proxy
         FakeRaw raw;
-        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).native = kReal;
         raw.R(kRt).backDevice = kDev;
         LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        b.NoteRuntime(kRt2); // (two runtimes: no fallback, so the match below is the back buffer's)
+        raw.R(kRt2).native = kDev2;
         const size_t lines = LogLines("device mismatch");
-        CHECK(b.SameDevice(kRt, kDev));  // a capture exists: equal by the resource's device
-        CHECK(b.IsOurRuntime(kRt) == true);
-        CHECK(!b.SameDevice(kRt, kDev2)); // ... and another capture device is refused
+        CHECK(b.SameDevice(kRt, kDev));
+        CHECK(b.IsOurRuntime(kRt) == true); // no capture device set: the primary device, by the same rule
+        CHECK(!b.SameDevice(kRt, kDev2));   // another capture device is refused
         CHECK(LogLines("device mismatch") == lines + 1);
-        CHECK(b.SameDevice(kRt, 0));      // no capture yet: equal to the primary device by the same rule
+        CHECK(b.SameDevice(kRt, 0));
+    }
+    { // a capture device that is a proxy-like pointer, different from get_native(), and a back buffer that says the real device: the
+      // native device matches nothing here, the back buffer's device (the real one) is the capture's? no: the capture says the proxy
+        FakeRaw raw;
+        raw.R(kRt).native = kReal;
+        raw.R(kRt).backDevice = kReal; // the back buffer answered the real device this time
+        LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        b.NoteRuntime(kRt2);
+        CHECK(!b.SameDevice(kRt, kDev)); // proxy capture, native back buffer, two runtimes: refused
+        CHECK(b.SameDevice(kRt, kReal)); // a capture made on the real device matches get_native() and the back buffer
     }
     { // equal by get_native() alone still counts (and then the resource is not even asked)
         FakeRaw raw;
@@ -868,59 +896,68 @@ void SameDeviceByResources()
         CHECK(b.SameDevice(kRt, kDev));
         CHECK(raw.backDeviceCalls == 0);
     }
-    { // neither matches once a capture exists: refused, also when it is the only runtime, with ALL the pointers in the one line
+    { // neither matches and there are two runtimes: refused, with ALL the pointers in the one line
         FakeRaw raw;
-        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).native = kReal;
         raw.R(kRt).backDevice = kDev2;
         LiveDepthBackend b(raw, Env());
         b.NoteRuntime(kRt);
-        CHECK(b.OnlyD3D11Runtime(kRt));
+        b.NoteRuntime(kRt2);
+        CHECK(!b.OnlyD3D11Runtime(kRt) && !b.OnlyD3D11Runtime(kRt2));
         const size_t lines = LogLines("device mismatch");
         CHECK(!b.SameDevice(kRt, kDev) && !b.SameDevice(kRt, kDev));
         CHECK(LogLines("device mismatch") == lines + 1);
         const std::string line = LastLine("device mismatch");
         CHECK(line.find("0xf390") != std::string::npos && line.find("0xd3d1") != std::string::npos && line.find("0xd3d0") != std::string::npos);
         CHECK(line.find("primary 0xd3d0") != std::string::npos);
-        // a second runtime: this one is no longer the only one (the binder then says nothing for it)
-        b.NoteRuntime(kRt2);
-        CHECK(!b.OnlyD3D11Runtime(kRt));
-        CHECK(!b.OnlyD3D11Runtime(kRt3));
+        // before any capture a refusal is logged all the same (once per backend)
+        FakeRaw raw2;
+        raw2.R(kRt).native = kReal;
+        raw2.R(kRt).backDevice = kDev2;
+        LiveDepthBackend b2(raw2, Env());
+        b2.NoteRuntime(kRt);
+        b2.NoteRuntime(kRt2);
+        const size_t before = LogLines("device mismatch");
+        CHECK(!b2.SameDevice(kRt, 0));
+        CHECK(LogLines("device mismatch") == before + 1);
+        CHECK(!b2.OnlyD3D11Runtime(kRt3));
+    }
+    { // neither matches and it is the only runtime: taken (one device, one proxy/native pair), the line says all the pointers, once
+        FakeRaw raw;
+        raw.R(kRt).native = kReal;
+        raw.R(kRt).backDevice = kDev2;
+        LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        CHECK(b.OnlyD3D11Runtime(kRt));
+        const size_t lines = LogLines("only D3D11 runtime");
+        const size_t refusals = LogLines("device mismatch");
+        CHECK(b.SameDevice(kRt, kDev) && b.SameDevice(kRt, kDev) && b.SameDevice(kRt, 0));
+        CHECK(LogLines("only D3D11 runtime") == lines + 1 && LogLines("device mismatch") == refusals);
+        const std::string line = LastLine("only D3D11 runtime");
+        CHECK(line.find("0xf390") != std::string::npos && line.find("0xd3d1") != std::string::npos && line.find("0xd3d0") != std::string::npos);
     }
     { // no capture yet: the primary device matched through the back buffer needs no fallback (and says nothing about one)
         FakeRaw raw;
-        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).native = kReal;
         raw.R(kRt).backDevice = kDev;
         LiveDepthBackend b(raw, Env());
         b.NoteRuntime(kRt);
         b.NoteRuntime(kRt2);
-        raw.R(kRt2).native = kWrapper;
+        raw.R(kRt2).native = kReal;
         raw.R(kRt2).backDevice = kDev2;
         CHECK(b.SameDevice(kRt, 0));   // by the resource's device, although a second runtime exists
         CHECK(!b.SameDevice(kRt2, 0)); // a runtime of another device with a rival: no fallback
     }
-    { // no capture yet and nothing matches: the only D3D11 runtime is taken, the line says all the pointers
-        FakeRaw raw;
-        raw.R(kRt).native = kWrapper;
-        raw.R(kRt).backDevice = kDev2;
-        LiveDepthBackend b(raw, Env());
-        const size_t lines = LogLines("only D3D11 runtime");
-        CHECK(b.SameDevice(kRt, 0));
-        CHECK(LogLines("only D3D11 runtime") == lines + 1);
-        const std::string line = LastLine("only D3D11 runtime");
-        CHECK(line.find("0xf390") != std::string::npos && line.find("0xd3d1") != std::string::npos && line.find("0xd3d0") != std::string::npos);
-    }
     { // a faulting back buffer query is "unknown": the rest decides (never a crash, never a match)
         FakeRaw raw;
-        raw.R(kRt).native = kWrapper;
+        raw.R(kRt).native = kReal;
         raw.R(kRt).backDevice = kDev;
         LiveDepthBackend b(raw, Env());
+        b.NoteRuntime(kRt);
+        b.NoteRuntime(kRt2);
         raw.faultAt = raw.calls + 2; // DeviceInfo is the next call, BackBufferDevice the one after
         CHECK(!b.SameDevice(kRt, kDev));
         CHECK(b.SameDevice(kRt, kDev)); // and the next query is fine
-        // a back buffer whose device is the runtime's own pointer again (backDevice 0 follows native)
-        raw.R(kRt).backDevice = 0;
-        raw.R(kRt).native = kWrapper;
-        CHECK(!b.SameDevice(kRt, kDev));
     }
 }
 
@@ -929,6 +966,8 @@ void RegistryAndOurRuntime()
     g_primary = kDev;
     FakeRaw raw;
     LiveDepthBackend b(raw, Env());
+    b.NoteRuntime(kRt);
+    b.NoteRuntime(kRt2); // two runtimes: the strict comparison stands
     // IsOurRuntime follows the capture device that was set
     CHECK(b.IsOurRuntime(kRt)); // no capture: the primary device
     b.SetCaptureDevice(kDev);
@@ -970,8 +1009,8 @@ void RegistryAndOurRuntime()
 // The first string that breaks ReShade's size contract is described once: the query kind, both sizes and the length found
 void StringContractLog()
 {
-    { // a string that grows between the two calls: first size 24 (the query), the copy has one byte more than that and writes 24
-      // characters (the second size says 24 characters, or 25 in the header's wording), the length found is 24
+    { // a string that grows between the two calls: first size 15 (the query), the copy has one byte more than that and writes 15
+      // characters (the second size says 15 characters, or 16 in the header's wording), the length found is 15
         FakeRaw raw;
         raw.growBetween = true;
         LiveDepthBackend b(raw, Env());
@@ -984,9 +1023,9 @@ void StringContractLog()
         CHECK(LogLines("string contract") == before + 1); // the first one only
         const std::string line = LastLine("string contract");
         CHECK(line.find("texture name") != std::string::npos);
-        CHECK(line.find("first size 24") != std::string::npos);
-        CHECK(line.find(g_headerWording ? "second size 25" : "second size 24") != std::string::npos);
-        CHECK(line.find("string length 24") != std::string::npos);
+        CHECK(line.find("first size 15") != std::string::npos);
+        CHECK(line.find(g_headerWording ? "second size 16" : "second size 15") != std::string::npos);
+        CHECK(line.find("string length 15") != std::string::npos);
     }
     { // a call that faults: no sizes to report, and it says so
         FakeRaw raw;
@@ -1029,6 +1068,8 @@ void SameDeviceRefusalLog()
     g_primary = kDev;
     FakeRaw raw;
     LiveDepthBackend b(raw, Env());
+    b.NoteRuntime(kRt);
+    b.NoteRuntime(kRt2); // the strict comparison needs a rival: the only runtime is taken whatever the pointers say
     const size_t before = LogLines("device mismatch");
     CHECK(b.SameDevice(kRt, kDev)); // equal: nothing to say
     CHECK(LogLines("device mismatch") == before);
@@ -1038,12 +1079,13 @@ void SameDeviceRefusalLog()
     const std::string line = LastLine("device mismatch");
     CHECK(line.find("0xd3d0") != std::string::npos && line.find("0xd3d1") != std::string::npos); // the runtime's device, the capture's
     CHECK(line.find("primary 0xd3d0") != std::string::npos);
-    // the fallback while no capture exists is not a refusal
-    raw.R(kRt2).native = kDev2;
-    b.NoteRuntime(kRt);
-    b.NoteRuntime(kRt2);
+    // the fallback for the only runtime is not a refusal
+    FakeRaw one;
+    one.R(kRt).native = kDev2;
+    LiveDepthBackend o(one, Env());
+    o.NoteRuntime(kRt);
     const size_t after = LogLines("device mismatch");
-    CHECK(!b.SameDevice(kRt2, 0));
+    CHECK(o.SameDevice(kRt, 0) && o.SameDevice(kRt, kDev));
     CHECK(LogLines("device mismatch") == after);
 }
 
@@ -1234,9 +1276,11 @@ void BinderOverTheBackend()
         p.raw.effectDefs["Main.fx"]["RESHADE_DEPTH_INPUT_Y_OFFSET"] = std::string(80, '0') + "1"; // a long value is read whole
         CHECK(!p.Pass());
     }
-    { // a real runtime for another device is not a consumer
+    { // a real runtime for another device is not a consumer (with a second runtime around: a lone runtime is the game's, see SameDevice)
         Rig r;
         r.raw.R(kRt).native = kDev2;
+        r.backend.NoteRuntime(kRt);
+        r.backend.NoteRuntime(kRt2);
         r.binder.OnDestroyRuntime(kRt); // (nothing to forget)
         DepthCapture c;
         c.valid = true;
