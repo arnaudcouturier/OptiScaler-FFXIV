@@ -7,9 +7,13 @@
 // Cost per Capture: one transient shader resource view of the game's depth, a 16-byte constant upload, two context-state swaps and one
 // full-screen draw into the R32_FLOAT target (about 33 MB at 3840x2160, created once per output size).
 //
-// The draw runs in a private ID3DDeviceContextState inside a BypassScope, so the game's pipeline state is untouched and our own
-// draw hooks ignore it. Nothing escapes the entry points: every D3D step is SEH-guarded and the game's state is swapped back
-// whatever happened.
+// The draw runs in a private ID3DDeviceContextState inside a BypassScope, so the game's pipeline state (predication included) is
+// untouched and our own draw hooks ignore it. Nothing escapes the entry points: every D3D step is SEH-guarded, and the unbind and the
+// swap back are separate steps, so a failed unbind cannot keep the game's state from coming back. A swap back that itself failed is
+// done again by the next Capture or Release, before anything else, with the game's own state object (kept alive until then).
+//
+// Limits: queries are not part of the state object, so an occlusion query that is open across a Capture counts the pass's pixels
+// (the output size). DrawTriangleFn is fixed at construction: the wiring constructs the pass once the draw it wants to pass exists.
 //
 // Publishing: the pass owns the order. The binder keeps the raw value of the view of the capture it holds and AddRefs it per pass,
 // so a new capture is published BEFORE the view of the old one is released; Release(), a device change and the destructor publish
@@ -159,8 +163,10 @@ class DepthCopy
     static void ProbeThunk(void* job);
     static void PrepareThunk(void* job);
     static void DrawThunk(void* job);
-    static void RestoreThunk(void* job);
+    static void UnbindThunk(void* job);
+    static void SwapBackThunk(void* job);
 
+    bool RecoverState();
     bool CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source, const CaptureArgs& args, CaptureReport& report);
     void PublishValid(const Target& target, const CaptureArgs& args);
     void Teardown();
@@ -175,5 +181,8 @@ class DepthCopy
     Microsoft::WRL::ComPtr<ID3D11Buffer> _constants;
     Target _target;
     bool _published = false; // a valid capture is with the sink
+    // A swap back that failed: the game's state object and the context it belongs to, until a later call has done it again
+    Microsoft::WRL::ComPtr<ID3DDeviceContextState> _stuckPrevious;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext1> _stuckContext;
 };
 } // namespace ext::reshade::depth

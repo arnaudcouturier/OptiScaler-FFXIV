@@ -134,8 +134,9 @@ bool DeviceMarkedFailed(ID3D11Device* device)
 }
 
 // ---- one capture ---------------------------------------------------------------------------------------------------------
-// Everything a guarded step reads or writes. The steps are plain functions on raw pointers and members of this struct: objects
-// with destructors live here (in the frame of CaptureImpl), never in a frame an access violation may unwind through.
+// Everything a guarded step reads or writes. The steps are plain functions on raw pointers and members of this struct: the objects
+// with destructors live here (in the frame of CaptureImpl), not in the frames of the steps, which an access violation unwinds without
+// running destructors (a step only makes trivial locals; logging in InitThunk aside).
 struct DepthCopy::Job
 {
     DepthCopy* self = nullptr;
@@ -180,13 +181,7 @@ void DepthCopy::Withdraw()
     if (!_published)
         return;
     _published = false;
-    try
-    {
-        _sink.Publish(DepthCapture {});
-    }
-    catch (...)
-    {
-    }
+    _sink.Publish(DepthCapture {});
 }
 
 void DepthCopy::Teardown()
@@ -201,6 +196,7 @@ void DepthCopy::Teardown()
 
 void DepthCopy::Release()
 {
+    RecoverState();
     Withdraw(); // the sink drops the capture before its view goes
     Teardown();
 }
@@ -336,18 +332,15 @@ void DepthCopy::PrepareThunk(void* p)
             FAILED(s._device->CreateRenderTargetView(j.fresh.texture.Get(), nullptr, &j.fresh.rtv)) ||
             FAILED(s._device->CreateShaderResourceView(j.fresh.texture.Get(), nullptr, &j.fresh.srv)))
         {
-            j.fresh = Target {};
+            j.fresh.texture.Reset();
+            j.fresh.rtv.Reset();
+            j.fresh.srv.Reset();
             j.result = Result::ResourceFailure;
             return;
         }
         j.fresh.width = a.outputW;
         j.fresh.height = a.outputH;
-        j.report->targetCreated = true;
     }
-
-    // origin, render size and output size: the only thing that follows the quality mode and the subrect
-    const CropConstants k = MakeConstants(a);
-    j.context->UpdateSubresource(s._constants.Get(), 0, nullptr, &k, 0, 0);
 }
 
 void DepthCopy::DrawThunk(void* p)
@@ -363,9 +356,11 @@ void DepthCopy::DrawThunk(void* p)
         return;
     }
     j.context1->SwapDeviceContextState(s._state.Get(), &j.previous);
-    if (j.previous == nullptr)
+    if (j.previous == nullptr || j.previous == s._state)
     {
-        // The game's state could not be captured: there is nothing to draw in and nothing to swap back to.
+        // The game's state could not be captured (or the context was in the private state already, after a swap whose answer was
+        // lost): there is nothing to draw in and nothing to swap back to. Never swap the private state into itself again.
+        j.previous.Reset();
         j.result = Result::Fault;
         return;
     }
@@ -376,7 +371,12 @@ void DepthCopy::DrawThunk(void* p)
     ID3D11RenderTargetView* rtv = target.rtv.Get();
     const D3D11_VIEWPORT viewport { 0.0f, 0.0f, static_cast<float>(a.outputW), static_cast<float>(a.outputH), 0.0f, 1.0f };
 
+    // Anything a failed unbind left in the private state goes first.
     c->ClearState();
+    // origin, render size and output size, the only thing that follows the quality mode and the subrect. Written here, in the private
+    // state: the game's predication would skip an UpdateSubresource in its own state, and a fresh buffer is all zeros.
+    const CropConstants k = MakeConstants(a);
+    c->UpdateSubresource(s._constants.Get(), 0, nullptr, &k, 0, 0);
     c->RSSetViewports(1, &viewport);
     c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     c->VSSetShader(s._vs.Get(), nullptr, 0);
@@ -391,16 +391,47 @@ void DepthCopy::DrawThunk(void* p)
         c->Draw(3, 0);
 }
 
-void DepthCopy::RestoreThunk(void* p)
+void DepthCopy::UnbindThunk(void* p)
+{
+    Job& j = *static_cast<Job*>(p);
+    if (j.previous == nullptr)
+        return; // never left the game's state
+    // Leave nothing bound in the private state: it must not keep the game's depth or our target alive. Explicit unbinds, not
+    // ClearState: if one of them fails, the swap back (its own step) still runs.
+    ID3D11DeviceContext* c = j.context;
+    ID3D11ShaderResourceView* noView[1] = {};
+    ID3D11Buffer* noBuffer[1] = {};
+    c->OMSetRenderTargets(0, nullptr, nullptr);
+    c->PSSetShaderResources(0, 1, noView);
+    c->PSSetConstantBuffers(0, 1, noBuffer);
+    c->VSSetShader(nullptr, nullptr, 0);
+    c->PSSetShader(nullptr, nullptr, 0);
+}
+
+void DepthCopy::SwapBackThunk(void* p)
 {
     Job& j = *static_cast<Job*>(p);
     if (j.previous == nullptr || j.context1 == nullptr)
-        return; // never left the game's state
-    // Leave nothing bound in the private state: it must not keep the game's depth or our target alive.
-    j.context->ClearState();
+        return;
     j.context1->SwapDeviceContextState(j.previous.Get(), nullptr);
 }
 
+// A swap back that failed (it may or may not have happened) is done again before anything else, with the game's own state object,
+// which is kept alive until then.
+bool DepthCopy::RecoverState()
+{
+    if (_stuckPrevious == nullptr)
+        return true;
+    ext::core::BypassScope bypass;
+    Job job;
+    job.context1 = _stuckContext;
+    job.previous = _stuckPrevious;
+    if (d3d11::GuardedCall(&SwapBackThunk, &job) != 0)
+        return false;
+    _stuckPrevious.Reset();
+    _stuckContext.Reset();
+    return true;
+}
 void DepthCopy::PublishValid(const Target& target, const CaptureArgs& args)
 {
     DepthCapture c;
@@ -414,26 +445,26 @@ void DepthCopy::PublishValid(const Target& target, const CaptureArgs& args)
     c.copyView = reinterpret_cast<uintptr_t>(target.srv.Get());
     c.device = reinterpret_cast<uintptr_t>(_device.Get());
     _published = true;
-    try
-    {
-        _sink.Publish(c);
-    }
-    catch (...)
-    {
-    }
+    _sink.Publish(c);
 }
 
 bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source, const CaptureArgs& args, CaptureReport& report)
 {
     report.args = args;
+    // Our own D3D11 calls (the views, the constants, the draw) must not look like game work to the draw hooks.
+    ext::core::BypassScope bypass;
+
+    // A swap back that failed on an earlier call comes before anything else.
+    if (!RecoverState())
+    {
+        report.result = Result::Fault;
+        return false;
+    }
     if (context == nullptr || source == nullptr)
     {
         report.result = Result::NullArgument;
         return false;
     }
-
-    // Our own D3D11 calls (the views, the constants, the draw) must not look like game work to the draw hooks.
-    ext::core::BypassScope bypass;
 
     Job job;
     job.self = this;
@@ -461,6 +492,7 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
         report.result = Result::NotTexture2D;
         return false;
     }
+    // The request is checked before the device: a refused request on a removed device withdraws nothing (the capture ages out).
     report.viewFormat = SrvFormatFor(report.source.format);
     if (const Result refusal = CheckSource(report.source, args); refusal != Result::Ok)
     {
@@ -503,8 +535,15 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
 
     // The draw runs in the private state. The way back is its own guarded step, so a failed draw cannot skip it.
     const uint32_t drawCode = d3d11::GuardedCall(&DrawThunk, &job);
-    const uint32_t restoreCode = d3d11::GuardedCall(&RestoreThunk, &job);
-    if (drawCode != 0 || restoreCode != 0 || job.result != Result::Ok)
+    const uint32_t unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
+    const uint32_t swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);
+    if (swapCode != 0)
+    {
+        // It may not have happened: the next call (or Release) does it again, and the game's state object must not die before.
+        _stuckContext = job.context1;
+        _stuckPrevious = job.previous;
+    }
+    if (drawCode != 0 || unbindCode != 0 || swapCode != 0 || job.result != Result::Ok)
     {
         // Once the draw started the target may be half written, and the capture that is published reads it.
         if (job.drawn)
@@ -516,7 +555,10 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
     // The new capture goes out first; the old target (if the output size changed) is released after that.
     PublishValid(job.fresh.texture != nullptr ? job.fresh : _target, args);
     if (job.fresh.texture != nullptr)
+    {
         _target = std::move(job.fresh);
+        report.targetCreated = true;
+    }
     report.result = Result::Ok;
     return true;
 }
