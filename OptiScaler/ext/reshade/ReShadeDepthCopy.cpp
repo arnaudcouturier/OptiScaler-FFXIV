@@ -148,17 +148,20 @@ struct DepthCopy::Job
     // ProbeThunk
     bool immediate = false;
     bool initFailed = false; // the device carries the tag of a failed set-up
+    bool sameAsStuck = false; // the context is the one a swap back is outstanding for
     HRESULT removed = S_OK;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11Texture2D> texture;
+    ComPtr<IUnknown> contextIdentity, stuckIdentity;
     // PrepareThunk
     Result result = Result::Ok;
     ComPtr<ID3D11ShaderResourceView> srv;
     Target fresh; // the new target when the output size changed
-    // DrawThunk, RestoreThunk
+    // DrawThunk, UnbindThunk, SwapBackThunk, ScrubThunk
     bool drawn = false; // the draw was started: the target may be half written
     ComPtr<ID3D11DeviceContext1> context1;
-    ComPtr<ID3DDeviceContextState> previous; // the game's state, non-null once it has been swapped out
+    ComPtr<ID3DDeviceContextState> previous;  // the game's state, non-null once it has been swapped out
+    ComPtr<ID3DDeviceContextState> displaced; // the state the swap back replaced (the private one, unless the context was elsewhere)
 };
 
 struct DepthCopy::InitJob
@@ -174,6 +177,10 @@ DepthCopy::DepthCopy(ICaptureSink& sink, DrawTriangleFn draw) : _sink(sink), _dr
 DepthCopy::~DepthCopy()
 {
     Release();
+    // The context may still be in the private state, and the game's state object is then reachable only through this reference: the
+    // destructor must not be the one that destroys it.
+    if (_stuckPrevious != nullptr)
+        DropStuck("the pass is being destroyed");
 }
 
 void DepthCopy::Withdraw()
@@ -282,6 +289,10 @@ void DepthCopy::ProbeThunk(void* p)
         j.removed = j.device->GetDeviceRemovedReason();
         j.initFailed = DeviceMarkedFailed(j.device.Get());
     }
+    if (j.self->_stuckContext != nullptr) // the same object, compared by its IUnknown identity
+        j.sameAsStuck = SUCCEEDED(j.context->QueryInterface(IID_PPV_ARGS(&j.contextIdentity))) &&
+                        SUCCEEDED(j.self->_stuckContext->QueryInterface(IID_PPV_ARGS(&j.stuckIdentity))) &&
+                        j.contextIdentity.Get() == j.stuckIdentity.Get();
     if (FAILED(j.source->QueryInterface(IID_PPV_ARGS(&j.texture))))
     {
         j.texture.Reset();
@@ -408,25 +419,62 @@ void DepthCopy::SwapBackThunk(void* p)
     Job& j = *static_cast<Job*>(p);
     if (j.previous == nullptr || j.context1 == nullptr)
         return;
-    j.context1->SwapDeviceContextState(j.previous.Get(), nullptr);
+    j.displaced.Reset();
+    j.context1->SwapDeviceContextState(j.previous.Get(), &j.displaced);
+}
+
+// Enters the private state and clears it: what the game bound there while the context was stuck in it must not stay alive until the
+// next capture. Best effort; the swap back that follows does not depend on it.
+void DepthCopy::ScrubThunk(void* p)
+{
+    Job& j = *static_cast<Job*>(p);
+    DepthCopy& s = *j.self;
+    if (j.context1 == nullptr || s._state == nullptr)
+        return;
+    j.context1->SwapDeviceContextState(s._state.Get(), nullptr);
+    j.context1->ClearState();
 }
 
 // A swap back that failed (it may or may not have happened) is done again before anything else, with the game's own state object,
-// which is kept alive until then.
+// which is kept alive until then. If the context really was in the private state, that state is cleared (the swap back is done, then
+// the private state entered, cleared and left again). A failed attempt is counted; the last one gives the state up.
 bool DepthCopy::RecoverState()
 {
     if (_stuckPrevious == nullptr)
         return true;
     ext::core::BypassScope bypass;
     Job job;
+    job.self = this;
     job.context1 = _stuckContext;
     job.previous = _stuckPrevious;
-    if (d3d11::GuardedCall(&SwapBackThunk, &job) != 0)
+    bool done = d3d11::GuardedCall(&SwapBackThunk, &job) == 0;
+    if (done && job.displaced != nullptr && job.displaced == _state)
+    {
+        (void)d3d11::GuardedCall(&ScrubThunk, &job);
+        done = d3d11::GuardedCall(&SwapBackThunk, &job) == 0; // the context may be in the private state again
+    }
+    if (!done)
+    {
+        if (++_stuckAttempts >= kMaxRecoverAttempts)
+            DropStuck("the swap back failed again");
         return false;
+    }
     _stuckPrevious.Reset();
     _stuckContext.Reset();
+    _stuckAttempts = 0;
     return true;
 }
+
+// The context may be in the private state for good. The game's state object must outlive that, so the reference is leaked instead of
+// released; the context reference is only an extra one and goes.
+void DepthCopy::DropStuck([[maybe_unused]] const char* why)
+{
+    LOG_ERROR("Automatic ReShade depth: giving up on putting the game's context state back ({}); its state object is kept alive on purpose", why);
+    (void)_stuckPrevious.Detach();
+    _stuckContext.Reset();
+    _stuckAttempts = 0;
+}
+
 void DepthCopy::PublishValid(const Target& target, const CaptureArgs& args)
 {
     DepthCapture c;
@@ -449,12 +497,6 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
     // Our own D3D11 calls (the views, the constants, the draw) must not look like game work to the draw hooks.
     ext::core::BypassScope bypass;
 
-    // A swap back that failed on an earlier call comes before anything else.
-    if (!RecoverState())
-    {
-        report.result = Result::Fault;
-        return false;
-    }
     if (context == nullptr || source == nullptr)
     {
         report.result = Result::NullArgument;
@@ -481,6 +523,18 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
     {
         report.result = Result::DeviceUnavailable;
         return false;
+    }
+    // A swap back that failed on an earlier call comes before anything else that touches the context, but only for the context it is
+    // outstanding for: a deferred context was refused above, and another context or a removed device is no reason to wait for it.
+    if (_stuckPrevious != nullptr)
+    {
+        if (FAILED(job.removed) || !job.sameAsStuck)
+            DropStuck(FAILED(job.removed) ? "the device was removed" : "the call is for another context");
+        else if (!RecoverState())
+        {
+            report.result = Result::Fault;
+            return false;
+        }
     }
     if (job.texture == nullptr)
     {

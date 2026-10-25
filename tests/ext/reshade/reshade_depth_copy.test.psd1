@@ -5,6 +5,6 @@
     Sources     = @('reshade_depth_copy.cpp', '{repo}/OptiScaler/ext/reshade/ReShadeDepthCopy.cpp', '{repo}/OptiScaler/ext/reshade/ReShadeD3D11.cpp')
     IncludeDirs = @('stubs', '{repo}/OptiScaler', '{out}/ext_gen')
     Libs        = @('d3d11.lib', 'dxgi.lib')
-    Defines     = @('NOMINMAX', 'UNDEBUG')
+    Defines     = @('NOMINMAX', 'UNDEBUG', 'DEPTH_TEST_LOG')
     Std         = 'c++latest'
 }

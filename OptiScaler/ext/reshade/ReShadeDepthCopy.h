@@ -10,7 +10,12 @@
 // The draw runs in a private ID3DDeviceContextState inside a BypassScope, so the game's pipeline state (predication included) is
 // untouched and our own draw hooks ignore it. Nothing escapes the entry points: every D3D step is SEH-guarded, and the unbind and the
 // swap back are separate steps, so a failed unbind cannot keep the game's state from coming back. A swap back that itself failed is
-// done again by the next Capture or Release, before anything else, with the game's own state object (kept alive until then).
+// done again by the next Capture for that context (or Release), before anything else, with the game's own state object (kept alive
+// until then): first inside the private state (cleared, so a render target the game bound there meanwhile is not kept alive), then back.
+// The attempts are capped (kMaxRecoverAttempts); the pass then gives the state up on purpose, logs it once and LEAKS its reference to
+// the game's state object: the context may still be in the private state, and the game's state must never be destroyed under it. The
+// same happens when the next call is for another context or a removed device, and in the destructor. A deferred context is refused
+// before the recovery, so it never touches the immediate context.
 //
 // Limits: queries are not part of the state object, so an occlusion query that is open across a Capture counts the pass's pixels
 // (the output size). DrawTriangleFn is fixed at construction: the wiring constructs the pass once the draw it wants to pass exists.
@@ -33,6 +38,9 @@ namespace ext::reshade::depth
 // Largest source, render and output edge: the D3D11 texture limit, and what keeps the shader's integer maths in 32 bits
 // ((2 * 0x3FFF + 1) * 0x4000 < 2^32).
 inline constexpr uint32_t kMaxEdge = 0x4000;
+
+// Attempts to put the game's context state back after a swap back that failed, before the pass gives it up.
+inline constexpr uint32_t kMaxRecoverAttempts = 3;
 
 // ---- pure helpers -------------------------------------------------------------------------------------------------------
 // The typed view format a depth source is read with, DXGI_FORMAT_UNKNOWN for a format the pass does not read.
@@ -165,8 +173,12 @@ class DepthCopy
     static void DrawThunk(void* job);
     static void UnbindThunk(void* job);
     static void SwapBackThunk(void* job);
+    static void ScrubThunk(void* job);
 
+    // Puts the game's state back (see the top). True = nothing is outstanding. A failed attempt counts; the last one gives up.
     bool RecoverState();
+    // Gives the outstanding state up deliberately: logs once and leaks the reference to the game's state object.
+    void DropStuck(const char* why);
     bool CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source, const CaptureArgs& args, CaptureReport& report);
     void PublishValid(const Target& target, const CaptureArgs& args);
     void Teardown();
@@ -181,8 +193,10 @@ class DepthCopy
     Microsoft::WRL::ComPtr<ID3D11Buffer> _constants;
     Target _target;
     bool _published = false; // a valid capture is with the sink
-    // A swap back that failed: the game's state object and the context it belongs to, until a later call has done it again
+    // A swap back that failed: the game's state object and the context it belongs to, until a later call has done it again (or the
+    // pass gave up, see the top). _stuckAttempts counts the failed attempts since.
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _stuckPrevious;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext1> _stuckContext;
+    uint32_t _stuckAttempts = 0;
 };
 } // namespace ext::reshade::depth

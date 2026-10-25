@@ -4,6 +4,8 @@
 // the source families, the game's context state, the bypass scope, the publish order of the three paths (new capture, Release,
 // device change) with a recording sink, refusals that draw nothing, failures that put the game's state back, and the product
 // shader driven directly (clamp, largest edge).
+#include "pch.h"
+
 #include "ext/core/HooksBypass.h"
 #include "ext/reshade/ReShadeDepthCopy.h"
 
@@ -1694,10 +1696,9 @@ void NoLeftovers()
 // The D3D11 runtime's objects share one method table per class, so a patch reaches every device and context of the process. Each
 // patch is removed again, and only if the slot still holds the hook (a context-state swap rewrites the context's table).
 // Slot numbers: ID3D11Device (CreateShaderResourceView 7, CreateVertexShader 12, GetDeviceRemovedReason 39), ID3D11DeviceContext
-// (Draw 13, OMSetRenderTargets 33, UpdateSubresource 48, ClearState 110), ID3D11DeviceContext1 (SwapDeviceContextState 131). The tests
-// check that their hook was reached.
+// (Draw 13, OMSetRenderTargets 33), ID3D11DeviceContext1 (SwapDeviceContextState 131). The tests check that their hook was reached.
 constexpr int kDevCreateSrv = 7, kDevCreateVs = 12, kDevRemovedReason = 39;
-constexpr int kCtxOmSetRenderTargets = 33, kCtxUpdateSubresource = 48, kCtxClearState = 110, kCtx1Swap = 131;
+constexpr int kCtxOmSetRenderTargets = 33, kCtx1Swap = 131;
 
 struct SlotPatch
 {
@@ -1738,13 +1739,11 @@ struct SlotPatch
     std::abort();
 }
 
-// ClearState and OMSetRenderTargets that crash (installed from inside the draw, i.e. inside the private state)
-SlotPatch g_patchClear, g_patchOm;
-void STDMETHODCALLTYPE HkClearCrash(ID3D11DeviceContext*) { CrashNow(); }
+// OMSetRenderTargets that crashes (installed from inside the draw, i.e. inside the private state): the unbind step has no ClearState
+SlotPatch g_patchOm;
 void STDMETHODCALLTYPE HkOmCrash(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*) { CrashNow(); }
 void InstallUnbindCrashes(ID3D11DeviceContext* c)
 {
-    g_patchClear.Install(c, kCtxClearState, reinterpret_cast<void*>(&HkClearCrash));
     g_patchOm.Install(c, kCtxOmSetRenderTargets, reinterpret_cast<void*>(&HkOmCrash));
 }
 
@@ -1755,6 +1754,9 @@ struct SwapHook
     SlotPatch patch;
     int calls = 0;
     int faultCall = 0; // 1-based; 0 = never
+    bool persistent = false; // every call from faultCall on misbehaves, not just that one
+    std::vector<int> alsoFaultAt; // more single calls (1-based) that misbehave
+    ID3D11DeviceContext1* onlyContext = nullptr; // misbehave for this context only (null = every context)
     SwapFault fault = SwapFault::None;
     std::vector<ID3DDeviceContextState*> targets;  // the state asked for, per call
     std::vector<ID3DDeviceContextState*> previous; // the previous state returned, per call
@@ -1768,7 +1770,10 @@ void STDMETHODCALLTYPE HkSwap(ID3D11DeviceContext1* c, ID3DDeviceContextState* s
     const int call = ++g_swap.calls;
     g_swap.targets.push_back(s);
     g_swap.bypassed.push_back(ext::core::HooksBypassed());
-    const bool faulty = call == g_swap.faultCall;
+    const bool mine = g_swap.onlyContext == nullptr || c == g_swap.onlyContext;
+    bool faulty = mine && g_swap.faultCall != 0 && (g_swap.persistent ? call >= g_swap.faultCall : call == g_swap.faultCall);
+    for (int extra : g_swap.alsoFaultAt)
+        faulty = faulty || (mine && call == extra);
     if (faulty && g_swap.fault == SwapFault::CrashBefore)
         CrashNow();
     if (faulty && g_swap.fault == SwapFault::NullPreviousNoSwap)
@@ -1788,12 +1793,15 @@ void STDMETHODCALLTYPE HkSwap(ID3D11DeviceContext1* c, ID3DDeviceContextState* s
     if (faulty && g_swap.fault == SwapFault::CrashAfter)
         CrashNow();
 }
-void InstallSwapHook(Rig& rig, int faultCall, SwapFault fault)
+void InstallSwapHook(Rig& rig, int faultCall, SwapFault fault, bool persistent = false, bool onlyThisContext = false)
 {
     ComPtr<ID3D11DeviceContext1> c1;
     rig.context.As(&c1);
     g_swap.calls = 0;
     g_swap.faultCall = faultCall;
+    g_swap.persistent = persistent;
+    g_swap.alsoFaultAt.clear();
+    g_swap.onlyContext = onlyThisContext ? c1.Get() : nullptr;
     g_swap.fault = fault;
     g_swap.targets.clear();
     g_swap.previous.clear();
@@ -1806,16 +1814,15 @@ void InstallSwapHook(Rig& rig, int faultCall, SwapFault fault)
 enum class DeviceFault { None, SrvCrash, VertexShaderFails, DeviceRemoved };
 struct DeviceHook
 {
-    SlotPatch srv, vs, removed, update;
+    SlotPatch srv, vs, removed;
     bool active = false; // a Capture is running
     DeviceFault fault = DeviceFault::None;
-    int srvCalls = 0, srvBypassed = 0, updateCalls = 0, updateBypassed = 0, removedCalls = 0, vsCalls = 0;
+    int srvCalls = 0, srvBypassed = 0, removedCalls = 0, vsCalls = 0;
 };
 DeviceHook g_dev;
 using SrvFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, ID3D11Resource*, const D3D11_SHADER_RESOURCE_VIEW_DESC*, ID3D11ShaderResourceView**);
 using VsFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11VertexShader**);
 using RemovedFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*);
-using UpdateFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
 HRESULT STDMETHODCALLTYPE HkCreateSrv(ID3D11Device* d, ID3D11Resource* r, const D3D11_SHADER_RESOURCE_VIEW_DESC* desc,
                                       ID3D11ShaderResourceView** out)
 {
@@ -1848,30 +1855,18 @@ HRESULT STDMETHODCALLTYPE HkRemoved(ID3D11Device* d)
     }
     return g_dev.removed.Original<RemovedFn>()(d);
 }
-void STDMETHODCALLTYPE HkUpdate(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* data, UINT p1,
-                                UINT p2)
-{
-    if (g_dev.active)
-    {
-        ++g_dev.updateCalls;
-        g_dev.updateBypassed += ext::core::HooksBypassed() ? 1 : 0;
-    }
-    g_dev.update.Original<UpdateFn>()(c, r, sub, box, data, p1, p2);
-}
 void InstallDeviceHooks(Rig& rig)
 {
     g_dev = DeviceHook {};
     g_dev.srv.Install(rig.device.Get(), kDevCreateSrv, reinterpret_cast<void*>(&HkCreateSrv));
     g_dev.vs.Install(rig.device.Get(), kDevCreateVs, reinterpret_cast<void*>(&HkCreateVs));
     g_dev.removed.Install(rig.device.Get(), kDevRemovedReason, reinterpret_cast<void*>(&HkRemoved));
-    g_dev.update.Install(rig.context.Get(), kCtxUpdateSubresource, reinterpret_cast<void*>(&HkUpdate));
 }
 void RemoveDeviceHooks()
 {
     g_dev.srv.Remove();
     g_dev.vs.Remove();
     g_dev.removed.Remove();
-    g_dev.update.Remove();
     g_dev.active = false;
     g_dev.fault = DeviceFault::None;
 }
@@ -1902,12 +1897,11 @@ void FaultsInTheRestore()
     const Dump before = DumpState(f.rig.context.Get());
     CaptureReport r;
 
-    // 1. the unbind step crashes (ClearState and OMSetRenderTargets, from inside the private state)
+    // 1. the unbind step crashes (OMSetRenderTargets, from inside the private state)
     size_t events = f.sink.events.size();
     g_draw.mode = 3;
     CHECK(!f.Run(src.Get(), args, &r));
     g_draw.mode = 0;
-    g_patchClear.Remove();
     g_patchOm.Remove();
     CHECK(r.result == Result::Fault);
     CHECK(SameState("after a crash while unbinding", before, DumpState(f.rig.context.Get())));
@@ -1916,7 +1910,8 @@ void FaultsInTheRestore()
     CHECK(SameState("after recovery from the unbind crash", before, DumpState(f.rig.context.Get())));
 
     // 2. the swap back crashes before it swaps: the context is left in the private state, and the NEXT call puts the game's state
-    // back first, with the very state object the first swap returned
+    // back first, with the very state object the first swap returned. A context that really was in the private state has that state
+    // cleared (the game's bindings made there must not outlive the recovery): swap back, enter, clear, swap back again.
     InstallSwapHook(f.rig, 2, SwapFault::CrashBefore);
     events = f.sink.events.size();
     CHECK(!f.Run(src.Get(), args, &r));
@@ -1926,11 +1921,13 @@ void FaultsInTheRestore()
     ID3DDeviceContextState* gameState = g_swap.previous.empty() ? nullptr : g_swap.previous[0];
     CHECK(gameState != nullptr);
     g_swap.faultCall = 0;
-    CHECK(f.Run(src.Get(), args)); // call 3 is the retry, 4 and 5 the capture
-    CHECK(g_swap.calls == 5);
-    if (g_swap.calls >= 3)
+    CHECK(f.Run(src.Get(), args)); // calls 3 to 5 are the retry (swap back, enter the private state to clear it, swap back), 6 and 7 the capture
+    CHECK(g_swap.calls == 7);
+    if (g_swap.calls >= 5)
     {
         CHECK(g_swap.targets[2] == gameState);
+        CHECK(g_swap.targets[3] != gameState); // clearing: into the private state
+        CHECK(g_swap.targets[4] == gameState);
         CHECK(g_swap.targets[0] != gameState);
     }
     CHECK(SameState("after the retried swap back", before, DumpState(f.rig.context.Get())));
@@ -1942,7 +1939,7 @@ void FaultsInTheRestore()
     g_swap.faultCall = 0;
     f.pass->Release();
     CHECK(SameState("after Release with a swap back outstanding", before, DumpState(f.rig.context.Get())));
-    CHECK(g_swap.calls == 3);
+    CHECK(g_swap.calls == 5);
     for (bool open : g_swap.bypassed) // the retry from Release is our own call, too
         CHECK(open);
     CHECK(f.Run(src.Get(), args));
@@ -1954,6 +1951,7 @@ void FaultsInTheRestore()
     CHECK(SameState("after a crash behind the swap back", before, DumpState(f.rig.context.Get())));
     g_swap.faultCall = 0;
     CHECK(f.Run(src.Get(), args));
+    CHECK(g_swap.calls == 5); // the retry is one swap: the context was in the game's state already, so there is nothing to clear
     CHECK(SameState("after the retry behind a finished swap back", before, DumpState(f.rig.context.Get())));
     g_swap.patch.Remove();
 }
@@ -1976,7 +1974,6 @@ void StaleBindingsAreCleared()
         g_draw.mode = 3;
         CHECK(!f.Run(first.Get(), args));
         g_draw.mode = 0;
-        g_patchClear.Remove();
         g_patchOm.Remove();
     }
     f.rig.context->Flush();
@@ -2033,6 +2030,342 @@ void NoPreviousState()
         g_swap.lost->Release();
     }
     CHECK(SameState("after putting the game's state back by hand", before, DumpState(f.rig.context.Get())));
+}
+
+// ---- a swap back that keeps failing -----------------------------------------------------------------------------------------
+// The pass leaves the context in its private state when the swap back fails, and keeps the game's state object to try again. The
+// attempts are capped, so a context that can never be put back does not block every later capture (also on another device), the
+// recovery touches the immediate context only when the call is for that context, and it clears the private state. Giving up keeps the
+// game's state object alive on purpose: the context may still be in the private state, and the object must not be destroyed under it.
+int SwapsTo(ID3DDeviceContextState* state)
+{
+    int n = 0;
+    for (ID3DDeviceContextState* t : g_swap.targets)
+        n += t == state ? 1 : 0;
+    return n;
+}
+
+size_t LogLines(const char* needle)
+{
+    size_t n = 0;
+    for (const std::string& line : depthtest_log::Lines())
+        n += line.find(needle) != std::string::npos ? 1 : 0;
+    return n;
+}
+
+// Leaves the context of `f` in the private state: the swap back (call 2 of the hook) crashes, and with `persistent` so does every later
+// swap. Returns the game's state object with a reference of the test's own (the pass holds, or leaks, its own).
+ID3DDeviceContextState* MakeStuck(Fixture& f, ID3D11Resource* source, const CaptureArgs& args, bool persistent, bool onlyThisContext = false)
+{
+    InstallSwapHook(f.rig, 2, SwapFault::CrashBefore, persistent, onlyThisContext);
+    CaptureReport r;
+    CHECK(!f.Run(source, args, &r));
+    CHECK(r.result == Result::Fault);
+    ID3DDeviceContextState* game = g_swap.previous.empty() ? nullptr : g_swap.previous[0];
+    CHECK(game != nullptr);
+    if (game != nullptr)
+        game->AddRef();
+    return game;
+}
+
+void StuckRecoveryIsCapped()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    const Dump before = DumpState(f.rig.context.Get());
+    ComPtr<ID3D11DeviceContext1> c1;
+    f.rig.context.As(&c1);
+    const size_t lines = LogLines("giving up");
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, true);
+    if (gs == nullptr)
+        return;
+    CHECK(SwapsTo(gs) == 1); // the swap back of the capture itself
+    const ULONG refs = RefCount(gs);
+    const int draws = g_draw.draws;
+    CaptureReport r;
+    for (int i = 1; i <= 8; ++i)
+    {
+        const int before = g_swap.calls;
+        CHECK(!f.Run(src.Get(), args, &r));
+        CHECK(r.result == Result::Fault);
+        if (i == 1)
+            CHECK(g_swap.calls == before + 1); // a failed recovery ends the call: the capture does not go on to swap into its state
+    }
+    CHECK(g_draw.draws == draws);
+    CHECK(SwapsTo(gs) == 1 + 3); // three attempts to put the state back, then the pass gave up: the later calls do not try again
+    CHECK(LogLines("giving up") == lines + 1); // said once
+    CHECK(RefCount(gs) == refs); // the pass leaked its reference on purpose (a Reset would have dropped it)
+
+    // the context is put back by hand; the pass is not blocked any more
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    c1->SwapDeviceContextState(gs, nullptr);
+    CHECK(f.Run(src.Get(), args));
+    CHECK(SameState("after giving up and putting the state back by hand", before, DumpState(f.rig.context.Get())));
+
+    // a second episode starts with a fresh count: three attempts again, and a second line
+    ID3DDeviceContextState* gs2 = MakeStuck(f, src.Get(), args, true);
+    if (gs2 == nullptr)
+        return;
+    CHECK(SwapsTo(gs2) == 1);
+    for (int i = 1; i <= 5; ++i)
+        CHECK(!f.Run(src.Get(), args, &r));
+    CHECK(SwapsTo(gs2) == 1 + 3);
+    CHECK(LogLines("giving up") == lines + 2);
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    c1->SwapDeviceContextState(gs2, nullptr);
+    CHECK(f.Run(src.Get(), args));
+}
+
+// The recovery swaps back, enters the private state to clear it and swaps back again: when that last swap fails, the context is in the
+// private state again and the attempt has failed (it is counted, and the call goes no further)
+void ScrubFailsToLeave()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    const Dump before = DumpState(f.rig.context.Get());
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, false);
+    if (gs == nullptr)
+        return;
+    g_swap.alsoFaultAt.push_back(5); // calls 3 (swap back) and 4 (enter) work, call 5 (leave) crashes
+    CaptureReport r;
+    CHECK(!f.Run(src.Get(), args, &r));
+    CHECK(r.result == Result::Fault);
+    CHECK(g_swap.calls == 5); // the call went no further: no capture swaps
+    CHECK(SwapsTo(gs) == 3); // the capture's own swap back, and two of the recovery
+    // the next one finds the state still outstanding and puts it back (a counted attempt, the third would give up)
+    CHECK(f.Run(src.Get(), args));
+    CHECK(SameState("after the second recovery", before, DumpState(f.rig.context.Get())));
+    g_swap.patch.Remove();
+    gs->Release();
+}
+
+// A recovery that worked ends the episode: the count of failed attempts starts over with the next one
+void AttemptsStartOverAfterARecovery()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    const size_t lines = LogLines("giving up");
+    CaptureReport r;
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, true);
+    if (gs == nullptr)
+        return;
+    CHECK(!f.Run(src.Get(), args, &r)); // failed attempt 1
+    CHECK(!f.Run(src.Get(), args, &r)); // failed attempt 2
+    g_swap.faultCall = 0;
+    CHECK(f.Run(src.Get(), args)); // the third works: recovered, and the capture goes on
+    CHECK(LogLines("giving up") == lines);
+
+    ID3DDeviceContextState* gs2 = MakeStuck(f, src.Get(), args, true);
+    if (gs2 == nullptr)
+        return;
+    CHECK(!f.Run(src.Get(), args, &r)); // 1
+    CHECK(!f.Run(src.Get(), args, &r)); // 2
+    CHECK(LogLines("giving up") == lines); // two failures of the new episode are not a give-up, whatever the old one counted
+    CHECK(!f.Run(src.Get(), args, &r)); // 3: gives up
+    CHECK(LogLines("giving up") == lines + 1);
+    CHECK(SwapsTo(gs2) == 1 + 3);
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    ComPtr<ID3D11DeviceContext1> c1;
+    f.rig.context.As(&c1);
+    c1->SwapDeviceContextState(gs2, nullptr);
+}
+
+// A removed device is no reason to keep trying to put a state back on its context
+void StuckOnARemovedDevice()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, true);
+    if (gs == nullptr)
+        return;
+    const size_t lines = LogLines("giving up");
+    CaptureReport r;
+    InstallDeviceHooks(f.rig);
+    CHECK(!RunHooked(f, src.Get(), args, DeviceFault::DeviceRemoved, &r));
+    RemoveDeviceHooks();
+    CHECK(r.result == Result::DeviceUnavailable);
+    CHECK(SwapsTo(gs) == 1); // no attempt on the removed device's context
+    CHECK(LogLines("giving up") == lines + 1);
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    ComPtr<ID3D11DeviceContext1> c1;
+    f.rig.context.As(&c1);
+    c1->SwapDeviceContextState(gs, nullptr);
+}
+
+// A stuck context of one device does not block a capture on another one: the state is given up at once (the call is not for that
+// context), the other device's capture goes through, and the stuck context is not touched again.
+void StuckDoesNotBlockAnotherDevice()
+{
+    Fixture f;
+    Rig other;
+    if (!f.Create() || !other.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    auto srcOther = MakeSource(other, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, true, true);
+    if (gs == nullptr)
+        return;
+    const size_t lines = LogLines("giving up");
+    const ULONG refs = RefCount(gs);
+    CaptureReport r;
+    CHECK(f.pass->Capture(other.context.Get(), srcOther.Get(), args, &r));
+    CHECK(r.result == Result::Ok);
+    CHECK(f.sink.events.back().valid);
+    CHECK(SwapsTo(gs) == 1); // the stuck context was not touched again
+    CHECK(LogLines("giving up") == lines + 1);
+    CHECK(RefCount(gs) == refs);
+    // and the first device, still stuck, is just another device now
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    ComPtr<ID3D11DeviceContext1> c1;
+    f.rig.context.As(&c1);
+    c1->SwapDeviceContextState(gs, nullptr);
+    CHECK(f.pass->Capture(f.rig.context.Get(), src.Get(), args, &r));
+    CHECK(r.result == Result::Ok);
+}
+
+// A deferred context is refused before anything else: while a swap back is outstanding it must not touch the immediate context
+void DeferredContextWhileStuck()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    ComPtr<ID3D11DeviceContext> deferred;
+    CHECK(SUCCEEDED(f.rig.device->CreateDeferredContext(0, &deferred)));
+    if (deferred == nullptr)
+        return;
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    const Dump before = DumpState(f.rig.context.Get());
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, false);
+    if (gs == nullptr)
+        return;
+    g_swap.faultCall = 0;
+    const int calls = g_swap.calls;
+    CaptureReport r;
+    CHECK(!f.pass->Capture(deferred.Get(), src.Get(), args, &r));
+    CHECK(r.result == Result::DeferredContext);
+    CHECK(g_swap.calls == calls); // no swap, no state change on the immediate context
+    // the next immediate call recovers first, as before
+    CHECK(f.Run(src.Get(), args));
+    CHECK(SwapsTo(gs) >= 2);
+    CHECK(SameState("after the recovery that followed a deferred call", before, DumpState(f.rig.context.Get())));
+    g_swap.patch.Remove();
+    gs->Release();
+}
+
+// The recovery clears the private state: whatever the game bound there while the context was stuck in it is not kept alive until the
+// next capture draws (a refused request recovers first and never draws)
+void RecoveryClearsThePrivateState()
+{
+    static const GUID kCanary = { 0x5d2b7e90, 0x31c4, 0x4a1f, { 0xb6, 0x08, 0x7c, 0x1e, 0x93, 0xa5, 0x40, 0x2d } };
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    const Dump before = DumpState(f.rig.context.Get());
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, false);
+    if (gs == nullptr)
+        return;
+    g_swap.faultCall = 0;
+
+    bool destroyed = false;
+    {
+        // the game goes on drawing in the private state and binds a render target of its own there
+        D3D11_TEXTURE2D_DESC td {};
+        td.Width = td.Height = 16;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11RenderTargetView> rtv;
+        CHECK(SUCCEEDED(f.rig.device->CreateTexture2D(&td, nullptr, &tex)));
+        CHECK(SUCCEEDED(f.rig.device->CreateRenderTargetView(tex.Get(), nullptr, &rtv)));
+        Canary* c = new Canary(&destroyed);
+        tex->SetPrivateDataInterface(kCanary, c);
+        c->Release();
+        ID3D11RenderTargetView* rtvs[1] = { rtv.Get() };
+        f.rig.context->OMSetRenderTargets(1, rtvs, nullptr);
+    }
+    f.rig.context->Flush();
+    CHECK(!destroyed); // the private state holds it
+
+    CaptureReport r;
+    CHECK(!f.Run(src.Get(), Args(0, 12, 0, 0, 16, 12), &r)); // refused, but only after the recovery
+    CHECK(r.result == Result::BadOutputSize);
+    CHECK(SameState("after the recovery of a refused request", before, DumpState(f.rig.context.Get())));
+    f.rig.context->Flush();
+    CHECK(destroyed);
+    g_swap.patch.Remove();
+    gs->Release();
+}
+
+// The destructor does not drop the only reference to the game's state object while the context may still be in the private state
+void DestructorKeepsTheGameStateAlive()
+{
+    Fixture f;
+    if (!f.Create())
+        return;
+    GameState game;
+    CHECK(game.Set(f.rig));
+    auto src = MakeSource(f.rig, kFamilies[0], 40, 30);
+    const CaptureArgs args = Args(16, 12, 0, 0, 16, 12);
+    CHECK(f.Run(src.Get(), args));
+    ID3DDeviceContextState* gs = MakeStuck(f, src.Get(), args, true);
+    if (gs == nullptr)
+        return;
+    const size_t lines = LogLines("giving up");
+    const ULONG refs = RefCount(gs);
+    f.pass.reset(); // Release() tries once more, fails, and the destructor must leak the reference
+    CHECK(RefCount(gs) == refs);
+    CHECK(LogLines("giving up") == lines + 1);
+    // put the game's state back by hand
+    g_swap.faultCall = 0;
+    g_swap.patch.Remove();
+    ComPtr<ID3D11DeviceContext1> c1;
+    f.rig.context.As(&c1);
+    c1->SwapDeviceContextState(gs, nullptr);
 }
 
 // ---- the game's predication ---------------------------------------------------------------------------------------------
@@ -2093,7 +2426,9 @@ void BypassCoversEveryCall()
     CHECK(RunHooked(f, src.Get(), args, DeviceFault::None));
     CHECK(g_dev.srvCalls >= 2); // the source view and the view of the new target
     CHECK(g_dev.srvBypassed == g_dev.srvCalls);
-    CHECK(g_dev.updateBypassed == g_dev.updateCalls); // (the context's table is the private state's while it is current: the count may be 0)
+    // (The constant upload and the swaps are not checked here: while the private state is current the context's method table is
+    // not the patched one, so a hook on UpdateSubresource sees no call. The bypass scope is one object that lives across the whole
+    // call, and the swap hook and the draw both see it open.)
     CHECK(g_dev.removedCalls >= 1); // the device is asked on every capture
     CHECK(!ext::core::HooksBypassed());
     RemoveDeviceHooks();
@@ -2369,6 +2704,14 @@ int main()
     FaultsInTheRestore();
     StaleBindingsAreCleared();
     NoPreviousState();
+    StuckRecoveryIsCapped();
+    AttemptsStartOverAfterARecovery();
+    ScrubFailsToLeave();
+    StuckOnARemovedDevice();
+    StuckDoesNotBlockAnotherDevice();
+    DeferredContextWhileStuck();
+    RecoveryClearsThePrivateState();
+    DestructorKeepsTheGameStateAlive();
     BypassCoversEveryCall();
     CrashInThePrepareStep();
     RemovedDevice();
@@ -2398,6 +2741,6 @@ int main()
         std::printf("FAIL: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::puts("PASS: depth copy (formats, request checks, constants, crop and nearest remap on 6 source families x 12 cases, context state (also with the depth bound in it), bypass scope, publish order on recreate / Release / destroy / device change, refusals, faults, product shader clamp and largest edge)");
+    std::puts("PASS: depth copy (formats, request checks, constants, crop and nearest remap on 6 source families x 12 cases, context state (also with the depth bound in it), bypass scope, publish order on recreate / Release / destroy / device change, refusals, faults, a stuck swap back (capped attempts, another device, removed device, deferred context, private state cleared, destructor leak), product shader clamp and largest edge)");
     return 0;
 }
