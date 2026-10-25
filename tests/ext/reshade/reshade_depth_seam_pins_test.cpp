@@ -192,6 +192,9 @@ int main(int argc, char** argv)
         CHECK(Has(setEnabled, "g_gate.SetEnabled(on);"));
         CHECK(Has(facade, "void OnConfigLoaded(bool on) { SetEnabled(on); }"));
         CHECK(Has(facade, "FfxivConfig::automaticReShadeDepthOnLoaded = &OnConfigLoaded"));
+        // ... and a load that ran before the hook existed is made up for with the value the config holds
+        CHECK(Has(facade, "bool RegisterLoadHook() { FfxivConfig::automaticReShadeDepthOnLoaded = &OnConfigLoaded; OnConfigLoaded(ext::Cfg().ffxiv.automaticReShadeDepth.value_or_default()); return true; }"));
+        CHECK(Has(facade, "const bool kLoadHookRegistered = RegisterLoadHook();"));
     }
     {   // the ini fragment ships the key as `auto` (a value of true here would turn the feature on in every new ini)
         const std::string ini = Read(ext + "ini/FFXIV.ini");

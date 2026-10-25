@@ -106,7 +106,17 @@ glue::Extent DisplayOf(void* feature)
 
 // [FFXIV] AutomaticReShadeDepth was read (config load and reload): a pure store, nothing is constructed
 void OnConfigLoaded(bool on) { SetEnabled(on); }
-[[maybe_unused]] const bool kLoadHookRegistered = (FfxivConfig::automaticReShadeDepthOnLoaded = &OnConfigLoaded, true);
+
+// Runs once, when this translation unit's statics are initialized. The order of that across translation units is unspecified, so a
+// config load that ran BEFORE it (it found no hook) is made up for here with the value the config holds; Cfg() is a plain function
+// static that loads nothing.
+bool RegisterLoadHook()
+{
+    FfxivConfig::automaticReShadeDepthOnLoaded = &OnConfigLoaded;
+    OnConfigLoaded(ext::Cfg().ffxiv.automaticReShadeDepth.value_or_default());
+    return true;
+}
+[[maybe_unused]] const bool kLoadHookRegistered = RegisterLoadHook();
 } // namespace
 
 bool Enabled() noexcept { return g_gate.Enabled(); }
