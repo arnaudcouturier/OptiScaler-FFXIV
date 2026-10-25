@@ -111,6 +111,12 @@ Seams: present `FrameInterval`; fg `MarkersBeforePresent`, `MarkersNextFrame`, `
 
 **Seams.** reshade `OnReshadeLoaded`.
 
+## Automatic ReShade scene depth
+
+**Code.** `ext/reshade/ReShadeDepth*.{h,cpp}` (facade `ReShadeDepth`, evaluate engine `ReShadeDepthEval`, binder `ReShadeDepthCore`, copy pass `ReShadeDepthCopy` with `ext/reshade/shaders/depth_crop.hlsl`, live backend `ReShadeDepthBackend`/`ReShadeDepthRaw`, event callbacks `ReShadeDepthEvents`, late registration `ReShadeDepthLate`, pure decisions `ReShadeDepthGlue.h`, menu card `ReShadeDepthMenu`), `ext/reshade/ReShadeRegistrationState.*`.
+
+**Seams.** reshade `OnEvaluated` (one line in `NVNGX_DLSS_Dx11.cpp`). `ext::reshade::depth::OnNgxShutdown()` is called from the existing seam bodies `dx11bridge::OnNgxShutdownBegin` and `dx11bridge::BeforeReleaseFeature`. Config: `FfxivConfig::automaticReShadeDepth` with a load hook (no seam).
+
 ## Window mode
 
 **Code.** `ext/window/`: `WindowRules.h` (pure rules: border rule, DLSS-G off gate, thread rule, defer verdict), `WindowDeferral.h` (the Idle/Pending/Replaying machine), `WindowProbe.h` (the line format), `WindowController.h` (decisions, driven through an `Env` interface so tests use fakes), `WindowWin32.cpp` (window reads and the extended-style call), `WindowModule.cpp` (live `Env`, entry points), `WindowConfig.h`, `WindowMode.h`, `WindowSeams.h`.

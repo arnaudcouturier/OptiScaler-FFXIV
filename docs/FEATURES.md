@@ -31,6 +31,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [XeFG / XeMFG](#xefg-and-xemfg) | ported from SirenBrink's fork (Citrus333's base) | untested |
 | [HUD-less frame generation](#hud-less-frame-generation) | adapted from byunjoe's code in SirenBrink's fork; native capture and engine layers are fork code | opt-in; SDR with DLSS-G 2x-4x tested, HDR untested |
 | [ReShade built-in add-on](#reshade-built-in-add-on) | fork | tested as part of HUD-less, ReShade 6.8.0 only |
+| [Automatic ReShade scene depth](#automatic-reshade-scene-depth) (`[FFXIV] AutomaticReShadeDepth`) | fork | opt-in, off by default; new; unit-tested on fakes and a WARP device, the live ReShade side has not run in game |
 | [Window mode](#window-mode) (log probe, border fix, deferred mode switch) | fork | opt-in, off by default; tested (RTX 4090) on 2026-10-19: border fix and two held-back mode switches with DLSS-G on; the open points listed in the entry were not exercised |
 | [FFXIV native quality, render geometry, colour scaling](#ffxiv-module) | ported from SirenBrink's fork | tested |
 | [Native quality hook install retry](#native-quality-and-forced-quality) (up to 3 attempts) | follows SirenBrink's approach, fork code | new; tested against the real Detours library; the install succeeded on its first attempt in every game log since 2026-10-22; the retry path itself (a failed first attempt) has never been seen in game |
@@ -262,6 +263,22 @@ It never goes above 4x, is off by default, and is inert on RTX 50 (use Force Dyn
 **Config.** `[HudLess] ReShadePresets` (`auto`, `on`, `off`), `ReShadeProbe` (diagnostics). **Menu.** `reshade_addon_probe` (tab Compatibility, diagnostics).
 
 **Code and seams.** `ext/reshade/` (the public ReShade API headers are vendored unmodified; licence notice shipped as `Licenses/ReShade_ATTRIBUTION.txt`). Seam: reshade `OnReshadeLoaded`.
+
+### Automatic ReShade scene depth
+
+**Origin.** Fork-original.
+
+**What it does.** ReShade effects that read depth (MXAO and the like) find the game's depth buffer on their own. When the game renders below the output size (DLSS Quality and lower) the depth they find is render-sized and does not line up with the output-sized picture they filter. With this option on, each DLSS evaluate copies the Depth texture the upscaler was given (cropped by the subrect origin, nearest-mapped from the render size) into an owned R32_FLOAT texture the size of ReShade's back buffer. While ReShade renders its effects (`begin_effects` to `finish_effects`) the `DEPTH` input is pointed at that copy through `update_texture_bindings`, and finish puts ReShade's own binding back. The copy is made on the game's native immediate context, in a private context state, so the game's pipeline state is untouched.
+
+It leaves ReShade alone, and ReShade keeps the depth it detected, whenever anything is not clearly right: another device, no `DEPTH` reader that reads the copy back, no or a stale capture, a size mismatch, the character preview (its output is not the back-buffer size), or any of `RESHADE_DEPTH_INPUT_X_SCALE`, `_Y_SCALE`, `_X_OFFSET`, `_Y_OFFSET`, `_X_PIXEL_OFFSET`, `_Y_PIXEL_OFFSET` set in ReShade's preprocessor definitions (a manual depth transform). The game's depth is reverse-Z: set `RESHADE_DEPTH_INPUT_IS_REVERSED=1` in ReShade if the effects need it. It needs ReShade 6.8 or newer (add-on API 20) loaded in the game; a ReShade installed as `dxgi.dll` that loads after OptiScaler is looked for once a second for the first minute while the option is on.
+
+**Status.** Opt-in, off by default. New. The decision logic, the copy pass (real shader, WARP device), the raw ReShade layer (against a fake ReShade DLL), the event wiring and the whole evaluate path (fake parameter block and fake host) have offline tests; the source pins keep the one upstream line and the shutdown calls in place. Not run against a real ReShade in game yet: whether ReShade's `get_texture_binding` reflects `update_texture_bindings` (if it does not, every pass fails closed with "Depth input not trusted" and ReShade keeps its own depth), and on which thread ReShade delivers `register_event` calls relative to the first evaluate. `INGAME-TEST-DEPTH.md` in the build folder lists what to compare and what to send back.
+
+**Config.** `[FFXIV] AutomaticReShadeDepth` (false; ini default `auto`; fragment `ext/ini/FFXIV.ini`). Loading or reloading the ini only stores the value; the machinery is built by the first evaluate that finds the option on, so a game without ReShade pays one relaxed load per evaluate. **Menu.** Card "ReShade depth compatibility" (`reshade_depth`, FFXIV tab, after "Window mode"), always shown on the FFXIV build match: checkbox "Automatic scene depth" (takes effect from the next frame) and a status line.
+
+**Status line.** `Automatic scene depth: off`; `ReShade not detected` (also `(stopped looking)` after the late attempts ran out); `ReShade found but refused add-on API 20 (needs ReShade 6.8 or newer)`; `ReShade found but without add-on support ...`; `Waiting for ReShade depth effects` (registered, no effect asked for depth yet); `Automatic scene depth: 1920x1080 -> 3840x2160` (a pass is bound); `Scene depth capture refused (<reason>); generic depth retained`; `ReShade events could not be subscribed; generic depth retained`; `Automatic scene depth: native context not available`.
+
+**Code and seams.** `ext/reshade/ReShadeDepth*.{h,cpp}` (facade, evaluate engine `ReShadeDepthEval`, binder `ReShadeDepthCore`, copy pass `ReShadeDepthCopy` with `shaders/depth_crop.hlsl`, live backend, event callbacks, late registration, menu card). Seams: reshade `OnEvaluated` (one line after the successful `Evaluate` in `NVSDK_NGX_D3D11_EvaluateFeature`); the shutdown call `ext::reshade::depth::OnNgxShutdown()` sits in the existing seam bodies `dx11bridge::OnNgxShutdownBegin` and `dx11bridge::BeforeReleaseFeature`.
 
 ## Window mode
 
@@ -513,7 +530,7 @@ The automatic bias does not engage while "MB Scale Override" is on (one warning,
 
 **What it does.** The in-game menu keeps upstream's tabs and cards; the fork's cards join them through the registry in `ext/core/MenuRegistry.h`.
 
-- **FFXIV tab.** Everything that needs the FFXIV build match sits in one tab, "FFXIV", third in the tab bar right after Frame Gen, hidden in every other game. Its cards, in order: Window mode, FFXIV HDR10 output, Game jitter, Character preview, HUD-less (UI-free frame generation), FFXIV Companion (nameplates), HUD-less diagnostics, Advanced (FFXIV) (a closed fold with `[Hotfix] RenderSizeFromWidthHeight` and `[XeFG] ResetOnUpscalerChange`, both FFXIV only). The cards keep their ids, so the pins of the Custom Tab still work.
+- **FFXIV tab.** Everything that needs the FFXIV build match sits in one tab, "FFXIV", third in the tab bar right after Frame Gen, hidden in every other game. Its cards, in order: Window mode, ReShade depth compatibility, FFXIV HDR10 output, Game jitter, Character preview, HUD-less (UI-free frame generation), FFXIV Companion (nameplates), HUD-less diagnostics, Advanced (FFXIV) (a closed fold with `[Hotfix] RenderSizeFromWidthHeight` and `[XeFG] ResetOnUpscalerChange`, both FFXIV only). The cards keep their ids, so the pins of the Custom Tab still work.
 - **Draw once.** A group of upstream cards that share one drawing function (the Frame Gen runtime cards, Mipmap Bias with Anisotropic Filtering, the advanced Compatibility cards) is drawn once per tab, at the place of its first card, so a fork card sits before or after such a group, never inside it.
 - **Layout table and manifest.** `ext/core/MenuLayout.h` says where each fork card goes (the card it follows, per card id); a card without an entry goes to the end of its tab, and the Custom Tab draws its pinned cards in the same order. `ext/core/MenuManifest.h` lists the FFXIV-only cards, every released card id (retired ids get an alias) and the config keys that stay ini-only on purpose; `tests/ext/menu/menu_manifest.cpp` checks it against the sources offline. Diagnostics (HUD-less diagnostics, the ReShade add-on probe, the Companion diagnostics) are closed by default.
 
@@ -525,6 +542,7 @@ The automatic bias does not engage while "MB Scale Override" is on (one warning,
 
 | Key | Card (tab) and control | Applies |
 |-----|------------------------|---------|
+| `[FFXIV] AutomaticReShadeDepth` | ReShade depth compatibility (FFXIV tab, after Window mode): "Automatic scene depth" checkbox and a status line | from the next frame |
 | `[HudLess] ReShadePresets` | HUD-less: "ReShade presets at the UI boundary" (Auto, On, Off), only used in UI-free mode | Off at once; on again after a start with Off, restart |
 | `[DLSSG] UIRecomposition` | HUD-less, closed Advanced fold: "UI recomposition (restart)" (Auto, On, Off) | restart |
 | `[XeFG] UnlockMFG`, `MaxInterpolatedFrames` | upstream's XeFG card: "Unlock multi frame generation (restart)", "Max XeFG multiplier (restart)" (2X to 8X) | restart |
