@@ -865,6 +865,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
         Hudfix_Dx11::SetSkipStatus(true);
 
     auto upscaleResult = deviceContext->Evaluate(InDevCtx, InParameters);
+    if (upscaleResult) ext::reshade::depth::OnEvaluated(InDevCtx, InParameters, deviceContext); // ext: DEPTH automatic ReShade scene depth (one relaxed load when the option is off)
     activeContext->lastEvalFrame = state.frameCount;
 
     if (State::Instance().activeFgInput == FGInput::Upscaler && IsFGSourceFeature(handleId))

@@ -157,7 +157,7 @@ int main(int argc, char** argv)
         CHECK(Has(glue, "if (xefgRebuild) { OwnedLockGuard guard(fg->Mutex, 5);"));
         CHECK(body.find("const bool xefgRebuild") < body.find("PrepareRelease(Registry(), plan, ops)"));
         CHECK(Has(body, "PrepareRelease(Registry(), plan, ops)"));
-        CHECK(Has(body, "bool shuttingDown) { ext::upscaler::LogReleaseThread(handleId); if (!IsolatesNgx() || !feature.IsWithDx12()) return ReleaseDrain::NotApplicable;")); // the thread line comes first, before the early return
+        CHECK(Has(body, "bool shuttingDown) { ext::upscaler::LogReleaseThread(handleId); ext::reshade::depth::OnNgxShutdown(); if (!IsolatesNgx() || !feature.IsWithDx12()) return ReleaseDrain::NotApplicable;")); // the thread line comes first, then the depth pass gives its device reference back (every release, whatever the game), both before the early return
         CHECK(Has(body, "if (result == ReleaseDrain::Failed) {"));
     }
     // the key binding

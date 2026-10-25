@@ -115,6 +115,7 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, boo
 {
     // Before the early return: the thread of every release is wanted in the log, whatever the game.
     ext::upscaler::LogReleaseThread(handleId);
+    ext::reshade::depth::OnNgxShutdown(); // DEPTH the scene depth copy holds a reference to the device: given back (on the evaluate thread at once)
 
     if (!IsolatesNgx() || !feature.IsWithDx12())
         return ReleaseDrain::NotApplicable;

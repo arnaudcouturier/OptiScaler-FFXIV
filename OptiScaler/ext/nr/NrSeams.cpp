@@ -289,6 +289,7 @@ void OnNgxInit()
 
 void OnNgxShutdownBegin()
 {
+    ext::reshade::depth::OnNgxShutdown(); // ext: DEPTH the scene depth copy gives its device reference back
     ext::ffxiv::chara::dlss::OnNgxShutdown();
     ext::ffxiv::chara::nr::OnBridgeShutdown(); // before the driver's NGX shutdown: the preview NR models and their GPU work go first
     // The oracle tested the FFXIV exe name here; the bridge-active test is what the call is about.

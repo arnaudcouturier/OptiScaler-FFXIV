@@ -4,6 +4,11 @@
 
 #include <Windows.h>
 
+// Upstream classes the depth seam names (forward declarations only; the full types come with the host file's own includes)
+struct ID3D11DeviceContext;
+struct NVSDK_NGX_Parameter;
+class IFeature_Dx11;
+
 namespace ext::reshade
 {
 // dllmain.cpp CheckWorkingMode, right after the `LoadReShade` block. Runs inside DllMain (loader lock): no file or
@@ -13,3 +18,17 @@ namespace ext::reshade
 // reason it stays inert. Idempotent, never throws, never blocks.
 void OnReshadeLoaded(HMODULE reshadeModule);
 } // namespace ext::reshade
+
+namespace ext::reshade::depth
+{
+// Automatic ReShade scene depth (docs/FEATURES.md "Automatic scene depth"): inputs/NVNGX_DLSS_Dx11.cpp, right after the successful
+// deviceContext->Evaluate(...). `context` is the context NGX was given (possibly ReShade's proxy: it is only logged), `feature` the
+// evaluating feature (its display size is the Output size of last resort). Per frame: with [FFXIV] AutomaticReShadeDepth off the cost
+// is ONE relaxed atomic load. Never throws, never lets an access violation out. Runs on the NGX evaluate thread. Free to call when the
+// option is off; nothing is read from `parameters` or `feature` before the gates have passed.
+void OnEvaluated(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters, IFeature_Dx11* feature) noexcept;
+
+// NGX is going away (ext::dx11bridge::OnNgxShutdownBegin and BeforeReleaseFeature): the copy pass gives its resources (and its reference
+// to the device) back. On the evaluate thread at once, from any other thread at the next OnEvaluated. A no-op before the first evaluate.
+void OnNgxShutdown() noexcept;
+} // namespace ext::reshade::depth
