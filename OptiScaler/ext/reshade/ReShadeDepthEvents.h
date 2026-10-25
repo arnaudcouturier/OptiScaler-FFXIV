@@ -9,6 +9,8 @@
 //
 // No ReShade or ImGui types in this header.
 
+#include "ext/reshade/ReShadeDepthCore.h"
+
 #include <cstdint>
 
 namespace ext::reshade::depth
@@ -28,5 +30,21 @@ bool EnsureSubscribed();
 // Bit i is set when the DepthEvent with value i is subscribed / failed to subscribe.
 uint32_t SubscribedEvents() noexcept;
 uint32_t FailedEvents() noexcept;
-inline constexpr uint32_t kAllDepthEvents = 0x3F;
+
+// One bit per event of LateRegistrationPlanner::kEvents (the list of what the depth binder subscribes), which must name every DepthEvent
+// exactly once: the compiler checks it, so a new event cannot be added to the enum and forgotten here.
+inline constexpr uint32_t kAllDepthEvents = (1u << LateRegistrationPlanner::kEvents.size()) - 1;
+constexpr bool EventListIsComplete()
+{
+    uint32_t seen = 0;
+    for (const DepthEvent event : LateRegistrationPlanner::kEvents)
+    {
+        const uint32_t bit = 1u << static_cast<uint32_t>(event);
+        if (static_cast<size_t>(event) >= LateRegistrationPlanner::kEvents.size() || (seen & bit) != 0)
+            return false;
+        seen |= bit;
+    }
+    return seen == kAllDepthEvents && LateRegistrationPlanner::kEvents.size() == static_cast<size_t>(DepthEvent::Count);
+}
+static_assert(EventListIsComplete(), "LateRegistrationPlanner::kEvents must list every DepthEvent exactly once");
 } // namespace ext::reshade::depth

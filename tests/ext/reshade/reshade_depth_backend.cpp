@@ -2,8 +2,9 @@
 // (the NUL stripped, never a truncated value), the tri-state definition, the handle lists that outgrow the first capacity, the
 // untrusted views (a faulting AddRef / Release / format query), SameDevice (native devices, the only-runtime fallback, the capture
 // device 0), the registry behind the frame counter, the first-bind readback log, and the real binder on top with a fault injected at
-// every raw call of a pass. The real raw layer (ReShadeDepthRaw.cpp, SEH thunks over effect_runtime) is not covered here: it needs a
-// real ReShade.
+// every raw call of a pass. The real raw layer (ReShadeDepthRaw.cpp, SEH thunks over effect_runtime) is covered by reshade_depth_raw.cpp
+// (garbage handles, exceptions, the argument wiring, against a fake runtime derived from ReShade's abstract class); what real ReShade
+// answers is not covered by any test and is what the logs of the first run in the game settle.
 #include "pch.h"
 
 #include "ext/reshade/ReShadeDepthBackend.h"
@@ -762,48 +763,172 @@ void RegistryAndOurRuntime()
     CHECK(b3.SameDevice(kRt2, 0)); // kRt was not remembered, so kRt2 is the only one
 }
 
+// ---- one-shot logs that settle what the headers cannot ----------------------------------------------------------------------------
+std::string LastLine(const char* needle)
+{
+    std::string found;
+    for (const std::string& l : depthtest_log::Lines())
+        if (l.find(needle) != std::string::npos)
+            found = l;
+    return found;
+}
+
+// The first string that breaks ReShade's size contract is described once: the query kind, both sizes and the length found
+void StringContractLog()
+{
+    { // a string that grows between the two calls: first size 24, second 25 (the spare byte), 24 characters
+        FakeRaw raw;
+        raw.growBetween = true;
+        LiveDepthBackend b(raw, Env());
+        const size_t before = LogLines("string contract");
+        std::vector<TextureVar> t;
+        std::vector<UniformVar> u;
+        CHECK(!b.TextureVariables(kRt, t));
+        CHECK(!b.UniformVariables(kRt, u));
+        CHECK(!b.TextureVariables(kRt, t));
+        CHECK(LogLines("string contract") == before + 1); // the first one only
+        const std::string line = LastLine("string contract");
+        CHECK(line.find("texture name") != std::string::npos);
+        CHECK(line.find("first size 24") != std::string::npos && line.find("second size 25") != std::string::npos);
+        CHECK(line.find("string length 24") != std::string::npos);
+    }
+    { // a call that faults: no sizes to report, and it says so
+        FakeRaw raw;
+        LiveDepthBackend b(raw, Env());
+        const size_t before = LogLines("string contract");
+        raw.faultAt = 2; // ListTextures is call 1, the size query of the first name call 2
+        std::vector<TextureVar> t;
+        CHECK(!b.TextureVariables(kRt, t));
+        CHECK(LogLines("string contract") == before + 1);
+        const std::string line = LastLine("string contract");
+        CHECK(line.find("texture name") != std::string::npos && line.find("call faulted") != std::string::npos);
+    }
+    { // each kind says its own name; a definition that is merely undefined is not a broken contract
+        FakeRaw raw;
+        raw.growBetween = true;
+        raw.globalDefs["A"] = "1";
+        LiveDepthBackend b(raw, Env());
+        std::string v;
+        const size_t before = LogLines("string contract");
+        CHECK(b.Definition(kRt, nullptr, "Z", v) == DefinitionState::Undefined);
+        CHECK(LogLines("string contract") == before);
+        CHECK(b.Definition(kRt, nullptr, "A", v) == DefinitionState::Error);
+        CHECK(LogLines("string contract") == before + 1 && LastLine("string contract").find("definition") != std::string::npos);
+        FakeRaw r2;
+        r2.growBetween = true;
+        LiveDepthBackend b2(r2, Env());
+        std::vector<UniformVar> u;
+        CHECK(!b2.UniformVariables(kRt, u) && LastLine("string contract").find("uniform source") != std::string::npos);
+        FakeRaw r3;
+        r3.growBetween = true;
+        LiveDepthBackend b3(r3, Env());
+        std::vector<EffectTechnique> e;
+        CHECK(!b3.Techniques(kRt, e) && LastLine("string contract").find("technique effect") != std::string::npos);
+    }
+}
+
+// The first refusal of a runtime by a device that differs once a capture exists: both devices and the primary one, once
+void SameDeviceRefusalLog()
+{
+    g_primary = kDev;
+    FakeRaw raw;
+    LiveDepthBackend b(raw, Env());
+    const size_t before = LogLines("device mismatch");
+    CHECK(b.SameDevice(kRt, kDev)); // equal: nothing to say
+    CHECK(LogLines("device mismatch") == before);
+    CHECK(!b.SameDevice(kRt, kDev2));
+    CHECK(!b.SameDevice(kRt, kDev2));
+    CHECK(LogLines("device mismatch") == before + 1);
+    const std::string line = LastLine("device mismatch");
+    CHECK(line.find("0xd3d0") != std::string::npos && line.find("0xd3d1") != std::string::npos); // the runtime's device, the capture's
+    CHECK(line.find("primary 0xd3d0") != std::string::npos);
+    // the fallback while no capture exists is not a refusal
+    raw.R(kRt2).native = kDev2;
+    b.NoteRuntime(kRt);
+    b.NoteRuntime(kRt2);
+    const size_t after = LogLines("device mismatch");
+    CHECK(!b.SameDevice(kRt2, 0));
+    CHECK(LogLines("device mismatch") == after);
+}
+
+// A runtime without a depth input candidate: the names that contain "depth" (any case), at most eight, and a few lines per process
+void NoCandidateLog()
+{
+    FakeRaw raw;
+    LiveDepthBackend b(raw, Env());
+    std::vector<TextureVar> names;
+    for (int i = 0; i < 12; ++i)
+        names.push_back({ 0x900u + i, "ao_Depth_" + std::to_string(i) });
+    names.push_back({ 0x950, "SomethingElse" });
+    names.push_back({ 0x951, "MXAODEPTH" });
+    const size_t before = LogLines("no known depth input");
+    b.NoDepthCandidate(kRt, names);
+    CHECK(LogLines("no known depth input") == before + 1);
+    const std::string line = LastLine("no known depth input");
+    CHECK(line.find("ao_Depth_0") != std::string::npos && line.find("ao_Depth_7") != std::string::npos); // the first eight
+    CHECK(line.find("ao_Depth_8") == std::string::npos);                                                  // ... not more
+    CHECK(line.find("SomethingElse") == std::string::npos);
+    CHECK(line.find("14 texture variables") != std::string::npos && line.find("13 contain") != std::string::npos);
+    // a case-insensitive match that comes after the cap is counted but not listed
+    std::vector<TextureVar> mxao { { 1, "MXAODEPTH" }, { 2, "Other" } };
+    b.NoDepthCandidate(kRt2, mxao);
+    CHECK(LastLine("no known depth input").find("MXAODEPTH") != std::string::npos);
+    // a limited number of lines per process
+    for (int i = 0; i < 10; ++i)
+        b.NoDepthCandidate(kRt + i, mxao);
+    CHECK(LogLines("no known depth input") == before + 3);
+}
+
 // ---- the first bind --------------------------------------------------------------------------------------------------------------
 void FirstBindReadback()
 {
+    // five candidate variables that do NOT read the DEPTH semantic (decoys: some other binding), and the real reader
     FakeRaw raw;
-    raw.textures.push_back({ 0x502, "DepthBufferTex", "DEPTH", 0, 0 });
-    raw.textures.push_back({ 0x503, "DepthInputTex", "DEPTH", 0, 0 });
-    raw.textures.push_back({ 0x504, "Other", "DEPTH", 0, 0 });
-    raw.textures.push_back({ 0x505, "Another", "DEPTH", 0, 0 });
-    raw.textures.push_back({ 0x506, "AndMore", "DEPTH", 0, 0 });
+    for (uint64_t h = 0x502; h <= 0x506; ++h)
+        raw.textures.push_back({ h, "DepthBufferTex", "", 0xA7, 0xA8 });
     LiveDepthBackend b(raw, Env());
     uint64_t s = 0, g = 0;
     const size_t before = LogLines("first bind");
     // reads before any bind are not logged
     CHECK(b.TextureBinding(kRt, kDepthVar, s, g));
     CHECK(LogLines("first bind") == before);
-    // a bind of the copy arms it: the next readbacks of that runtime are logged, at most four
+    // a bind of the copy arms it: the next readbacks of that runtime are logged
     CHECK(b.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
+    // the decoys come first (the core reads every candidate until one shows the copy): they must not use up the lines of the reader
+    for (uint64_t v = 0x502; v <= 0x506; ++v)
+        CHECK(b.TextureBinding(kRt, v, s, g) && s == 0xA7 && g == 0xA8);
+    CHECK(LogLines("first bind") == before + 3); // at most three decoys
     CHECK(b.TextureBinding(kRt, kDepthVar, s, g) && s == kCopy && g == kCopy);
-    CHECK(LogLines("first bind") == before + 1);
-    for (uint64_t v : { 0x502u, 0x503u, 0x504u, 0x505u, 0x506u })
-        CHECK(b.TextureBinding(kRt, v, s, g));
-    CHECK(LogLines("first bind") == before + 4);
-    // the line says what ReShade answered, and what was bound
-    bool said = false;
+    CHECK(LogLines("first bind") == before + 4); // ... and the reader is always there
+    bool reader = false;
     for (const std::string& l : depthtest_log::Lines())
-        said = said || (l.find("first bind") != std::string::npos && l.find("0xc0") != std::string::npos);
-    CHECK(said);
-    { // ... both: a variable that reads back something else than the bound view
+        reader = reader || (l.find("first bind") != std::string::npos && l.find("0xc0 / srgb 0xc0") != std::string::npos);
+    CHECK(reader);
+    CHECK(b.TextureBinding(kRt, kDepthVar, s, g)); // the reader is said once
+    CHECK(LogLines("first bind") == before + 4);
+    { // a decoy that shows the bound srv but another srgb is no reader
+        FakeRaw half;
+        half.textures.push_back({ 0x508, "DepthBufferTex", "", kCopy, 0xA8 });
+        LiveDepthBackend hb(half, Env());
+        CHECK(hb.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
+        CHECK(hb.TextureBinding(kRt, 0x508, s, g));
+        CHECK(LastLine("first bind").find("a decoy") != std::string::npos);
+    }
+    // the line says what ReShade answered, and what was bound
+    bool both = false;
+    for (const std::string& l : depthtest_log::Lines())
+        both = both || (l.find("first bind") != std::string::npos && l.find("0xa7") != std::string::npos && l.find("0xa8") != std::string::npos &&
+                        l.find("bound 0xc0") != std::string::npos);
+    CHECK(both);
+    { // a read of another runtime during the observation is not logged
         FakeRaw other;
         other.textures.push_back({ 0x507, "NoSemantic", "", 0xA7, 0xA8 });
         LiveDepthBackend ob(other, Env());
         CHECK(ob.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
-        // a read of another runtime during the observation is not logged
         const size_t quiet = LogLines("first bind");
         CHECK(ob.TextureBinding(kRt2, 0x507, s, g));
         CHECK(LogLines("first bind") == quiet);
         CHECK(ob.TextureBinding(kRt, 0x507, s, g));
-        bool both = false;
-        for (const std::string& l : depthtest_log::Lines())
-            both = both || (l.find("first bind") != std::string::npos && l.find("0xa7") != std::string::npos && l.find("0xa8") != std::string::npos &&
-                            l.find("bound 0xc0") != std::string::npos);
-        CHECK(both);
         CHECK(LogLines("first bind") == quiet + 1);
     }
     const size_t afterBlock = LogLines("first bind"); // (that backend's line is in the shared log)
@@ -811,6 +936,7 @@ void FirstBindReadback()
     CHECK(b.UpdateTextureBindings(kRt, "DEPTH", kOrig, kOrigSrgb)); // the restore
     CHECK(b.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
     CHECK(b.TextureBinding(kRt, kDepthVar, s, g));
+    CHECK(b.TextureBinding(kRt, 0x502, s, g));
     CHECK(LogLines("first bind") == afterBlock);
 
     // a first bind that is undone by an erase before anything was read: no log, and the next real bind is still the first
@@ -824,6 +950,20 @@ void FirstBindReadback()
     CHECK(b2.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
     CHECK(b2.TextureBinding(kRt, kDepthVar, s, g));
     CHECK(LogLines("first bind") == lines + 1);
+
+    // a bind that is restored with the original views before anything was read (nothing logged) does not make the restore the next
+    // observation: the restore binds views too, and what is read after it is not the first bind
+    FakeRaw r4;
+    LiveDepthBackend b4(r4, Env());
+    const size_t l4 = LogLines("first bind");
+    CHECK(b4.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
+    CHECK(b4.UpdateTextureBindings(kRt, "DEPTH", kOrig, kOrigSrgb)); // the restore, nothing read in between
+    CHECK(b4.TextureBinding(kRt, kDepthVar, s, g));
+    CHECK(LogLines("first bind") == l4);
+    CHECK(b4.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy)); // the next real bind is still the first one
+    CHECK(b4.TextureBinding(kRt, kDepthVar, s, g));
+    CHECK(LogLines("first bind") == l4 + 1);
+
     // another semantic is not a depth bind
     FakeRaw r3;
     LiveDepthBackend b3(r3, Env());
@@ -967,6 +1107,9 @@ int main()
     RuntimeQueries();
     SameDeviceSemantics();
     RegistryAndOurRuntime();
+    StringContractLog();
+    SameDeviceRefusalLog();
+    NoCandidateLog();
     FirstBindReadback();
     BinderOverTheBackend();
     FaultAtEveryRawCall();

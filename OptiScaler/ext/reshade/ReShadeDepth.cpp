@@ -149,7 +149,7 @@ void Evaluate(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters)
     {
     case glue::Gate::NotRegistered:
         // ReShade may have loaded after us (installed as dxgi.dll): look for it, at most once a second, up to 60 times
-        if (!TryLateRegister(true, now))
+        if (!TryLateRegister(g_gate.Enabled(), now))
             return;
         break;
     case glue::Gate::Go:
@@ -197,9 +197,10 @@ void Evaluate(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters)
     {
         f.identityLogged = true;
         LOG_INFO("Automatic ReShade depth: contexts: NGX gave {:#x}, the depth's device has the native immediate context {:#x}, the hooked "
-                 "immediate context is {:#x} ({})",
+                 "immediate context is {:#x} ({}); evaluate thread {}",
                  reinterpret_cast<uintptr_t>(context), reinterpret_cast<uintptr_t>(native.Get()), reinterpret_cast<uintptr_t>(hooked),
-                 context == native.Get() ? "NGX's context is the native one" : "NGX's context is not the native one (a ReShade proxy?)");
+                 context == native.Get() ? "NGX's context is the native one" : "NGX's context is not the native one (a ReShade proxy?)",
+                 GetCurrentThreadId());
     }
     if (native == nullptr)
     {
@@ -278,7 +279,9 @@ std::string Status()
     {
         glue::StatusInputs in;
         in.enabled = g_gate.Enabled();
-        in.registered = Registered();
+        const AddonStatus addon = ext::reshade::Status();
+        in.registered = addon.registered;
+        in.reason = addon.reason;
         in.lateGaveUp = GetLateStatus().gaveUp;
         in.subscriptionFailed = FailedEvents() != 0;
         in.nativeContextMissing = g_nativeMissing.load(std::memory_order_relaxed);

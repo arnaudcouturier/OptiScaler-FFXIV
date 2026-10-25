@@ -99,6 +99,7 @@ enum class DepthEvent : uint8_t
     ReloadedEffects,      // reshade_reloaded_effects
     TechniqueState,       // reshade_set_technique_state
     PresetPath,           // reshade_set_current_preset_path
+    Count,
 };
 const char* DepthEventName(DepthEvent event);
 
@@ -183,6 +184,14 @@ struct IBackend
     virtual bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) = 0;
 
     virtual bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) = 0;
+    // Told once per runtime (and again after its effects were reloaded) when its texture variables contain no known depth input: the
+    // live backend logs the names that contain "depth", so the first run answers which names real presets use (an MXAO-only preset
+    // declares DepthInputTex only). Inert by default; an exception is swallowed by the core.
+    virtual void NoDepthCandidate(uint64_t runtime, const std::vector<TextureVar>& textures)
+    {
+        (void)runtime;
+        (void)textures;
+    }
     virtual bool TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb) = 0;
     virtual bool UpdateTextureBindings(uint64_t runtime, const char* semantic, uint64_t srv, uint64_t srvSrgb) = 0;
 
@@ -330,6 +339,7 @@ class DepthBinder
     {
         std::optional<bool> manual; // RESHADE_DEPTH_INPUT_* macros non-neutral; known until reload, destroy or a technique change
         Trust trust = Trust::Unknown; // until reload or destroy
+        bool noCandidateNoted = false; // IBackend::NoDepthCandidate was called (until reload or destroy)
 
         // The pass. open = references held; inPass = between begin and finish; bound = update_texture_bindings(copy) was
         // issued and the binding is not known to be put back. open && !inPass is the "dirty" state.

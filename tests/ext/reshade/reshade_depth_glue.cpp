@@ -4,6 +4,7 @@
 // status line of the menu.
 #include "ext/reshade/ReShadeDepthCore.h"
 #include "ext/reshade/ReShadeDepthGlue.h"
+#include "ext/reshade/ReShadeRegister.h"
 
 #include <cstdio>
 #include <string>
@@ -92,8 +93,12 @@ void Gates()
     CHECK(FirstGate(kOn, true, false) == Gate::ShuttingDown);
     CHECK(FirstGate(kOn, false, false) == Gate::NotRegistered);
     CHECK(FirstGate(kOn, false, true) == Gate::Go);
-    CHECK(FirstGate(kReq, false, true) == Gate::Go); // a request pending while the option is off: the evaluate thread has work to do
-    CHECK(FirstGate(kReq, true, true) == Gate::ShuttingDown);
+    // a word with requests but without the option (the requests are carried out before the gates): nothing else may run, in particular no
+    // late registration and no event subscription with the option off
+    CHECK(FirstGate(kReq, false, true) == Gate::Idle);
+    CHECK(FirstGate(kReq, false, false) == Gate::Idle);
+    CHECK(FirstGate(kReq, true, true) == Gate::Idle);
+    CHECK(FirstGate(kOn | kReq, false, true) == Gate::Go);
 
     ConsumerInfo none;
     CHECK(ConsumerGate(none) == Gate::NoConsumer);
@@ -211,8 +216,30 @@ void Status()
     in.lateGaveUp = true;
     CHECK(ComposeStatus(in).find("ReShade not detected") == 0 && ComposeStatus(in).find("stopped looking") != std::string::npos);
     in.lateGaveUp = false;
+    // a ReShade that is there but cannot be used is not "not detected"
+    using ext::reshade::RegisterStatus;
+    for (const RegisterStatus reason : { RegisterStatus::Refused, RegisterStatus::ExportsMissing, RegisterStatus::Exception, RegisterStatus::NoSelf })
+    {
+        in.reason = reason;
+        const std::string s = ComposeStatus(in);
+        CHECK(s.find("not detected") == std::string::npos);
+        CHECK(s.find("ReShade") != std::string::npos);
+        in.lateGaveUp = true; // (the late path stopped for good with a refusal: still the refusal that is said)
+        CHECK(ComposeStatus(in) == s);
+        in.lateGaveUp = false;
+    }
+    in.reason = RegisterStatus::Refused;
+    CHECK(ComposeStatus(in).find("add-on API 20") != std::string::npos && ComposeStatus(in).find("6.8") != std::string::npos);
+    in.reason = RegisterStatus::ExportsMissing;
+    CHECK(ComposeStatus(in).find("add-on support") != std::string::npos);
+    in.reason = RegisterStatus::NoModule;
+    CHECK(ComposeStatus(in) == "ReShade not detected");
     in.registered = true;
     CHECK(ComposeStatus(in) == "Waiting for ReShade depth effects");
+    // the facade does not exist yet (the ini said true on the title screen): waiting, not off and not empty
+    in.binderStatus.clear();
+    CHECK(ComposeStatus(in) == "Waiting for ReShade depth effects");
+    in.binderStatus = "Waiting for ReShade depth effects";
     in.subscriptionFailed = true;
     CHECK(ComposeStatus(in).find("could not be subscribed") != std::string::npos);
     in.subscriptionFailed = false;

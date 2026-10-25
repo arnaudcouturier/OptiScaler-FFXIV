@@ -114,6 +114,10 @@ struct Fake final : IBackend
     std::map<uint64_t, int> bindingReads;
     int defQueries = 0, textureEnums = 0, uniformEnums = 0;
 
+    int noCandidateCalls = 0; // NoDepthCandidate calls (the texture list is not kept: the allocation test counts the fake's allocations)
+    size_t noCandidateTextures = 0;
+    bool noCandidateThrows = false;
+
     int calls = 0, faultAt = 0; // the faultAt-th backend call is disturbed
     Fault fault = Fault::None;
     std::function<void(const char*)> afterCall; // runs after a call went through (not for AddRef: it runs under a lock)
@@ -272,6 +276,13 @@ struct Fake final : IBackend
         return result;
     }
 
+    void NoDepthCandidate(uint64_t, const std::vector<TextureVar>& textures) override
+    {
+        ++noCandidateCalls;
+        noCandidateTextures = textures.size();
+        if (noCandidateThrows)
+            throw std::runtime_error("NoDepthCandidate");
+    }
     int64_t NowMs() override { return Run<int64_t>("NowMs", 0, [&]() -> int64_t { return now; }); }
     uint64_t Frame() override
     {
@@ -471,6 +482,7 @@ struct Router final : IBackend
     bool SameDevice(uint64_t rt, uint64_t d) override { return For(rt).SameDevice(rt, d); }
     bool BackBufferSize(uint64_t rt, uint32_t& w, uint32_t& h) override { return For(rt).BackBufferSize(rt, w, h); }
     bool TextureVariables(uint64_t rt, std::vector<TextureVar>& o) override { return For(rt).TextureVariables(rt, o); }
+    void NoDepthCandidate(uint64_t rt, const std::vector<TextureVar>& t) override { For(rt).NoDepthCandidate(rt, t); }
     bool TextureBinding(uint64_t rt, uint64_t v, uint64_t& s, uint64_t& g) override { return For(rt).TextureBinding(rt, v, s, g); }
     bool UpdateTextureBindings(uint64_t rt, const char* sem, uint64_t s, uint64_t g) override
     {

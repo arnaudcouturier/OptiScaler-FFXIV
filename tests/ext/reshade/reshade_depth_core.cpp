@@ -1249,6 +1249,61 @@ void DepthInputLookup()
     }
 }
 
+// The first sight of a runtime without any depth input candidate is reported to the backend once (the live one logs the names that
+// contain "depth", so the first run answers the MXAO-only question); a reload makes the effects new, a destroy forgets the runtime
+void NoCandidateNote()
+{
+    { // no candidate: once, however often it begins; with the texture list
+        Rig r;
+        r.fake.vars = { { 0x510, "MXAODepth", "", kOther, kOtherSrgb }, { 0x511, "Other", "", kOther, kOtherSrgb } };
+        for (int i = 0; i < 4; ++i)
+            CHECK(r.Pass() == false);
+        CHECK(r.fake.noCandidateCalls == 1 && r.fake.noCandidateTextures == 2);
+        CHECK(r.binder.GetCounters().noDepthInput == 4);
+        r.binder.OnReloadedEffects(kRt); // new effects: said again
+        CHECK(!r.Pass() && r.fake.noCandidateCalls == 2);
+        CHECK(!r.Pass() && r.fake.noCandidateCalls == 2);
+        r.binder.OnTechniquesChanged(kRt); // (not new effects)
+        CHECK(!r.Pass() && r.fake.noCandidateCalls == 2);
+        r.binder.OnDestroyRuntime(kRt); // the runtime is gone
+        CHECK(!r.Pass() && r.fake.noCandidateCalls == 3);
+    }
+    { // a candidate: never
+        Rig r;
+        CHECK(r.Pass() && r.Pass());
+        CHECK(r.fake.noCandidateCalls == 0);
+    }
+    { // a candidate that is not trusted is a different answer (the names are known): not reported
+        Rig r;
+        r.fake.vars[0].semantic = "";
+        r.fake.vars[0].srv = kColor;
+        CHECK(!r.Pass());
+        CHECK(r.fake.noCandidateCalls == 0 && r.binder.GetCounters().noDepthInput == 1);
+    }
+    { // another runtime of the same binder: its own first sight
+        Fake a, b;
+        Router router(a, b);
+        DepthBinder binder(router, nullptr);
+        binder.SetEnabled(true);
+        a.vars.clear();
+        b.vars.clear();
+        binder.OnBeginEffects(kRt);
+        binder.OnBeginEffects(kRt2);
+        binder.OnBeginEffects(kRt);
+        CHECK(a.noCandidateCalls == 1 && b.noCandidateCalls == 1);
+    }
+    { // a hook that throws changes nothing: same outcome, same counter, nothing escapes
+        Rig r;
+        r.fake.vars.clear();
+        r.fake.noCandidateThrows = true;
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput);
+        CHECK(r.binder.GetCounters().noDepthInput == 1 && r.binder.Status() == kNoInput);
+        r.NextFrame();
+        CHECK(r.Begin() == Outcome::NoDepthInput && r.fake.noCandidateCalls == 1);
+    }
+}
+
 void BufReadyDepth()
 {
     { // only the exact annotation value; other values are left alone
@@ -2663,6 +2718,7 @@ int main()
     ManualTransform();
     ManualTransformCache();
     DepthInputLookup();
+    NoCandidateNote();
     BufReadyDepth();
     EnableDisable();
     ReloadMidPass();

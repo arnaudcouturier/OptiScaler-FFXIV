@@ -4,6 +4,7 @@
 // (tests/ext/reshade/reshade_depth_glue.cpp).
 
 #include "ext/reshade/ReShadeDepthCore.h"
+#include "ext/reshade/ReShadeRegister.h"
 #include "ext/upscaler/RenderGeometry.h"
 
 #include <atomic>
@@ -96,9 +97,11 @@ enum class Gate : uint8_t
     Go,
 };
 
+// `bits` is the EvalGate word AFTER the requests were carried out. Without the option nothing else may run (a late registration
+// attempt or the event subscription with the option off), also if a request arrived in the meantime.
 inline Gate FirstGate(uint32_t bits, bool shuttingDown, bool registered)
 {
-    if (bits == 0)
+    if ((bits & EvalGate::kEnabled) == 0)
         return Gate::Idle;
     if (shuttingDown)
         return Gate::ShuttingDown;
@@ -188,6 +191,7 @@ struct StatusInputs
 {
     bool enabled = false;
     bool registered = false;
+    ext::reshade::RegisterStatus reason = ext::reshade::RegisterStatus::NoModule; // why not, when !registered
     bool lateGaveUp = false;        // the late registration used up its attempts
     bool subscriptionFailed = false;
     bool nativeContextMissing = false; // the last evaluate had no native immediate context
@@ -200,7 +204,24 @@ inline std::string ComposeStatus(const StatusInputs& in)
     if (!in.enabled)
         return "Automatic scene depth: off";
     if (!in.registered)
+    {
+        // "not detected" is for a ReShade that is not there; one that is there and cannot be used says why
+        switch (in.reason)
+        {
+        case ext::reshade::RegisterStatus::Refused:
+            return "ReShade found but refused add-on API 20 (needs ReShade 6.8 or newer)";
+        case ext::reshade::RegisterStatus::ExportsMissing:
+            return "ReShade found but without add-on support (needs ReShade 6.8 or newer with add-on support)";
+        case ext::reshade::RegisterStatus::Exception:
+            return "ReShade found but the registration failed";
+        case ext::reshade::RegisterStatus::NoSelf:
+            return "ReShade found but OptiScaler's own module is unknown";
+        case ext::reshade::RegisterStatus::Ok: // (registered is false: cannot happen)
+        case ext::reshade::RegisterStatus::NoModule:
+            break;
+        }
         return in.lateGaveUp ? "ReShade not detected (stopped looking)" : "ReShade not detected";
+    }
     if (in.subscriptionFailed)
         return "ReShade events could not be subscribed; generic depth retained";
     if (in.nativeContextMissing)
@@ -209,6 +230,7 @@ inline std::string ComposeStatus(const StatusInputs& in)
         return in.binderStatus;
     if (in.captureRefusal != nullptr)
         return std::string("Scene depth capture refused (") + in.captureRefusal + "); generic depth retained";
-    return in.binderStatus;
+    // no binder yet (it is built at the first evaluate; the ini can say true on the title screen): waiting, not off and not empty
+    return in.binderStatus.empty() ? std::string("Waiting for ReShade depth effects") : in.binderStatus;
 }
 } // namespace ext::reshade::depth::glue

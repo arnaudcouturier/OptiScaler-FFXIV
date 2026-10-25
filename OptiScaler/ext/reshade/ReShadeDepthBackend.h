@@ -15,6 +15,9 @@
 //  - SameDevice compares NATIVE devices (ReShade's device::get_native()), modelled on the runtime choice of the HudLess boundary
 //    (PickRuntime in ReShadeEvents.cpp). See SameDevice below for where it differs, on purpose.
 //  - The first real bind: the readback of ReShade's binding after the first update_texture_bindings with a view is logged once.
+//  - What the headers cannot settle is logged once each, so the first run in the game answers it: the first string that breaks the size
+//    contract (query kind, both sizes, the length found), the first refusal of a runtime by a device that differs once a capture
+//    exists (both devices and the primary one), and the texture names that contain "depth" of a runtime with no depth input.
 //
 // Threading: the binder calls the backend under its own runtime mutex from whatever thread the ReShade event arrives on; the
 // registry and the capture device are the only state shared with other threads, and are guarded.
@@ -156,6 +159,7 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     bool SameDevice(uint64_t runtime, uint64_t captureDevice) override;
     bool BackBufferSize(uint64_t runtime, uint32_t& width, uint32_t& height) override;
     bool TextureVariables(uint64_t runtime, std::vector<TextureVar>& out) override;
+    void NoDepthCandidate(uint64_t runtime, const std::vector<TextureVar>& textures) override;
     bool TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb) override;
     bool UpdateTextureBindings(uint64_t runtime, const char* semantic, uint64_t srv, uint64_t srvSrgb) override;
     bool UniformVariables(uint64_t runtime, std::vector<UniformVar>& out) override;
@@ -174,8 +178,9 @@ class LiveDepthBackend final : public IBackend, public IEventHost
 
   private:
     // Reads one string with the size query first. Yes = *out is the value; No = the thing does not exist; Fault = a call faulted, the
-    // sizes disagree or the string is not terminated (nothing is returned).
-    template <class Query> Call ReadString(Query&& query, std::string& out);
+    // sizes disagree or the string is not terminated (nothing is returned). `kind` names the query in the log of the first Fault.
+    template <class Query> Call ReadString(Query&& query, std::string& out, const char* kind);
+    void LogStringFault(const char* kind, const char* why, size_t firstSize, size_t secondSize, size_t length);
     // Handles of an enumeration, grown once if the first capacity was too small.
     template <class List> bool ReadHandles(List&& list, std::vector<uint64_t>& handles);
     void LogFirstBind(uint64_t runtime, uint64_t variable, uint64_t srv, uint64_t srvSrgb);
@@ -188,13 +193,20 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     std::mutex _registryMutex;
     std::vector<uint64_t> _d3d11Runtimes; // runtimes seen in begin/finish events that are D3D11 runtimes
 
-    // The readback log of the first real bind: armed by the first update_texture_bindings with a view, it logs the next few readbacks
-    // of that runtime. Plain atomics: the binder serialises the calls, and a lost update only costs or repeats a log line.
-    std::atomic<int> _readbacksLeft { 0 };
-    std::atomic<uint64_t> _readbackRuntime { 0 };
-    std::atomic<uint64_t> _readbackView { 0 };
-    std::atomic<bool> _readbackLogged { false };
+    // The readback log of the first real bind. The first update_texture_bindings of the DEPTH semantic with a view starts an
+    // observation of that runtime: the readbacks that follow are logged, the one that shows exactly what was bound (the reader) always,
+    // the others (decoys) at most kDecoyLogs. The next update ends it; if it logged anything that was the first bind, once. An update
+    // that ends an observation never starts the next one (it is the restore). Plain atomics: the binder serialises the calls, and a
+    // lost update only costs or repeats a log line.
+    std::atomic<uint64_t> _obsRuntime { 0 }; // 0 = no observation
+    std::atomic<uint64_t> _obsSrv { 0 }, _obsSrgb { 0 };
+    std::atomic<int> _decoysLeft { 0 };
+    std::atomic<bool> _obsLogged { false };
+    std::atomic<bool> _obsReaderLogged { false };
     std::atomic<bool> _firstBindDone { false };
     std::atomic<bool> _fallbackLogged { false };
+    std::atomic<bool> _stringFaultLogged { false };
+    std::atomic<bool> _deviceRefusalLogged { false };
+    std::atomic<int> _noCandidateLogs { 0 };
 };
 } // namespace ext::reshade::depth

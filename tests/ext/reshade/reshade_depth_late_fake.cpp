@@ -17,6 +17,7 @@
 #include "ext/reshade/ReShadeDepthDispatch.h"
 #include "ext/reshade/ReShadeDepthEvents.h"
 #include "ext/reshade/ReShadeDepthLate.h"
+#include "ext/reshade/ReShadeRegistrationState.h"
 #include "ext/reshade/third_party/reshade/reshade.hpp"
 
 #include "reshade_depth_fake.h"
@@ -33,28 +34,16 @@
 using namespace depthtest;
 using namespace ext::reshade;
 
-// ---- what ReShadeAddon.cpp provides in the product (it needs the whole config to build): the registration state --------------------
+// ---- what ReShadeAddon.cpp provides in the product beyond the registration state (it needs the whole config to build): Status() ------
 namespace ext::reshade
 {
-namespace
-{
-std::atomic<bool> g_registered { false };
-std::atomic<uint8_t> g_reason { static_cast<uint8_t>(RegisterStatus::NoModule) };
-} // namespace
-
 AddonStatus Status()
 {
     AddonStatus s;
-    s.attempted = true; // the load-time attempt ran and found no ReShade
-    s.registered = g_registered.load();
-    s.reason = static_cast<RegisterStatus>(g_reason.load());
+    s.attempted = Registration().attempted.load(); // set by main: the load-time attempt ran and found no ReShade
+    s.registered = Registration().registered.load();
+    s.reason = static_cast<RegisterStatus>(Registration().reason.load());
     return s;
-}
-
-void NoteRegistration(RegisterStatus status)
-{
-    g_reason.store(static_cast<uint8_t>(status));
-    g_registered.store(status == RegisterStatus::Ok);
 }
 } // namespace ext::reshade
 
@@ -94,6 +83,23 @@ struct Registered
         return n;
     }
 };
+
+size_t LogLines(const char* needle)
+{
+    size_t n = 0;
+    for (const std::string& line : depthtest_log::Lines())
+        n += line.find(needle) != std::string::npos ? 1 : 0;
+    return n;
+}
+
+std::string LastLine(const char* needle)
+{
+    std::string found;
+    for (const std::string& line : depthtest_log::Lines())
+        if (line.find(needle) != std::string::npos)
+            found = line;
+    return found;
+}
 
 Registered ReadEvents(HMODULE fake)
 {
@@ -164,6 +170,9 @@ int Late(HMODULE& fake, const char* dll)
     CHECK(distinct.size() == 6 && distinct.count(nullptr) == 0); // six different callbacks
     CHECK(r.count == 6 && r.events[5] == static_cast<int>(addon_event::reshade_begin_effects));
     CHECK(SubscribedEvents() == kAllDepthEvents && FailedEvents() == 0);
+    // the subscription says which thread made it (whether that is ReShade's own dispatch thread decides if it can race its event lists)
+    CHECK(LogLines("subscribed to") == 1);
+    CHECK(LastLine("subscribed to").find("on thread " + std::to_string(GetCurrentThreadId())) != std::string::npos);
     // not one of the other events the add-on subscribes elsewhere (boundary tracking, probe, window mode, present)
     for (int i = 0; i < r.count; ++i)
     {
@@ -205,14 +214,34 @@ int Late(HMODULE& fake, const char* dll)
         c.device = kDevice;
         binder.PublishCapture(c);
     };
+    // the first begin and the first finish callback say which thread ReShade runs them on, once: here a worker thread
+    {
+        DWORD workerId = 0;
+        std::thread worker(
+            [&]
+            {
+                workerId = GetCurrentThreadId();
+                begin(Rt(), nullptr, resource_view {}, resource_view {});
+                finish(Rt(), nullptr, resource_view {}, resource_view {});
+                begin(Rt(), nullptr, resource_view {}, resource_view {});
+                finish(Rt(), nullptr, resource_view {}, resource_view {});
+            });
+        worker.join();
+        CHECK(LogLines("first begin_effects callback") == 1 && LogLines("first finish_effects callback") == 1);
+        CHECK(LastLine("first begin_effects callback").find("on thread " + std::to_string(workerId)) != std::string::npos);
+        CHECK(LastLine("first finish_effects callback").find("on thread " + std::to_string(workerId)) != std::string::npos);
+    }
+    const uint64_t base = counter.load(); // (the two passes of the worker ticked it, bound or not)
+    CHECK(base == 102);
     publish();
     begin(Rt(), nullptr, resource_view {}, resource_view {});
+    CHECK(LogLines("first begin_effects callback") == 1); // not again, from this thread
     CHECK(world.DepthIs(kCopy, kCopy)); // the binder was reached through the registered pointer
     // the option is switched off while the pass is open: the registered finish callback still puts the binding back
     binder.SetEnabled(false);
     finish(Rt(), nullptr, resource_view {}, resource_view {});
     CHECK(world.DepthIs(kOrig, kOrigSrgb) && !world.HoldsCopy());
-    CHECK(counter == 101);
+    CHECK(counter == base + 1);
 
     // the technique-state callback never vetoes and clears the cache; the others are plain
     binder.SetEnabled(true);
@@ -360,6 +389,7 @@ int main(int argc, char** argv)
     if (argc < 3)
         return 2;
     const std::string mode = argv[1];
+    ext::reshade::Registration().attempted = true; // the load-time attempt ran (and found no ReShade)
     SetEnvironmentVariableA("FAKE_RESHADE_MODE", mode == "refuse" ? "refuse" : mode == "crash" ? "crash" : "ok");
     if (mode == "failure")
         SetEnvironmentVariableA("FAKE_RESHADE_CRASH_EVENT", std::to_string(static_cast<int>(addon_event::reshade_finish_effects)).c_str());

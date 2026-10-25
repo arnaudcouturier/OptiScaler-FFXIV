@@ -6,6 +6,7 @@
 #include "ext/reshade/ReShadeAddon.h"
 #include "ext/reshade/ReShadeBoundary.h"
 #include "ext/reshade/ReShadeEvents.h"
+#include "ext/reshade/ReShadeRegistrationState.h"
 #include "ext/window/WindowSeams.h"
 
 #include <atomic>
@@ -15,20 +16,8 @@ namespace ext::reshade
 {
 namespace
 {
-// Heap-allocated and never destroyed: nothing runs at DLL_PROCESS_DETACH (loader lock), and callbacks that ReShade may
-// still deliver while the process shuts down only ever read these atomics.
-struct Global
-{
-    std::atomic<bool> attempted { false };
-    std::atomic<bool> registered { false };
-    std::atomic<uint8_t> reason { static_cast<uint8_t>(RegisterStatus::NoModule) };
-};
-
-Global& G()
-{
-    static Global* g = new Global;
-    return *g;
-}
+// The registration state (ReShadeRegistrationState.cpp: heap-allocated, never destroyed).
+RegistrationState& G() { return Registration(); }
 
 // "6.8.0.2155" from the module's version resource (no version.dll: it may be the proxy we are running as).
 std::string ModuleVersion(HMODULE module)
@@ -62,15 +51,6 @@ std::string ModuleVersion(HMODULE module)
 bool ProbeEnabled()
 {
     return ext::Cfg().reshade.probe.value_or_default() || ext::Cfg().ui.diagnostics.value_or_default();
-}
-
-bool Registered() { return G().registered.load(std::memory_order_acquire); }
-
-void NoteRegistration(RegisterStatus status)
-{
-    auto& g = G();
-    g.reason.store(static_cast<uint8_t>(status), std::memory_order_release);
-    g.registered.store(status == RegisterStatus::Ok, std::memory_order_release);
 }
 
 AddonStatus Status()

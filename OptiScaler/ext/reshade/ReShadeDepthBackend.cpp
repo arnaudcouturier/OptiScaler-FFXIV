@@ -3,6 +3,7 @@
 #include "ext/reshade/ReShadeDepthBackend.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -12,7 +13,9 @@ namespace ext::reshade::depth
 namespace
 {
 constexpr size_t kFirstHandles = 512; // the first capacity of a handle list; a longer list is read again with the right one
-constexpr int kReadbackLogs = 4;      // readbacks of the first bind that are logged
+constexpr int kDecoyLogs = 3;         // readbacks of the first bind that are not the reader and are logged all the same
+constexpr int kNoCandidateLogs = 3;   // lines about runtimes without a depth input candidate, per process
+constexpr size_t kDepthNamesShown = 8;
 const char* const kDepthSemantic = "DEPTH";
 } // namespace
 
@@ -26,22 +29,47 @@ uint64_t LiveDepthBackend::Frame() { return _env.frame != nullptr ? _env.frame()
 // capacity than asked for: a string that grew in between would then come back longer than the first answer instead of cut to fit, and
 // the difference shows. The NUL is checked and stripped; a length of 0 with "exists", an absurd length, a missing terminator or one
 // inside the value are failures, never a shortened value.
-template <class Query> Call LiveDepthBackend::ReadString(Query&& query, std::string& out)
+template <class Query> Call LiveDepthBackend::ReadString(Query&& query, std::string& out, const char* kind)
 {
     size_t size = 0;
     const Call first = query(nullptr, &size);
-    if (first != Call::Yes)
-        return first; // Fault, or No: not there
-    if (size == 0 || size > kMaxStringBytes)
+    if (first == Call::Fault)
+    {
+        LogStringFault(kind, "call faulted", 0, 0, 0);
         return Call::Fault;
+    }
+    if (first != Call::Yes)
+        return first; // not there
+    if (size == 0 || size > kMaxStringBytes)
+    {
+        LogStringFault(kind, "unusable length", size, 0, 0);
+        return Call::Fault;
+    }
     std::vector<char> buffer(size + 1, '\0');
     size_t capacity = size + 1;
     if (query(buffer.data(), &capacity) != Call::Yes) // gone a moment after it was there: not "not there"
+    {
+        LogStringFault(kind, "second call faulted or answered no", size, 0, 0);
         return Call::Fault;
+    }
     if (capacity != size || buffer[size - 1] != '\0' || std::memchr(buffer.data(), 0, size - 1) != nullptr)
+    {
+        LogStringFault(kind, "answers disagree", size, capacity, strnlen(buffer.data(), size + 1));
         return Call::Fault;
+    }
     out.assign(buffer.data(), size - 1);
     return Call::Yes;
+}
+
+// Said once: the first string that breaks the size contract, whatever its kind. What the headers promise (the length includes the NUL,
+// the second call returns the same length) is what real ReShade must keep; if it does not, this line shows how it differs.
+void LiveDepthBackend::LogStringFault([[maybe_unused]] const char* kind, [[maybe_unused]] const char* why, [[maybe_unused]] size_t firstSize,
+                                      [[maybe_unused]] size_t secondSize, [[maybe_unused]] size_t length)
+{
+    if (_stringFaultLogged.exchange(true))
+        return;
+    LOG_WARN("Automatic ReShade depth: string contract broken for {} ({}): first size {}, second size {}, string length {}", kind, why,
+             firstSize, secondSize, length);
 }
 
 template <class List> bool LiveDepthBackend::ReadHandles(List&& list, std::vector<uint64_t>& handles)
@@ -104,12 +132,19 @@ bool LiveDepthBackend::SameDevice(uint64_t runtime, uint64_t captureDevice)
     uint64_t native = 0;
     if (!_raw.DeviceInfo(runtime, hasDevice, d3d11, native) || !hasDevice || !d3d11)
         return false;
-    const uint64_t target = captureDevice != 0 ? captureDevice : (_env.primaryDevice != nullptr ? _env.primaryDevice() : 0);
+    const uint64_t primary = _env.primaryDevice != nullptr ? _env.primaryDevice() : 0;
+    const uint64_t target = captureDevice != 0 ? captureDevice : primary;
     if (target != 0 && native == target)
         return true;
     // A real capture was made on the native device of the game's depth texture: another device never gets a view of it.
     if (captureDevice != 0)
+    {
+        if (!_deviceRefusalLogged.exchange(true))
+            LOG_WARN("Automatic ReShade depth: device mismatch: the runtime's device {:#x} is not the capture's device {:#x} (primary {:#x}); "
+                     "runtimes of this device get no depth copy",
+                     native, captureDevice, primary);
         return false;
+    }
     // No capture yet. The primary device may be known under another pointer (a proxy) or not at all: the only D3D11 runtime is ours.
     if (!OnlyD3D11Runtime(runtime))
         return false;
@@ -165,12 +200,39 @@ bool LiveDepthBackend::TextureVariables(uint64_t runtime, std::vector<TextureVar
     for (const uint64_t handle : handles)
     {
         std::string name;
-        if (ReadString([&](char* b, size_t* s) { return _raw.TextureName(runtime, handle, b, s); }, name) != Call::Yes)
+        if (ReadString([&](char* b, size_t* s) { return _raw.TextureName(runtime, handle, b, s); }, name, "texture name") != Call::Yes)
             return false;
         result.push_back({ handle, std::move(name) });
     }
     out = std::move(result);
     return true;
+}
+
+// The first run answers which names real presets use for their depth input: this lists the texture names that contain "depth" (any case)
+// of a runtime in which none of the three known names exists (an MXAO-only preset declares DepthInputTex only; anything else shows here).
+void LiveDepthBackend::NoDepthCandidate([[maybe_unused]] uint64_t runtime, const std::vector<TextureVar>& textures)
+{
+    if (_noCandidateLogs.fetch_add(1, std::memory_order_relaxed) >= kNoCandidateLogs)
+        return;
+    std::string names;
+    size_t matching = 0, shown = 0;
+    for (const TextureVar& t : textures)
+    {
+        std::string lower = t.name;
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.find("depth") == std::string::npos)
+            continue;
+        ++matching;
+        if (shown < kDepthNamesShown)
+        {
+            names += shown == 0 ? "" : ", ";
+            names += t.name;
+            ++shown;
+        }
+    }
+    LOG_INFO("Automatic ReShade depth: runtime {:#x} has {} texture variables and no known depth input; {} contain 'depth' in the name: {}",
+             runtime, textures.size(), matching, names.empty() ? std::string("(none)") : names);
 }
 
 bool LiveDepthBackend::TextureBinding(uint64_t runtime, uint64_t variable, uint64_t& srv, uint64_t& srvSrgb)
@@ -190,23 +252,23 @@ bool LiveDepthBackend::UpdateTextureBindings(uint64_t runtime, const char* seman
         return false;
     if (_firstBindDone.load(std::memory_order_relaxed))
         return true;
-    // An observation in progress ends with the next update (the restore): the first bind is done if it logged anything.
-    if (_readbackRuntime.load(std::memory_order_relaxed) != 0)
+    // An observation in progress ends with the next update (the restore, or an erase): the first bind is done if it logged anything.
+    // This update is then the end of the observation and never the start of another.
+    if (_obsRuntime.load(std::memory_order_relaxed) != 0)
     {
-        _readbackRuntime.store(0, std::memory_order_relaxed);
-        _readbacksLeft.store(0, std::memory_order_relaxed);
-        if (_readbackLogged.load(std::memory_order_relaxed))
-        {
+        _obsRuntime.store(0, std::memory_order_relaxed);
+        if (_obsLogged.load(std::memory_order_relaxed))
             _firstBindDone.store(true, std::memory_order_relaxed);
-            return true;
-        }
+        return true;
     }
     if (semantic != nullptr && std::strcmp(semantic, kDepthSemantic) == 0 && (srv != 0 || srvSrgb != 0))
     {
-        _readbackView.store(srv != 0 ? srv : srvSrgb, std::memory_order_relaxed);
-        _readbackLogged.store(false, std::memory_order_relaxed);
-        _readbacksLeft.store(kReadbackLogs, std::memory_order_relaxed);
-        _readbackRuntime.store(runtime, std::memory_order_relaxed);
+        _obsSrv.store(srv, std::memory_order_relaxed);
+        _obsSrgb.store(srvSrgb, std::memory_order_relaxed);
+        _obsLogged.store(false, std::memory_order_relaxed);
+        _obsReaderLogged.store(false, std::memory_order_relaxed);
+        _decoysLeft.store(kDecoyLogs, std::memory_order_relaxed);
+        _obsRuntime.store(runtime, std::memory_order_relaxed);
     }
     return true;
 }
@@ -214,14 +276,15 @@ bool LiveDepthBackend::UpdateTextureBindings(uint64_t runtime, const char* seman
 // What real ReShade answers for the variable that reads the DEPTH semantic right after the first bind is not settled by the headers.
 void LiveDepthBackend::LogFirstBind(uint64_t runtime, uint64_t variable, uint64_t srv, uint64_t srvSrgb)
 {
-    if (_readbacksLeft.load(std::memory_order_relaxed) <= 0 || _readbackRuntime.load(std::memory_order_relaxed) != runtime)
+    if (_obsRuntime.load(std::memory_order_relaxed) != runtime)
         return;
-    const int left = _readbacksLeft.fetch_sub(1, std::memory_order_relaxed);
-    if (left <= 0)
-        return;
-    _readbackLogged.store(true, std::memory_order_relaxed);
-    LOG_INFO("Automatic ReShade depth: first bind, ReShade reads variable {:#x} back as srv {:#x} / srgb {:#x} (bound {:#x})", variable, srv,
-             srvSrgb, _readbackView.load(std::memory_order_relaxed));
+    const uint64_t boundSrv = _obsSrv.load(std::memory_order_relaxed), boundSrgb = _obsSrgb.load(std::memory_order_relaxed);
+    const bool reader = srv == boundSrv && srvSrgb == boundSrgb;
+    if (reader ? _obsReaderLogged.exchange(true, std::memory_order_relaxed) : _decoysLeft.fetch_sub(1, std::memory_order_relaxed) <= 0)
+        return; // the reader is said once; the decoys (variables with the right name that read something else) a few times
+    _obsLogged.store(true, std::memory_order_relaxed);
+    LOG_INFO("Automatic ReShade depth: first bind, ReShade reads variable {:#x} back as srv {:#x} / srgb {:#x} (bound {:#x} / {:#x}): {}",
+             variable, srv, srvSrgb, boundSrv, boundSrgb, reader ? "the bound copy, a reader" : "not the copy, a decoy");
 }
 
 bool LiveDepthBackend::UniformVariables(uint64_t runtime, std::vector<UniformVar>& out)
@@ -235,7 +298,7 @@ bool LiveDepthBackend::UniformVariables(uint64_t runtime, std::vector<UniformVar
     for (const uint64_t handle : handles)
     {
         std::string source;
-        const Call c = ReadString([&](char* b, size_t* s) { return _raw.UniformSource(runtime, handle, b, s); }, source);
+        const Call c = ReadString([&](char* b, size_t* s) { return _raw.UniformSource(runtime, handle, b, s); }, source, "uniform source");
         if (c == Call::Fault)
             return false;
         result.push_back({ handle, c == Call::Yes ? std::move(source) : std::string() }); // no annotation: empty
@@ -267,7 +330,7 @@ bool LiveDepthBackend::Techniques(uint64_t runtime, std::vector<EffectTechnique>
     {
         EffectTechnique t;
         bool enabled = false;
-        if (ReadString([&](char* b, size_t* s) { return _raw.TechniqueEffect(runtime, handle, b, s); }, t.effect) != Call::Yes ||
+        if (ReadString([&](char* b, size_t* s) { return _raw.TechniqueEffect(runtime, handle, b, s); }, t.effect, "technique effect") != Call::Yes ||
             !_raw.TechniqueState(runtime, handle, enabled))
             return false;
         t.enabled = enabled;
@@ -280,7 +343,7 @@ bool LiveDepthBackend::Techniques(uint64_t runtime, std::vector<EffectTechnique>
 DefinitionState LiveDepthBackend::Definition(uint64_t runtime, const char* effect, const char* name, std::string& value)
 {
     std::string text;
-    const Call c = ReadString([&](char* b, size_t* s) { return _raw.Definition(runtime, effect, name, b, s); }, text);
+    const Call c = ReadString([&](char* b, size_t* s) { return _raw.Definition(runtime, effect, name, b, s); }, text, "definition");
     if (c == Call::Yes)
     {
         value = std::move(text);

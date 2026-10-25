@@ -158,6 +158,7 @@ void LateEvents()
     // probe (present, reshade_present, init_effect_runtime) and the window mode (set_fullscreen_state).
     const auto& events = LateRegistrationPlanner::kEvents;
     static_assert(LateRegistrationPlanner::kEvents.size() == 6);
+    static_assert(static_cast<size_t>(DepthEvent::Count) == LateRegistrationPlanner::kEvents.size()); // the list is every event
     bool seen[6] = {};
     for (DepthEvent e : events)
     {

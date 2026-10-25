@@ -121,6 +121,8 @@ const char* DepthEventName(DepthEvent event)
         return "reshade_set_technique_state";
     case DepthEvent::PresetPath:
         return "reshade_set_current_preset_path";
+    case DepthEvent::Count:
+        break;
     }
     return "?";
 }
@@ -567,6 +569,17 @@ Outcome DepthBinder::Bind(uint64_t runtime, Runtime& state)
     const std::vector<const TextureVar*> candidates = FindDepthInputs(textures);
     if (candidates.empty())
     {
+        if (!state.noCandidateNoted)
+        {
+            state.noCandidateNoted = true;
+            try
+            {
+                _backend.NoDepthCandidate(runtime, textures);
+            }
+            catch (...)
+            {
+            }
+        }
         Bump(Counter::NoDepthInput);
         return Done(Outcome::NoDepthInput);
     }

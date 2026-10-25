@@ -11,6 +11,7 @@
 
 #include "ext/reshade/third_party/reshade/reshade.hpp"
 
+#include <array>
 #include <atomic>
 #include <mutex>
 
@@ -41,16 +42,33 @@ EventDispatcher* Live()
 }
 
 // ---- the six callbacks (noexcept: nothing may escape into ReShade or the game) -----------------------------------------------------
+// The thread a callback runs on, once for begin and once for finish: the subscription is made from the evaluate thread, and if ReShade
+// delivers its events on another one, register_event could race the iteration of its event lists (see the runbook).
+std::atomic<bool> g_beginThreadLogged { false };
+std::atomic<bool> g_finishThreadLogged { false };
+
+void LogThreadOnce(std::atomic<bool>& flag, [[maybe_unused]] const char* what)
+{
+    if (!flag.load(std::memory_order_relaxed) && !flag.exchange(true, std::memory_order_relaxed))
+        LOG_INFO("Automatic ReShade depth: first {} callback on thread {}", what, GetCurrentThreadId());
+}
+
 void DepthOnBegin(effect_runtime* runtime, command_list*, resource_view, resource_view) noexcept
 {
     if (EventDispatcher* d = Live())
+    {
+        LogThreadOnce(g_beginThreadLogged, "begin_effects");
         d->Begin(Id(runtime));
+    }
 }
 
 void DepthOnFinish(effect_runtime* runtime, command_list*, resource_view, resource_view) noexcept
 {
     if (EventDispatcher* d = Live())
+    {
+        LogThreadOnce(g_finishThreadLogged, "finish_effects");
         d->Finish(Id(runtime));
+    }
 }
 
 void DepthOnDestroy(effect_runtime* runtime) noexcept
@@ -86,7 +104,21 @@ struct SubscribeJob
     DepthEvent event;
 };
 
-// A POD thunk: ReShade's registration is the first call into the add-on API after the module scan, and the callbacks are ours.
+// The events of LateRegistrationPlanner::kEvents in the order they are subscribed: begin last.
+constexpr std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> SubscribeOrder()
+{
+    std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> order {};
+    size_t n = 0;
+    for (const DepthEvent event : LateRegistrationPlanner::kEvents)
+        if (event != DepthEvent::BeginEffects)
+            order[n++] = event;
+    order[n] = DepthEvent::BeginEffects;
+    return order;
+}
+static_assert(SubscribeOrder().back() == DepthEvent::BeginEffects);
+
+// A POD thunk, so that SEH can guard the call into ReShade (register_event resolves ReShade's entry point on its first use per event
+// and calls it): a fault inside it is a failed subscription, not a crash.
 void SubscribeThunk(void* p)
 {
     switch (static_cast<SubscribeJob*>(p)->event)
@@ -141,8 +173,7 @@ bool EnsureSubscribed()
     {
         std::lock_guard lock(g_subscribeMutex);
         // begin last: a begin without its finish would leave our copy bound until the next begin
-        static constexpr DepthEvent kOrder[] = { DepthEvent::FinishEffects, DepthEvent::DestroyEffectRuntime, DepthEvent::ReloadedEffects,
-                                                 DepthEvent::TechniqueState, DepthEvent::PresetPath,         DepthEvent::BeginEffects };
+        static constexpr std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> kOrder = SubscribeOrder();
         const uint32_t before = g_subscribed.load();
         for (const DepthEvent event : kOrder)
         {
@@ -165,7 +196,8 @@ bool EnsureSubscribed()
         }
         if (g_subscribed.load() == kAllDepthEvents && before != kAllDepthEvents)
             LOG_INFO("Automatic ReShade depth: subscribed to begin_effects, finish_effects, destroy_effect_runtime, reshade_reloaded_effects, "
-                     "reshade_set_technique_state and reshade_set_current_preset_path");
+                     "reshade_set_technique_state and reshade_set_current_preset_path, on thread {}",
+                     GetCurrentThreadId());
     }
     catch (...)
     {

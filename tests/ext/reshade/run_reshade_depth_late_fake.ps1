@@ -11,7 +11,7 @@ $exe = Join-Path $Out 'reshade_depth_late_fake.exe'
 $ext = Join-Path $Repo 'OptiScaler\ext\reshade'
 & cl.exe /nologo /std:c++latest /EHsc /W4 /MD /DNOMINMAX /DUNDEBUG /DDEPTH_TEST_LOG "/I$here\stubs" "/I$Repo\OptiScaler" `
     (Join-Path $here 'reshade_depth_late_fake.cpp') (Join-Path $ext 'ReShadeRegister.cpp') (Join-Path $ext 'ReShadeDepthLate.cpp') `
-    (Join-Path $ext 'ReShadeDepthEvents.cpp') (Join-Path $ext 'ReShadeDepthCore.cpp') (Join-Path $ext 'ReShadeD3D11.cpp') `
+    (Join-Path $ext 'ReShadeDepthEvents.cpp') (Join-Path $ext 'ReShadeDepthCore.cpp') (Join-Path $ext 'ReShadeD3D11.cpp') (Join-Path $ext 'ReShadeRegistrationState.cpp') `
     "/Fo$Out\" "/Fe$exe" d3d11.lib dxgi.lib
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 foreach ($mode in 'late', 'bound', 'refuse', 'crash', 'failure', 'race') {
