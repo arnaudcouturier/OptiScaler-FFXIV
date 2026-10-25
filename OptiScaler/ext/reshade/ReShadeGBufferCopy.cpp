@@ -10,6 +10,7 @@
 #include <GBufferRemap_Vs_Shader.h>
 
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <utility>
@@ -139,6 +140,22 @@ RemapConstants MakeRemapConstants(const RemapRequest& request)
     k.mulX = m.x;
     k.mulY = m.y;
     return k;
+}
+
+bool IsPermanentCreateFailure(HRESULT hr)
+{
+    // "This format / size cannot be a render target here" answers: they come again for the same request. Everything else - out of memory,
+    // a removed or reset device, a driver error, E_FAIL, anything unknown - may pass, so the next call tries again.
+    switch (hr)
+    {
+    case E_INVALIDARG:
+    case E_NOTIMPL:
+    case DXGI_ERROR_UNSUPPORTED:
+    case DXGI_ERROR_INVALID_CALL:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool RemapDeviceReplaced(const void* owned, const void* given, HRESULT removedReason)
@@ -421,18 +438,20 @@ void GBufferRemap::PrepareThunk(void* p)
     sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     sd.Texture2D.MostDetailedMip = 0;
     sd.Texture2D.MipLevels = 1;
-    bool ok = SUCCEEDED(s._device->CreateTexture2D(&td, nullptr, &j.fresh.texture)) &&
-              SUCCEEDED(s._device->CreateRenderTargetView(j.fresh.texture.Get(), &rd, &j.fresh.rtv)) &&
-              SUCCEEDED(s._device->CreateShaderResourceView(j.fresh.texture.Get(), &sd, &j.fresh.srv));
-    if (ok && j.format.srgbTwin != DXGI_FORMAT_UNKNOWN)
+    HRESULT hr = s._device->CreateTexture2D(&td, nullptr, &j.fresh.texture);
+    if (SUCCEEDED(hr))
+        hr = s._device->CreateRenderTargetView(j.fresh.texture.Get(), &rd, &j.fresh.rtv);
+    if (SUCCEEDED(hr))
+        hr = s._device->CreateShaderResourceView(j.fresh.texture.Get(), &sd, &j.fresh.srv);
+    if (SUCCEEDED(hr) && j.format.srgbTwin != DXGI_FORMAT_UNKNOWN)
     {
         sd.Format = j.format.srgbTwin;
-        ok = SUCCEEDED(s._device->CreateShaderResourceView(j.fresh.texture.Get(), &sd, &j.fresh.srvSrgb));
+        hr = s._device->CreateShaderResourceView(j.fresh.texture.Get(), &sd, &j.fresh.srvSrgb);
     }
-    if (!ok)
+    if (FAILED(hr))
     {
         j.fresh = Target {};
-        j.targetFailed = true;
+        j.targetFailed = IsPermanentCreateFailure(hr); // only an answer that will not change is remembered (see _targetFailure)
         return;
     }
     j.fresh.width = a.outputW;
@@ -522,6 +541,19 @@ void GBufferRemap::ScrubThunk(void* p)
     j.context1->ClearState();
 }
 
+// The context-state lock stayed busy for kContextStateLockTimeoutMs: the pass was skipped before any state swap. Counted for tests, and
+// logged at most once a minute per pass (a holder that does not come back would otherwise log every frame).
+void GBufferRemap::NoteLockTimeout()
+{
+    ++_lockTimeouts;
+    const uint64_t now = GetTickCount64();
+    if (_lockLogged && now - _lockLogTick < 60'000)
+        return;
+    _lockLogged = true;
+    _lockLogTick = now;
+    LOG_WARN("Automatic ReShade G-buffers ({}): context state lock busy for {} ms: pass skipped", KindName(_kind), d3d11::kContextStateLockTimeoutMs);
+}
+
 // A swap back that failed (it may or may not have happened) is done again before anything else, with the game's own state object,
 // which is kept alive until then. If the context really was in the private state, that state is cleared (the swap back is done, then
 // the private state entered, cleared and left again). A failed attempt is counted; the last one gives the state up.
@@ -531,8 +563,14 @@ bool GBufferRemap::RecoverState()
         return true;
     ext::core::BypassScope bypass;
     // The swaps below are a swap-in sequence like the remap's own: no other pass may be inside the private state meanwhile (recursive, so
-    // a Release that is called under the lock, or by a remap that holds it, is fine).
-    const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+    // a Release that is called under the lock, or by a remap that holds it, is fine). A lock that stays busy skips the recovery BEFORE
+    // anything is swapped: nothing was attempted, so it is not a failed attempt (the next call tries again).
+    std::unique_lock<std::recursive_timed_mutex> lock(d3d11::ContextStateMutex(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::milliseconds(d3d11::kContextStateLockTimeoutMs)))
+    {
+        NoteLockTimeout();
+        return false;
+    }
     Job job;
     job.self = this;
     job.context1 = _stuckContext;
@@ -663,10 +701,17 @@ RemapStatus GBufferRemap::RemapImpl(ID3D11DeviceContext* context, ID3D11ShaderRe
     // The whole swap-in .. draw .. unbind .. swap-back sequence is one critical section process-wide (d3d11::ContextStateMutex): begin_effects
     // can run on two paths (the HudLess UI-boundary render_effects call and ReShade's own pass in Present) next to the depth pass on the
     // evaluate thread, and an interleaved sequence would put the wrong state back. Nothing else is under the lock: not the target's
-    // creation above, not the publishing below, and a cache hit (which swaps nothing) never takes it.
+    // creation above, not the publishing below, and a cache hit (which swaps nothing) never takes it. The lock is timed: a holder that
+    // does not come back (a third-party callback we cannot audit) skips this remap BEFORE the state swap, so nothing is half done; the
+    // add-on's binding is kept and the cache key stays unset.
     uint32_t drawCode = 0, unbindCode = 0, swapCode = 0;
     {
-        const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+        std::unique_lock<std::recursive_timed_mutex> lock(d3d11::ContextStateMutex(), std::defer_lock);
+        if (!lock.try_lock_for(std::chrono::milliseconds(d3d11::kContextStateLockTimeoutMs)))
+        {
+            NoteLockTimeout();
+            return RemapStatus::Failed;
+        }
         drawCode = d3d11::GuardedCall(&DrawThunk, &job);
         unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
         swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);

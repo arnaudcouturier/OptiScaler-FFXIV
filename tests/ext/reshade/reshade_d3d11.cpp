@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <chrono>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -35,24 +36,37 @@ void TestGuardedCall()
     assert(GuardedCall(&Throw, nullptr) != 0); // a C++ exception crossing the frame is reported, not propagated
 }
 
-// The process-wide context-state mutex: one object, recursive on a thread, exclusive between threads
+// The process-wide context-state mutex: one object, recursive and timed, exclusive between threads
 void TestContextStateMutex()
 {
-    std::recursive_mutex& m = ContextStateMutex();
+    std::recursive_timed_mutex& m = ContextStateMutex();
     assert(&m == &ContextStateMutex());
+    assert(kContextStateLockTimeoutMs > 0 && kContextStateLockTimeoutMs <= 100); // a stuck holder costs a pass this much, not a freeze
     {
-        std::lock_guard<std::recursive_mutex> outer(m);
-        std::lock_guard<std::recursive_mutex> inner(ContextStateMutex()); // recursive: a Release under a capture takes it again
+        std::lock_guard<std::recursive_timed_mutex> outer(m);
+        std::lock_guard<std::recursive_timed_mutex> inner(ContextStateMutex()); // recursive: a Release under a capture takes it again
+        assert(m.try_lock_for(std::chrono::milliseconds(kContextStateLockTimeoutMs))); // ... also timed, at once on the owner
+        m.unlock();
         std::atomic<int> other { -1 };
-        std::thread t([&] { other = m.try_lock() ? 1 : 0; if (other == 1) m.unlock(); });
+        std::atomic<long long> waitedMs { -1 };
+        std::thread t(
+            [&]
+            {
+                const auto t0 = std::chrono::steady_clock::now();
+                other = m.try_lock_for(std::chrono::milliseconds(kContextStateLockTimeoutMs)) ? 1 : 0;
+                waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+                if (other == 1)
+                    m.unlock();
+            });
         t.join();
-        assert(other == 0); // held by this thread: another thread does not get in
+        assert(other == 0);      // held by this thread: another thread does not get in ...
+        assert(waitedMs < 2000); // ... and gives up after the timeout instead of waiting for good
     }
     std::atomic<int> after { -1 };
     std::thread t([&] { after = m.try_lock() ? 1 : 0; if (after == 1) m.unlock(); });
     t.join();
     assert(after == 1); // and free again once released
-    std::recursive_mutex* seenByThread = nullptr;
+    std::recursive_timed_mutex* seenByThread = nullptr;
     std::thread t2([&] { seenByThread = &ContextStateMutex(); });
     t2.join();
     assert(seenByThread == &m); // one object for the whole process

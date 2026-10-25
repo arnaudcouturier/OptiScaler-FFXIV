@@ -8,6 +8,8 @@
 #include <DepthCrop_Ps_Shader.h>
 #include <DepthCrop_Vs_Shader.h>
 
+#include <chrono>
+#include <mutex>
 #include <utility>
 
 namespace ext::reshade::depth
@@ -435,6 +437,19 @@ void DepthCopy::ScrubThunk(void* p)
     j.context1->ClearState();
 }
 
+// The context-state lock stayed busy for kContextStateLockTimeoutMs: the pass was skipped before any state swap. Counted for tests, and
+// logged at most once a minute per pass (a holder that does not come back would otherwise log every frame).
+void DepthCopy::NoteLockTimeout()
+{
+    ++_lockTimeouts;
+    const uint64_t now = GetTickCount64();
+    if (_lockLogged && now - _lockLogTick < 60'000)
+        return;
+    _lockLogged = true;
+    _lockLogTick = now;
+    LOG_WARN("Automatic ReShade depth: context state lock busy for {} ms: pass skipped", d3d11::kContextStateLockTimeoutMs);
+}
+
 // A swap back that failed (it may or may not have happened) is done again before anything else, with the game's own state object,
 // which is kept alive until then. If the context really was in the private state, that state is cleared (the swap back is done, then
 // the private state entered, cleared and left again). A failed attempt is counted; the last one gives the state up.
@@ -444,8 +459,14 @@ bool DepthCopy::RecoverState()
         return true;
     ext::core::BypassScope bypass;
     // The swaps below are a swap-in sequence like the capture's own: no other pass may be inside the private state meanwhile (recursive,
-    // so a Release that is called under the lock, or by a capture that holds it, is fine).
-    const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+    // so a Release that is called under the lock, or by a capture that holds it, is fine). A lock that stays busy skips the recovery
+    // BEFORE anything is swapped: nothing was attempted, so it is not a failed attempt (the next call tries again).
+    std::unique_lock<std::recursive_timed_mutex> lock(d3d11::ContextStateMutex(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::milliseconds(d3d11::kContextStateLockTimeoutMs)))
+    {
+        NoteLockTimeout();
+        return false;
+    }
     Job job;
     job.self = this;
     job.context1 = _stuckContext;
@@ -592,10 +613,18 @@ bool DepthCopy::CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source
     // The draw runs in the private state. The way back is its own guarded step, so a failed draw cannot skip it.
     // The whole swap-in .. draw .. unbind .. swap-back sequence is one critical section process-wide (d3d11::ContextStateMutex): the
     // HudLess UI-boundary pass and ReShade's own pass can run the G-buffer remaps on other threads, and an interleaved sequence would
-    // put the wrong state back. Nothing else is under the lock: not the view creation above, not the publishing below.
+    // put the wrong state back. Nothing else is under the lock: not the view creation above, not the publishing below. The lock is timed:
+    // a holder that does not come back (a third-party callback we cannot audit) skips this capture BEFORE the state swap, so nothing is
+    // half done and nothing is published; the capture that is published ages out.
     uint32_t drawCode = 0, unbindCode = 0, swapCode = 0;
     {
-        const std::lock_guard<std::recursive_mutex> lock(d3d11::ContextStateMutex());
+        std::unique_lock<std::recursive_timed_mutex> lock(d3d11::ContextStateMutex(), std::defer_lock);
+        if (!lock.try_lock_for(std::chrono::milliseconds(d3d11::kContextStateLockTimeoutMs)))
+        {
+            NoteLockTimeout();
+            report.result = Result::Fault;
+            return false;
+        }
         drawCode = d3d11::GuardedCall(&DrawThunk, &job);
         unbindCode = d3d11::GuardedCall(&UnbindThunk, &job);
         swapCode = d3d11::GuardedCall(&SwapBackThunk, &job);

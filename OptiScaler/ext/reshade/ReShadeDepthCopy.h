@@ -4,8 +4,12 @@
 // (ReShadeDepthCore.h) through a sink. Shader: shaders/depth_crop.hlsl. Tests: tests/ext/reshade/reshade_depth_copy.cpp (WARP).
 //
 // Threading: Init, Capture, Withdraw and Release run on the thread that owns the immediate context (the NGX evaluate thread). The
-// swap-in .. draw .. swap-back sequence (and the recovery of a swap back) holds d3d11::ContextStateMutex(), which the G-buffer passes
-// (ReShadeGBufferCopy.h, on the thread that runs begin_effects) take too.
+// swap-in .. draw .. swap-back sequence (and the recovery of a swap back) holds d3d11::ContextStateMutex(), which serializes only OUR
+// depth and G-buffer passes (ReShadeGBufferCopy.h, on the thread that runs begin_effects); CharaEnhancePass.cpp and CharaGuides.cpp also
+// swap private context states without it. The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the
+// capture 30 ms, not a freeze. On a timeout, before any state swap, the capture returns Result::Fault (nothing is published; the capture
+// that is published ages out), a pending recovery of a swap back returns false without counting an attempt, LockTimeouts() counts it
+// and one line per minute is logged.
 // Cost per Capture: one transient shader resource view of the game's depth, a 16-byte constant upload, two context-state swaps and one
 // full-screen draw into the R32_FLOAT target (about 33 MB at 3840x2160, created once per output size).
 //
@@ -85,7 +89,7 @@ enum class Result : uint8_t
     UnsupportedFormat,
     NotContained,     // the render region does not lie inside the source
     ResourceFailure,  // a view, the target or the constant buffer could not be created or written
-    Fault,            // the draw failed (exception or access violation); the game's state was put back
+    Fault,            // the draw failed (exception or access violation; the game's state was put back), or the context-state lock stayed busy (skipped before any swap)
 };
 const char* ResultName(Result result);
 
@@ -155,6 +159,8 @@ class DepthCopy
     void Withdraw();
     bool Ready() const { return _state != nullptr; }
     uint32_t InitFailures() const { return _initFailures; }
+    // Times the context-state lock was busy for kContextStateLockTimeoutMs and this pass skipped its swap (a capture or a recovery).
+    uint32_t LockTimeouts() const { return _lockTimeouts; }
 
     // Copies the game's depth into the target and publishes it. False (nothing new published) when the request is refused or
     // the draw failed; a failure after the target was touched also withdraws the capture that was published. `report` may be null.
@@ -180,6 +186,8 @@ class DepthCopy
 
     // Puts the game's state back (see the top). True = nothing is outstanding. A failed attempt counts; the last one gives up.
     bool RecoverState();
+    // The lock stayed busy: counts it and logs (at most one line per minute per pass).
+    void NoteLockTimeout();
     // Gives the outstanding state up deliberately: logs once and leaks the reference to the game's state object.
     void DropStuck(const char* why);
     bool CaptureImpl(ID3D11DeviceContext* context, ID3D11Resource* source, const CaptureArgs& args, CaptureReport& report);
@@ -190,6 +198,9 @@ class DepthCopy
     DrawTriangleFn _draw;
     Microsoft::WRL::ComPtr<ID3D11Device> _device;
     uint32_t _initFailures = 0;
+    uint32_t _lockTimeouts = 0;
+    bool _lockLogged = false;
+    uint64_t _lockLogTick = 0; // GetTickCount64() of the last line
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _ps;

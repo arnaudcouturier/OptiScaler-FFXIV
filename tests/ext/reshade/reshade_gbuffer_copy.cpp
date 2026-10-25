@@ -2964,13 +2964,27 @@ void ReportedMotionScale()
 }
 
 // ---- a target that cannot be made is not tried every frame -------------------------------------------------------------------
+// Only an answer that will not change ("this format / size cannot be a render target") is remembered; a transient one is retried.
+void PermanentCreateFailures()
+{
+    for (HRESULT hr : { E_INVALIDARG, E_NOTIMPL, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_INVALID_CALL })
+        CHECK(IsPermanentCreateFailure(hr));
+    for (HRESULT hr : { S_OK, S_FALSE, E_OUTOFMEMORY, E_FAIL, E_UNEXPECTED, E_POINTER, E_ACCESSDENIED, E_ABORT, E_NOINTERFACE, E_HANDLE,
+                        DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DRIVER_INTERNAL_ERROR,
+                        DXGI_ERROR_WAS_STILL_DRAWING, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_ACCESS_LOST,
+                        D3D11_ERROR_TOO_MANY_UNIQUE_STATE_OBJECTS, D3D11_ERROR_FILE_NOT_FOUND, HRESULT(0x80004005L), HRESULT(0xFFFFFFFFL),
+                        HRESULT(0x80070058L) /* E_INVALIDARG + 1 */, HRESULT(0x00000001L) })
+        CHECK(!IsPermanentCreateFailure(hr));
+}
+
 struct TexHook
 {
     SlotPatch patch;
     bool active = false;
     DXGI_FORMAT failFormat = DXGI_FORMAT_UNKNOWN;
-    int calls = 0;  // CreateTexture2D calls while active
-    int failed = 0; // ... that were refused
+    HRESULT result = E_INVALIDARG; // what the refused creation answers
+    int calls = 0;                 // CreateTexture2D calls while active
+    int failed = 0;                // ... that were refused
 };
 TexHook g_tex;
 constexpr int kDevCreateTexture2D = 5;
@@ -2983,7 +2997,7 @@ HRESULT STDMETHODCALLTYPE HkCreateTex2d(ID3D11Device* d, const D3D11_TEXTURE2D_D
         if (desc != nullptr && desc->Format == g_tex.failFormat)
         {
             ++g_tex.failed;
-            return E_FAIL;
+            return g_tex.result;
         }
     }
     return g_tex.patch.Original<Tex2dFn>()(d, desc, init, out);
@@ -3001,6 +3015,7 @@ void NegativeTargetCache()
     g_tex = TexHook {};
     g_tex.patch.Install(fx.rig.device.Get(), kDevCreateTexture2D, reinterpret_cast<void*>(&HkCreateTex2d));
     g_tex.failFormat = bad.view;
+    g_tex.result = E_INVALIDARG; // a permanent answer
     g_tex.active = true;
 
     // the first remap fails and tries once; the same format and size again fails without trying
@@ -3033,14 +3048,45 @@ void NegativeTargetCache()
 
     // Release() clears it
     CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
-    const int before = g_tex.calls;
+    int before = g_tex.calls;
     CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before);
     fx.pass->Release();
     CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
     CHECK(g_tex.calls == before + 1);
     CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 1);
 
+    // the other answers that mean "cannot be a render target" are remembered, too; every other answer is retried at the next call
+    for (HRESULT hr : { E_NOTIMPL, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_INVALID_CALL })
+    {
+        fx.pass->Release();
+        g_tex.result = hr;
+        before = g_tex.calls;
+        CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+        CHECK(g_tex.calls == before + 1);
+    }
+    for (HRESULT hr : { E_OUTOFMEMORY, E_FAIL, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_DRIVER_INTERNAL_ERROR })
+    {
+        fx.pass->Release();
+        g_tex.result = hr;
+        before = g_tex.calls;
+        for (int i = 1; i <= 3; ++i)
+        {
+            CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed);
+            CHECK(g_tex.calls == before + i); // tried again every time
+        }
+    }
+    // a transient answer after a permanent one replaces nothing: the record is for the permanent one until the format or size changes
+    fx.pass->Release();
+    g_tex.result = E_INVALIDARG;
+    before = g_tex.calls;
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 1);
+    g_tex.result = E_OUTOFMEMORY;
+    CHECK(fx.Run(srcBad, 16, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 1); // (latched: not asked)
+    CHECK(fx.Run(srcBad, 20, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 2);  // a new size: asked, and not latched now
+    CHECK(fx.Run(srcBad, 20, 12, 8, 6) == RemapStatus::Failed && g_tex.calls == before + 3);
+
     // only the failure to make the target is remembered: a failed draw and a crash while the target is made are not
+    g_tex.result = E_INVALIDARG;
     const int draws = g_draw.draws;
     g_draw.mode = 1;
     CHECK(fx.Run(srcGood, 24, 12, 8, 6) == RemapStatus::Failed);
@@ -3066,6 +3112,11 @@ void NegativeTargetCache()
 struct NullSink final : ICaptureSink
 {
     void Publish(const DepthCapture&) noexcept override {}
+};
+struct CountingSink final : ICaptureSink
+{
+    int valid = 0, withdrawn = 0;
+    void Publish(const DepthCapture& c) noexcept override { (c.valid ? valid : withdrawn) += 1; }
 };
 std::atomic<int> g_occupancy { 0 }, g_occupancyMax { 0 }, g_occupancyDraws { 0 };
 void SpinMicros(int us)
@@ -3118,7 +3169,9 @@ CaptureArgs DepthArgs(uint64_t frame)
     return a;
 }
 
-// The depth pass on one thread and a G-buffer pass on another, on one device and context: the swap regions never overlap
+// The depth pass on one thread and a G-buffer pass on another, on one device and context: the swap regions never overlap. A pass that
+// waited longer than the lock timeout skips its round (and says so with LockTimeouts()), so a loaded machine cannot fail this test: every
+// round either ran or was counted as skipped, and the draws that ran never overlapped.
 void ContextStateMutexSerializes()
 {
     Fixture fx;
@@ -3169,29 +3222,35 @@ void ContextStateMutexSerializes()
         });
     a.join();
     b.join();
-    if (g_occupancyMax != 1 || depthOk != kRounds || gbufOk != kRounds)
-        std::printf("  two threads: occupancy max %d, depth ok %d / %d, g-buffer ok %d / %d\n", g_occupancyMax.load(), depthOk.load(), kRounds,
-                    gbufOk.load(), kRounds);
-    CHECK(g_occupancyMax == 1); // never two swap regions at once
-    CHECK(g_occupancyDraws == 2 * kRounds);
-    CHECK(depthOk == kRounds && gbufOk == kRounds);
+    const int skipped = int(depth.LockTimeouts() + gbuf.LockTimeouts());
+    if (g_occupancyMax != 1 || depthOk + gbufOk + skipped != 2 * kRounds)
+        std::printf("  two threads: occupancy max %d, depth ok %d / %d, g-buffer ok %d / %d, skipped on the lock %d\n", g_occupancyMax.load(),
+                    depthOk.load(), kRounds, gbufOk.load(), kRounds, skipped);
+    CHECK(g_occupancyMax == 1);                                 // never two swap regions at once
+    CHECK(depthOk + gbufOk + skipped == 2 * kRounds);           // every round ran or was counted as skipped
+    CHECK(g_occupancyDraws == depthOk + gbufOk);                // ... and a round that ran drew once
+    CHECK(depthOk > 0 && gbufOk > 0);
     CHECK(SameState("after two threads' passes", before, DumpState(ctx)));
 }
 
-// A thread that holds the mutex until it is told to let go
+// A thread that holds the mutex until it is told to let go (or, as a watchdog, for five seconds: a pass that waits for it for good
+// would otherwise hang the test instead of failing it)
 struct LockHolder
 {
     std::thread thread;
     std::atomic<bool> held { false }, release { false };
     void Start()
     {
+        held = false;
+        release = false;
         thread = std::thread(
             [this]
             {
-                const std::lock_guard<std::recursive_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
+                std::unique_lock<std::recursive_timed_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
                 held = true;
-                while (!release)
-                    std::this_thread::yield();
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!release && std::chrono::steady_clock::now() < until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
             });
         while (!held)
             std::this_thread::yield();
@@ -3199,100 +3258,173 @@ struct LockHolder
     void Stop()
     {
         release = true;
-        thread.join();
+        if (thread.joinable())
+            thread.join();
     }
 };
-// Runs `call` on another thread while the mutex is held by a third one, and tells whether it came back within `ms`
-bool FinishesWhileLockHeld(const std::function<void()>& call, int ms)
+bool MutexIsFreeForAnotherThread()
 {
-    LockHolder holder;
-    holder.Start();
-    std::promise<void> done;
-    std::future<void> finished = done.get_future();
-    std::thread worker(
+    std::atomic<int> got { -1 };
+    std::thread t(
         [&]
         {
-            call();
-            done.set_value();
+            auto& m = ext::reshade::d3d11::ContextStateMutex();
+            got = m.try_lock() ? 1 : 0;
+            if (got == 1)
+                m.unlock();
         });
-    const bool ready = finished.wait_for(std::chrono::milliseconds(ms)) == std::future_status::ready;
-    holder.Stop();
-    worker.join();
-    return ready;
+    t.join();
+    return got == 1;
+}
+long long MillisSince(std::chrono::steady_clock::time_point t0)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
-// The passes do hold the mutex around the swap region (a deterministic control for the race above), and a cache hit does not take it
-void ContextStateMutexIsTaken()
+// A holder that does not come back costs a pass the lock timeout, not a freeze: the pass is skipped BEFORE any state swap
+void ContextStateLockTimeout()
 {
     Fixture fx;
     if (!fx.Create())
         return;
+    GameState game;
+    CHECK(game.Set(fx.rig));
     const Fmt& f = Rg16();
     const Source src = MakeSource(fx.rig, f, 40, 30, 16, 12, Pattern(f, 16));
     const ComPtr<ID3D11Texture2D> depthTex = MakeDepthLike(fx.rig);
-    NullSink sink;
-    DepthCopy depth(sink);
+    CHECK(depthTex != nullptr);
+    if (depthTex == nullptr)
+        return;
+    CountingSink sink;
+    DepthCopy depth(sink, &TestDraw);
     ID3D11DeviceContext* const ctx = fx.rig.context.Get();
+    // both are set up, with a live target and a cached key (so that a timeout is not just a first use)
     CHECK(depth.Capture(ctx, depthTex.Get(), DepthArgs(1)));
-    const RemapRequest k = fx.Req(16, 12, 8, 6);
-    CHECK(fx.Go(src, k) == RemapStatus::Ok);
-
-    // a cache hit swaps nothing and does not wait for the mutex
-    bool hitOk = false;
-    CHECK(FinishesWhileLockHeld([&] { hitOk = fx.Go(src, k) == RemapStatus::Ok && fx.out.cached; }, 3000));
-    CHECK(hitOk);
-    // a refusal does not take it either
-    CHECK(FinishesWhileLockHeld([&] { fx.Go(src, fx.Req(0, 12, 8, 6)); }, 3000));
-    // a remap that draws waits until the mutex is free, then goes through
-    bool missOk = false;
-    const RemapRequest miss = fx.Req(16, 12, 8, 6);
-    CHECK(!FinishesWhileLockHeld([&] { missOk = fx.Go(src, miss) == RemapStatus::Ok; }, 300));
-    CHECK(missOk); // (it finished after the holder let go)
-    // so does a depth capture
-    bool captureOk = false;
-    CHECK(!FinishesWhileLockHeld([&] { captureOk = depth.Capture(ctx, depthTex.Get(), DepthArgs(2)); }, 300));
-    CHECK(captureOk);
-
-    // the mutex is recursive: a Release under it that has a swap back to recover (the recovery swaps) does not deadlock
-    GameState game;
-    CHECK(game.Set(fx.rig));
+    const RemapRequest warm = fx.Req(16, 12, 8, 6);
+    CHECK(fx.Go(src, warm) == RemapStatus::Ok);
+    InstallSwapHook(fx.rig, 0, SwapFault::None); // counts the swaps; none of them misbehaves
     const Dump before = DumpState(ctx);
-    ID3DDeviceContextState* gs = MakeStuck(fx, src, false);
+    const size_t lines = LogLines("context state lock busy");
+    LockHolder holder;
+
+    // ---- a G-buffer remap that has to draw
+    int draws = g_draw.draws;
+    int swaps = g_swap.calls;
+    const RemapRequest k = fx.Req(16, 12, 8, 6);
+    holder.Start();
+    auto t0 = std::chrono::steady_clock::now();
+    RemapStatus st = fx.Go(src, k);
+    const long long ms = MillisSince(t0);
+    CHECK(st == RemapStatus::Failed);
+    CHECK(ms < 2000); // it came back (the timeout is 30 ms; this bound is generous on purpose)
+    CHECK(fx.out.srv == 0 && fx.out.srvSrgb == 0 && !fx.out.cached);
+    CHECK(fx.report.status == RemapStatus::Failed);
+    CHECK(fx.pass->LockTimeouts() == 1);
+    CHECK(fx.Go(src, k) == RemapStatus::Failed); // again, still held
+    CHECK(fx.pass->LockTimeouts() == 2);
+    holder.Stop();
+    CHECK(g_draw.draws == draws);  // nothing reached the draw
+    CHECK(g_swap.calls == swaps);  // ... and the context was never swapped
+    CHECK(SameState("after a remap that found the context-state lock busy", before, DumpState(ctx)));
+    CHECK(LogLines("context state lock busy") == lines + 1); // said once for the pass, not twice
+    CHECK(MutexIsFreeForAnotherThread());
+    // the cache key was not set: the same request now draws, and only then is it cached
+    CHECK(fx.Go(src, k) == RemapStatus::Ok && !fx.out.cached);
+    CHECK(g_draw.draws == draws + 1);
+    CHECK(fx.Go(src, k) == RemapStatus::Ok && fx.out.cached);
+    CHECK(fx.pass->LockTimeouts() == 2);
+
+    // ---- a cache hit and a refusal never take the lock
+    holder.Start();
+    CHECK(fx.Go(src, k) == RemapStatus::Ok && fx.out.cached);
+    CHECK(fx.Go(src, fx.Req(0, 12, 8, 6)) == RemapStatus::Refused);
+    holder.Stop();
+    CHECK(fx.pass->LockTimeouts() == 2);
+
+    // ---- a depth capture
+    draws = g_draw.draws;
+    swaps = g_swap.calls;
+    const int published = sink.valid;
+    CaptureReport rep;
+    holder.Start();
+    t0 = std::chrono::steady_clock::now();
+    bool ok = depth.Capture(ctx, depthTex.Get(), DepthArgs(5), &rep);
+    const long long depthMs = MillisSince(t0);
+    CHECK(!ok && rep.result == Result::Fault);
+    CHECK(depthMs < 2000);
+    CHECK(depth.LockTimeouts() == 1);
+    CHECK(!depth.Capture(ctx, depthTex.Get(), DepthArgs(6)));
+    CHECK(depth.LockTimeouts() == 2);
+    holder.Stop();
+    CHECK(g_draw.draws == draws && g_swap.calls == swaps);
+    CHECK(sink.valid == published && sink.withdrawn == 0); // nothing new, and the capture that is published is not withdrawn by this
+    CHECK(SameState("after a capture that found the context-state lock busy", before, DumpState(ctx)));
+    CHECK(LogLines("context state lock busy") == lines + 2); // one line per pass
+    CHECK(MutexIsFreeForAnotherThread());
+    CHECK(depth.Capture(ctx, depthTex.Get(), DepthArgs(7)));
+    CHECK(sink.valid == published + 1 && g_draw.draws == draws + 1);
+
+    // ---- a recovery that finds the lock busy: false, no attempt counted, done once the holder lets go
+    ID3DDeviceContextState* gs = MakeStuck(fx, src, false); // the swap back of a remap crashed: the pass owes it
+    if (gs != nullptr)
+    {
+        g_swap.faultCall = 0;
+        const size_t gaveUp = LogLines("giving up");
+        const uint32_t timeouts = fx.pass->LockTimeouts();
+        holder.Start();
+        for (int i = 0; i < int(kMaxRecoverAttempts) + 3; ++i) // more than the attempts the pass allows itself
+            CHECK(fx.Run(src, 16, 12, 16, 12) == RemapStatus::Failed);
+        holder.Stop();
+        CHECK(fx.pass->LockTimeouts() == timeouts + kMaxRecoverAttempts + 3);
+        CHECK(SwapsTo(gs) == 1);                    // no recovery swap was tried
+        CHECK(LogLines("giving up") == gaveUp);     // ... so none failed, and the pass did not give the state up
+        CHECK(fx.Run(src, 16, 12, 16, 12) == RemapStatus::Ok); // the holder let go: recovered, and the remap went on
+        CHECK(SwapsTo(gs) >= 2);
+        CHECK(SameState("after the recovery that waited for the lock", before, DumpState(ctx)));
+        g_swap.patch.Remove();
+        gs->Release();
+    }
+    InstallSwapHook(fx.rig, 2, SwapFault::CrashBefore); // ... and the same for the depth pass
+    CHECK(!depth.Capture(ctx, depthTex.Get(), DepthArgs(8)));
+    ID3DDeviceContextState* gd = g_swap.previous.empty() ? nullptr : g_swap.previous[0];
+    CHECK(gd != nullptr);
+    if (gd != nullptr)
+    {
+        gd->AddRef();
+        g_swap.faultCall = 0;
+        const size_t gaveUp = LogLines("giving up");
+        const uint32_t timeouts = depth.LockTimeouts();
+        holder.Start();
+        for (int i = 0; i < int(kMaxRecoverAttempts) + 3; ++i)
+            CHECK(!depth.Capture(ctx, depthTex.Get(), DepthArgs(9 + uint64_t(i))));
+        holder.Stop();
+        CHECK(depth.LockTimeouts() == timeouts + kMaxRecoverAttempts + 3);
+        CHECK(SwapsTo(gd) == 1);
+        CHECK(LogLines("giving up") == gaveUp);
+        CHECK(depth.Capture(ctx, depthTex.Get(), DepthArgs(20)));
+        CHECK(SwapsTo(gd) >= 2);
+        CHECK(SameState("after the depth recovery that waited for the lock", before, DumpState(ctx)));
+        gd->Release();
+    }
+    g_swap.patch.Remove();
+
+    // ---- recursion: the owning thread takes the lock again at once (a Release under it that has a swap back to recover)
+    const uint32_t timeoutsBeforeRecursion = fx.pass->LockTimeouts();
+    gs = MakeStuck(fx, src, false);
     if (gs != nullptr)
     {
         g_swap.faultCall = 0;
         {
-            const std::lock_guard<std::recursive_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
+            std::unique_lock<std::recursive_timed_mutex> lock(ext::reshade::d3d11::ContextStateMutex());
+            t0 = std::chrono::steady_clock::now();
             fx.pass->Release();
+            CHECK(MillisSince(t0) < 2000);
         }
         CHECK(SameState("after a Release under the mutex that recovered a swap back", before, DumpState(ctx)));
+        CHECK(fx.pass->LockTimeouts() == timeoutsBeforeRecursion); // (the recursion was not a timeout)
         g_swap.patch.Remove();
         gs->Release();
     }
-
-    // the recovery of a swap back is a swap sequence, too: it waits for the mutex (G-buffer pass, then depth pass)
-    ID3DDeviceContextState* gs2 = MakeStuck(fx, src, false);
-    if (gs2 != nullptr)
-    {
-        g_swap.faultCall = 0;
-        CHECK(!FinishesWhileLockHeld([&] { fx.pass->Release(); }, 300));
-        CHECK(SameState("after a Release that waited for the mutex", before, DumpState(ctx)));
-        g_swap.patch.Remove();
-        gs2->Release();
-    }
-    InstallSwapHook(fx.rig, 2, SwapFault::CrashBefore);
-    CHECK(!depth.Capture(ctx, depthTex.Get(), DepthArgs(3))); // the swap back crashes: the depth pass owes it
-    ID3DDeviceContextState* gs3 = g_swap.previous.empty() ? nullptr : g_swap.previous[0];
-    CHECK(gs3 != nullptr);
-    if (gs3 != nullptr)
-    {
-        gs3->AddRef();
-        g_swap.faultCall = 0;
-        CHECK(!FinishesWhileLockHeld([&] { depth.Release(); }, 300));
-        CHECK(SameState("after a depth Release that waited for the mutex", before, DumpState(ctx)));
-        gs3->Release();
-    }
-    g_swap.patch.Remove();
 }
 
 // ---- the product shader, driven directly ---------------------------------------------------------------------------------
@@ -3527,8 +3659,9 @@ int main()
     EngineRouting();
     std::fputs("reported motion scale, negative cache, context-state mutex...\n", stderr);
     ReportedMotionScale();
+    PermanentCreateFailures();
     NegativeTargetCache();
-    ContextStateMutexIsTaken();
+    ContextStateLockTimeout();
     ContextStateMutexSerializes();
     std::fputs("shader...\n", stderr);
     ShaderClamp();

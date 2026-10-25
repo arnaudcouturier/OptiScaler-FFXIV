@@ -36,13 +36,20 @@
 // same key as the last successful Remap on a live target returns the same views with out.cached = true and draws nothing, not even a
 // state swap (and without the context-state mutex).
 //
-// Negative cache: a target that could not be created (a format the GPU cannot render to) is remembered per (view format, output size)
-// until either changes, the pass is released or the device changes; Remap then fails at once without a D3D call that creates anything.
-// Failures of the transient steps (reading the view, the draw) are never remembered.
+// Negative cache: a target that the GPU refused for good (IsPermanentCreateFailure: a format or size that cannot be a render target) is
+// remembered per (view format, output size) until either changes, the pass is released or the device changes; Remap then fails at once
+// without a D3D call that creates anything. Failures of the transient steps (reading the view, the draw) and of transient creation
+// answers (out of memory, a lost device) are never remembered.
 //
 // Threading: Init, Remap and Release run on the thread that runs begin_effects (two possible paths: the HudLess UI-boundary
-// render_effects call and ReShade's own pass in Present); the process-wide context-state mutex (d3d11::ContextStateMutex) serializes
-// the swap-in .. draw .. swap-back sequence with the depth pass and the other G-buffer passes. The destructor must not run from a static destructor at DLL unload: call Release() while the device is alive.
+// render_effects call and ReShade's own pass in Present). The process-wide context-state mutex (d3d11::ContextStateMutex) serializes
+// the swap-in .. draw .. swap-back sequence of OUR depth and G-buffer passes only (CharaEnhancePass.cpp and CharaGuides.cpp also swap
+// private context states without it). The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the pass
+// 30 ms, not a freeze. On a timeout, before any state swap, Remap returns Failed (the add-on's binding is kept, the cache key is not
+// set), a pending recovery of a swap back returns false without counting an attempt, LockTimeouts() counts it and one line per minute
+// is logged. A cache hit swaps nothing and never takes the lock.
+//
+// The destructor must not run from a static destructor at DLL unload: call Release() while the device is alive.
 
 #include "ext/reshade/ReShadeDepthCopy.h" // kMaxEdge, kMaxRecoverAttempts, PackPair, DrawTriangleFn
 #include "ext/reshade/ReShadeDepthCore.h" // GBuffer, ViewDesc, RemapRequest, RemapStatus, RemapOut, IRemapEngine
@@ -100,6 +107,12 @@ struct RemapConstants
 static_assert(sizeof(RemapConstants) == 16, "must match cbuffer Remap in gbuffer_remap.hlsl");
 RemapConstants MakeRemapConstants(const RemapRequest& request);
 
+// Whether a failed creation of the target (texture, render target view, shader resource view) is permanent for that view format and
+// output size: E_INVALIDARG, E_NOTIMPL, DXGI_ERROR_UNSUPPORTED and DXGI_ERROR_INVALID_CALL. Only those are remembered (the negative
+// cache); E_OUTOFMEMORY, DXGI_ERROR_DEVICE_REMOVED / RESET / HUNG, a driver error, E_FAIL and every other result are not, so the next call
+// tries again.
+bool IsPermanentCreateFailure(HRESULT hr);
+
 // The device the pass was set up on must be replaced: another device was given, or the old one reports it was removed.
 bool RemapDeviceReplaced(const void* owned, const void* given, HRESULT removedReason);
 
@@ -139,6 +152,8 @@ class GBufferRemap
     void Release();
     bool Ready() const { return _state != nullptr; }
     uint32_t InitFailures() const { return _initFailures; }
+    // Times the context-state lock was busy for kContextStateLockTimeoutMs and this pass skipped its swap (a remap or a recovery).
+    uint32_t LockTimeouts() const { return _lockTimeouts; }
     GBuffer Kind() const { return _kind; }
 
     // Copies the render window of `srv` into the target and fills `out`. `srv` is the add-on's view (the key of the cache and the
@@ -186,6 +201,8 @@ class GBufferRemap
 
     // Puts the game's state back (see the top). True = nothing is outstanding. A failed attempt counts; the last one gives up.
     bool RecoverState();
+    // The lock stayed busy: counts it and logs (at most one line per minute per pass).
+    void NoteLockTimeout();
     // Gives the outstanding state up deliberately: logs once and leaks the reference to the game's state object.
     void DropStuck(const char* why);
     RemapStatus RemapImpl(ID3D11DeviceContext* context, ID3D11ShaderResourceView* srv, const RemapRequest& request, RemapOut& out,
@@ -197,6 +214,9 @@ class GBufferRemap
     DrawTriangleFn _draw;
     Microsoft::WRL::ComPtr<ID3D11Device> _device;
     uint32_t _initFailures = 0;
+    uint32_t _lockTimeouts = 0;
+    bool _lockLogged = false;
+    uint64_t _lockLogTick = 0; // GetTickCount64() of the last line
     Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _ps;

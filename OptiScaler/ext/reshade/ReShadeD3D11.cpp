@@ -30,9 +30,9 @@ uint32_t GuardedCall(void (*fn)(void*), void* arg)
     return 0;
 }
 
-std::recursive_mutex& ContextStateMutex()
+std::recursive_timed_mutex& ContextStateMutex()
 {
-    static std::recursive_mutex* const mutex = new std::recursive_mutex; // (thread-safe initialisation; never destroyed on purpose)
+    static std::recursive_timed_mutex* const mutex = new std::recursive_timed_mutex; // (thread-safe initialisation; never destroyed on purpose)
     return *mutex;
 }
 
