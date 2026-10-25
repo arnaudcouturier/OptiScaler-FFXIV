@@ -218,7 +218,27 @@ enum class RemapDecision : uint8_t
     KeepRenderSized,   // the source is already render-sized: ReShade's UV 0..1 already covers it
     KeepSizeMismatch,  // any other size (or a render window larger than the output)
     KeepUnreadable,    // the source view could not be described or is not a plain 2D view
+    KeepNoSource,      // (not from DecideRemap) the add-on has bound nothing to the semantic yet
+    KeepAmbiguous,     // (not from DecideRemap) the variables of that name show different bindings: some of them are not the semantic's readers
 };
+
+// What the binder tells the backend (once per change, for the log): the add-on's binding, the render and output sizes and the decision.
+struct GBufferNote
+{
+    GBuffer buffer = GBuffer::Normals;
+    ViewDesc source;
+    RemapDecision decision = RemapDecision::KeepNoSource;
+    RemapStatus status = RemapStatus::Ok; // what IBackend::Remap answered (only for decision Remap)
+    uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
+};
+// Told once per slot and runtime: whether the add-on's binding is a different view at our next begin than the one we put back at our last
+// finish. Answers (with the overwrittenByOther counter) whether REST rebinds every frame, which the order of the callbacks depends on.
+enum class GBufferEvent : uint8_t
+{
+    ViewChanged, // the first time the view seen at a begin differs from the one put back at the finish before
+    ViewStable,  // after kStableLogAfter begins in which it did not
+};
+inline constexpr uint32_t kStableLogAfter = 30;
 RemapDecision DecideRemap(const ViewDesc& source, uint32_t bbW, uint32_t bbH, uint32_t renderW, uint32_t renderH, uint32_t outputW,
                           uint32_t outputH);
 const char* RemapDecisionName(RemapDecision decision);
@@ -310,6 +330,32 @@ struct IBackend
     virtual bool Techniques(uint64_t runtime, std::vector<EffectTechnique>& out) = 0;
     // A preprocessor definition: `effect` null = global scope, otherwise that effect's.
     virtual DefinitionState Definition(uint64_t runtime, const char* effect, const char* name, std::string& value) = 0;
+
+    // ---- the G-buffers (IRemapEngine, above). All inert by default, so a backend without them keeps the add-on's binding everywhere.
+    // What the add-on's view is (untrusted handle): false = it could not be read.
+    virtual bool DescribeView(uint64_t view, ViewDesc& out)
+    {
+        (void)view;
+        (void)out;
+        return false;
+    }
+    // The copy of the render window of request.srv, or why not. Anything but Ok keeps the add-on's binding. Does not throw: the core
+    // treats a throw like Failed.
+    virtual RemapStatus Remap(const RemapRequest& request, RemapOut& out)
+    {
+        (void)request;
+        (void)out;
+        return RemapStatus::NoContext;
+    }
+    // The option went off: the D3D side drops its targets. Called from the thread of begin_effects (the one that owns the remap passes).
+    virtual void ReleaseRemaps() {}
+    // Log hooks: the decision for a buffer when it changes, and what the add-on's rebinding does. Swallowed when they throw.
+    virtual void GBufferDecided(const GBufferNote& note) { (void)note; }
+    virtual void GBufferObserved(GBuffer buffer, GBufferEvent event)
+    {
+        (void)buffer;
+        (void)event;
+    }
 };
 
 // ---- the binder ---------------------------------------------------------------------------------------------------------
@@ -338,6 +384,7 @@ enum class Counter : uint8_t
     OtherDevice,
     Failed,
     ErasedUnverified,
+    Kept, // G-buffers only: the add-on's binding was left as it is (no capture-based reason to realign it, or a source the pass does not do)
     Count
 };
 inline constexpr size_t kCounters = static_cast<size_t>(Counter::Count);
@@ -360,11 +407,16 @@ struct Counters
     // pick of another add-on (Generic Depth) until it selects again; a deliberate trade-off against leaving the copy in a map
     // that ReShade frees views of. The in-game run shows how often that happens.
     uint64_t erasedUnverified = 0;
+    // G-buffer slots (the depth slot leaves it 0): begins that left the add-on's binding alone. The reason of a CHANGE of it is logged
+    // (IBackend::GBufferDecided).
+    uint64_t kept = 0;
 };
 
 // Called when ShouldLog says so (first occurrence, then once per kLogIntervalMs), with the current count. May be null. It runs with
 // the runtime mutex held, on the thread of the ReShade event (or of the capture side): it must not call back into the binder.
 using LogFn = void (*)(Counter counter, uint64_t count);
+// The same for the G-buffer slots, which have counters of their own (`buffer` says which).
+using SlotLogFn = void (*)(GBuffer buffer, Counter counter, uint64_t count);
 
 // What the capture side needs to know before it has a capture: a depth consumer exists, and how big its back buffer is.
 struct ConsumerInfo
@@ -377,6 +429,17 @@ struct ConsumerInfo
 // What real ReShade answers for a genuine reader's get_texture_binding after the bind (exactly the copy) is not settled by reading the
 // headers; the pass relies on it (a variable counts as a DEPTH reader only if it reads back exactly the copy). The live backend logs the
 // readback of the first real bind once, so the in-game run shows what ReShade really returns.
+//
+// THE G-BUFFER SLOTS. The same machinery drives five more semantics (GBuffer: NORMALS, DECALS, DECALS_WATER, MOTIONVECTORS, MATERIAL),
+// each a "slot" next to the depth with its own pass state per runtime, counters and trust latch. A slot differs from the depth in what it
+// binds and in what it needs: the copy is made NOW by IBackend::Remap from the binding the add-on put there (not from a capture), there is
+// no manual-transform check of its own, no first-sight depth-view trust and no bufready_depth. The rules that carry over unchanged:
+// the variable that reads exactly the copy back vouches for the pass and its pre-bind reading is the original, the original is put back
+// at finish only if the entry is still ours, a failed restore keeps the references and is retried first, and nothing is freed while
+// ReShade may hold it. The slots run in the same begin as the depth, AFTER it reached Bound and reusing its texture list (so with no
+// G-buffer variables in the effects they cost no backend call at all), each under its own try: a slot that fails never turns the
+// depth into Failed. Consequence, by design: no depth consumer (a manual transform, an untrusted depth input, no capture) means no
+// G-buffer work either. What an unverified slot does is decided on purpose, see RestoreBinding.
 class DepthBinder
 {
   public:
@@ -392,8 +455,12 @@ class DepthBinder
     // ReShade runtime may be alive, switch it off with SetEnabled(false), which lets finish_effects put the binding back.
     void Shutdown() noexcept;
 
-    // Starts disabled. Any thread. Disabling does not cut a pass short: finish_effects still puts the binding back.
+    // Starts disabled. Any thread. Disabling does not cut a pass short: finish_effects still puts the binding back. The first begin after
+    // it, once nothing is pending, asks the backend to drop the remap targets (IBackend::ReleaseRemaps).
     void SetEnabled(bool enabled) noexcept;
+
+    // Log hook for the G-buffer slots' counters. May be null; set before the first event.
+    void SetSlotLog(SlotLogFn log) noexcept { _slotLog = log; }
 
     // The capture side, after every evaluate (valid = false withdraws the capture). The core takes its reference to
     // capture.copyView under the capture lock, so the owner must keep the view alive until the call that replaces it has
@@ -410,7 +477,9 @@ class DepthBinder
     // ReShade events (any thread, never throw). `runtime` = the effect_runtime pointer.
     // A begin while a pass of the same runtime is open ends that pass first and starts a new one; the finish of the pass that
     // was ended then finds nothing open (nested begin/finish: the first finish closes the second pass, the second is a no-op).
-    Outcome OnBeginEffects(uint64_t runtime) noexcept;
+    // `context` = the immediate context begin_effects gave (the native ID3D11DeviceContext*), 0 when there is none: the G-buffer slots
+    // then keep the add-on's bindings (the depth does not need it).
+    Outcome OnBeginEffects(uint64_t runtime, uint64_t context = 0) noexcept;
     void OnFinishEffects(uint64_t runtime) noexcept;
     // A runtime that holds nothing is forgotten. One that holds the copy (a bound or dirty pass) is kept as orphaned, no ReShade
     // call and no reference released: the pointer may come back (a reset that reuses the object, its map surviving), and then
@@ -429,7 +498,11 @@ class DepthBinder
     // One line for the menu: why the last begin did what it did (last writer wins across runtimes; a runtime that is not ours
     // never writes it). Copy; built here, so the refusal paths do not allocate.
     std::string Status() const noexcept;
-    Counters GetCounters() const noexcept;
+    Counters GetCounters() const noexcept; // the depth's
+    Counters GetCounters(GBuffer buffer) const noexcept;
+    // Bit i is set while the last begin that looked at G-buffer i (GBuffer value i) bound a realigned copy (last writer wins across
+    // runtimes; cleared by a begin that kept the add-on's binding or did not get that far). For the status line.
+    uint32_t RealignedMask() const noexcept { return _realigned.load(std::memory_order_relaxed); }
 
   private:
     struct SavedBool
@@ -443,30 +516,59 @@ class DepthBinder
         Trusted,   // it was empty or a depth view, and a bind has not shown otherwise
         Untrusted, // it was something else, or no variable read the copy back: right name, not the DEPTH semantic
     };
-    struct Runtime
+    // One pass of one slot. open = references held; inPass = between begin and finish; bound = update_texture_bindings(copy) was
+    // issued and the binding is not known to be put back. open && !inPass is the "dirty" state.
+    struct Pass
     {
-        std::optional<bool> manual; // RESHADE_DEPTH_INPUT_* macros non-neutral; known until reload, destroy or a technique change
-        Trust trust = Trust::Unknown; // until reload or destroy
-        bool noCandidateNoted = false; // IBackend::NoDepthCandidate was called (until reload or destroy)
-        bool foundNoted = false;       // IBackend::DepthInputsFound was called (until reload or destroy)
-
-        // The pass. open = references held; inPass = between begin and finish; bound = update_texture_bindings(copy) was
-        // issued and the binding is not known to be put back. open && !inPass is the "dirty" state.
         bool open = false;
         bool inPass = false;
         bool bound = false;
         // The runtime was destroyed while it held the copy: kept without a ReShade call. Its stored handles may belong to a
         // runtime that is gone, so a finish of it is a retry (everything is looked up again), like a begin or a reload.
         bool orphaned = false;
-        uint64_t copy = 0;
+        // The views of the copy that are bound: `copySrgb` equals `copy` for the depth (one reference), the G-buffers may have an sRGB twin
+        // (two references). A binding "holds the copy" when either of its two views is one of these.
+        uint64_t copy = 0, copySrgb = 0;
         // True once a variable read the copy back after the bind. Only then are `variable` (valid until the pass ends) and
         // `orig*` (what that variable showed before the bind) meaningful; an unverified pass is undone with an erase.
         bool verified = false;
         uint64_t variable = 0;
         uint64_t origSrv = 0, origSrgb = 0;
         bool refSrv = false, refSrgb = false; // a reference to the original view is held
-        std::vector<SavedBool> bools;         // bufready_depth values before the pass
+        std::vector<SavedBool> bools;         // bufready_depth values before the pass (the depth only)
     };
+    // What a G-buffer slot remembers of a runtime between passes.
+    struct GSlot
+    {
+        Pass pass;
+        bool untrusted = false; // no variable of that name read the copy back: right name, not the semantic (until reload or destroy)
+        // the last decision that was told to the backend (the log says each change once)
+        bool noted = false;
+        GBufferNote lastNote;
+        // what the add-on's binding looked like at the last finish, to tell whether it rebinds a new view between frames
+        bool restoredKnown = false;
+        uint64_t restoredSrv = 0, restoredSrgb = 0;
+        uint32_t stableBegins = 0;
+        bool changedTold = false, stableTold = false;
+    };
+    struct Runtime
+    {
+        std::optional<bool> manual; // RESHADE_DEPTH_INPUT_* macros non-neutral; known until reload, destroy or a technique change
+        Trust trust = Trust::Unknown; // until reload or destroy
+        bool noCandidateNoted = false; // IBackend::NoDepthCandidate was called (until reload or destroy)
+        bool foundNoted = false;       // IBackend::DepthInputsFound was called (until reload or destroy)
+        Pass pass;                     // the depth's
+        GSlot gb[kGBuffers];
+    };
+    // What a begin that bound the depth hands to the G-buffer slots.
+    struct BindContext
+    {
+        uint64_t context = 0;
+        DepthCapture capture;
+        uint32_t bbW = 0, bbH = 0;
+        std::vector<TextureVar> textures; // the one enumeration of the begin
+    };
+    static constexpr size_t kSlots = 1 + kGBuffers; // slot 0 = the depth, 1 + i = GBuffer i
     enum class End : uint8_t
     {
         Finish,   // finish_effects: the handles of the pass, counts a replaced binding
@@ -492,12 +594,16 @@ class DepthBinder
         uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0; // Bound only
     };
 
-    Outcome Begin(uint64_t runtime);
-    Outcome Bind(uint64_t runtime, Runtime& state);
-    void EndPass(uint64_t runtime, Runtime& state, End how) noexcept;
-    bool RestoreBinding(uint64_t runtime, Runtime& state, End how) noexcept;
-    void RestoreBools(uint64_t runtime, Runtime& state, End how) noexcept;
-    void ReleasePass(Runtime& state) noexcept;
+    Outcome Begin(uint64_t runtime, uint64_t context);
+    Outcome Bind(uint64_t runtime, Runtime& state, BindContext& bc);
+    void BindGBuffers(uint64_t runtime, Runtime& state, const BindContext& bc) noexcept;
+    void BindGBuffer(uint64_t runtime, Runtime& state, size_t index, const BindContext& bc);
+    // `slot` = 0 for the depth, 1 + i for G-buffer i: it names the semantic and the variables the pass is about.
+    void EndPass(uint64_t runtime, Pass& pass, size_t slot, End how) noexcept;
+    void EndAll(uint64_t runtime, Runtime& state, End how) noexcept; // every pass that is open, the depth first
+    bool RestoreBinding(uint64_t runtime, Pass& pass, size_t slot, End how) noexcept;
+    void RestoreBools(uint64_t runtime, Pass& pass, End how) noexcept;
+    void ReleasePass(Pass& pass) noexcept;
     void Forget(uint64_t runtime, bool reload) noexcept;
     bool ManualTransform(uint64_t runtime, bool& manual);
     bool AnyNonNeutral(uint64_t runtime, const char* effect, bool& error);
@@ -506,13 +612,17 @@ class DepthBinder
     void RecordConsumer(int64_t nowMs, uint32_t width, uint32_t height) noexcept;
     Outcome Done(Outcome outcome);
     void SetStatus(StatusKind kind, const DepthCapture* capture = nullptr) noexcept;
-    void Bump(Counter counter) noexcept;
+    void Bump(Counter counter, size_t slot = 0) noexcept;
+    void SetRealigned(size_t index, bool on) noexcept;
 
     IBackend& _backend;
     LogFn _log;
+    SlotLogFn _slotLog = nullptr;
     std::atomic<bool> _enabled { false };
-    std::atomic<uint64_t> _counts[kCounters] {};
-    std::atomic<int64_t> _lastLogged[kCounters] {}; // set to kNeverLogged by the constructor
+    std::atomic<bool> _remapsLive { false }; // a Remap went through since the targets were last released
+    std::atomic<uint32_t> _realigned { 0 };
+    std::atomic<uint64_t> _counts[kSlots][kCounters] {};
+    std::atomic<int64_t> _lastLogged[kSlots][kCounters] {}; // set to kNeverLogged by the constructor
 
     std::recursive_mutex _mutex; // _runtimes
     std::map<uint64_t, Runtime> _runtimes;

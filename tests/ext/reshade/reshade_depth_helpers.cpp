@@ -140,7 +140,8 @@ void Names()
     CHECK(std::string(CounterName(Counter::OtherDevice)) == "otherDevice");
     CHECK(std::string(CounterName(Counter::Failed)) == "failed");
     CHECK(std::string(CounterName(Counter::ErasedUnverified)) == "erasedUnverified");
-    static_assert(kCounters == 9);
+    CHECK(std::string(CounterName(Counter::Kept)) == "kept");
+    static_assert(kCounters == 10);
     static_assert(kConsumerWindowMs == 1000);
 
     CHECK(std::string(DepthEventName(DepthEvent::BeginEffects)) == "reshade_begin_effects");

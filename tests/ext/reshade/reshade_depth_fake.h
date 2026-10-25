@@ -92,6 +92,24 @@ struct Fake final : IBackend
     uint64_t depthSrv = kOrig, depthSrgb = kOrigSrgb;
     std::set<uint64_t> copyViews { kCopy, kCopy2 }; // the views the capture side makes
 
+    // The G-buffer semantics (NORMALS, MOTIONVECTORS, ...): one binding per runtime each, exactly like DEPTH. Variables with such a
+    // semantic read it; update_texture_bindings sets it. `described` is what DescribeView answers; Remap makes the copies.
+    std::map<std::string, std::pair<uint64_t, uint64_t>> sem;
+    std::map<uint64_t, ViewDesc> described;
+    RemapStatus remapStatus = RemapStatus::Ok;
+    bool remapTwin = false; // the copy has a second (sRGB) view
+    std::vector<RemapRequest> remaps;
+    struct Held // what the engine keeps per G-buffer: the last copy and the key that made it (the engine's cache)
+    {
+        bool valid = false;
+        uint64_t srv = 0, stamp = 0;
+        uint64_t a = 0, b = 0;
+    };
+    std::map<GBuffer, Held> held;
+    int remapMakes = 0, releaseRemaps = 0;
+    std::vector<GBufferNote> notes;
+    std::vector<std::pair<GBuffer, GBufferEvent>> observed;
+
     // knobs for the restore paths
     bool failRestore = false; // update_texture_bindings with something that is not a copy returns false
     bool texturesOk = true;   // false: the texture variables cannot be enumerated
@@ -213,6 +231,9 @@ struct Fake final : IBackend
         for (const auto& v : vars)
             if (v.semantic.empty() && (copyViews.count(v.srv) || copyViews.count(v.srgb)))
                 return true;
+        for (const auto& [name, binding] : sem)
+            if (copyViews.count(binding.first) || copyViews.count(binding.second))
+                return true;
         return false;
     }
     // The DEPTH entry itself (not a variable) holds one of the capture side's views.
@@ -295,6 +316,50 @@ struct Fake final : IBackend
         if (noCandidateThrows)
             throw std::runtime_error("NoDepthCandidate");
     }
+    bool DescribeView(uint64_t view, ViewDesc& out) override
+    {
+        return Run<bool>("DescribeView", false,
+                         [&]() -> bool
+                         {
+                             const auto it = described.find(view);
+                             if (it == described.end())
+                                 return false;
+                             out = it->second;
+                             return true;
+                         });
+    }
+    RemapStatus Remap(const RemapRequest& request, RemapOut& out) override
+    {
+        return Run<RemapStatus>("Remap", RemapStatus::Failed,
+                                [&]() -> RemapStatus
+                                {
+                                    remaps.push_back(request);
+                                    if (remapStatus != RemapStatus::Ok)
+                                        return remapStatus;
+                                    Held& h = held[request.buffer];
+                                    out.cached = h.valid && h.srv == request.srv && h.stamp == request.stamp;
+                                    if (!out.cached)
+                                    {
+                                        // a new copy; the engine drops its reference to the previous one (the core's own keep it alive)
+                                        const uint64_t a = NewView();
+                                        const uint64_t b = remapTwin ? NewView() : a;
+                                        if (h.valid)
+                                        {
+                                            OwnerRelease(h.a);
+                                            if (h.b != h.a)
+                                                OwnerRelease(h.b);
+                                        }
+                                        h = Held { true, request.srv, request.stamp, a, b };
+                                        ++remapMakes;
+                                    }
+                                    out.srv = h.a;
+                                    out.srvSrgb = h.b;
+                                    return RemapStatus::Ok;
+                                });
+    }
+    void ReleaseRemaps() override { ++releaseRemaps; }
+    void GBufferDecided(const GBufferNote& note) override { notes.push_back(note); }
+    void GBufferObserved(GBuffer buffer, GBufferEvent event) override { observed.emplace_back(buffer, event); }
     int64_t NowMs() override { return Run<int64_t>("NowMs", 0, [&]() -> int64_t { return now; }); }
     uint64_t Frame() override
     {
@@ -385,6 +450,12 @@ struct Fake final : IBackend
                                  {
                                      srv = v.semantic == "DEPTH" ? depthSrv : v.srv;
                                      srgb = v.semantic == "DEPTH" ? depthSrgb : v.srgb;
+                                     if (!v.semantic.empty() && v.semantic != "DEPTH")
+                                     {
+                                         const auto entry = sem.find(v.semantic);
+                                         srv = entry != sem.end() ? entry->second.first : 0;
+                                         srgb = entry != sem.end() ? entry->second.second : 0;
+                                     }
                                      for (uint64_t view : { srv, srgb })
                                          if (view != 0 && IsFreed(view))
                                              Violation(); // ReShade hands out a dangling pointer
@@ -406,6 +477,10 @@ struct Fake final : IBackend
                                      Violation(); // binding a dead view
                              if (std::string(semantic) == "DEPTH")
                                  SetDepth(srv, srgb);
+                             else if (srv == 0 && srgb == 0)
+                                 sem.erase(semantic);
+                             else
+                                 sem[semantic] = { srv, srgb };
                              return true;
                          });
     }
