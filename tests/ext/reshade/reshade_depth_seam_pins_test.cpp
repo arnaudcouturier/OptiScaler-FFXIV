@@ -151,7 +151,9 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "bool ShuttingDown() override { return State::Instance().isShuttingDown; }"));
         CHECK(Has(facade, "bool Registered() override { return ext::reshade::Registered(); }"));
         CHECK(Has(facade, "bool TryLateRegister(bool enabled, int64_t nowMs) override { return ext::reshade::depth::TryLateRegister(enabled, nowMs); }"));
-        CHECK(Has(facade, "if (SubscribedEvents() != kAllDepthEvents && FailedEvents() == 0) ext::reshade::depth::EnsureSubscribed();"));
+        // the evaluate thread subscribes only for a registration that neither path has seen: the load path leaves begin and finish to init_effect_runtime
+        CHECK(Has(facade, "if (SubscriptionPath() == SubscribedVia::None && FailedEvents() == 0) ext::reshade::depth::EnsureSubscribed();"));
+        CHECK(!Has(facade, "kAllDepthEvents"));
         CHECK(Has(facade, "ConsumerInfo GetConsumer(int64_t nowMs) override { return _binder.GetConsumer(nowMs); }"));
         CHECK(Has(facade, "return ext::ffxiv::lighting::FfxivLightingCapture::installed.load() ? ext::ffxiv::lighting::FfxivLightingCapture::context : nullptr;"));
         CHECK(Has(facade, "DrawTriangleFn RawDraw() override { return &ext::ffxiv::chara::DrawFullscreenTriangle; }"));
@@ -227,7 +229,7 @@ int main(int argc, char** argv)
     CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeDepth { false };"));
     CHECK(Has(cfgHeader, "automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());"));
 
-    // ---- the six depth events are subscribed AT LOAD, right after the registration and before the boundary tracking, whatever the option says
+    // ---- five depth events (init_effect_runtime among them) are subscribed AT LOAD, right after the registration and before the boundary tracking, whatever the option says; begin and finish come from the init callback
     {
         const auto addon = Normalize(Read(ext + "reshade/ReShadeAddon.cpp"));
         CHECK(Has(addon, "LOG_INFO(\"ReShade built-in add-on: registered (API {})\", kApiVersion); try { ext::reshade::depth::EnsureSubscribed(ext::reshade::depth::SubscribeWhen::Load); }"));
@@ -239,6 +241,16 @@ int main(int argc, char** argv)
         CHECK(Has(events, "EventDispatcher* Live() { if (State::Instance().isShuttingDown) return nullptr; return g_dispatcher.load(std::memory_order_acquire); }"));
         CHECK(Has(events, "if (EventDispatcher* d = Live())") && !Has(events, "automaticReShadeDepth") && !Has(events, "Enabled()"));
         CHECK(Has(events, "void SetDispatcher(EventDispatcher* dispatcher) noexcept { g_dispatcher.store(dispatcher, std::memory_order_release); }"));
+        // the init callback: shutdown is its only gate (no dispatcher, no option), it subscribes finish then begin, and begin/finish are registered nowhere else
+        {
+            const auto init = Between(events, "void DepthOnInit(effect_runtime* runtime) noexcept {", "void DepthOnBegin(");
+            CHECK(!init.empty());
+            CHECK(Has(init, "if (State::Instance().isShuttingDown) return;") && Has(init, "SubscribeRuntimeEvents(Id(runtime));"));
+            CHECK(!Has(init, "Live()") && !Has(init, "g_dispatcher") && !Has(init, "Enabled"));
+            CHECK(Has(events, "for (const DepthEvent event : LateRegistrationPlanner::kRuntimeEvents) SubscribeOne(event);"));
+            CHECK(Has(events, "for (const DepthEvent event : LateRegistrationPlanner::kLoadEvents) SubscribeOne(event);"));
+            CHECK(Count(events, "register_event<addon_event::reshade_begin_effects>") == 1);
+        }
     }
 
     // ---- one writer of the registration state: the load-time attempt notes it the way the late attempt does

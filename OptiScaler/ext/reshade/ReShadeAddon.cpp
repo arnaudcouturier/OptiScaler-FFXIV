@@ -106,10 +106,12 @@ void OnReshadeLoaded(HMODULE reshadeModule)
     {
         LOG_INFO("ReShade built-in add-on: registered (API {})", kApiVersion);
 
-        // The six events of the automatic scene depth, subscribed HERE, before anything can dispatch: a later register_event from the
+        // The events of the automatic scene depth, subscribed HERE, before anything can dispatch: a later register_event from the
         // evaluate thread can race ReShade's dispatch loop on another thread (seen in game 2026-10-25: events delivered on thread 21584,
         // subscribed from 34912). Unconditional, whatever the option says: the callbacks return at once while nothing was built (no
-        // dispatcher), so the menu switch needs no restart. Known ordering residual: they now run BEFORE Generic Depth's on each frame.
+        // dispatcher), so the menu switch needs no restart. Only FIVE events here (init_effect_runtime among them): begin_effects and
+        // finish_effects are subscribed by the init_effect_runtime callback, so that they run AFTER the begin_effects of REST and Generic
+        // Depth, which register theirs at device creation (ReShade calls the callbacks of an event in registration order).
         try
         {
             ext::reshade::depth::EnsureSubscribed(ext::reshade::depth::SubscribeWhen::Load);

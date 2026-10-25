@@ -125,6 +125,8 @@ const char* DepthEventName(DepthEvent event)
         return "reshade_set_technique_state";
     case DepthEvent::PresetPath:
         return "reshade_set_current_preset_path";
+    case DepthEvent::InitEffectRuntime:
+        return "init_effect_runtime";
     case DepthEvent::Count:
         break;
     }

@@ -65,6 +65,38 @@ __declspec(dllexport) void ReShadeRegisterEvent(int ev, void* callback)
 
 __declspec(dllexport) void ReShadeUnregisterEvent(int, void*) { g_events--; }
 
+// ---- the "other add-on" and the dispatch --------------------------------------------------------------------------------------
+// REST and ReShade's Generic Depth register their begin_effects at device creation, long before an effect runtime exists. The fake
+// models that with a begin_effects callback that lives in this DLL and reports to a test hook, and a dispatcher that calls every
+// callback registered for an event in REGISTRATION ORDER (like ReShade does), so a test sees which callback really runs first.
+static void (*g_hook)(const char*) = nullptr;
+static void OtherBegin(void*, void*, uint64_t, uint64_t)
+{
+    if (g_hook != nullptr)
+        g_hook("other begin");
+}
+
+// Test hook: called with a short text by the DLL's own callbacks.
+__declspec(dllexport) void Fake_SetHook(void (*hook)(const char*)) { g_hook = hook; }
+
+// Registers the DLL's own begin_effects callback for the event number `ev` (the other add-on).
+__declspec(dllexport) void Fake_RegisterOtherBegin(int ev) { ReShadeRegisterEvent(ev, reinterpret_cast<void*>(&OtherBegin)); }
+
+// Calls the callbacks registered for `ev` in registration order. The four arguments are what the begin/finish callbacks take
+// (runtime, command list, rtv, rtv_srgb); init_effect_runtime and the other runtime events read the first only. The list is
+// snapshotted: a callback may register more events while it runs. Returns the number of callbacks called.
+__declspec(dllexport) int Fake_Dispatch(int ev, void* a, void* b, uint64_t c, uint64_t d)
+{
+    void* callbacks[kMaxRecorded] = {};
+    int n = 0;
+    for (int i = 0; i < g_recorded; ++i)
+        if (g_recordedEvent[i] == ev)
+            callbacks[n++] = g_recordedCallback[i];
+    for (int i = 0; i < n; ++i)
+        reinterpret_cast<void (*)(void*, void*, uint64_t, uint64_t)>(callbacks[i])(a, b, c, d);
+    return n;
+}
+
 // Test hook: how many times ReShadeRegisterEvent was called, the faulting calls included.
 __declspec(dllexport) int Fake_EventCalls() { return g_eventCalls; }
 

@@ -149,16 +149,18 @@ void Names()
     CHECK(std::string(DepthEventName(DepthEvent::ReloadedEffects)) == "reshade_reloaded_effects");
     CHECK(std::string(DepthEventName(DepthEvent::TechniqueState)) == "reshade_set_technique_state");
     CHECK(std::string(DepthEventName(DepthEvent::PresetPath)) == "reshade_set_current_preset_path");
+    CHECK(std::string(DepthEventName(DepthEvent::InitEffectRuntime)) == "init_effect_runtime");
 }
 
 void LateEvents()
 {
-    // Exactly the six depth callbacks. The last two only clear the manual transform cache; the boundary tracking subscribes the
-    // same two ReShade events for its own callbacks, so the event kinds overlap but the callbacks do not. Not in the list: the
-    // probe (present, reshade_present, init_effect_runtime) and the window mode (set_fullscreen_state).
+    // The late path: exactly the six depth callbacks (no init_effect_runtime: its runtime exists or is about to). TechniqueState and
+    // PresetPath only clear the manual transform cache; the boundary tracking subscribes the same two ReShade events for its own
+    // callbacks, so the event kinds overlap but the callbacks do not. Not in the list: the probe (present, reshade_present,
+    // init_effect_runtime) and the window mode (set_fullscreen_state).
     const auto& events = LateRegistrationPlanner::kEvents;
     static_assert(LateRegistrationPlanner::kEvents.size() == 6);
-    static_assert(static_cast<size_t>(DepthEvent::Count) == LateRegistrationPlanner::kEvents.size()); // the list is every event
+    static_assert(static_cast<size_t>(DepthEvent::Count) == 7); // six, and the init event of the load path
     bool seen[6] = {};
     for (DepthEvent e : events)
     {
@@ -170,6 +172,35 @@ void LateEvents()
               name == "reshade_set_current_preset_path");
     }
     CHECK(seen[0] && seen[1] && seen[2] && seen[3] && seen[4] && seen[5]);
+}
+
+void LoadEvents()
+{
+    // The load path subscribes five events at once (destroy, reloaded, technique state, preset path and init_effect_runtime) and
+    // the init callback the other two, finish FIRST and begin last: together they name every DepthEvent exactly once. This is what
+    // puts our begin_effects after the ones the other add-ons registered at device creation.
+    using P = LateRegistrationPlanner;
+    static_assert(P::kLoadEvents.size() == 5 && P::kRuntimeEvents.size() == 2);
+    static_assert(P::kLoadEvents.size() + P::kRuntimeEvents.size() == static_cast<size_t>(DepthEvent::Count));
+    static_assert(P::kRuntimeEvents[0] == DepthEvent::FinishEffects && P::kRuntimeEvents[1] == DepthEvent::BeginEffects);
+    static_assert(P::kLoadEvents.back() == DepthEvent::InitEffectRuntime);
+    bool seen[static_cast<size_t>(DepthEvent::Count)] = {};
+    for (DepthEvent e : P::kLoadEvents)
+    {
+        CHECK(!seen[static_cast<size_t>(e)]);
+        seen[static_cast<size_t>(e)] = true;
+        CHECK(e != DepthEvent::BeginEffects && e != DepthEvent::FinishEffects); // never at load
+    }
+    for (DepthEvent e : P::kRuntimeEvents)
+    {
+        CHECK(!seen[static_cast<size_t>(e)]);
+        seen[static_cast<size_t>(e)] = true;
+    }
+    for (bool s : seen)
+        CHECK(s);
+    // the late list is the same minus init_effect_runtime
+    for (DepthEvent e : P::kEvents)
+        CHECK(e != DepthEvent::InitEffectRuntime);
 }
 
 void LatePlanner()
@@ -213,6 +244,7 @@ int main()
     LogRule();
     Names();
     LateEvents();
+    LoadEvents();
     LatePlanner();
     if (g_fail)
     {

@@ -89,9 +89,11 @@ bool ShouldLog(uint64_t count, int64_t nowMs, int64_t lastLoggedMs);
 // allowed) is a number exactly equal to `neutral`. Empty, unparsable, inf/nan, trailing junk and a leading '+' are not neutral.
 bool IsNeutralDefinition(std::string_view value, double neutral);
 
-// ---- late registration --------------------------------------------------------------------------------------------------
-// The ReShade events the depth binder subscribes, by the ReShade addon_event they map to. The last two only clear the manual
-// transform cache (OnTechniquesChanged).
+// ---- event subscription, late registration -------------------------------------------------------------------------------------
+// The ReShade events the depth binder subscribes, by the ReShade addon_event they map to. TechniqueState and PresetPath only clear
+// the manual transform cache (OnTechniquesChanged). InitEffectRuntime is the ordering trick of the load path (see
+// LateRegistrationPlanner): its callback subscribes begin and finish, so that they land AFTER the begin_effects of the add-ons that
+// register theirs at device creation (REST and ReShade's Generic Depth), which therefore run first and have bound what we read.
 enum class DepthEvent : uint8_t
 {
     BeginEffects,         // reshade_begin_effects
@@ -100,6 +102,7 @@ enum class DepthEvent : uint8_t
     ReloadedEffects,      // reshade_reloaded_effects
     TechniqueState,       // reshade_set_technique_state
     PresetPath,           // reshade_set_current_preset_path
+    InitEffectRuntime,    // init_effect_runtime
     Count,
 };
 const char* DepthEventName(DepthEvent event);
@@ -111,13 +114,22 @@ struct LateRegistrationPlanner
 {
     static constexpr int64_t kRetryIntervalMs = 1000;
     static constexpr uint32_t kMaxAttempts = 60; // late attempts in all: about a minute, then ReShade is considered absent
-    // The late path subscribes exactly these callbacks (the depth ones, never the HudLess probe, present or window events). Other
+    // The late path (a ReShade that loaded after OptiScaler: its runtime exists or is about to, and the add-ons registered long ago)
+    // subscribes exactly these callbacks at once (the depth ones, never the HudLess probe, present or window events). Other
     // callbacks of this add-on may sit on the same ReShade events: the HudLess boundary tracking subscribes destroy_effect_runtime,
     // reshade_reloaded_effects, reshade_set_current_preset_path and reshade_set_technique_state with callbacks of its own, and the
     // diagnostics probe begin, finish, destroy, reloaded and preset path with theirs.
     static constexpr std::array<DepthEvent, 6> kEvents { DepthEvent::BeginEffects,         DepthEvent::FinishEffects,
                                                          DepthEvent::DestroyEffectRuntime, DepthEvent::ReloadedEffects,
                                                          DepthEvent::TechniqueState,       DepthEvent::PresetPath };
+    // The load path (ReShade was there when OptiScaler loaded) subscribes these at once ...
+    static constexpr std::array<DepthEvent, 5> kLoadEvents { DepthEvent::DestroyEffectRuntime, DepthEvent::ReloadedEffects,
+                                                             DepthEvent::TechniqueState, DepthEvent::PresetPath,
+                                                             DepthEvent::InitEffectRuntime };
+    // ... and the init_effect_runtime callback these two, in this order (finish first; begin only if finish and everything else
+    // succeeded: a begin without its finish would leave our copy bound). The add-ons that matter registered their begin_effects at
+    // device creation, before any effect runtime is initialized, so ours comes after theirs.
+    static constexpr std::array<DepthEvent, 2> kRuntimeEvents { DepthEvent::FinishEffects, DepthEvent::BeginEffects };
 
     // `attempted`/`status`: result of the last registration attempt (load time or late); `attempts`: late attempts so far.
     // Retry only when the option is on, an attempt found no ReShade module, fewer than kMaxAttempts late attempts were made
@@ -126,6 +138,90 @@ struct LateRegistrationPlanner
     static bool ShouldRetry(bool enabled, bool attempted, RegisterStatus status, uint32_t attempts, int64_t nowMs,
                             int64_t lastAttemptMs);
 };
+
+// ---- G-buffers realigned like the depth ---------------------------------------------------------------------------------------
+// An add-on such as REST (ReshadeEffectShaderToggler) hands the game's G-buffers to ReShade's semantics NORMALS, DECALS, DECALS_WATER,
+// MOTIONVECTORS and MATERIAL (update_texture_bindings), and effects read them with plain UV 0..1. When the game renders below the output
+// size those textures are output-sized with the picture only in their top-left render window, exactly like the depth. After the add-on's
+// own begin_effects the binder reads its binding, remaps the render window to the whole output (the same exact-integer nearest mapping
+// as the depth pass, origin 0,0) and binds the copy to the same semantic until finish_effects. Kept apart from the depth: the sources
+// are the add-on's views, not a capture, and the copy is made at begin_effects on the present thread (IRemapEngine).
+enum class GBuffer : uint8_t
+{
+    Normals,
+    Decals,
+    DecalsWater,
+    MotionVectors,
+    Material,
+    Count,
+};
+inline constexpr size_t kGBuffers = static_cast<size_t>(GBuffer::Count);
+const char* GBufferSemantic(GBuffer buffer); // the ReShade semantic: "NORMALS", "DECALS", "DECALS_WATER", "MOTIONVECTORS", "MATERIAL"
+const char* GBufferVariable(GBuffer buffer); // the SHORT name effects declare it under: "texNormals", "texDecalNormals", ...
+const char* GBufferLabel(GBuffer buffer);    // for the status line: "normals", "decals", "water decals", "motion", "material"
+
+// What a view is, as far as the remap needs it. The handle is untrusted (read from ReShade's binding map): the engine reads it under a
+// fault guard and answers ok = false when that fails.
+struct ViewDesc
+{
+    bool ok = false;      // the handle could be read; the rest is meaningful only then
+    bool plain2D = false; // a TEXTURE2D view of mip 0 of a one-slice, single-sample 2D texture (anything else is not remapped)
+    uint32_t width = 0, height = 0; // of that mip
+    uint32_t format = 0;  // DXGI_FORMAT of the VIEW (not of the resource, which may be typeless)
+    uint64_t device = 0;  // the D3D11 device of the resource (pointer value): INFORMATION for the log only. Under ReShade's proxy one device shows as two
+                          // pointers, so it is never compared: the target is made on the context's device, and the add-on's views come from that runtime
+};
+
+// One remap: copy the render window (origin 0,0, renderW x renderH) of the source view, stretched by exact-integer nearest sampling
+// (src = min((i*2+1)*render/(output*2), render-1)) to a new texture of outputW x outputH in the same format as the SOURCE VIEW.
+struct RemapRequest
+{
+    uint64_t context = 0;            // the immediate context begin_effects gave (ID3D11DeviceContext*); a non-immediate one is refused
+    GBuffer buffer = GBuffer::Normals;
+    uint64_t srv = 0, srvSrgb = 0;   // the add-on's bindings (ID3D11ShaderResourceView*, untrusted); srvSrgb may be 0 or equal to srv
+    uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
+    uint64_t stamp = 0;              // the depth capture counter: with `srv` it keys the cache (same key = same copy, no draw)
+    bool scaleMotion = true;         // MotionVectors only: multiply the vector values by output/render per axis (DERIVED, see the docs)
+};
+enum class RemapStatus : uint8_t
+{
+    Ok,                // out holds the copy
+    NoContext,         // no (or a deferred) context: keep the add-on's binding
+    NotPlain2D,        // the source view is not a plain 2D view
+    UnsupportedFormat, // a format the pass does not remap (typeless, integer, sRGB, depth, ...)
+    Refused,           // sizes the pass cannot do (zero, beyond the texture limit, render outside the source)
+    Failed,            // a resource could not be created or the draw failed; the game's state was put back
+};
+struct RemapOut
+{
+    uint64_t srv = 0, srvSrgb = 0; // views of the copy; srvSrgb equals srv unless the format has an sRGB twin. NOT AddRef'd: the owner keeps them
+                                   // until its next Remap or Release; whoever binds them takes its own reference first (same thread, no gap)
+    uint32_t format = 0;           // DXGI format of the copy's srv
+    bool cached = false;           // the key matched: nothing was drawn
+};
+// The D3D11 side of the realignment (ReShadeGBufferCopy.h). Runs on the thread of begin_effects (the present thread) and nowhere else.
+class IRemapEngine
+{
+  public:
+    virtual ~IRemapEngine() = default;
+    virtual bool DescribeView(uint64_t view, ViewDesc& out) noexcept = 0;
+    virtual RemapStatus Remap(const RemapRequest& request, RemapOut& out) noexcept = 0;
+    // Drops every target and resource (the option went off). References the binder took on a copy keep that copy alive.
+    virtual void Release() noexcept = 0;
+};
+
+// The size rule, per buffer, after the add-on has bound its source. `bbW x bbH` is the effect runtime's back buffer (the output size).
+enum class RemapDecision : uint8_t
+{
+    Remap,             // output-sized source, render window smaller than the output: copy it
+    KeepSameSize,      // render == output: nothing to realign
+    KeepRenderSized,   // the source is already render-sized: ReShade's UV 0..1 already covers it
+    KeepSizeMismatch,  // any other size (or a render window larger than the output)
+    KeepUnreadable,    // the source view could not be described or is not a plain 2D view
+};
+RemapDecision DecideRemap(const ViewDesc& source, uint32_t bbW, uint32_t bbH, uint32_t renderW, uint32_t renderH, uint32_t outputW,
+                          uint32_t outputH);
+const char* RemapDecisionName(RemapDecision decision);
 
 // ---- the backend --------------------------------------------------------------------------------------------------------
 // Everything ReShade- or D3D-specific. Ids and handles are opaque 64-bit values: a runtime id is the effect_runtime pointer, a

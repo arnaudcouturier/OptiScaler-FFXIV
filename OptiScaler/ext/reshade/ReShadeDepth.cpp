@@ -52,7 +52,10 @@ class ProcessHost final : public IEvalHost
     bool TryLateRegister(bool enabled, int64_t nowMs) override { return ext::reshade::depth::TryLateRegister(enabled, nowMs); }
     void EnsureSubscribed() override
     {
-        if (SubscribedEvents() != kAllDepthEvents && FailedEvents() == 0)
+        // A safety net for a registration that neither path has subscribed for. The load path (OnReshadeLoaded) leaves begin and finish to
+        // the init_effect_runtime callback, so that they come after the begin_effects of REST and Generic Depth: the evaluate thread must not
+        // subscribe them (before theirs, and from the wrong thread). The late path subscribes all six right after its registration.
+        if (SubscriptionPath() == SubscribedVia::None && FailedEvents() == 0)
             ext::reshade::depth::EnsureSubscribed();
     }
     ConsumerInfo GetConsumer(int64_t nowMs) override { return _binder.GetConsumer(nowMs); }

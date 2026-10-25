@@ -28,6 +28,7 @@ using ::reshade::api::resource_view;
 std::atomic<EventDispatcher*> g_dispatcher { nullptr };
 std::atomic<uint32_t> g_subscribed { 0 };
 std::atomic<uint32_t> g_failed { 0 };
+std::atomic<uint8_t> g_path { static_cast<uint8_t>(SubscribedVia::None) };
 std::mutex g_subscribeMutex;
 
 uint64_t Id(effect_runtime* runtime) { return reinterpret_cast<uint64_t>(runtime); }
@@ -41,9 +42,10 @@ EventDispatcher* Live()
     return g_dispatcher.load(std::memory_order_acquire);
 }
 
-// ---- the six callbacks (noexcept: nothing may escape into ReShade or the game) -----------------------------------------------------
-// The thread a callback runs on, once for begin and once for finish: the subscription is made from the evaluate thread, and if ReShade
-// delivers its events on another one, register_event could race the iteration of its event lists (see the runbook).
+// ---- the callbacks (noexcept: nothing may escape into ReShade or the game) ---------------------------------------------------------
+// The thread a callback runs on, once for init, begin and finish: the load path subscribes from the init callback, i.e. on the thread
+// that creates the effect runtime, and if ReShade delivers begin and finish on another one the log shows it (see the runbook).
+std::atomic<bool> g_initThreadLogged { false };
 std::atomic<bool> g_beginThreadLogged { false };
 std::atomic<bool> g_finishThreadLogged { false };
 
@@ -51,6 +53,18 @@ void LogThreadOnce(std::atomic<bool>& flag, [[maybe_unused]] const char* what)
 {
     if (!flag.load(std::memory_order_relaxed) && !flag.exchange(true, std::memory_order_relaxed))
         LOG_INFO("Automatic ReShade depth: first {} callback on thread {}", what, GetCurrentThreadId());
+}
+
+void SubscribeRuntimeEvents(uint64_t runtime) noexcept;
+
+// The init callback subscribes finish and begin (load path). It looks at neither the dispatcher nor the option: the facade does not exist
+// until the first evaluate with the option on, and the runtime is created long before that.
+void DepthOnInit(effect_runtime* runtime) noexcept
+{
+    if (State::Instance().isShuttingDown)
+        return;
+    LogThreadOnce(g_initThreadLogged, "init_effect_runtime");
+    SubscribeRuntimeEvents(Id(runtime));
 }
 
 void DepthOnBegin(effect_runtime* runtime, command_list*, resource_view, resource_view) noexcept
@@ -104,19 +118,6 @@ struct SubscribeJob
     DepthEvent event;
 };
 
-// The events of LateRegistrationPlanner::kEvents in the order they are subscribed: begin last.
-constexpr std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> SubscribeOrder()
-{
-    std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> order {};
-    size_t n = 0;
-    for (const DepthEvent event : LateRegistrationPlanner::kEvents)
-        if (event != DepthEvent::BeginEffects)
-            order[n++] = event;
-    order[n] = DepthEvent::BeginEffects;
-    return order;
-}
-static_assert(SubscribeOrder().back() == DepthEvent::BeginEffects);
-
 // A POD thunk, so that SEH can guard the call into ReShade (register_event resolves ReShade's entry point on its first use per event
 // and calls it): a fault inside it is a failed subscription, not a crash.
 void SubscribeThunk(void* p)
@@ -141,6 +142,11 @@ void SubscribeThunk(void* p)
     case DepthEvent::PresetPath:
         ::reshade::register_event<addon_event::reshade_set_current_preset_path>(&DepthOnPresetPath);
         break;
+    case DepthEvent::InitEffectRuntime:
+        ::reshade::register_event<addon_event::init_effect_runtime>(&DepthOnInit);
+        break;
+    case DepthEvent::Count:
+        break;
     }
 }
 
@@ -157,52 +163,100 @@ bool Subscribe(DepthEvent event)
     }
 }
 
-constexpr uint32_t Bit(DepthEvent event) { return 1u << static_cast<uint32_t>(event); }
+// Subscribes one event unless it is done or failed once (a failure is remembered and not tried again). Begin is held back, and marked
+// failed with the others, when any other event could not be subscribed: a begin without its finish and its destroy would leave our
+// copy in ReShade's map. The caller holds g_subscribeMutex.
+void SubscribeOne(DepthEvent event)
+{
+    const uint32_t bit = EventBit(event);
+    if (((g_subscribed.load() | g_failed.load()) & bit) != 0)
+        return; // done, or failed once and not tried again
+    if (event == DepthEvent::BeginEffects && (g_failed.load() & ~bit) != 0)
+    {
+        g_failed.fetch_or(bit);
+        LOG_WARN("Automatic ReShade depth: not subscribing {} because another event could not be subscribed", DepthEventName(event));
+        return;
+    }
+    if (Subscribe(event))
+        g_subscribed.fetch_or(bit);
+    else
+    {
+        g_failed.fetch_or(bit);
+        LOG_WARN("Automatic ReShade depth: could not subscribe to {}", DepthEventName(event));
+    }
+}
+
+// finish, then begin: from the init_effect_runtime callback (load path). Idempotent across runtimes (ResizeBuffers makes a new one).
+void SubscribeRuntimeEvents([[maybe_unused]] uint64_t runtime) noexcept
+{
+    // nothing to do once both are subscribed or failed: the common case after the first runtime, without the mutex
+    if (((g_subscribed.load(std::memory_order_acquire) | g_failed.load(std::memory_order_acquire)) & kRuntimeDepthEvents) == kRuntimeDepthEvents)
+        return;
+    try
+    {
+        std::lock_guard lock(g_subscribeMutex);
+        const uint32_t before = g_subscribed.load();
+        for (const DepthEvent event : LateRegistrationPlanner::kRuntimeEvents)
+            SubscribeOne(event);
+        if ((g_subscribed.load() & kRuntimeDepthEvents) == kRuntimeDepthEvents && (before & kRuntimeDepthEvents) != kRuntimeDepthEvents)
+            LOG_INFO("Automatic ReShade depth: subscribed to finish_effects and begin_effects from init_effect_runtime (effect runtime {:#x}), "
+                     "after the begin_effects of the add-ons that registered theirs at device creation, on thread {}",
+                     runtime, GetCurrentThreadId());
+    }
+    catch (...)
+    {
+    }
+}
 } // namespace
 
 void SetDispatcher(EventDispatcher* dispatcher) noexcept { g_dispatcher.store(dispatcher, std::memory_order_release); }
 
 uint32_t SubscribedEvents() noexcept { return g_subscribed.load(std::memory_order_acquire); }
 uint32_t FailedEvents() noexcept { return g_failed.load(std::memory_order_acquire); }
+SubscribedVia SubscriptionPath() noexcept { return static_cast<SubscribedVia>(g_path.load(std::memory_order_acquire)); }
 
 bool EnsureSubscribed(SubscribeWhen when)
 {
-    if (g_subscribed.load(std::memory_order_acquire) == kAllDepthEvents)
-        return true;
     try
     {
         std::lock_guard lock(g_subscribeMutex);
-        // begin last: a begin without its finish would leave our copy bound until the next begin
-        static constexpr std::array<DepthEvent, LateRegistrationPlanner::kEvents.size()> kOrder = SubscribeOrder();
+        // The first call decides the path; the other kind of call is then a no-op (it only reports).
+        uint8_t none = static_cast<uint8_t>(SubscribedVia::None);
+        g_path.compare_exchange_strong(none, static_cast<uint8_t>(when == SubscribeWhen::Load ? SubscribedVia::Load : SubscribedVia::Late));
+        const bool load = SubscriptionPath() == SubscribedVia::Load;
+        const uint32_t needed = load ? kLoadDepthEvents : kLateDepthEvents;
         const uint32_t before = g_subscribed.load();
-        for (const DepthEvent event : kOrder)
+        if ((before & needed) == needed)
+            return true;
+        if (load)
         {
-            const uint32_t bit = Bit(event);
-            if (((g_subscribed.load() | g_failed.load()) & bit) != 0)
-                continue; // done, or failed once and not tried again
-            if (event == DepthEvent::BeginEffects && (g_failed.load() & ~bit) != 0)
-            {
-                g_failed.fetch_or(bit);
-                LOG_WARN("Automatic ReShade depth: not subscribing {} because another event could not be subscribed", DepthEventName(event));
-                continue;
-            }
-            if (Subscribe(event))
-                g_subscribed.fetch_or(bit);
-            else
-            {
-                g_failed.fetch_or(bit);
-                LOG_WARN("Automatic ReShade depth: could not subscribe to {}", DepthEventName(event));
-            }
+            // init_effect_runtime is last (kLoadEvents): the other four exist when the first runtime appears. Begin and finish wait for it.
+            for (const DepthEvent event : LateRegistrationPlanner::kLoadEvents)
+                SubscribeOne(event);
+            if ((g_subscribed.load() & needed) == needed)
+                LOG_INFO("Automatic ReShade depth: subscribed to destroy_effect_runtime, reshade_reloaded_effects, reshade_set_technique_state, "
+                         "reshade_set_current_preset_path and init_effect_runtime at load (begin_effects and finish_effects follow from the first "
+                         "init_effect_runtime, after the add-ons that registered theirs at device creation), on thread {}",
+                         GetCurrentThreadId());
         }
-        if (g_subscribed.load() == kAllDepthEvents && before != kAllDepthEvents)
-            LOG_INFO("Automatic ReShade depth: subscribed to begin_effects, finish_effects, destroy_effect_runtime, reshade_reloaded_effects, "
-                     "reshade_set_technique_state and reshade_set_current_preset_path, {}, on thread {}",
-                     when == SubscribeWhen::Load ? "at load" : "late (ReShade loaded after OptiScaler; its dispatch may be running on another thread)",
-                     GetCurrentThreadId());
+        else
+        {
+            // begin last: a begin without its finish would leave our copy bound until the next begin
+            for (const DepthEvent event : LateRegistrationPlanner::kEvents)
+                if (event != DepthEvent::BeginEffects)
+                    SubscribeOne(event);
+            SubscribeOne(DepthEvent::BeginEffects);
+            if ((g_subscribed.load() & needed) == needed)
+                LOG_INFO("Automatic ReShade depth: subscribed to begin_effects, finish_effects, destroy_effect_runtime, reshade_reloaded_effects, "
+                         "reshade_set_technique_state and reshade_set_current_preset_path, late (ReShade loaded after OptiScaler; its dispatch "
+                         "may be running on another thread), on thread {}",
+                         GetCurrentThreadId());
+        }
+        return (g_subscribed.load() & needed) == needed;
     }
     catch (...)
     {
     }
-    return g_subscribed.load(std::memory_order_acquire) == kAllDepthEvents;
+    return false;
 }
 } // namespace ext::reshade::depth
