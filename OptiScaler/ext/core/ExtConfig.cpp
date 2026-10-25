@@ -160,6 +160,7 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "JitterScaleOverride", jitterScaleOverride);
     b.Add("FFXIV", "JitterSource", jitterSource);
     b.Add("FFXIV", "AutomaticReShadeDepth", automaticReShadeDepth);
+    b.Add("FFXIV", "AutomaticReShadeMotionScale", automaticReShadeMotionScale);
     chara.Bind(b);
 }
 

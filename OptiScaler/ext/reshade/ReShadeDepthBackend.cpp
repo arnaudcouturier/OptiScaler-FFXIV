@@ -361,6 +361,67 @@ bool LiveDepthBackend::Techniques(uint64_t runtime, std::vector<EffectTechnique>
     return true;
 }
 
+// ---- the G-buffers ---------------------------------------------------------------------------------------------------------------
+bool LiveDepthBackend::DescribeView(uint64_t view, ViewDesc& out) { return _env.remap != nullptr && _env.remap->DescribeView(view, out); }
+
+RemapStatus LiveDepthBackend::Remap(const RemapRequest& request, RemapOut& out)
+{
+    if (_env.remap == nullptr)
+        return RemapStatus::NoContext;
+    RemapRequest r = request;
+    r.scaleMotion = request.scaleMotion && (_env.scaleMotion == nullptr || _env.scaleMotion());
+    return _env.remap->Remap(r, out);
+}
+
+void LiveDepthBackend::ReleaseRemaps()
+{
+    if (_env.remap != nullptr)
+        _env.remap->Release();
+}
+
+namespace
+{
+[[maybe_unused]] const char* StatusName(RemapStatus status)
+{
+    switch (status)
+    {
+    case RemapStatus::Ok:
+        return "copy made";
+    case RemapStatus::NoContext:
+        return "no immediate context";
+    case RemapStatus::NotPlain2D:
+        return "not a plain 2D view";
+    case RemapStatus::UnsupportedFormat:
+        return "format not supported, the add-on's binding is kept";
+    case RemapStatus::Refused:
+        return "sizes refused, the add-on's binding is kept";
+    case RemapStatus::Failed:
+        return "failed, the add-on's binding is kept";
+    }
+    return "?";
+}
+} // namespace
+
+// Once per change of the decision (sizes, format, outcome) of a buffer and runtime: what the add-on bound, the sizes and what was done.
+void LiveDepthBackend::GBufferDecided([[maybe_unused]] const GBufferNote& note)
+{
+    LOG_INFO("Automatic ReShade depth: {} ({}): the add-on's binding is {}x{} DXGI format {}{}, render {}x{} in an output of {}x{}: {}{}{}",
+             GBufferSemantic(note.buffer), GBufferVariable(note.buffer), note.source.width, note.source.height, note.source.format,
+             note.source.ok ? "" : " (unreadable)", note.renderW, note.renderH, note.outputW, note.outputH, RemapDecisionName(note.decision),
+             note.decision == RemapDecision::Remap ? ": " : "", note.decision == RemapDecision::Remap ? StatusName(note.status) : "");
+}
+
+void LiveDepthBackend::GBufferObserved([[maybe_unused]] GBuffer buffer, [[maybe_unused]] GBufferEvent event)
+{
+    if (event == GBufferEvent::ViewChanged)
+        LOG_INFO("Automatic ReShade depth: {}: the add-on bound a different view than the one we put back at the last finish (it rebinds between frames)",
+                 GBufferSemantic(buffer));
+    else
+        LOG_INFO("Automatic ReShade depth: {}: the add-on's view was the one we put back for {} begins in a row (it rebinds the same view, or only "
+                 "when it changes)",
+                 GBufferSemantic(buffer), kStableLogAfter);
+}
+
 DefinitionState LiveDepthBackend::Definition(uint64_t runtime, const char* effect, const char* name, std::string& value)
 {
     std::string text;

@@ -53,6 +53,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
     "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias
     "[DlssNr] PauseOnFocusLoss", // another name for DisableOnFocusLoss, moved into it when the ini is read
+    "[FFXIV] AutomaticReShadeMotionScale", // developer switch of the derived motion vector value scaling; goes once it is confirmed in game
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member

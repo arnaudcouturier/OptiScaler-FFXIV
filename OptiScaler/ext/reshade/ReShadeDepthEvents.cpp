@@ -67,12 +67,37 @@ void DepthOnInit(effect_runtime* runtime) noexcept
     SubscribeRuntimeEvents(Id(runtime));
 }
 
-void DepthOnBegin(effect_runtime* runtime, command_list*, resource_view, resource_view) noexcept
+// The native immediate context of this begin_effects (for D3D11 command_list::get_native() is the ID3D11DeviceContext*). The binder only
+// uses it after it found the runtime to be a D3D11 one, and the remap refuses a deferred context. A fault is "no context".
+struct NativeJob
+{
+    command_list* list;
+    uint64_t native;
+};
+void NativeThunk(void* p)
+{
+    auto& j = *static_cast<NativeJob*>(p);
+    j.native = j.list != nullptr ? j.list->get_native() : 0;
+}
+uint64_t NativeContext(command_list* list) noexcept
+{
+    NativeJob job { list, 0 };
+    try
+    {
+        return d3d11::GuardedCall(&NativeThunk, &job) == 0 ? job.native : 0;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+void DepthOnBegin(effect_runtime* runtime, command_list* list, resource_view, resource_view) noexcept
 {
     if (EventDispatcher* d = Live())
     {
         LogThreadOnce(g_beginThreadLogged, "begin_effects");
-        d->Begin(Id(runtime));
+        d->Begin(Id(runtime), NativeContext(list));
     }
 }
 

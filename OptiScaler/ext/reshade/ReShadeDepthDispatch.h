@@ -28,10 +28,11 @@ class EventDispatcher
   public:
     EventDispatcher(DepthBinder& binder, IEventHost& host) : _binder(binder), _host(host) {}
 
-    void Begin(uint64_t runtime) noexcept
+    // `context` = the native immediate context of this begin_effects (the G-buffer remap draws on it), 0 when unknown.
+    void Begin(uint64_t runtime, uint64_t context = 0) noexcept
     {
         Note(runtime);
-        _binder.OnBeginEffects(runtime);
+        _binder.OnBeginEffects(runtime, context);
     }
 
     void Finish(uint64_t runtime) noexcept

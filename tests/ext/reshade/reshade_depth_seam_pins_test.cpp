@@ -160,12 +160,16 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "EventDispatcher dispatcher { binder, backend };"));
         // the binder reads the counter the engine ticks: one atomic, nothing else moves it
         CHECK(Has(facade, "uint64_t FrameImpl() { return g_frame.load(std::memory_order_relaxed); }"));
-        CHECK(Has(facade, "BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl }"));
+        CHECK(Has(facade, "BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl, &remapEngine, &ScaleMotionImpl }"));
         CHECK(Count(facade, "g_frame") == 4); // the definition, FrameImpl, the engine and GetCaptureStats
         CHECK(Has(facade, "DepthBinder binder { backend, &LogCounter };"));
-        CHECK(Has(facade, "LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl } };"));
+        CHECK(Has(facade, "LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl, &remapEngine, &ScaleMotionImpl } };"));
+        // the G-buffer engine: one instance, on the raw draw of the lighting hooks only for the context they hooked; the motion scaling reads the ini key where it is used
+        CHECK(Has(facade, "LiveRemapEngine remapEngine { &ext::ffxiv::chara::DrawFullscreenTriangle, &HookedContextImpl };"));
+        CHECK(Has(facade, "bool ScaleMotionImpl() { return ext::Cfg().ffxiv.automaticReShadeMotionScale.value_or_default(); }"));
+        CHECK(Has(facade, "binder.SetSlotLog(&LogSlotCounter);"));
         CHECK(Has(facade, "CaptureEngine engine { g_gate, g_frame, *this, host };"));
-        CHECK(Has(facade, "Facade() { binder.SetEnabled(g_gate.Enabled()); SetDispatcher(&dispatcher); }"));
+        CHECK(Has(facade, "Facade() { binder.SetSlotLog(&LogSlotCounter); binder.SetEnabled(g_gate.Enabled()); SetDispatcher(&dispatcher); }"));
         CHECK(Has(facade, "void Publish(const DepthCapture& capture) noexcept override { binder.PublishCapture(capture); }"));
         // the counter is ticked by the capture side only (the engine), never by an event
         const auto dispatch = Normalize(Read(ext + "reshade/ReShadeDepthDispatch.h"));
@@ -221,12 +225,18 @@ int main(int argc, char** argv)
         CHECK(Has(ini, "\nAutomaticReShadeDepth=auto"));
         CHECK(!Has(ini, "\nAutomaticReShadeDepth=true") && !Has(ini, "\nAutomaticReShadeDepth=false"));
         CHECK(Count(ini, "AutomaticReShadeDepth=") == 1);
+        // the developer switch of the derived motion vector scaling: ini only, shipped as auto, says so
+        CHECK(Has(ini, "\nAutomaticReShadeMotionScale=auto") && Count(ini, "AutomaticReShadeMotionScale=") == 1);
+        CHECK(Has(ini, "will be removed once confirmed in game. No menu control."));
+        CHECK(!Has(ini, "AutomaticReShadeGBuffers"));
     }
     const auto cfg = Normalize(Read(ext + "core/ExtConfig.cpp"));
     CHECK(Has(cfg, "b.Add(\"FFXIV\", \"AutomaticReShadeDepth\", automaticReShadeDepth);"));
+    CHECK(Has(cfg, "b.Add(\"FFXIV\", \"AutomaticReShadeMotionScale\", automaticReShadeMotionScale);") && !Has(cfg, "AutomaticReShadeGBuffers"));
     CHECK(Has(cfg, "window.PostLoad(); ffxiv.PostLoad(); }"));
     const auto cfgHeader = Normalize(Read(ext + "ffxiv/FfxivConfig.h"));
     CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeDepth { false };"));
+    CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeMotionScale { true };") && !Has(cfgHeader, "automaticReShadeGBuffers"));
     CHECK(Has(cfgHeader, "automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());"));
 
     // ---- five depth events (init_effect_runtime among them) are subscribed AT LOAD, right after the registration and before the boundary tracking, whatever the option says; begin and finish come from the init callback

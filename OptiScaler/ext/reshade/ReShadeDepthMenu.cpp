@@ -36,17 +36,8 @@ void Draw(ext::menu::Ctx&)
     }
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
-    ext::menu::Tooltip("Needs ReShade 6.8 or newer (add-on API 20) loaded in the game.\n\n"
-                       "FFXIV keeps its scene buffers at the output size and draws into a window of them when it renders below that size (DLSS\n"
-                       "Quality and lower), so the depth ReShade finds does not line up with the picture and effects that read it (MXAO and the\n"
-                       "like) misfit. With this on, the depth the upscaler is given is copied to the size of ReShade's back buffer and handed to\n"
-                       "ReShade's depth input while it renders its effects; the original depth input is put back afterwards.\n\n"
-                       "It stands down only for NON-NEUTRAL values of RESHADE_DEPTH_INPUT_X_SCALE, _Y_SCALE, _X_OFFSET, _Y_OFFSET,\n"
-                       "_X_PIXEL_OFFSET and _Y_PIXEL_OFFSET (neutral is 1 for the scales and 0 for the offsets): defined with the neutral value it\n"
-                       "does not stand down.\n\n"
-                       "The game's depth is reverse-Z: if ambient occlusion looks inverted with this on, set RESHADE_DEPTH_INPUT_IS_REVERSED=1\n"
-                       "in your ReShade preprocessor definitions.\n\n"
-                       "It applies while the game runs; switching it on takes effect within a few frames.");
+    ext::menu::Tooltip("Keeps ReShade effects (ambient occlusion etc.) lined up with the picture when the game renders below the output size: "
+                       "realigns the depth and the game's normals/motion/material automatically; needs ReShade 6.8+; no presets or shaders need editing");
 
     const std::string status = ext::reshade::depth::Status();
     ImGui::TextWrapped("%s", status.c_str());

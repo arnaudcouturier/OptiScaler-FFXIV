@@ -87,14 +87,13 @@ constexpr const char* kAmpereAdvanced = "ImGui::TreeNode(\"Advanced (RTX 20/30 r
 
 const Row kRows[] = {
     // Automatic ReShade scene depth: [FFXIV] AutomaticReShadeDepth, the switch of the "ReShade depth compatibility" card. Read at every
-    // evaluate (the facade keeps it in one atomic word), so a change applies without a restart: switching it on takes effect within a few
-    // frames (the first evaluate builds it, a begin records the consumer, the next evaluate captures); the tooltip says what it needs
-    // (ReShade 6.8 or newer), that it stands down only for NON-NEUTRAL values of the six macros, what to do about the reverse-Z depth,
-    // and the toggle goes through SetEnabled so the binder follows it.
+    // evaluate (the facade keeps it in one atomic word), so a change applies without a restart (the first evaluate builds it, a begin records
+    // the consumer, the next evaluate captures). ONE checkbox governs the depth and the G-buffer realignment together; the tooltip is a single
+    // sentence (what it does, ReShade 6.8+, nothing to edit), and the toggle goes through SetEnabled so the binder follows it.
     { .home = kDepth, .file = "reshade/ReShadeDepthMenu.cpp", .widget = "ImGui::Checkbox(\"Automatic scene depth\"",
       .write = "cfg.automaticReShadeDepth=on", .keyPrefix = "cfg.automaticReShadeDepth=",
-      .block = { "Needs ReShade 6.8 or newer (add-on API 20)", "stands down only for NON-NEUTRAL values", "defined with the neutral value",
-                 "looks inverted with this on, set RESHADE_DEPTH_INPUT_IS_REVERSED=1", "takes effect within a few frames" },
+      .block = { "Keeps ReShade effects (ambient occlusion etc.) lined up with the picture when the game renders below the output size",
+                 "realigns the depth and the game's normals/motion/material automatically", "needs ReShade 6.8+", "no presets or shaders need editing" },
       .fileHas = { "ext::reshade::depth::SetEnabled(on);", "ext::reshade::depth::Status()", "ext::menu::SectionTitle(\"ReShade depth compatibility\");" },
       .blockNot = { "restart", "next frame" } },
 

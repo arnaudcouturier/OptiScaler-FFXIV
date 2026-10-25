@@ -34,6 +34,8 @@ void SetEnabled(bool on) noexcept;
 std::string Status();
 
 Counters GetCounters();
+// The counters of one G-buffer slot (NORMALS, ...): passesBound, kept, failed, overwrittenByOther, erasedUnverified, noDepthInput.
+Counters GetGBufferCounters(GBuffer buffer);
 
 // What the capture side did (the evaluate thread writes, any thread reads).
 struct CaptureStats

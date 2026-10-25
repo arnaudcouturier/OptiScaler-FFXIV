@@ -214,6 +214,7 @@ struct StatusInputs
     bool nativeContextMissing = false; // the last evaluate had no native immediate context
     const char* captureRefusal = nullptr; // why the last capture was refused, null when it was not
     std::string binderStatus;       // DepthBinder::Status()
+    std::string gbuffers;           // "normals, motion": the G-buffers realigned by the last begin, empty when none
 };
 
 inline std::string ComposeStatus(const StatusInputs& in)
@@ -246,7 +247,7 @@ inline std::string ComposeStatus(const StatusInputs& in)
     if (in.nativeContextMissing)
         return "Automatic scene depth: native context not available";
     if (in.binderStatus.rfind(kBoundPrefix, 0) == 0)
-        return in.binderStatus;
+        return in.gbuffers.empty() ? in.binderStatus : in.binderStatus + "; G-buffers realigned: " + in.gbuffers;
     if (in.captureRefusal != nullptr)
         return std::string("Scene depth capture refused (") + in.captureRefusal + "); generic depth retained";
     // no binder yet (it is built at the first evaluate; the ini can say true on the title screen): waiting, not off and not empty

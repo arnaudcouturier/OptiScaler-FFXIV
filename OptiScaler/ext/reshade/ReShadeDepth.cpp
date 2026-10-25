@@ -14,6 +14,7 @@
 #include "ext/reshade/ReShadeDepthEvents.h"
 #include "ext/reshade/ReShadeDepthGlue.h"
 #include "ext/reshade/ReShadeDepthLate.h"
+#include "ext/reshade/ReShadeGBufferCopy.h"
 
 #include <State.h>
 #include <upscalers/IFeature_Dx11.h>
@@ -39,6 +40,20 @@ void LogCounter(Counter counter, uint64_t count)
     LOG_INFO("Automatic ReShade depth: {} = {}", CounterName(counter), count);
 }
 
+void LogSlotCounter(GBuffer buffer, Counter counter, uint64_t count)
+{
+    LOG_INFO("Automatic ReShade depth: {} ({}): {} = {}", GBufferSemantic(buffer), GBufferVariable(buffer), CounterName(counter), count);
+}
+
+// [FFXIV] AutomaticReShadeMotionScale, read where it is used (ini only; a plain read of the config)
+bool ScaleMotionImpl() { return ext::Cfg().ffxiv.automaticReShadeMotionScale.value_or_default(); }
+
+// The immediate context the lighting hooks sit on, null when they are not installed.
+ID3D11DeviceContext* HookedContextImpl()
+{
+    return ext::ffxiv::lighting::FfxivLightingCapture::installed.load() ? ext::ffxiv::lighting::FfxivLightingCapture::context : nullptr;
+}
+
 // ---- the process, as the capture engine sees it -----------------------------------------------------------------------------------
 class ProcessHost final : public IEvalHost
 {
@@ -59,10 +74,7 @@ class ProcessHost final : public IEvalHost
             ext::reshade::depth::EnsureSubscribed();
     }
     ConsumerInfo GetConsumer(int64_t nowMs) override { return _binder.GetConsumer(nowMs); }
-    ID3D11DeviceContext* HookedContext() override
-    {
-        return ext::ffxiv::lighting::FfxivLightingCapture::installed.load() ? ext::ffxiv::lighting::FfxivLightingCapture::context : nullptr;
-    }
+    ID3D11DeviceContext* HookedContext() override { return HookedContextImpl(); }
     DrawTriangleFn RawDraw() override { return &ext::ffxiv::chara::DrawFullscreenTriangle; }
 
   private:
@@ -72,7 +84,10 @@ class ProcessHost final : public IEvalHost
 // ---- the singletons (heap, never destroyed) ----------------------------------------------------------------------------------------
 struct Facade final : ICaptureSink
 {
-    LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl } };
+    // the D3D11 side of the G-buffer realignment: it runs on the thread of begin_effects and draws with the raw draw of the lighting hooks
+    // only on the context they hooked
+    LiveRemapEngine remapEngine { &ext::ffxiv::chara::DrawFullscreenTriangle, &HookedContextImpl };
+    LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl, &remapEngine, &ScaleMotionImpl } };
     DepthBinder binder { backend, &LogCounter };
     EventDispatcher dispatcher { binder, backend };
     ProcessHost host { binder };
@@ -80,6 +95,7 @@ struct Facade final : ICaptureSink
 
     Facade()
     {
+        binder.SetSlotLog(&LogSlotCounter);
         binder.SetEnabled(g_gate.Enabled());
         SetDispatcher(&dispatcher);
     }
@@ -170,6 +186,10 @@ std::string Status()
             const uint32_t last = f->engine.Stats().lastResult;
             in.captureRefusal = last != 0 ? ResultName(static_cast<Result>(last)) : nullptr;
             in.binderStatus = f->binder.Status();
+            const uint32_t realigned = f->binder.RealignedMask();
+            for (size_t i = 0; i < kGBuffers; ++i)
+                if ((realigned & (1u << i)) != 0)
+                    in.gbuffers += (in.gbuffers.empty() ? "" : ", ") + std::string(GBufferLabel(static_cast<GBuffer>(i)));
         }
         return glue::ComposeStatus(in);
     }
@@ -183,6 +203,12 @@ Counters GetCounters()
 {
     Facade* f = g_facade.load(std::memory_order_acquire);
     return f != nullptr ? f->binder.GetCounters() : Counters {};
+}
+
+Counters GetGBufferCounters(GBuffer buffer)
+{
+    Facade* f = g_facade.load(std::memory_order_acquire);
+    return f != nullptr ? f->binder.GetCounters(buffer) : Counters {};
 }
 
 CaptureStats GetCaptureStats()
