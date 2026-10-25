@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Automatic ReShade scene depth (ext\reshade\ReShadeDepthCopy.cpp). One source, two entry points compiled by fxc -O3 into
+  headers in $(IntDir)ext_gen\ (never committed). The constant-buffer layout and the register slots in the .hlsl are
+  mirrored by ReShadeDepthCopy.h; change them together. The test prepare step (tests\ext\reshade\prepare_depth_copy.ps1)
+  reads this file, so a test builds the very bytecode the product build generates.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\depth_crop.hlsl">
+      <Variable>DepthCrop_Vs_cso</Variable>
+      <Header>DepthCrop_Vs_Shader.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\depth_crop.hlsl">
+      <Variable>DepthCrop_Ps_cso</Variable>
+      <Header>DepthCrop_Ps_Shader.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>
