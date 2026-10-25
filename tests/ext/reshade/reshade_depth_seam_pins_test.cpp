@@ -156,6 +156,10 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "return ext::ffxiv::lighting::FfxivLightingCapture::installed.load() ? ext::ffxiv::lighting::FfxivLightingCapture::context : nullptr;"));
         CHECK(Has(facade, "DrawTriangleFn RawDraw() override { return &ext::ffxiv::chara::DrawFullscreenTriangle; }"));
         CHECK(Has(facade, "EventDispatcher dispatcher { binder, backend };"));
+        // the binder reads the counter the engine ticks: one atomic, nothing else moves it
+        CHECK(Has(facade, "uint64_t FrameImpl() { return g_frame.load(std::memory_order_relaxed); }"));
+        CHECK(Has(facade, "BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl }"));
+        CHECK(Count(facade, "g_frame") == 4); // the definition, FrameImpl, the engine and GetCaptureStats
         CHECK(Has(facade, "DepthBinder binder { backend, &LogCounter };"));
         CHECK(Has(facade, "LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl } };"));
         CHECK(Has(facade, "CaptureEngine engine { g_gate, g_frame, *this, host };"));
