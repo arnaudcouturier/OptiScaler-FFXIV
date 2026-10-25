@@ -277,6 +277,19 @@ void Status()
     in.captureRefusal = nullptr;
     CHECK(ComposeStatus(in) == "Automatic scene depth: 1920x1080 -> 3840x2160");
 
+    // the G-buffers realigned by the last begin are a suffix of the bound line, and only of it
+    in.gbuffers = "normals, motion";
+    CHECK(ComposeStatus(in) == "Automatic scene depth: 1920x1080 -> 3840x2160; G-buffers realigned: normals, motion");
+    in.gbuffers = "material";
+    CHECK(ComposeStatus(in) == "Automatic scene depth: 1920x1080 -> 3840x2160; G-buffers realigned: material");
+    in.binderStatus = "Scene depth unavailable; generic depth retained";
+    CHECK(ComposeStatus(in).find("G-buffers") == std::string::npos); // not bound: no suffix
+    in.binderStatus = "Waiting for ReShade depth effects";
+    CHECK(ComposeStatus(in) == "Waiting for ReShade depth effects");
+    in.binderStatus = "Automatic scene depth: 1920x1080 -> 3840x2160";
+    in.gbuffers.clear();
+    CHECK(ComposeStatus(in) == "Automatic scene depth: 1920x1080 -> 3840x2160"); // none realigned: no suffix
+
     // the prefix is the one the binder writes for a bound pass
     CHECK(std::string("Automatic scene depth: 1920x1080 -> 3840x2160").rfind(kBoundPrefix, 0) == 0);
 }
