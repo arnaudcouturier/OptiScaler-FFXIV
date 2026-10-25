@@ -8,8 +8,10 @@
 #include "ext/upscaler/RenderGeometry.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace ext::reshade::depth::glue
 {
@@ -183,6 +185,20 @@ class ResultLog
     int64_t _lastMs = 0;
 };
 
+// ---- the game gate -----------------------------------------------------------------------------------------------------------------
+// The automatic depth is for FFXIV only (plan 4.1): the executable name, whole and case-insensitive. The facade reads State::gameExe once
+// (after the one-load gate), so another game with the ini key on builds nothing and does nothing.
+inline bool IsFfxivExe(std::string_view exe)
+{
+    constexpr std::string_view kName = "ffxiv_dx11.exe";
+    if (exe.size() != kName.size())
+        return false;
+    for (size_t i = 0; i < kName.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(exe[i])) != kName[i])
+            return false;
+    return true;
+}
+
 // ---- the status line of the menu -------------------------------------------------------------------------------------------------
 // The text DepthBinder::Status() writes for a pass that is bound starts with this.
 inline constexpr char kBoundPrefix[] = "Automatic scene depth:";
@@ -190,6 +206,7 @@ inline constexpr char kBoundPrefix[] = "Automatic scene depth:";
 struct StatusInputs
 {
     bool enabled = false;
+    bool gameSupported = true;      // false: not the FFXIV executable
     bool registered = false;
     ext::reshade::RegisterStatus reason = ext::reshade::RegisterStatus::NoModule; // why not, when !registered
     bool lateGaveUp = false;        // the late registration used up its attempts
@@ -203,6 +220,8 @@ inline std::string ComposeStatus(const StatusInputs& in)
 {
     if (!in.enabled)
         return "Automatic scene depth: off";
+    if (!in.gameSupported)
+        return "Automatic scene depth: not available for this game";
     if (!in.registered)
     {
         // "not detected" is for a ReShade that is not there; one that is there and cannot be used says why

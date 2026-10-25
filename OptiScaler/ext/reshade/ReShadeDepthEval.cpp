@@ -2,6 +2,8 @@
 
 #include "ext/reshade/ReShadeDepthEval.h"
 
+#include "ext/reshade/ReShadeD3D11.h"
+
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <nvsdk_ngx_defs.h>
@@ -40,6 +42,54 @@ unsigned GetUInt(NVSDK_NGX_Parameter* parameters, const char* name)
     parameters->Get(name, &value);
     return value;
 }
+
+// ---- the reads on the upscaler's pointers ----------------------------------------------------------------------------------------
+// The parameter block, the Output and Depth resources, the depth's device and the feature are objects the upscaler has just used, so a
+// fault in them is not expected; but a C++ catch does not see a hardware access violation (/EHsc), so the reads run as POD thunks under
+// d3d11::GuardedCall (SEH), and a fault ends that evaluate and nothing else. The copy pass guards its own D3D calls.
+struct SizeReads
+{
+    NVSDK_NGX_Parameter* parameters = nullptr;
+    DisplaySource display;
+    glue::Extent render, output;
+    uint32_t baseX = 0, baseY = 0;
+};
+
+void ReadSizes(void* arg)
+{
+    auto& in = *static_cast<SizeReads*>(arg);
+    NVSDK_NGX_Parameter* const p = in.parameters;
+    in.render = glue::RenderExtent(GetUInt(p, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width),
+                                   GetUInt(p, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height), GetUInt(p, NVSDK_NGX_Parameter_Width),
+                                   GetUInt(p, NVSDK_NGX_Parameter_Height));
+    in.output = glue::OutputExtent(GetUInt(p, NVSDK_NGX_Parameter_OutWidth), GetUInt(p, NVSDK_NGX_Parameter_OutHeight), {}, {});
+    if (!in.output.Valid())
+        in.output = glue::OutputExtent(0, 0, ReadExtent(GetResource(p, NVSDK_NGX_Parameter_Output)), {});
+    if (!in.output.Valid() && in.display.get != nullptr)
+        in.output = glue::OutputExtent(0, 0, {}, in.display.get(in.display.feature)); // the display size the feature was created with
+    // the base of the depth subrect is never clamped: a negative value becomes a huge one, which the pass refuses
+    in.baseX = glue::BaseFromInt(static_cast<int>(GetUInt(p, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X)));
+    in.baseY = glue::BaseFromInt(static_cast<int>(GetUInt(p, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y)));
+}
+
+struct DepthReads
+{
+    NVSDK_NGX_Parameter* parameters = nullptr;
+    ID3D11Resource* depth = nullptr;
+    ID3D11DeviceContext* native = nullptr; // holds a reference when set: the caller attaches it
+};
+
+void ReadDepth(void* arg)
+{
+    auto& in = *static_cast<DepthReads*>(arg);
+    in.depth = GetResource(in.parameters, NVSDK_NGX_Parameter_Depth);
+    if (in.depth == nullptr)
+        return;
+    ComPtr<ID3D11Device> device;
+    in.depth->GetDevice(&device);
+    if (device != nullptr)
+        device->GetImmediateContext(&in.native);
+}
 } // namespace
 
 CaptureEngine::CaptureEngine(glue::EvalGate& gate, std::atomic<uint64_t>& frame, ICaptureSink& downstream, IEvalHost& host)
@@ -64,6 +114,20 @@ CaptureStats CaptureEngine::Stats() const
 
 // The pass takes its draw at construction. The raw trampoline goes with the native hooked context only; otherwise the context's own
 // Draw inside the bypass scope (the other draw hooks ignore it).
+// One thunk under SEH. False = it faulted (or an exception crossed it): said once with the code, and this evaluate is skipped.
+bool CaptureEngine::Guarded(void (*thunk)(void*), void* arg, [[maybe_unused]] const char* what)
+{
+    const uint32_t code = d3d11::GuardedCall(thunk, arg);
+    if (code == 0)
+        return true;
+    if (!_faultLogged)
+    {
+        _faultLogged = true;
+        LOG_WARN("Automatic ReShade depth: reading {} failed with {:#x}; this evaluate is skipped", what, code);
+    }
+    return false;
+}
+
 DepthCopy& CaptureEngine::PassFor(bool rawDraw)
 {
     if (_copy != nullptr && _copyUsesRawDraw != rawDraw)
@@ -96,6 +160,8 @@ void CaptureEngine::OnNgxShutdown() noexcept
 {
     try
     {
+        if (_host.ShuttingDown()) // the process is going down: nothing is touched
+            return;
         if (_evalThread.load(std::memory_order_relaxed) == _host.ThreadId())
         {
             if (_copy != nullptr)
@@ -148,27 +214,28 @@ void CaptureEngine::Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* param
     }
 
     // ---- the sizes of this evaluate
-    const glue::Extent render = glue::RenderExtent(GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width),
-                                                   GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height),
-                                                   GetUInt(parameters, NVSDK_NGX_Parameter_Width), GetUInt(parameters, NVSDK_NGX_Parameter_Height));
-    glue::Extent output = glue::OutputExtent(GetUInt(parameters, NVSDK_NGX_Parameter_OutWidth), GetUInt(parameters, NVSDK_NGX_Parameter_OutHeight), {}, {});
-    if (!output.Valid())
-        output = glue::OutputExtent(0, 0, ReadExtent(GetResource(parameters, NVSDK_NGX_Parameter_Output)), {});
-    if (!output.Valid() && display.get != nullptr)
-        output = glue::OutputExtent(0, 0, {}, display.get(display.feature)); // the display size the feature was created with
+    if (parameters == nullptr) // (the upscaler always passes one; a null has nothing to read)
+        return;
+    SizeReads sizes;
+    sizes.parameters = parameters;
+    sizes.display = display;
+    if (!Guarded(&ReadSizes, &sizes, "the sizes of the evaluate"))
+        return;
+    const glue::Extent render = sizes.render;
+    const glue::Extent output = sizes.output;
     if (glue::SizeGate(render, output, consumer) != glue::Gate::Go)
         return; // unknown sizes, or not the consumer's size (the character preview): nothing is published
 
-    ID3D11Resource* depth = GetResource(parameters, NVSDK_NGX_Parameter_Depth);
-    if (depth == nullptr)
+    DepthReads reads;
+    reads.parameters = parameters;
+    const bool readDepth = Guarded(&ReadDepth, &reads, "the depth resource");
+    ComPtr<ID3D11DeviceContext> native;
+    native.Attach(reads.native);
+    ID3D11Resource* const depth = reads.depth;
+    if (!readDepth || depth == nullptr)
         return;
 
     // ---- the native immediate context
-    ComPtr<ID3D11Device> device;
-    depth->GetDevice(&device);
-    ComPtr<ID3D11DeviceContext> native;
-    if (device != nullptr)
-        device->GetImmediateContext(&native);
     ID3D11DeviceContext* const hooked = _host.HookedContext();
     if (!_identityLogged)
     {
@@ -190,8 +257,8 @@ void CaptureEngine::Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* param
     CaptureArgs args;
     args.outputW = output.w;
     args.outputH = output.h;
-    args.baseX = glue::BaseFromInt(static_cast<int>(GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X)));
-    args.baseY = glue::BaseFromInt(static_cast<int>(GetUInt(parameters, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y)));
+    args.baseX = sizes.baseX;
+    args.baseY = sizes.baseY;
     args.renderW = render.w;
     args.renderH = render.h;
     args.frame = _frame.load(std::memory_order_relaxed);

@@ -21,11 +21,14 @@ void OnReshadeLoaded(HMODULE reshadeModule);
 
 namespace ext::reshade::depth
 {
-// Automatic ReShade scene depth (docs/FEATURES.md "Automatic scene depth"): inputs/NVNGX_DLSS_Dx11.cpp, right after the successful
+// Automatic ReShade scene depth (docs/FEATURES.md "Automatic ReShade scene depth"): inputs/NVNGX_DLSS_Dx11.cpp, right after the successful
 // deviceContext->Evaluate(...). `context` is the context NGX was given (possibly ReShade's proxy: it is only logged), `feature` the
-// evaluating feature (its display size is the Output size of last resort). Per frame: with [FFXIV] AutomaticReShadeDepth off the cost
-// is ONE relaxed atomic load. Never throws, never lets an access violation out. Runs on the NGX evaluate thread. Free to call when the
-// option is off; nothing is read from `parameters` or `feature` before the gates have passed.
+// evaluating feature (its display size is the Output size of last resort; may be null), `parameters` the NGX parameter block (a null one
+// ends the evaluate). Per frame: with [FFXIV] AutomaticReShadeDepth off the cost is ONE relaxed atomic load; with it on in another game it is a few
+// relaxed loads and a cached flag. Runs on the NGX evaluate thread. C++ exceptions never leave it. The reads on the pointers the
+// upscaler has just used (the parameter block, the Output and Depth resources, the depth's device, the feature) run under SEH, so a
+// hardware fault in one of them ends that evaluate; the copy pass guards its own D3D calls. Nothing is read from `parameters` or
+// `feature` before the gates have passed.
 void OnEvaluated(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters, IFeature_Dx11* feature) noexcept;
 
 // NGX is going away (ext::dx11bridge::OnNgxShutdownBegin and BeforeReleaseFeature): the copy pass gives its resources (and its reference

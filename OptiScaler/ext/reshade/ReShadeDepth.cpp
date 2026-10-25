@@ -91,6 +91,23 @@ struct Facade final : ICaptureSink
 
 std::atomic<Facade*> g_facade { nullptr };
 
+// The game gate: 0 = not known yet (State::gameExe is set early in startup), 1 = ffxiv_dx11.exe, 2 = anything else. Decided once, the
+// first time it is asked after the one-load gate, and never on the path of an option that is off.
+std::atomic<int> g_game { 0 };
+
+int GameState()
+{
+    int state = g_game.load(std::memory_order_relaxed);
+    if (state != 0)
+        return state;
+    const std::string& exe = State::Instance().gameExe;
+    if (exe.empty())
+        return 0;
+    state = glue::IsFfxivExe(exe) ? 1 : 2;
+    g_game.store(state, std::memory_order_relaxed);
+    return state;
+}
+
 Facade& Build()
 {
     static Facade* facade = new Facade; // never destroyed
@@ -142,6 +159,7 @@ std::string Status()
     {
         glue::StatusInputs in;
         in.enabled = g_gate.Enabled();
+        in.gameSupported = GameState() != 2; // (not known yet is not "another game")
         const AddonStatus addon = ext::reshade::Status();
         in.registered = addon.registered;
         in.reason = addon.reason;
@@ -197,6 +215,8 @@ void OnEvaluated(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters, 
                 g_gate.TakeRequests();
                 return;
             }
+            if (GameState() != 1) // another game with the ini key on: nothing is built, nothing is done
+                return;
             f = &Build(); // first evaluate with the option on, on the evaluate thread and outside DllMain
         }
         f->engine.OnEvaluated(context, parameters, DisplaySource { feature != nullptr ? &DisplayOf : nullptr, feature });

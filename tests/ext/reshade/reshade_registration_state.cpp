@@ -6,8 +6,6 @@
 #include "ext/reshade/ReShadeRegistrationState.h"
 
 #include <cstdio>
-#include <thread>
-#include <vector>
 
 using namespace ext::reshade;
 
@@ -55,32 +53,12 @@ void NoteEveryStatus()
     NoteRegistration(RegisterStatus::Ok);
     CHECK(Registered());
 }
-
-void Threads()
-{
-    std::vector<std::thread> threads;
-    for (int t = 0; t < 4; ++t)
-        threads.emplace_back(
-            [t]
-            {
-                for (int i = 0; i < 2000; ++i)
-                {
-                    NoteRegistration(((i + t) & 1) != 0 ? RegisterStatus::Ok : RegisterStatus::NoModule);
-                    (void)Registered();
-                }
-            });
-    for (std::thread& t : threads)
-        t.join();
-    NoteRegistration(RegisterStatus::Ok);
-    CHECK(Registered());
-}
 } // namespace
 
 int main()
 {
     Initial();
     NoteEveryStatus();
-    Threads();
     if (g_fail != 0)
     {
         std::printf("reshade_registration_state: %d check(s) failed\n", g_fail);

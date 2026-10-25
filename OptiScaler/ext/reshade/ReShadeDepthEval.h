@@ -74,6 +74,7 @@ class CaptureEngine
   private:
     void Run(ID3D11DeviceContext* context, NVSDK_NGX_Parameter* parameters, const DisplaySource& display);
     DepthCopy& PassFor(bool rawDraw);
+    bool Guarded(void (*thunk)(void*), void* arg, const char* what);
 
     glue::EvalGate& _gate;
     std::atomic<uint64_t>& _frame;
@@ -91,5 +92,6 @@ class CaptureEngine
     glue::ChangeTracker _captureLine;
     glue::ResultLog _resultLog;
     bool _identityLogged = false;
+    bool _faultLogged = false;
 };
 } // namespace ext::reshade::depth

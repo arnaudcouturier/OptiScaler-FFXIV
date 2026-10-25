@@ -13,6 +13,8 @@
 
 #include "ext/reshade/ReShadeDepthEval.h"
 
+#include "reshade_depth_eval_rig.h"
+
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <nvsdk_ngx_defs.h>
@@ -29,6 +31,7 @@
 
 using Microsoft::WRL::ComPtr;
 using namespace ext::reshade::depth;
+using namespace evaltest;
 
 namespace
 {
@@ -42,230 +45,6 @@ int g_fail = 0;
             ++g_fail;                                                                                                  \
         }                                                                                                              \
     } while (0)
-
-size_t LogLines(const char* needle)
-{
-    size_t n = 0;
-    for (const std::string& line : depthtest_log::Lines())
-        n += line.find(needle) != std::string::npos ? 1 : 0;
-    return n;
-}
-std::string LastLine(const char* needle)
-{
-    std::string found;
-    for (const std::string& line : depthtest_log::Lines())
-        if (line.find(needle) != std::string::npos)
-            found = line;
-    return found;
-}
-
-// ---- fakes -----------------------------------------------------------------------------------------------------------------------
-struct FakeParams final : NVSDK_NGX_Parameter
-{
-    std::map<std::string, unsigned> uints;
-    std::map<std::string, ID3D11Resource*> resources;
-    mutable int gets = 0;
-    mutable std::vector<std::string> asked;
-    bool throwOnGet = false; // a parameter block that throws
-
-    void Set(const char*, unsigned long long) override {}
-    void Set(const char*, float) override {}
-    void Set(const char*, double) override {}
-    void Set(const char*, unsigned int) override {}
-    void Set(const char*, int) override {}
-    void Set(const char*, ID3D11Resource*) override {}
-    void Set(const char*, ID3D12Resource*) override {}
-    void Set(const char*, void*) override {}
-
-    NVSDK_NGX_Result Get(const char* name, unsigned long long*) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, float*) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, double*) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, unsigned int* out) const override
-    {
-        Note(name);
-        const auto it = uints.find(name);
-        if (it == uints.end())
-            return NVSDK_NGX_Result_Fail;
-        *out = it->second;
-        return NVSDK_NGX_Result_Success;
-    }
-    NVSDK_NGX_Result Get(const char* name, int*) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, ID3D11Resource** out) const override
-    {
-        Note(name);
-        const auto it = resources.find(name);
-        if (it == resources.end())
-            return NVSDK_NGX_Result_Fail;
-        *out = it->second;
-        return NVSDK_NGX_Result_Success;
-    }
-    NVSDK_NGX_Result Get(const char* name, ID3D12Resource**) const override { return Miss(name); }
-    NVSDK_NGX_Result Get(const char* name, void** out) const override
-    {
-        Note(name);
-        const auto it = resources.find(name);
-        if (it == resources.end())
-            return NVSDK_NGX_Result_Fail;
-        *out = it->second;
-        return NVSDK_NGX_Result_Success;
-    }
-    void Reset() override {}
-
-    void Note(const char* name) const
-    {
-        ++gets;
-        asked.push_back(name);
-        if (throwOnGet)
-            throw std::runtime_error("parameter block failure");
-    }
-    NVSDK_NGX_Result Miss(const char* name) const
-    {
-        Note(name);
-        return NVSDK_NGX_Result_Fail;
-    }
-    bool Asked(const char* name) const
-    {
-        for (const std::string& a : asked)
-            if (a == name)
-                return true;
-        return false;
-    }
-};
-
-int g_rawDraws = 0;
-void CountingDraw(ID3D11DeviceContext* c)
-{
-    ++g_rawDraws;
-    c->Draw(3, 0);
-}
-
-struct FakeHost final : IEvalHost
-{
-    bool shutting = false;
-    int64_t now = 100'000;
-    uint32_t thread = GetCurrentThreadId();
-    bool registered = true;
-    bool lateResult = false;
-    int lateCalls = 0, subscribes = 0, calls = 0;
-    bool lateEnabledArg = false;
-    int64_t lateNow = 0;
-    ConsumerInfo consumer;
-    ID3D11DeviceContext* hooked = nullptr;
-    DrawTriangleFn raw = &CountingDraw;
-
-    bool ShuttingDown() override { return ++calls, shutting; }
-    int64_t NowMs() override { return ++calls, now; }
-    uint32_t ThreadId() override { return ++calls, thread; }
-    bool Registered() override { return ++calls, registered; }
-    bool TryLateRegister(bool enabled, int64_t nowMs) override
-    {
-        ++calls;
-        ++lateCalls;
-        lateEnabledArg = enabled;
-        lateNow = nowMs;
-        if (lateResult)
-            registered = true;
-        return lateResult;
-    }
-    void EnsureSubscribed() override { ++calls, ++subscribes; }
-    ConsumerInfo GetConsumer(int64_t) override { return ++calls, consumer; }
-    ID3D11DeviceContext* HookedContext() override { return ++calls, hooked; }
-    DrawTriangleFn RawDraw() override { return ++calls, raw; }
-};
-
-// the binder's side of the sink, as far as it matters here (the same as the copy pass test's)
-ULONG RefCount(IUnknown* p)
-{
-    p->AddRef();
-    return p->Release();
-}
-struct Recorder final : ICaptureSink
-{
-    struct Event
-    {
-        DepthCapture capture;
-        ULONG heldRefs = 0;
-    };
-    std::vector<Event> events;
-    ComPtr<ID3D11ShaderResourceView> held;
-    void Publish(const DepthCapture& c) noexcept override
-    {
-        Event e;
-        e.capture = c;
-        e.heldRefs = held ? RefCount(held.Get()) : 0;
-        events.push_back(e);
-        ComPtr<ID3D11ShaderResourceView> next;
-        if (c.valid && c.copyView != 0)
-            next = reinterpret_cast<ID3D11ShaderResourceView*>(static_cast<uintptr_t>(c.copyView));
-        held = next;
-    }
-    size_t Valid() const
-    {
-        size_t n = 0;
-        for (const Event& e : events)
-            n += e.capture.valid ? 1 : 0;
-        return n;
-    }
-};
-
-constexpr UINT kW = 128, kH = 72;
-constexpr uintptr_t kBogusContext = 0x1234;
-
-struct Rig
-{
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Texture2D> depth, output;
-    FakeParams params;
-    FakeHost host;
-    Recorder sink;
-    glue::EvalGate gate;
-    std::atomic<uint64_t> frame { 5 };
-    std::unique_ptr<CaptureEngine> engine;
-
-    bool Create(UINT depthBind = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE)
-    {
-        D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0, got {};
-        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device, &got, &context)))
-            return false;
-        D3D11_TEXTURE2D_DESC td {};
-        td.Width = kW;
-        td.Height = kH;
-        td.MipLevels = td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R32_TYPELESS;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = depthBind;
-        if (FAILED(device->CreateTexture2D(&td, nullptr, &depth)))
-            return false;
-        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(device->CreateTexture2D(&td, nullptr, &output)))
-            return false;
-        params.resources["Depth"] = depth.Get();
-        params.resources["Output"] = output.Get();
-        params.uints["DLSS.Render.Subrect.Dimensions.Width"] = kW;
-        params.uints["DLSS.Render.Subrect.Dimensions.Height"] = kH;
-        params.uints["Width"] = kW;
-        params.uints["Height"] = kH;
-        params.uints["OutWidth"] = kW;
-        params.uints["OutHeight"] = kH;
-        host.consumer.seen = true;
-        host.consumer.seenMs = host.now;
-        host.consumer.width = kW;
-        host.consumer.height = kH;
-        engine = std::make_unique<CaptureEngine>(gate, frame, sink, host);
-        gate.SetEnabled(true);
-        return true;
-    }
-    void Eval(const DisplaySource& display = {}) { engine->OnEvaluated(reinterpret_cast<ID3D11DeviceContext*>(kBogusContext), &params, display); }
-    bool Capture() // one evaluate; true if it published a capture
-    {
-        const size_t before = sink.Valid();
-        Eval();
-        return sink.Valid() > before;
-    }
-};
 
 // ---- the tests -------------------------------------------------------------------------------------------------------------------
 void OptionOffIsOneLoad()
@@ -391,6 +170,21 @@ void OutputFallbacks()
     display = glue::Extent { 576, 960 }; // ... and a display that is not the consumer's size is the preview filter, too
     r.Eval(source);
     CHECK(r.sink.Valid() == before + 1);
+}
+
+void HalfAnOutputSizeIsNoSize()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    r.params.uints["OutWidth"] = 64; // OutHeight is missing: the pair is not used, the Output texture (128x72) says the size
+    r.params.uints.erase("OutHeight");
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.outputW == kW && r.sink.events.back().capture.outputH == kH);
+    r.params.uints.erase("OutWidth"); // and the other way round
+    r.params.uints["OutHeight"] = 36;
+    CHECK(r.Capture());
+    CHECK(r.sink.events.back().capture.outputW == kW && r.sink.events.back().capture.outputH == kH);
 }
 
 void NativeDeviceNotNgxContext()
@@ -551,6 +345,21 @@ void NgxShutdown()
     Rig q;
     if (q.Create())
         q.engine->OnNgxShutdown();
+
+    // the process is going down: nothing is touched (no release, no request)
+    Rig s;
+    if (s.Create())
+    {
+        CHECK(s.Capture());
+        const size_t published = s.sink.events.size();
+        s.host.shutting = true;
+        s.engine->OnNgxShutdown();
+        s.host.thread = GetCurrentThreadId() + 1;
+        s.engine->OnNgxShutdown();
+        s.host.thread = GetCurrentThreadId();
+        CHECK(s.engine->PassReady() && s.sink.events.size() == published);
+        CHECK((s.gate.Bits() & glue::EvalGate::kRequests) == 0);
+    }
 }
 
 // A depth resource whose device is gone (GetDevice answers nothing): the immediate context cannot be found.
@@ -606,6 +415,115 @@ void ExceptionsDoNotEscape()
     r.Eval(); // the seam is noexcept: whatever the parameter block does, nothing comes out
     r.params.throwOnGet = false;
     CHECK(r.Capture()); // and the next evaluate works
+}
+
+// A resource whose calls fault (a hardware access violation, which a C++ catch does not see).
+struct FaultyResource final : ID3D11Resource
+{
+    enum class Where
+    {
+        QueryInterface,
+        GetDevice,
+    };
+    explicit FaultyResource(Where w) : where(w) {}
+    Where where;
+    static void Fault() { *static_cast<volatile int*>(nullptr) = 1; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override
+    {
+        if (where == Where::QueryInterface)
+            Fault();
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device** device) override
+    {
+        if (where == Where::GetDevice)
+            Fault();
+        *device = nullptr;
+    }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
+    void STDMETHODCALLTYPE GetType(D3D11_RESOURCE_DIMENSION* dimension) override { *dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D; }
+    void STDMETHODCALLTYPE SetEvictionPriority(UINT) override {}
+    UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
+};
+
+// The reads on the pointers the upscaler just used (the parameter block, the Output and Depth resources, the depth's device) are
+// guarded: a hardware fault in one of them ends that evaluate and nothing else.
+void HardwareFaultsStayInside()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    CHECK(r.Capture());
+    const size_t events = r.sink.events.size();
+
+    const size_t faultLines = LogLines("failed with");
+    r.params.faultOnGet = true; // the parameter block faults on the first read
+    r.Eval();
+    r.Eval(); // (and again: said once)
+    r.params.faultOnGet = false;
+    CHECK(r.sink.events.size() == events);
+    CHECK(LogLines("failed with") == faultLines + 1);
+    CHECK(LastLine("failed with").find("0xc0000005") != std::string::npos); // the access violation, named
+    CHECK(r.Capture()); // the next evaluate works
+
+    static FaultyResource faultyOutput(FaultyResource::Where::QueryInterface);
+    r.params.uints.erase("OutWidth"); // the Output resource is what says the output size
+    r.params.uints.erase("OutHeight");
+    ID3D11Resource* const output = r.params.resources["Output"];
+    r.params.resources["Output"] = &faultyOutput;
+    r.Eval();
+    CHECK(r.sink.events.size() == events + 1);
+    r.params.resources["Output"] = output;
+    CHECK(r.Capture());
+
+    static FaultyResource faultyDepth(FaultyResource::Where::GetDevice);
+    ID3D11Resource* const depth = r.params.resources["Depth"];
+    r.params.resources["Depth"] = &faultyDepth; // the depth's device cannot be asked
+    const size_t before = r.sink.events.size();
+    r.Eval();
+    CHECK(r.sink.events.size() == before);
+    CHECK(!r.engine->NativeContextMissing()); // a fault is not a missing context
+    r.params.resources["Depth"] = depth;
+    CHECK(r.Capture());
+}
+
+void NullParameters()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    CHECK(r.Capture());
+    const size_t events = r.sink.events.size();
+    const size_t faultLines = LogLines("failed with");
+    r.engine->OnEvaluated(reinterpret_cast<ID3D11DeviceContext*>(kBogusContext), nullptr, {}); // no parameter block: nothing to read
+    CHECK(r.sink.events.size() == events);
+    CHECK(LogLines("failed with") == faultLines); // refused up front, not by a fault
+    CHECK(r.Capture());
+    // requests are still carried out with no parameter block
+    std::thread([&] { r.gate.SetEnabled(false); }).join();
+    r.engine->OnEvaluated(nullptr, nullptr, {});
+    CHECK(!r.engine->PassReady() && !r.sink.events.back().capture.valid);
+}
+
+// The reference to the native immediate context that the depth read takes is given back at the end of every evaluate.
+void NativeReferenceIsGivenBack()
+{
+    Rig r;
+    if (!r.Create())
+        return;
+    CHECK(r.Capture());
+    const ULONG settled = RefCount(r.context.Get());
+    for (int i = 0; i < 5; ++i)
+        CHECK(r.Capture());
+    CHECK(RefCount(r.context.Get()) == settled);
+    r.params.resources.erase("Depth"); // (and when the evaluate ends early)
+    r.Eval();
+    CHECK(RefCount(r.context.Get()) == settled);
 }
 
 void NoDepthResource()
@@ -767,6 +685,7 @@ int main()
     RenderSize();
     PreviewPublishesNothing();
     OutputFallbacks();
+    HalfAnOutputSizeIsNoSize();
     NativeDeviceNotNgxContext();
     OptionOffFromAnotherThread();
     RequestsOneByOne();
@@ -775,7 +694,10 @@ int main()
     NgxShutdown();
     NativeContextMissingIsReported();
     NoDepthResource();
+    NativeReferenceIsGivenBack();
     ExceptionsDoNotEscape();
+    HardwareFaultsStayInside();
+    NullParameters();
     CaptureLineChangesWithEachField();
     RefusalsAreLoggedOncePerChange();
     BaseIsNeverClamped();

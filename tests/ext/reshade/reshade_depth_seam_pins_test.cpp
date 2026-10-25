@@ -112,8 +112,8 @@ int main(int argc, char** argv)
         CHECK(atEvaluate < atSeam && atSeam < atFrame && atFrame < atTable);
         CHECK(evaluate.substr(atEvaluate + std::string("auto upscaleResult = deviceContext->Evaluate(InDevCtx, InParameters);").size(), 1) == " ");
         CHECK(evaluate.find(call) - atEvaluate == std::string("auto upscaleResult = deviceContext->Evaluate(InDevCtx, InParameters); ").size());
-        // no lock and no table access in the seam's own line
-        CHECK(!Has(call, "IsFGSourceFeature") && !Has(call, "Dx11Contexts"));
+        // no lock and no table access between the evaluate and the seam: the text between them is the evaluate's own line and nothing else
+        CHECK(evaluate.substr(atEvaluate, atSeam - atEvaluate) == "auto upscaleResult = deviceContext->Evaluate(InDevCtx, InParameters); ");
         // the arguments are the evaluate's own: the context NGX gave, the parameter block, the feature
         CHECK(Has(evaluate, "deviceContext = activeContext->feature.get();"));
     }
@@ -163,6 +163,14 @@ int main(int argc, char** argv)
         CHECK(Has(facade, "backend.SetCaptureDevice(capture.valid ? capture.device : 0); binder.PublishCapture(capture);"));
         CHECK(Has(facade, "return glue::Extent { f->DisplayWidth(), f->DisplayHeight() };"));
         CHECK(Has(facade, "f->engine.OnEvaluated(context, parameters, DisplaySource { feature != nullptr ? &DisplayOf : nullptr, feature });"));
+        // the game gate: the executable name, read once, after the one-load gate and before anything is built; the status says so
+        CHECK(Has(facade, "const std::string& exe = State::Instance().gameExe; if (exe.empty()) return 0; state = glue::IsFfxivExe(exe) ? 1 : 2; g_game.store(state, std::memory_order_relaxed);"));
+        CHECK(Has(facade, "if (GameState() != 1) return;"));
+        CHECK(Has(facade, "in.gameSupported = GameState() != 2;"));
+        {
+            const auto body = Between(facade, "void OnEvaluated(ID3D11DeviceContext* context", "void OnNgxShutdown() noexcept {");
+            CHECK(body.find("g_gate.Idle()") < body.find("GameState()") && body.find("GameState()") < body.find("f = &Build();"));
+        }
         // nothing exists and the option is off: a request has nothing to carry out, it is dropped
         CHECK(Has(facade, "if (!g_gate.Enabled()) { g_gate.TakeRequests(); return; }"));
         CHECK(Has(facade, "f = &Build();"));
@@ -208,6 +216,15 @@ int main(int argc, char** argv)
     const auto cfgHeader = Normalize(Read(ext + "ffxiv/FfxivConfig.h"));
     CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeDepth { false };"));
     CHECK(Has(cfgHeader, "automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());"));
+
+    // ---- one writer of the registration state: the load-time attempt notes it the way the late attempt does
+    {
+        const auto addon = Normalize(Read(ext + "reshade/ReShadeAddon.cpp"));
+        CHECK(Has(addon, "NoteRegistration(result.status);"));
+        CHECK(!Has(addon, "g.reason.store") && !Has(addon, "g.registered.store"));
+        const auto late = Normalize(Read(ext + "reshade/ReShadeDepthLate.cpp"));
+        CHECK(Has(late, "NoteRegistration(job.result.status);"));
+    }
 
     // ---- the NGX shutdown calls
     const auto nr = Normalize(Read(ext + "nr/NrSeams.cpp"));

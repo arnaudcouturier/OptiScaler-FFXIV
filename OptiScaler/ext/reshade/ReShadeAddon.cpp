@@ -98,8 +98,7 @@ void OnReshadeLoaded(HMODULE reshadeModule)
         result.status = RegisterStatus::Exception;
     }
 
-    g.reason.store(static_cast<uint8_t>(result.status), std::memory_order_release);
-    g.registered.store(result.status == RegisterStatus::Ok, std::memory_order_release);
+    NoteRegistration(result.status); // the same way the late registration records it: one place writes the state
 
     // The one log line (docs/HUDLESS.md section 16 / BRIEF-s10-d0): nothing else happens with diagnostics off.
     if (result.status == RegisterStatus::Ok)

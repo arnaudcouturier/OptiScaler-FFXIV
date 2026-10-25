@@ -61,6 +61,7 @@ struct Fake final : IBackend
     const std::atomic<uint64_t>* frameSource = nullptr; // when set, Frame() reads this counter instead (the depth-owned one)
     bool d3d11 = true;
     bool sameDevice = true;
+    uint64_t device = kDevice; // the device of the runtimes the fake answers for (SameDevice)
     uint32_t bbW = 3840, bbH = 2160;
     bool bbOk = true;
 
@@ -334,7 +335,7 @@ struct Fake final : IBackend
     bool SameDevice(uint64_t, uint64_t captureDevice) override
     {
         // 0 = no capture yet: the game's primary device
-        return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice && (captureDevice == 0 || captureDevice == kDevice); });
+        return Run<bool>("SameDevice", false, [&]() -> bool { return sameDevice && (captureDevice == 0 || captureDevice == device); });
     }
     bool BackBufferSize(uint64_t, uint32_t& w, uint32_t& h) override
     {

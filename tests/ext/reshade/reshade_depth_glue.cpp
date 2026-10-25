@@ -204,6 +204,21 @@ void LogDiffs()
     CHECK(r.ShouldLog(5, 121'005));
 }
 
+void Game()
+{
+    // the game gate is the executable name, whole and case-insensitive
+    CHECK(IsFfxivExe("ffxiv_dx11.exe"));
+    CHECK(IsFfxivExe("FFXIV_DX11.EXE"));
+    CHECK(IsFfxivExe("Ffxiv_Dx11.Exe"));
+    CHECK(!IsFfxivExe(""));
+    CHECK(!IsFfxivExe("ffxiv.exe"));
+    CHECK(!IsFfxivExe("ffxiv_dx11"));
+    CHECK(!IsFfxivExe("xffxiv_dx11.exe"));
+    CHECK(!IsFfxivExe("ffxiv_dx11.exe.bak"));
+    CHECK(!IsFfxivExe("ffxiv_dx12.exe"));
+    CHECK(!IsFfxivExe("bf_dx11.exe_"));
+}
+
 void Status()
 {
     StatusInputs in;
@@ -211,6 +226,14 @@ void Status()
     in.binderStatus = "Waiting for ReShade depth effects";
     CHECK(ComposeStatus(in) == "Automatic scene depth: off");
     in.enabled = true;
+    // another game: not available, whatever else is true; the option off is still said first
+    in.gameSupported = false;
+    in.registered = true;
+    CHECK(ComposeStatus(in) == "Automatic scene depth: not available for this game");
+    in.enabled = false;
+    CHECK(ComposeStatus(in) == "Automatic scene depth: off");
+    in.enabled = true;
+    in.gameSupported = true;
     in.registered = false;
     CHECK(ComposeStatus(in) == "ReShade not detected");
     in.lateGaveUp = true;
@@ -269,6 +292,7 @@ int main()
     OneLoad();
     DrawChoice();
     LogDiffs();
+    Game();
     Status();
     if (g_fail != 0)
     {
