@@ -151,7 +151,7 @@ class ChangeTracker
 };
 
 // The line for a result that is not Ok: at once when the result changes, then at most one per kIntervalMs while it repeats. Ok (0) is
-// never a line and ends the run. A clock that went backwards logs nothing.
+// never a line and ends the run. A clock that went backwards logs nothing (its difference is negative, so below the interval).
 class ResultLog
 {
   public:
@@ -169,7 +169,7 @@ class ResultLog
             _lastMs = nowMs;
             return true;
         }
-        if (nowMs < _lastMs || nowMs - _lastMs < kIntervalMs)
+        if (nowMs - _lastMs < kIntervalMs)
             return false;
         _lastMs = nowMs;
         return true;

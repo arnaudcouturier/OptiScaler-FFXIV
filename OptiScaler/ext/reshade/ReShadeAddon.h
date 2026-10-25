@@ -28,6 +28,10 @@ bool Registered();
 // Records the outcome of a registration made AFTER load time (the automatic ReShade depth retries when a ReShade loaded later,
 // ReShadeDepthLate.cpp): `reason` and `registered` follow it, so Status() and Registered() answer for it. `attempted` is the load-time
 // attempt's and does not change. Any thread; only the late path calls it.
+// What the other readers of Registered()/Status() then see (a late registration installs the depth events only, not the boundary
+// tracking, the probe or the window event): ApplyPresetsInPlace answers NoRuntime ("no live ReShade effect runtime") instead of
+// NoReShade, both "nothing applied" and counted alike by the UI boundary; the diagnostics card and the UI diag dump say "registered",
+// which is true, and the card shows "Probe: not subscribed". No reader behaves differently otherwise.
 void NoteRegistration(RegisterStatus status);
 
 // Entry point of the invasive probe: package A's boundary detector calls this at its candidate boundary (immediate

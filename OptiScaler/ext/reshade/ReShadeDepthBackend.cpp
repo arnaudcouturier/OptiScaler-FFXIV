@@ -222,8 +222,6 @@ void LiveDepthBackend::LogFirstBind(uint64_t runtime, uint64_t variable, uint64_
     _readbackLogged.store(true, std::memory_order_relaxed);
     LOG_INFO("Automatic ReShade depth: first bind, ReShade reads variable {:#x} back as srv {:#x} / srgb {:#x} (bound {:#x})", variable, srv,
              srvSrgb, _readbackView.load(std::memory_order_relaxed));
-    if (left == 1)
-        _firstBindDone.store(true, std::memory_order_relaxed);
 }
 
 bool LiveDepthBackend::UniformVariables(uint64_t runtime, std::vector<UniformVar>& out)

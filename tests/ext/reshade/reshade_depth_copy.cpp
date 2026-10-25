@@ -2091,11 +2091,11 @@ void StuckRecoveryIsCapped()
     CaptureReport r;
     for (int i = 1; i <= 8; ++i)
     {
-        const int before = g_swap.calls;
+        const int callsBefore = g_swap.calls;
         CHECK(!f.Run(src.Get(), args, &r));
         CHECK(r.result == Result::Fault);
         if (i == 1)
-            CHECK(g_swap.calls == before + 1); // a failed recovery ends the call: the capture does not go on to swap into its state
+            CHECK(g_swap.calls == callsBefore + 1); // a failed recovery ends the call: the capture does not go on to swap into its state
     }
     CHECK(g_draw.draws == draws);
     CHECK(SwapsTo(gs) == 1 + 3); // three attempts to put the state back, then the pass gave up: the later calls do not try again

@@ -466,6 +466,10 @@ void Definitions()
     CHECK(b.Definition(kRt, nullptr, "Z", v) == DefinitionState::Undefined);
     CHECK(b.Definition(kRt, "Main.fx", "A", v) == DefinitionState::Defined && v == "0.5"); // the effect's own scope
     CHECK(b.Definition(kRt, "Other.fx", "A", v) == DefinitionState::Undefined);
+    raw.globalDefs["HUGE"] = std::string(kMaxStringBytes + 10, 'x'); // too long to read: an error, never a cut value
+    CHECK(b.Definition(kRt, nullptr, "HUGE", v) == DefinitionState::Error);
+    raw.globalDefs["BIG"] = std::string(kMaxStringBytes - 10, 'x');
+    CHECK(b.Definition(kRt, nullptr, "BIG", v) == DefinitionState::Defined && v.size() == kMaxStringBytes - 10);
     CHECK(raw.definitionScopes.size() >= 6);
     if (raw.definitionScopes.size() >= 6)
     {
@@ -523,6 +527,12 @@ void UniformsAndTechniques()
     CHECK(b.GetUniformBool(kRt, 0x601, value) && !value);
     CHECK(b.SetUniformBool(kRt, 0x601, true));
     CHECK(raw.unis[0].value);
+    // a faulting read or write is a failure, and the read leaves the caller's value alone
+    raw.faultAt = raw.calls + 1;
+    value = true;
+    CHECK(!b.GetUniformBool(kRt, 0x601, value) && value);
+    raw.faultAt = raw.calls + 1;
+    CHECK(!b.SetUniformBool(kRt, 0x601, false) && raw.unis[0].value);
 
     // a fault in any call of a read fails the read and leaves nothing behind; a read that the fault does not reach works
     for (int n = 1; n <= 10; ++n)
@@ -779,11 +789,29 @@ void FirstBindReadback()
     for (const std::string& l : depthtest_log::Lines())
         said = said || (l.find("first bind") != std::string::npos && l.find("0xc0") != std::string::npos);
     CHECK(said);
+    { // ... both: a variable that reads back something else than the bound view
+        FakeRaw other;
+        other.textures.push_back({ 0x507, "NoSemantic", "", 0xA7, 0xA8 });
+        LiveDepthBackend ob(other, Env());
+        CHECK(ob.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
+        // a read of another runtime during the observation is not logged
+        const size_t quiet = LogLines("first bind");
+        CHECK(ob.TextureBinding(kRt2, 0x507, s, g));
+        CHECK(LogLines("first bind") == quiet);
+        CHECK(ob.TextureBinding(kRt, 0x507, s, g));
+        bool both = false;
+        for (const std::string& l : depthtest_log::Lines())
+            both = both || (l.find("first bind") != std::string::npos && l.find("0xa7") != std::string::npos && l.find("0xa8") != std::string::npos &&
+                            l.find("bound 0xc0") != std::string::npos);
+        CHECK(both);
+        CHECK(LogLines("first bind") == quiet + 1);
+    }
+    const size_t afterBlock = LogLines("first bind"); // (that backend's line is in the shared log)
     // only the first bind of the process: a later one logs nothing
     CHECK(b.UpdateTextureBindings(kRt, "DEPTH", kOrig, kOrigSrgb)); // the restore
     CHECK(b.UpdateTextureBindings(kRt, "DEPTH", kCopy, kCopy));
     CHECK(b.TextureBinding(kRt, kDepthVar, s, g));
-    CHECK(LogLines("first bind") == before + 4);
+    CHECK(LogLines("first bind") == afterBlock);
 
     // a first bind that is undone by an erase before anything was read: no log, and the next real bind is still the first
     FakeRaw r2;

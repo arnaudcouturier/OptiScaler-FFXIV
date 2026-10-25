@@ -57,9 +57,7 @@ bool TryLateRegister(bool enabled, int64_t nowMs)
         if (g_attempts.load(std::memory_order_acquire) >= LateRegistrationPlanner::kMaxAttempts ||
             nowMs - g_lastAttemptMs.load(std::memory_order_acquire) < LateRegistrationPlanner::kRetryIntervalMs)
             return false;
-        const AddonStatus status = Status();
-        if (status.registered)
-            return false;
+        const AddonStatus status = Status(); // (a registered ReShade is no reason to retry: the planner refuses Ok)
         int64_t last = g_lastAttemptMs.load(std::memory_order_acquire);
         if (!LateRegistrationPlanner::ShouldRetry(enabled, status.attempted, status.reason, g_attempts.load(std::memory_order_acquire),
                                                   nowMs, last))

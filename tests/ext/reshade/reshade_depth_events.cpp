@@ -142,6 +142,22 @@ void EveryEventReachesTheBinder()
             CHECK(r.Clean());
         }
     }
+    { // a reload while a pass is open ends it (the effects are new: the binding is put back, the runtime forgotten); the cache events do not
+        for (const bool reload : { true, false })
+        {
+            EvRig r;
+            r.Capture();
+            r.d.Begin(kRt);
+            CHECK(r.fake.DepthIs(kCopy, kCopy));
+            if (reload)
+                r.d.Reloaded(kRt);
+            else
+                r.d.PresetPath(kRt);
+            CHECK(r.fake.HoldsCopy() == !reload);
+            r.d.Finish(kRt);
+            CHECK(r.Clean());
+        }
+    }
     { // the manual transform cache really is what the technique-state and preset-path events clear
         EvRig r;
         r.Capture();
