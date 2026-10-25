@@ -58,6 +58,7 @@ struct Fake final : IBackend
 {
     std::atomic<int64_t> now { 1000 };
     std::atomic<uint64_t> frame { 100 };
+    const std::atomic<uint64_t>* frameSource = nullptr; // when set, Frame() reads this counter instead (the depth-owned one)
     bool d3d11 = true;
     bool sameDevice = true;
     uint32_t bbW = 3840, bbH = 2160;
@@ -272,7 +273,10 @@ struct Fake final : IBackend
     }
 
     int64_t NowMs() override { return Run<int64_t>("NowMs", 0, [&]() -> int64_t { return now; }); }
-    uint64_t Frame() override { return Run<uint64_t>("Frame", 0, [&]() -> uint64_t { return frame; }); }
+    uint64_t Frame() override
+    {
+        return Run<uint64_t>("Frame", 0, [&]() -> uint64_t { return frameSource != nullptr ? frameSource->load() : frame.load(); });
+    }
     void AddRef(uint64_t view) override
     {
         if (Hit("AddRef"))

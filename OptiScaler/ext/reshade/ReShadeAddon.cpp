@@ -66,6 +66,13 @@ bool ProbeEnabled()
 
 bool Registered() { return G().registered.load(std::memory_order_acquire); }
 
+void NoteRegistration(RegisterStatus status)
+{
+    auto& g = G();
+    g.reason.store(static_cast<uint8_t>(status), std::memory_order_release);
+    g.registered.store(status == RegisterStatus::Ok, std::memory_order_release);
+}
+
 AddonStatus Status()
 {
     auto& g = G();

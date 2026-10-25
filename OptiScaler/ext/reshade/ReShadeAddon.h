@@ -25,6 +25,11 @@ AddonStatus Status();
 // Registration accepted by ReShade (one atomic load; Status() also reads the config). Any thread.
 bool Registered();
 
+// Records the outcome of a registration made AFTER load time (the automatic ReShade depth retries when a ReShade loaded later,
+// ReShadeDepthLate.cpp): `reason` and `registered` follow it, so Status() and Registered() answer for it. `attempted` is the load-time
+// attempt's and does not change. Any thread; only the late path calls it.
+void NoteRegistration(RegisterStatus status);
+
 // Entry point of the invasive probe: package A's boundary detector calls this at its candidate boundary (immediate
 // context, before the boundary draw). One atomic load and a failed compare when the probe is not armed from the menu
 // card; never throws, never lets an access violation out. Safe to call unconditionally.
