@@ -4,7 +4,7 @@ What has been played in game and what has not, for every feature of this fork. T
 
 ## Release status
 
-> **Status (October 2026): v0.2.0.** `ffxiv-2026.10.25-d9b62110-rc1` (the tag of v0.2.0, which keeps the `-rc1` suffix from before the release was promoted; OptiScaler nightly `d9b62110`) adds the automatic ReShade scene depth (depth and the game's normals, decals and motion vectors lined up with the picture when the game renders below the output size); it was played in game on 2026-10-25 on one RTX 4090 (SDR, one ReShade preset, DLAA, Quality and Performance). The first release was v0.1.0, tag `ffxiv-2026.10.23-d9b62110` (first official release, played in game on 2026-10-23 on one RTX 4090: SDR, DLSS-G 2x to 4x, recomposition HUD-less, preset Auto and a boot on Preset C, the NR model picker). Download the zips from the Releases page. See the table below for what was played and what was not.
+> **Status (October 2026): v0.2.0.** `ffxiv-2026.10.25-d9b62110` (the tag of v0.2.0, on OptiScaler nightly `d9b62110`) adds the automatic ReShade scene depth (depth and the game's normals, decals and motion vectors lined up with the picture when the game renders below the output size); it was played in game on 2026-10-25 on one RTX 4090 (SDR, one ReShade preset, DLAA, Quality and Performance). The first release was v0.1.0, tag `ffxiv-2026.10.23-d9b62110` (first official release, played in game on 2026-10-23 on one RTX 4090: SDR, DLSS-G 2x to 4x, recomposition HUD-less, preset Auto and a boot on Preset C, the NR model picker). Download the zips from the Releases page. See the table below for what was played and what was not.
 
 ## Features
 
