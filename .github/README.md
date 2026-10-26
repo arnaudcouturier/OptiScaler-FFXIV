@@ -1,8 +1,6 @@
-<h1 align="center">
-  <img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS upscaling, frame generation and HDR for Final Fantasy XIV on DirectX 11" width="860">
-</h1>
-
 <div align="center">
+
+<img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS upscaling, frame generation and HDR for Final Fantasy XIV on DirectX 11" width="860">
 
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?include_prereleases&display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
@@ -25,9 +23,9 @@ OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiSca
 | DLSS Neural Rendering | Adds detail to the upscaled image with NVIDIA's Neural Rendering model | tested |
 | Frame generation | DLSS multi frame generation at 2x to 4x on RTX 40 cards | tested; 5x and 6x are experimental |
 | HDR10 output | HDR10 for the game, with RenoDX scene HDR as an option | tested |
-| ReShade depth alignment | Keeps ReShade's depth, normals and motion vectors lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
+| ReShade depth alignment | Keeps ReShade's depth lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
 | HUD-less frame generation | Handles the interface separately from the game picture during frame generation | optional, tested in SDR; one of its two modes is experimental |
-| Character preview | DLSS, spatial anti-aliasing and Neural Rendering in the character preview | optional, tested with one preview window |
+| Character preview | DLSS, spatial anti-aliasing and Neural Rendering in the character preview | optional, tested on earlier builds with one preview window |
 
 Tested means played in game by the author on an RTX 4090. Every feature above is off until you switch it on in the menu or in `OptiScaler.ini`.
 
