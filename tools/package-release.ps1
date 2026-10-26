@@ -291,7 +291,7 @@ BRING YOUR OWN (not included: not redistributable from this repository)
 $(($byo | ForEach-Object { "  $_" }) -join "`n")
 
 KNOWN LIMITS
-  * Only the settings marked "tested" in the project README were played in game, on one RTX 4090. Everything else is untested.
+  * Only the settings marked "tested" in docs/STATUS.md of the project repository were played in game, on one RTX 4090. Everything else is untested.
   * HUD-less is opt-in and off by default; recomposition in SDR with DLSS-G 2x-4x was tested, HDR was not. ui_free is experimental (in one scene its
     UI mask fell back for most frames).
   * DLSS-G Preset A and C turn NVIDIA's UI recomposition off (Preset C also turns FG Lite on), so with them HUD-less recomposition is not requested
