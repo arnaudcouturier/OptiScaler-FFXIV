@@ -61,15 +61,17 @@ Use `--prerelease` for `-rcN` tags. The release notes should say which features 
 
 Each GitHub release is named with a version number (`--title "v<version>"`). The git tag keeps the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, because `tools\package-release.ps1` and the build's version string rely on the `ffxiv-` prefix.
 
-- Major: a change that breaks existing settings or drops support.
-- Minor: a new feature.
-- Patch: fixes only.
+The project is at 0.x, the initial development range of semantic versioning.
+
+- Minor (0.Y.0): a new feature, or a change in behaviour that may need a settings change.
+- Patch (0.Y.Z): fixes only.
 - `-rcN`: a candidate that has not been through the wider play-test yet.
+- 1.0.0 is reserved for the day the author calls the project stable.
 
 | Version | Tag | Date | Upstream base |
 |---|---|---|---|
-| v1.0.0 | `ffxiv-2026.10.23-d9b62110` | 2026-10-23 | `d9b62110` |
-| v1.1.0-rc1 | `ffxiv-2026.10.25-d9b62110-rc1` | 2026-10-25 | `d9b62110` |
+| v0.1.0 | `ffxiv-2026.10.23-d9b62110` | 2026-10-23 | `d9b62110` |
+| v0.2.0-rc1 | `ffxiv-2026.10.25-d9b62110-rc1` | 2026-10-25 | `d9b62110` |
 
 Add a row for every release. [STATUS.md](STATUS.md) and the status section of the README name the current release by version first and by tag second.
 

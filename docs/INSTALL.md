@@ -2,7 +2,7 @@
 
 How to put OptiScaler-FFXIV into the game, what you have to bring yourself, how to turn features on and how to remove it again. The short version is in the [README](../.github/README.md); what was tested is in [STATUS.md](STATUS.md); every setting is in [FEATURES.md](FEATURES.md).
 
-Download `OptiScaler-FFXIV-<version>.zip` from the [Releases](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases) page (releases are named by version, for example `v1.0.0`; tags and archive names use the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, see [RELEASE.md](RELEASE.md#release-numbering)), or build one yourself ([RELEASE.md](RELEASE.md)). The archive contains its own `INSTALL.txt` with the same steps.
+Download `OptiScaler-FFXIV-<version>.zip` from the [Releases](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases) page (releases are named by version, for example `v0.1.0`; tags and archive names use the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, see [RELEASE.md](RELEASE.md#release-numbering)), or build one yourself ([RELEASE.md](RELEASE.md)). The archive contains its own `INSTALL.txt` with the same steps.
 
 1. **Back up first.** Close the game and the launcher. In the folder that contains `ffxiv_dx11.exe`, copy `winmm.dll`, `nvngx.dll_dlssnr.dll`, `OptiScaler.ini` and the `OptiScaler` folder to a new folder, for those that exist.
 2. **Copy the files.** Extract the archive into that folder and overwrite. The archive holds `winmm.dll` (the fork's DLL, installed under the name the game loads), the NR forwarder `nvngx.dll_dlssnr.dll` (keep the exact name), `OptiScaler.ini`, the `OptiScaler` folder with third-party libraries, a `Licenses` folder, `NOTICE.txt` and `SHA256SUMS.txt`. Optional: compare hashes with `SHA256SUMS.txt`.

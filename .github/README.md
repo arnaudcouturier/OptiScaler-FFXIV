@@ -50,7 +50,7 @@ The [install guide](../docs/INSTALL.md) has the details, the settings of the tes
 
 ## Status
 
-The current release candidate is v1.1.0-rc1 (tag `ffxiv-2026.10.25-d9b62110-rc1`), a pre-release on OptiScaler nightly `d9b62110`. The latest full release is v1.0.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV-specific features follow one game build and switch themselves off after a game patch until the fork is updated. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release candidate is v0.2.0-rc1 (tag `ffxiv-2026.10.25-d9b62110-rc1`), a pre-release on OptiScaler nightly `d9b62110`. The latest full release is v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV-specific features follow one game build and switch themselves off after a game patch until the fork is updated. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 
