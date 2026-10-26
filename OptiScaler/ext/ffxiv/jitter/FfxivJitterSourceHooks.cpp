@@ -3,6 +3,7 @@
 #include "ext/ffxiv/jitter/FfxivJitterSourceHooks.h"
 
 #include "ext/core/ProcessMemory.h"
+#include "ext/ffxiv/ActiveBuild.h"
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/jitter/FfxivJitterSourceAnchors.h"
 #include "ext/ffxiv/jitter/FfxivJitterSourceDetours.h"
@@ -13,6 +14,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstring>
 
 namespace ext::ffxiv::jitter::source::hooks
 {
@@ -29,12 +31,20 @@ using Getter = void* (*)(std::uintptr_t);
 Generator g_generator = nullptr;
 Getter g_getter = nullptr;
 std::uintptr_t g_base = 0;                     // the executable's base; written before the first attach, read-only afterwards
-const JitterSourceBuild* g_build = nullptr;    // same
+const JitterSourceBuild* g_build = nullptr;    // same (a member of the active build, set only after the gate enabled the jitter source)
 std::atomic<bool> g_guardFailed { false };
 
 bool ReadBytes(std::uintptr_t address, void* out, std::size_t bytes) { return ext::core::ReadProcessBytes(address, out, bytes); }
 
 template <class T> bool ReadValue(std::uintptr_t address, T& out) { return ReadBytes(address, &out, sizeof(out)); }
+
+float FloatFromBits(std::uint32_t bits)
+{
+    float f = 0.0f;
+    static_assert(sizeof(f) == sizeof(bits));
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
 
 // Everything the generator plan needs, read from the game. false = a read failed (the call is left alone).
 bool ReadInputs(const JitterSourceBuild& b, std::uint32_t phases, GeneratorInputs& in)
@@ -70,6 +80,7 @@ bool ReadInputs(const JitterSourceBuild& b, std::uint32_t phases, GeneratorInput
     in.outW = output[0];
     in.outH = output[1];
     in.phases = phases;
+    in.strengthFloor = FloatFromBits(b.strengthFloorBits); // the constant of the build (the seam checks it live), not a literal
     return true;
 }
 
@@ -98,6 +109,7 @@ void* Observe(std::uintptr_t camera)
     args.caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
     args.expectedCaller = g_build != nullptr ? g_base + g_build->producerReturnRva : 0;
     args.camera = camera;
+    args.ndcYSignMask = g_build != nullptr ? g_build->ndcSignMaskBits : kNdcYSignMask;
     return RunObserve(
         State(), args, [](std::uintptr_t c) { return g_getter(c); },
         [](const void* object, float* out)
@@ -111,10 +123,13 @@ void* Observe(std::uintptr_t camera)
         [] { return GetTickCount64(); });
 }
 
+// The build the hooks are verified against and read: ext::ffxiv::ActiveBuild() (the resolved build; the compile-time table under the rollback key)
+// once the build gate (ext/ffxiv/resolve/Gate.h) has enabled the jitter source: every hook site (location AND shape), the three globals, the
+// strengthFloor / ndcSignMask / cameraGlobal seams and every bound offset were usable, and on an unknown build the key was on. Not cached: a
+// refusal before the startup has published the gate must never stick.
 const GameBuild* Matched()
 {
-    static const GameBuild* build = MatchCurrentProcess();
-    return build;
+    return ext::ffxiv::BuildFor(ext::ffxiv::resolve::Feature::JitterSource);
 }
 
 // One install attempt: the identity and the instruction guards (deterministic for an exe: a refusal is Permanent and never retried), then ONE
@@ -122,11 +137,15 @@ const GameBuild* Matched()
 retry::StepResult Attempt()
 {
     constexpr retry::StepResult kRefused { retry::Outcome::Permanent, retry::Stage::Guard, 0, 0 };
+    // Before the startup published the gate: not a verdict. Transient, so the retry installer asks again instead of latching.
+    if (!ext::ffxiv::ActiveStarted())
+        return { retry::Outcome::Transient, retry::Stage::Guard, 0, 0 };
     const GameBuild* build = Matched();
     if (build == nullptr)
     {
         g_guardFailed.store(false);
-        LOG_INFO("Jitter source: the game executable is not the supported build; the hooks are not installed");
+        LOG_INFO("Jitter source: the build gate does not allow the hooks ({}); they are not installed",
+                 ext::ffxiv::ActiveGate().Reason(ext::ffxiv::resolve::Feature::JitterSource));
         return kRefused;
     }
     const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));

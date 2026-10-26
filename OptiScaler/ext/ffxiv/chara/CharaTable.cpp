@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/core/ProcessMemory.h"
+#include "ext/ffxiv/ActiveBuild.h"
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 
@@ -28,9 +29,14 @@ Resolution Inert(std::string reason)
 
 Resolution DoResolve()
 {
-    const GameBuild* build = MatchCurrentProcess();
+    // The build gate (ext/ffxiv/resolve/Gate.h) replaces the old exact-build match: the accessor and the manager pointer seams usable, on an unknown
+    // build the key on; under the rollback key "the exact known build". The accessor VALUES come from ActiveBuild() (the resolved seams; the table on
+    // the known build) and this module still runs its own scan of the executable and cross-checks it with them, so on every build the result must
+    // equal the resolved seam or the feature goes inert.
+    const GameBuild* build = ext::ffxiv::BuildFor(ext::ffxiv::resolve::Feature::CharaViewAccessor);
     if (build == nullptr)
-        return Inert("this game build is not the one the preview support was checked against");
+        return Inert(std::string("the game build handling does not allow it: ") +
+                     ext::ffxiv::ActiveGate().Reason(ext::ffxiv::resolve::Feature::CharaViewAccessor));
 
     // The verification itself is ResolveFromImage (CharaTable.h, tested on a synthetic image); this reads the real process.
     const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -76,6 +82,11 @@ std::atomic<bool> g_resolved { false };
 
 const Resolution& Resolve()
 {
+    // Before the startup published the build gate (ext/ffxiv/ActiveBuild.h) there is no verdict: "not resolved yet", not latched, not logged. The
+    // first request after the startup decides for the session, as before.
+    static const Resolution notDecided {};
+    if (!ext::ffxiv::ActiveStarted())
+        return notDecided;
     std::call_once(g_once,
                    []
                    {

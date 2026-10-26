@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <mutex>
 #include <optional>
@@ -52,15 +53,31 @@ constexpr std::uint32_t PhaseCount(std::uint32_t renderW, std::uint32_t renderH,
 
 inline constexpr float kMinStrength = 0.125f; // outside [kMinStrength, kMaxStrength] the strength is not believed and the call is left alone
 inline constexpr float kMaxStrength = 4.0f;
-inline constexpr float kStrengthFloor = 0.001f; // the constant at RVA 0x211dd64 that the executable subtracts and adds
+// The constant at RVA 0x211dd64 that the executable subtracts and adds. The default only: the hooks hand NativeStrength the value of
+// JitterSourceBuild::strengthFloorBits (GameBuild.h, 0x3a83126f = this float), which the seam jitterSource.strengthFloor checks against the live
+// executable (ValueEquals) before the gate lets the fix run.
+inline constexpr float kStrengthFloor = 0.001f;
+// The sign mask the executable XORs into the NDC y (JitterSourceBuild::ndcSignMaskBits, checked live by jitterSource.ndcSignMask): the y of the
+// NDC translation is the NEGATED jitter y. A different mask would mean a different convention, and the gate refuses the fix on such a build.
+inline constexpr std::uint32_t kNdcYSignMask = 0x80000000u;
+
+// v with its bits XORed by `mask` (0x80000000 negates).
+inline float ApplySignMask(float v, std::uint32_t mask)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    bits ^= mask;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
 
 // The executable's own float expression, in its own order of operations. nullopt = a value is not usable (extent 0, not finite, outside the range).
-inline std::optional<float> NativeStrength(float amount, float scale, std::uint16_t extent0, std::uint16_t extent2)
+inline std::optional<float> NativeStrength(float amount, float scale, std::uint16_t extent0, std::uint16_t extent2, float floor = kStrengthFloor)
 {
-    if (extent2 == 0 || !std::isfinite(amount) || !std::isfinite(scale))
+    if (extent2 == 0 || !std::isfinite(amount) || !std::isfinite(scale) || !std::isfinite(floor))
         return std::nullopt;
     const float ratio = (static_cast<float>(extent0) / static_cast<float>(extent2)) * scale;
-    const float strength = (amount - kStrengthFloor) * (ratio * ratio) + kStrengthFloor;
+    const float strength = (amount - floor) * (ratio * ratio) + floor;
     if (!std::isfinite(strength) || strength < kMinStrength || strength > kMaxStrength)
         return std::nullopt;
     return strength;
@@ -89,6 +106,7 @@ struct GeneratorInputs
     bool dlssMode = false;      // the game's settings byte at +0x54 equals 2
     float amount = 0.0f;        // settings+0x78
     float scale = 0.0f;         // settings+0x4c
+    float strengthFloor = kStrengthFloor; // the constant the strength expression subtracts and adds (GameBuild.h strengthFloorBits)
     std::uint16_t extent0 = 0;  // renderer+0x700
     std::uint16_t extent2 = 0;  // renderer+0x704
     std::uint32_t phases = 0;   // the phase count the game passed
@@ -116,7 +134,7 @@ inline GeneratorPlan PlanGenerate(const GeneratorInputs& in)
     plan.phases = in.phases;
     if (!in.dlssMode)
         return plan;
-    const std::optional<float> strength = NativeStrength(in.amount, in.scale, in.extent0, in.extent2);
+    const std::optional<float> strength = NativeStrength(in.amount, in.scale, in.extent0, in.extent2, in.strengthFloor);
     if (!strength)
     {
         plan.why = PlanWhy::StrengthInvalid;
@@ -147,6 +165,7 @@ struct Observed
     float rawX = 0.0f, rawY = 0.0f, ndcX = 0.0f, ndcY = 0.0f;
     std::uint32_t width = 0, height = 0;
     std::uint64_t timeMs = 0;
+    std::uint32_t ndcYSignMask = kNdcYSignMask; // the executable's sign mask for the NDC y (GameBuild.h ndcSignMaskBits)
 };
 
 // The pixel offset the frame was drawn with: x = ndcX * width / 2, y = -ndcY * height / 2. nullopt = the sample is torn or unrelated (a
@@ -158,7 +177,7 @@ inline std::optional<Pair> ProjectOffset(const Observed& s)
         !std::isfinite(s.ndcX) || !std::isfinite(s.ndcY) || std::fabs(s.rawX) > 4.0f || std::fabs(s.rawY) > 4.0f)
         return std::nullopt;
     float x = static_cast<float>(static_cast<double>(s.ndcX) * s.width * 0.5);
-    float y = static_cast<float>(-static_cast<double>(s.ndcY) * s.height * 0.5);
+    float y = static_cast<float>(static_cast<double>(ApplySignMask(s.ndcY, s.ndcYSignMask)) * s.height * 0.5);
     if (s.rawX == 0.0f && s.rawY == 0.0f)
         x = y = 0.0f;
     // Both axes must describe the same strength; torn, stale or unrelated storage is refused rather than turned into an offset.

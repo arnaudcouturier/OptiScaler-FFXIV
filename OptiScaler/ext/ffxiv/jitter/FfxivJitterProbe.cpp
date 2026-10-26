@@ -6,6 +6,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
+#include "ext/ffxiv/ActiveBuild.h"
 #include "ext/upscaler/UpscalerSeams.h"
 
 #include <Config.h>
@@ -50,11 +51,12 @@ struct NgxEnvironment
 
     std::unique_lock<std::mutex> Lock() { return std::unique_lock<std::mutex>(S().mutex); }
 
-    // The executable identity is checked once per session (MatchCurrentProcess walks the module headers).
+    // The build the probe reads: ext::ffxiv::ActiveBuild() while the build gate (ext/ffxiv/resolve/Gate.h) has enabled the jitter probe (the camera
+    // chain seams usable; on an unknown build the key was on), nullptr otherwise. Not cached: the gate is immutable once published, and a
+    // refusal before the startup must not stick. Under the rollback key this is the exact known build, as MatchCurrentProcess was.
     const GameBuild* Build()
     {
-        static const GameBuild* build = MatchCurrentProcess();
-        return build;
+        return ext::ffxiv::BuildFor(ext::ffxiv::resolve::Feature::JitterProbe);
     }
 
     std::uintptr_t ModuleBase() { return reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)); }

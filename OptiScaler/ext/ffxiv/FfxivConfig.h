@@ -19,6 +19,10 @@ struct FfxivConfig
     CustomOptional<bool> jitterCorrection { false }; // [FFXIV] JitterCorrection: experimental, learns the ratio the game applies and scales the reported jitter by it
     CustomOptional<float> jitterScaleOverride { 0.0f }; // [FFXIV] JitterScaleOverride: experiment, a fixed scale (0.25 to 1.0) instead of the learned one; 0 = off
     CustomOptional<bool> jitterSource { false };     // [FFXIV] JitterSource: experimental, fixes the jitter at the source (full lattice, repeating cycle, told what was drawn); ext/ffxiv/jitter
+    // Game build handling (ext/ffxiv/resolve). Persistent keys, read once when the game's first device is hooked; no menu control.
+    CustomOptional<bool> legacyGameBuild { false };   // [FFXIV] FfxivLegacyGameBuild: rollback, exactly the behaviour before pattern search (exact build match, compile-time table, no resolve)
+    CustomOptional<bool> unknownBuildHooks { false }; // [FFXIV] FfxivUnknownBuildHooks: allow the features that read game addresses on a game build the table does not know
+    CustomOptional<bool> forceUnknownBuild { false }; // [FFXIV] FfxivForceUnknownBuild: debug, ignore the table so the resolver's values alone can be tried on today's exe
     CustomOptional<bool> automaticReShadeDepth { false }; // [FFXIV] AutomaticReShadeDepth: ReShade effects get a copy of the scene depth at the output size (ext/reshade/ReShadeDepth.h)
     // [FFXIV] AutomaticReShadeMotionScale: ini only (no menu control). The motion vectors that REST hands to ReShade are realigned with the
     // rest of the G-buffers; this multiplies their VALUES by output/render per axis as well. DERIVED (not yet confirmed in game): the switch

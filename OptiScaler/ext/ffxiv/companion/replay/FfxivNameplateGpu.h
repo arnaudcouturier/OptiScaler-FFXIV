@@ -107,10 +107,10 @@ inline void Arm(const ext::ffxiv::companion::replay::FfxivNameplatePackets::Capt
     for(const auto& packet:capture.packets)
     {
         uintptr_t wrapper=0,identity=0;
-        std::memcpy(&wrapper,packet.header.data()+ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset,8);
+        std::memcpy(&wrapper,packet.header.data()+ext::ffxiv::ActiveBuild().companion.batchWrapperOffset,8);
         // Offset is only read as an identity hint. Actual resource must be found
         // via PSGetShaderResources/GetResource on the immediate context.
-        if(!ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset,identity) || !identity) continue;
+        if(!ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::ActiveBuild().companion.resourceWrapperOffset,identity) || !identity) continue;
         bool found=false; for(const auto& t:textures) found |= t.identity==identity;
         if(!found && textures.size()<8) { Texture t; t.identity=identity; textures.push_back(std::move(t)); }
         states<<"packet_texture "<<std::hex<<wrapper<<" resource "<<identity<<std::dec<<'\n';

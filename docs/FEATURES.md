@@ -39,6 +39,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [FFXIV lighting scan](#lighting-scan) | ported from SirenBrink's fork | runs inside the tested NR path |
 | [FFXIV Companion nameplates](#companion-nameplates) | ported from SirenBrink's fork | tested |
 | [Composition swapchain hook](#composition-swapchain-hook) | ported from SirenBrink's fork (janblade's hook) | untested on its own |
+| [Game build detection by pattern search](#game-build-detection-pattern-search) (`FfxivUnknownBuildHooks`, `FfxivLegacyGameBuild`, `FfxivForceUnknownBuild`) | fork | new; unit-tested offline (all 81 seams found on the current executable); never run in game yet; the address features on an unlisted build are opt-in, off by default |
 | [Game jitter probe](#game-jitter-probe) (`JitterProbe`) | fork | diagnostic, off by default; tested (ratio 0.600) |
 | [Jitter correction](#jitter-correction) (`JitterCorrection`, `JitterScaleOverride`) | fork | experimental, off by default; the correction ran in game and scaled the told jitter (2026-10-20 and 2026-10-23); its earlier version showed no visible gain at the Quality mode (2026-10-19); the look of the current version is not recorded |
 | [Jitter source](#jitter-source) (`JitterSource`) | follows SirenBrink's approach, fork code | experimental, opt-in, off by default; full lattice seen in game; "less jumpy" impression confounded by `ui_free` |
@@ -302,7 +303,7 @@ It leaves ReShade alone, and ReShade keeps the depth it detected, whenever anyth
 
 ## FFXIV module
 
-Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activates only when the running `ffxiv_dx11.exe` matches the supported build recorded in `ext/ffxiv/GameBuild.h` (see [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md)); on any other executable the pieces below do nothing. The module implements the interfaces in `ext/game/`. The build gate compares the executable's PE `TimeDateStamp` and `SizeOfImage`; SirenBrink's fork compares fixed addresses with `memcmp`. The addresses and guard bytes are SirenBrink's.
+Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. The pieces that identify the game by program name or shader fingerprint run on any `ffxiv_dx11.exe`. The pieces that read or hook the game's code (native quality, the jitter probe and source, the Companion native hooks, the character preview lookup) run on the supported build recorded in `ext/ffxiv/GameBuild.h`, and on a patched build only when `[FFXIV] FfxivUnknownBuildHooks` is on and the pattern search found every address they need (see [Game build detection](#game-build-detection-pattern-search), [FFXIV-PATTERN-SEARCH.md](FFXIV-PATTERN-SEARCH.md) and [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md)). The module implements the interfaces in `ext/game/`. The build gate compares the executable's PE `TimeDateStamp` and `SizeOfImage`; SirenBrink's fork compares fixed addresses with `memcmp`. The addresses and guard bytes are SirenBrink's.
 
 ### Native quality and forced quality
 
@@ -375,6 +376,18 @@ Everything that is specific to FFXIV is under `OptiScaler/ext/ffxiv/`. It activa
 **Status.** tested. **Config.** `[Companion] HudReplacement`, `HudInterpolation`. **Menu.** `ffxiv_companion` (tab FFXIV, card "FFXIV Companion (nameplates)", shown for FFXIV).
 
 **Code and seams.** `ext/ffxiv/companion/`. Seams: game, dx11bridge `AfterSharedCopy`, core `HooksBypassed` (lets the layer's own device and swapchain calls pass the fork's hooks).
+
+### Game build detection (pattern search)
+
+**Origin.** Fork code. The one scan it generalises, the CharaView accessor pattern, comes with the [Character preview](#character-preview-charaview) entry; the other anchors were written for this fork from the executable's code. SirenBrink's fork compares fixed addresses with `memcmp`.
+
+**What it does.** Finds the addresses the FFXIV hooks need (functions, globals, struct offsets, one table) by instruction patterns, once per game start at the game's first device, before any hook is installed. On the supported build the table of `GameBuild.h` is used and the search cross-checks it. On a patched build the search result feeds the features that need addresses, only with `FfxivUnknownBuildHooks=true` and only the features whose addresses were all found; the others go off alone, with their reason in the log. The name-based and shader-based features run on any `ffxiv_dx11.exe`. `tools/ffxiv-resolve` runs the same search offline on a new executable and, with `--emit-gamebuild`, writes the new table entry for review. Limits (fixed struct offsets are not self-healing, a compiler change defeats any pattern set, shader catalogs are checked only by the in-game log) are listed in [FFXIV-PATTERN-SEARCH.md](FFXIV-PATTERN-SEARCH.md).
+
+**Status.** New. Unit-tested offline: all 81 seams `Found` on the current executable with every bound value equal to the table, mutation-tested anchors and gate. `LiveImage`, `EntryPatched` detection against a real injector and the shape gating have never run inside the game; the plan is [FFXIV-PATTERN-SEARCH-TEST-PLAN.md](FFXIV-PATTERN-SEARCH-TEST-PLAN.md). `FfxivUnknownBuildHooks` stays off by default until one real patch is proven.
+
+**Config.** `[FFXIV] FfxivLegacyGameBuild` (false: rollback to the exact-match behaviour), `FfxivUnknownBuildHooks` (false), `FfxivForceUnknownBuild` (false: debug, treats today's executable as unknown). Read once at the first device hook; ini fragment `ext/ini/FFXIV.ini`. **Menu.** None.
+
+**Check.** Log lines `[ffxiv-resolve]` (one per seam and a total), `[ffxiv-gate]` (build, one line per feature, four cross-checks, the not-self-healing offsets on an unknown build) and `[ffxiv-catalog]` (the shader catalogs; a healthy known build reads `UI 6/7` and `UI boundary ok`). **Code and seams.** `ext/ffxiv/resolve/`, `ext/ffxiv/catalog/`, `ext/ffxiv/ActiveBuild.h`; started by `StartOnce()` at the top of `ext::game::OnD3D11DeviceHooked` in `ext/Seams.cpp`. No seams in upstream files. The CLI is under `tools/ffxiv-resolve/` and is not part of the product.
 
 ### Composition swapchain hook
 

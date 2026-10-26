@@ -3,6 +3,7 @@
 #include "ext/ffxiv/ui/FfxivUiBoundary.h"
 
 #include "ext/core/HooksBypass.h"
+#include "ext/ffxiv/catalog/FfxivCatalog.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
 #include "ext/ffxiv/ui/UiDiag.h"
@@ -152,6 +153,13 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
             return ext::hudless::TakeResult::NoSource;
         if (!ext::hudless::Wanted())
             return ext::hudless::TakeResult::NotThisFrame;
+        // Partial UI catalog (a game patch recompiled some of the UI shaders, so their CRCs no longer match): R1b could then fire on a
+        // later UI draw than the real first HUD draw and the "UI-free" capture would contain HUD pixels. Fail safe: no boundary this frame, the
+        // engine falls back (Reason::NoBoundaryThisFrame). Decided per frame, never latched, so a shader created late clears it. Not even the live
+        // source is consulted: its Take() would arm the ReShade presets at a boundary that cannot be trusted. A healthy build (6 or 7 of the 7 UI
+        // shaders created) is unaffected.
+        if (!ext::ffxiv::catalog::UiBoundaryUsable())
+            return ext::hudless::TakeResult::NotThisFrame;
         try
         {
             return Live().Take(out);
@@ -169,6 +177,8 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
             return "boundary detector not armed";
         if (!ext::hudless::Wanted())
             return "diagnostic build: boundary observed, no frame delivered";
+        if (!ext::ffxiv::catalog::UiBoundaryUsable())
+            return "UI shader catalog incomplete: boundary not trusted";
         try
         {
             return Live().LastReason();
@@ -380,6 +390,9 @@ void OnPresentBegin()
 {
     try
     {
+        // One Present for the shader catalog health log. BEFORE the Armed() test: a default-ini session (Mode off, Diagnostics off) is
+        // not armed and still has to get its catalog summary line (catalog health at first launch is the point).
+        ext::ffxiv::catalog::OnPresent();
         RefreshArmed();
         if (!Armed())
             return;

@@ -1,6 +1,7 @@
 #pragma once
 #include "FfxivNameplatePackets.h"
 #include "../../../core/Crc32.h"
+#include "../../catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -39,9 +40,11 @@ inline UINT FormatBytes(DXGI_FORMAT f)
 }
 inline void TagLayout(ID3D11InputLayout* object,const D3D11_INPUT_ELEMENT_DESC* elements,UINT count,const void* code,SIZE_T size)
 {
+    ext::ffxiv::catalog::OnLayoutSeen(); // ext: the nameplate catalog counts as measured once any layout was created
     if(!object || !elements || !count || count>16 || !code || !size || size>256*1024) return;
     const auto crc=Crc(code,size);
     if(crc!=2964264238u && crc!=1445359818u && crc!=3153679471u) return;
+    ext::ffxiv::catalog::OnNameplateVertexShader(code,size,crc); // ext: catalog health (before the element validation below can return)
     Layout layout; layout.count=count;
     std::array<UINT,32> ends{};
     for(UINT i=0;i<count;++i)
@@ -182,14 +185,14 @@ struct Session
         size_t total=0;
         for(const auto& p:capture.packets)
         {
-            uintptr_t wrapper=0,identity=0; memcpy(&wrapper,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset,8);
+            uintptr_t wrapper=0,identity=0; memcpy(&wrapper,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchWrapperOffset,8);
             const UINT stride=p.layout==0?40:p.layout==4?24:32;
             const bool supported=p.layout==0 || p.layout==4 || p.layout==5 || p.layout==6;
             total+=p.vertices.size();
-            uint16_t extension=0;memcpy(&extension,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchExtensionOffset,2);
+            uint16_t extension=0;memcpy(&extension,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchExtensionOffset,2);
             if(!supported || p.error || p.kind!=0x22 || extension || !p.count || p.count%4 || p.count>65536 || p.stride!=stride ||
                p.vertices.size()!=size_t(p.count)*stride || total>8*1024*1024 ||
-               !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset,identity) || !identity)
+               !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::ActiveBuild().companion.resourceWrapperOffset,identity) || !identity)
             { valid=false; continue; }
             draws.push_back({p,identity});
         }

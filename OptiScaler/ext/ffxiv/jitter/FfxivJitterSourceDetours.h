@@ -98,6 +98,7 @@ struct ObserveArgs
     std::uintptr_t caller = 0;          // the detour's return address
     std::uintptr_t expectedCaller = 0;  // exe + producerReturnRva; 0 = no build
     std::uintptr_t camera = 0;          // the getter's argument
+    std::uint32_t ndcYSignMask = kNdcYSignMask; // JitterSourceBuild::ndcSignMaskBits of the build the hooks were verified against
 };
 
 // The detour of the camera getter: observe only. The world-scene NGX packet producer is the one caller sampled; the pointer it gets is the game's
@@ -128,6 +129,7 @@ void* RunObserve(SharedState& state, const ObserveArgs& a, Getter&& getter, Read
             o.width = size[0];
             o.height = size[1];
             o.timeMs = nowMs();
+            o.ndcYSignMask = a.ndcYSignMask;
             if (ProjectOffset(o))
                 state.RecordObserved(o);
         }

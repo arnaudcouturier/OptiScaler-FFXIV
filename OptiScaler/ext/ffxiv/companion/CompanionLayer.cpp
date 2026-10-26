@@ -164,7 +164,7 @@ bool InterceptVisibilityIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT bas
         if(!ContextIdentity::Matches(c,boundContextToken)){++visibilityRejects[0];return false;}
         ++forwardedContexts;
     }
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
     UINT savedCount=0,savedStart=0;INT savedBase=0;
     memcpy(&savedCount,command->command.data()+build.indexCountOffset,4);
     memcpy(&savedStart,command->command.data()+build.startIndexOffset,4);

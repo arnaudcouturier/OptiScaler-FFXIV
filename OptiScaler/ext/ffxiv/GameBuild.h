@@ -245,6 +245,13 @@ struct JitterSourceBuild
     std::uint32_t rendererSceneSizeOffset = 0x428; // u32 width, u32 height of the scene (render) size
     std::uint32_t rendererExtentOffset = 0x700;    // u16 extent0 at +0, u16 extent2 at +4
     std::uint32_t deviceOutputSizeOffset = 0x8c;   // u32 output width, u32 output height
+
+    // The two constants the source-fix core assumes (FfxivJitterSourceCore.h reads them from here at run time). Constants, never resolved: the
+    // seams jitterSource.strengthFloor and jitterSource.ndcSignMask are the live check (ValueEquals of exactly these bits), and the gate
+    // (ext/ffxiv/resolve/Gate.h) refuses the whole fix on any build where one of them is not Usable, i.e. where the executable's value
+    // differs from what the core was written against.
+    std::uint32_t strengthFloorBits = 0x3a83126f; // float 0.001f, the constant the strength expression subtracts and adds
+    std::uint32_t ndcSignMaskBits = 0x80000000;   // the sign mask `xorps` applies to the NDC y (the generator output's y is negated)
 };
 
 struct GameBuild

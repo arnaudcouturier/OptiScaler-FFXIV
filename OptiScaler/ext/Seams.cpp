@@ -8,7 +8,9 @@
 #include "ext/ffxiv/companion/Companion.h"
 #include "ext/ffxiv/companion/CompanionCallbackMap.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/ActiveBuild.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
+#include "ext/ffxiv/resolve/ResolveStartup.h"
 #include "ext/upscaler/MipBindHooks.h"
 #include "ext/upscaler/NgxThreadTrace.h"
 
@@ -20,6 +22,11 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
 {
     if (device == nullptr)
         return;
+
+    // Pattern search (ext/ffxiv/resolve/ResolveStartup.h): resolve the game executable ONCE, before the first Detour of the fork over it
+    // (companion::Install below, the native-quality and jitter-source hooks later) and before the game selector's answer is used. Idempotent; a
+    // non-FFXIV executable returns at once.
+    ext::ffxiv::resolve::StartOnce();
 
     // Diagnostic for a code-review finding (not a fix): this seam fires on every device that reaches
     // HookToDeviceLocal, matching the oracle's own placement (D3D11_Hooks.cpp, before the "already hooked"
@@ -60,7 +67,10 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
                  ext::ffxiv::lighting::FfxivLightingCapture::installed.load());
     }
 
-    if (Current().hdr != nullptr)
+    // The native hooks read game addresses: Group 2 of the gate (ext/ffxiv/resolve/Gate.h). Known build: as before (Install still compares the
+    // live bytes with the guard of the build). Unknown build: only with [FFXIV] FfxivUnknownBuildHooks and every companion seam usable. The
+    // gate's own [ffxiv-gate] line says why it is off, so a refusal is logged once instead of once per device.
+    if (Current().hdr != nullptr && ext::ffxiv::FeatureEnabled(ext::ffxiv::resolve::Feature::CompanionNative))
         ext::ffxiv::companion::Install(device);
 
     // Bind-time mip bias (ext/upscaler/MipBindHooks.h): sampler hooks on this device and its immediate context; FFXIV only.

@@ -137,11 +137,11 @@ inline void Stage(const ext::ffxiv::companion::replay::FfxivNameplatePackets::Ca
     size_t bytes=0;
     for(const auto& p:capture.packets)
     {
-        uintptr_t wrapper=0,identity=0;memcpy(&wrapper,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset,8);
+        uintptr_t wrapper=0,identity=0;memcpy(&wrapper,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchWrapperOffset,8);
         const UINT stride=p.layout==0?40:p.layout==4?24:32;bytes+=p.vertices.size();
-        uint16_t extension=0;memcpy(&extension,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchExtensionOffset,2);
+        uint16_t extension=0;memcpy(&extension,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchExtensionOffset,2);
         if(!p.source || p.error || p.kind!=0x22 || extension || !p.count || p.count%4 || p.count>65536 || p.stride!=stride || p.vertices.size()!=size_t(p.count)*stride || bytes>8*1024*1024 ||
-           !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset,identity) || std::find(supported.begin(),supported.end(),std::make_pair(identity,p.layout))==supported.end())
+           !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(wrapper+ext::ffxiv::ActiveBuild().companion.resourceWrapperOffset,identity) || std::find(supported.begin(),supported.end(),std::make_pair(identity,p.layout))==supported.end())
         {++fallbacks;latest.reset();pendingSources.clear();return;}
         frame->draws.push_back({p,identity});pendingSources.push_back(p.source);
     }
@@ -158,7 +158,7 @@ struct BatchFilter
         auto frame=pending;
         UINT count=0;
         if(!WantFrame() || Seconds()-frame->time>0.05 || GetTickCount64()-heartbeat.load()>100 ||
-           !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(renderer+ext::ffxiv::kCurrentBuild.companion.rendererBatchListOffset,original) || !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(renderer+ext::ffxiv::kCurrentBuild.companion.rendererBatchCountOffset,count) || count>8192)
+           !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(renderer+ext::ffxiv::ActiveBuild().companion.rendererBatchListOffset,original) || !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(renderer+ext::ffxiv::ActiveBuild().companion.rendererBatchCountOffset,count) || count>8192)
         {Cancel();return;}
         entries.resize(count);
         if(count && !ext::ffxiv::companion::replay::FfxivNameplatePackets::ReadBytes(original,entries.data(),entries.size()*sizeof(entries[0]))) {Cancel();return;}
@@ -170,7 +170,7 @@ struct BatchFilter
             const auto sourceIndex=static_cast<size_t>(source-pendingSources.begin());
             if(seen[sourceIndex]){Cancel();return;}seen[sourceIndex]=true;
             const auto packet=std::find_if(frame->draws.begin(),frame->draws.end(),[&](const Draw& d){return d.packet.source==entry[1];});
-            std::array<unsigned char,ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> live{};
+            std::array<unsigned char,ext::ffxiv::kNativeBatchHeaderBytes> live{};
             if(packet==frame->draws.end() || !ext::ffxiv::companion::replay::FfxivNameplatePackets::Read(entry[1],live) || live!=packet->packet.header)
             {Cancel();return;}
             entry[1]=0;++found;
@@ -180,7 +180,7 @@ struct BatchFilter
         std::lock_guard lock(mutex);
         if(!WantFrame()){latest.reset();pending.reset();return;}
         uintptr_t replacement=reinterpret_cast<uintptr_t>(entries.data());
-        if(!scope.Enter(renderer+ext::ffxiv::kCurrentBuild.companion.rendererBatchListOffset,original,replacement)) {++fallbacks;latest.reset();return;}
+        if(!scope.Enter(renderer+ext::ffxiv::ActiveBuild().companion.rendererBatchListOffset,original,replacement)) {++fallbacks;latest.reset();return;}
         owner=renderer;pending.reset();
         previous=latest;latest=std::move(frame);++updates;
     }
@@ -210,10 +210,10 @@ inline bool BuildMidpoint(const Frame& old,const Frame& current,const std::map<s
     {
         const auto& a=old.draws[i];const auto& b=current.draws[i];const auto& p=a.packet;const auto& q=b.packet;
         if(a.identity!=b.identity || p.key!=q.key || p.layout!=q.layout || p.count!=q.count || p.stride!=q.stride ||
-           memcmp(p.header.data(),q.header.data(),ext::ffxiv::kCurrentBuild.companion.batchVerticesOffset) ||
-           memcmp(p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchFormatOffset,
-                  q.header.data()+ext::ffxiv::kCurrentBuild.companion.batchFormatOffset,
-                  ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize-ext::ffxiv::kCurrentBuild.companion.batchFormatOffset))return false;
+           memcmp(p.header.data(),q.header.data(),ext::ffxiv::ActiveBuild().companion.batchVerticesOffset) ||
+           memcmp(p.header.data()+ext::ffxiv::ActiveBuild().companion.batchFormatOffset,
+                  q.header.data()+ext::ffxiv::ActiveBuild().companion.batchFormatOffset,
+                  ext::ffxiv::ActiveBuild().companion.nativeBatchHeaderSize-ext::ffxiv::ActiveBuild().companion.batchFormatOffset))return false;
         const auto material=materials.find({b.identity,q.layout});if(material==materials.end())return false;
         const auto& layout=material->second.layout;
         const Element* position=nullptr;

@@ -1,59 +1,170 @@
 # After an FFXIV patch
 
-What to do when a game patch changes `ffxiv_dx11.exe`. Some of the fork's FFXIV features read the game's memory or hook its functions at fixed addresses. A patch moves those addresses; the fork notices and switches those features off instead of guessing. This runbook says how the check works, which addresses exist, how to find them again in the new executable, and how to prove the new values are right.
+What to do when a game patch changes `ffxiv_dx11.exe`. The fork finds the game's code addresses by pattern search and checks them against its table of the last verified build ([FFXIV-PATTERN-SEARCH.md](FFXIV-PATTERN-SEARCH.md) explains the mechanism). On patch day you run a command-line tool against the new executable, read what it found, let it write the new table entry for review, build, test and release. No game launch and no disassembler is needed unless a seam fails.
 
-Nothing in this document needs the game's source. Everything is recovered from the executable with a disassembler or decompiler (Ghidra or a comparable tool).
+Nothing here needs the game's source. Anything that has to be recovered by hand comes from the executable with a disassembler or decompiler (Ghidra or a comparable tool).
 
-## 1. How the build identity guard works
+## 1. What happens to players before you do anything
 
-All game-build-dependent values are in one file, `OptiScaler/ext/ffxiv/GameBuild.h`; `GameBuild.cpp` has the matching code. There are three layers.
+| Part of the fork | On the new, unlisted build |
+|---|---|
+| Features that identify the game by program name or shader fingerprint: scene HDR, lighting, HUD-less, geometry, markers, mipmap bias, the FFXIV quirks | run, as on any `ffxiv_dx11.exe`. (For these features the one exact build in the table is identified by its PE timestamp and size, whatever the file is called; the program name only decides on a build the table does not know.) |
+| Features that read or hook addresses of the executable: native quality, jitter probe, jitter source, companion native hooks, the character preview lookup | off by default. With `FfxivUnknownBuildHooks=true` each runs if every address it needs was found |
+| DLSS-G, XeFG, NR core, OptiScaler itself | as in plain OptiScaler |
 
-1. **Image identity.** `GameBuild` holds the PE `TimeDateStamp` and `SizeOfImage` of the supported executable. `MatchBuild()` compares them with the running process; `MatchCurrentProcess()` reads the running executable's own headers and calls it. `ext::game::Current()` (`OptiScaler/ext/game/Game.cpp`) does the same walk once at start-up. A mismatch means every game-module pointer stays null and every FFXIV feature stays off (section 6). This layer is silent: the only sign is that the log line `Matched supported FFXIV build for game-module seams` is missing.
-2. **Byte guards.** Before any hook is installed, the code reads the bytes at each hook target and compares them with the expected prologue (`settingsInstructions`, `querySizeInstructions`, `rendererUpdateInstructions`, `resizeCallbacksInstructions`, `batchInstructions`, `enqueueInstructions`, `bindStateInstructions` in `GameBuild.h`). Any difference logs a warning and installs nothing (fail closed). These checks sit behind layer 1: the code that reads the bytes is only reached when the image identity matched, so on a patched executable (new timestamp) none of these warnings can appear. The guards are what catch a patch that keeps the image size by chance, or a function that moved by a few bytes.
-3. **Plausibility checks at run time.** Pointer reads are bounds-checked and structures are range-checked (queue sizes, counts); a failed read makes that frame fall back to the native path. The one pointer that has no byte guard, the nameplate module global, is logged once at start-up so you can see whether the chain resolves (section 4).
+The log block that says which (`[ffxiv-gate]`, `[ffxiv-resolve]`) is described in [FFXIV-PATTERN-SEARCH.md](FFXIV-PATTERN-SEARCH.md). A release that pins the new build in `GameBuild.h` brings the default-key players back to the full, verified fast path. That release is the end point of this runbook.
 
-**Fail open.** In every case the game keeps running with the fork's FFXIV features disabled, as if the fork were plain OptiScaler: no crash, no hook, no memory read outside the guarded paths. The disk hash of the executable is not checked at run time; the identity is the PE header plus the byte guards.
+## 2. The patch-day workflow
 
-## 2. Single build, not a table
+1. **Get the new executable and keep a copy of the old one.** Work on copies. The CLI only reads the file.
+2. **Build the CLI.** It lives under `tools\ffxiv-resolve\` and is never part of the product. The test runner builds it as part of `ffxiv_resolve_cli`:
+   ```powershell
+   pwsh -NoProfile -File tools\test.ps1 -Filter ffxiv_resolve_cli
+   ```
+   For a copy you keep, use the same compile line from a `vcvars64` prompt of the VC tools installation (the one `tools\test.ps1` finds; plain `vswhere -latest` can return a Visual Studio without the C++ tools, so use `-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64`, or set `OPTISCALER_VCVARS`):
+   ```
+   cl /nologo /std:c++20 /EHsc /W4 /DNOMINMAX /Fo<out>\ /Fe<out>\ffxiv-resolve.exe /I<repo>\OptiScaler /I<repo>\tools\ffxiv-resolve <repo>\tools\ffxiv-resolve\main.cpp
+   ```
+3. **Run it on the new executable.**
+   ```
+   ffxiv-resolve "<new ffxiv_dx11.exe>" --strict --margin
+   ```
+   It prints the image identity, one line per seam in the format of the game's log, the generated entry, the count of unbound fields and, with `--margin`, how far each pattern is from the next-nearest site in the executable. The resolve itself takes a fraction of a second, `--margin` a few seconds more.
+4. **Read the status table** (section 3). Every seam should read `Found`. `--strict` exits 2 for anything else.
+5. **Generate the new table entry** (section 5):
+   ```
+   ffxiv-resolve "<new ffxiv_dx11.exe>" --emit-gamebuild OptiScaler\ext\ffxiv\GameBuild.h --out GameBuild.new.h
+   ```
+6. **Review the "NOT SELF-HEALING / NOT RE-VERIFIED" list** the tool prints (section 5). Those fields still hold the old build's values.
+7. **Install the reviewed text as `GameBuild.h`** (a copy over the file, by you; the tool never writes the source), update the tests that pin the table, build, run the full test suite (section 6).
+8. **Play-test** with [FFXIV-PATTERN-SEARCH-TEST-PLAN.md](FFXIV-PATTERN-SEARCH-TEST-PLAN.md), then tag a release candidate (section 6).
 
-`GameBuild.h` defines one build, `kCurrentBuild`, and `MatchBuild()` compares only against it. A patch is therefore "replace the values in `kCurrentBuild`": the old build stops being supported. There are 59 direct references to `kCurrentBuild` outside `GameBuild.h` (the Companion code reads `kCurrentBuild.companion.*` in about forty places), and two members, `nativeBatchHeaderSize` and `drawCommandSize`, are used as compile-time `std::array` sizes. Supporting two builds at once would need, in this order:
+If a seam fails and you are not ready to write a new anchor, you can still release: the features that need that seam stay off by themselves, the rest of the fork runs. Say which features are off in the release notes.
 
-1. `MatchBuild()` returning the matching entry of a table instead of the single constant.
-2. The 59 references going through a cached pointer to the matched entry (`ext::game::Current()` is the natural owner) instead of the constant.
-3. The two array sizes moved out of the per-build struct into shared constants (with a `static_assert` that every entry agrees), or the arrays made dynamic.
-4. A unit test per entry for the guard arrays.
+## 3. Reading the CLI output
 
-None of that is done. If you only need to follow the game, edit the values in place.
+One line per seam, the same text the game writes to `OptiScaler.log`:
 
-## 3. Every game address the code uses
+```
+[ffxiv-resolve] quality.querySize Found rva=0x352350 hits=1+1+1 table=0x352350 agree ms=0.127
+```
 
-All values are for the build recorded in `GameBuild.h` (`TimeDateStamp 0x6ad10bfd`, `SizeOfImage 0x381f000`). RVAs are relative to the image base. "Guard" means a byte array that the code compares before use.
+`hits=1+1+1` is what each anchor left after its predicates (a seam has one to three anchors). `table=` shows the table value when the executable is the table's build and `n/a` otherwise. A line that is not a clean `Found` starts with `WARN`. `[ffxiv-resolve] total ...` ends the block (seams, counts per status, scan time, stamp, size, `known=yes|no`).
 
-### 3.1 Native quality (`ext/ffxiv/quality/FfxivNativeQualityHooks.h`)
+`known=no` is what a new build shows: the table is never offered to a different build, so there is no cross-check and no `DISAGREE`.
 
-| Name in `GameBuild.h` | Value | What it is | Guard | Used by |
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The report printed and every requested check passed. With `--emit-gamebuild`: the entry was emitted and every bound field was re-verified |
+| 1 | Usage error, the file is not a readable x64 PE, the header cannot be read or does not fit the field table, `--out` is the source header or the input executable, or the output cannot be written |
+| 2 | `--strict` and a seam is not plain `Found`, or disagrees with the table, or a registry error, or (with `--margin`) an anchor is below its required margin. Also `--emit-gamebuild` refused because a bound seam is unusable |
+| 3 | `--compare-table` on the table's own build: a seam disagrees with the table, or the entry resolved without the table differs from it |
+| 4 | `--emit-gamebuild --allow-partial` emitted a header with fields that are not re-verified |
+
+When several apply, the worst wins: 1, then 2, then 3, then 4.
+
+### What each status means and what to do
+
+| Status | What it means | In the game | What to do |
+|---|---|---|---|
+| `Found` | All anchors that could be evaluated agree on one unique value | the seam is usable | nothing |
+| `FoundSingleAnchor` | One anchor found it and the others found nothing, or it rests on a weak seam | usable, a WARN in the log | Usable but unconfirmed. Find out which anchor stopped matching (the seam line shows `hits=1+0`) and check the value against the executable: the decompiler, or the second anchor's logic. Either repair the stale anchor or accept the value on purpose. The codegen marks the line `// single-anchor: review before pinning` |
+| `NotFound` | No anchor produced a candidate, or a seam it depends on has no value | every feature that needs the seam stays off (the log names it). On the known build a seam that is not a shape is filled from the table | The code was rewritten, or the pattern is too specific for the new compiler output. Find the function by hand (appendix B), write a new anchor in `OptiScaler\ext\ffxiv\resolve\Anchors*.h` with its pinned test, or ship with the feature off |
+| `Ambiguous` | More candidates than the seam expects | as `NotFound` | The pattern is no longer unique, or the compiler emitted another copy. Tighten the pattern or add a predicate (a call relation, a position relative to another seam). `deviceSize` is the known sensitive case (below) |
+| `Conflict` | Two anchors found different values, or a unique anchor is not among another anchor's candidates | seam inert (no value) | The dangerous class: one anchor now matches the wrong place. Do not pin anything that depends on it. Decompile both candidates, fix the wrong anchor |
+| `EntryPatched` | The function's first bytes are a jump (`E9`, `EB`, `FF 25`) | never hooked, also on the known build (it is not filled from the table) | In the file on disk this means the game itself now starts the function with a thunk. Look at it in the decompiler and anchor the real body, or use an anchor inside the function. In memory the same status is what a foreign hook (Dalamud, another injector) produces; that is logged at run time and is not fixable offline |
+| `DISAGREE` | The table's build only: a seam resolved to a value different from the table | the table wins, WARN | After an anchor change this means the change broke the seam (or the table is wrong). `--compare-table` exits 3. Fix before releasing |
+
+Other lines you can meet: `registry error: ...` (the anchor definitions themselves are inconsistent: `--strict` exits 2), `ffxiv-resolve: cannot use <file>: ...` (not an x64 PE, exit 1), a note `the image could not be scanned: ...` on every seam (a damaged copy of the file; not a verdict about the patch).
+
+**`jitterSource.deviceSize` and the copy count.** The strict 20-byte pattern for the device output size matches two byte-identical copies of a template instance (`0xd3f73` and `0xd4013`), and the seam expects exactly two, taking the first. A compiler that emits a third copy makes the seam `Ambiguous` and the jitter source goes off; a second copy that disappears does the same. If it happens, check in the decompiler that all the copies are the same template instance reading the pair at `+0x8c` and `+0x90`, then change `expectedHits` in `AnchorsJitter.h` together with its pinned test, or give the anchor a disambiguating predicate.
+
+**`companion.nameplateModulePointer` is medium confidence.** Three distinct code sites load the same global and walk the same pointer chain `[[[g] + 8] + 8]`, and the seam is `Found` only when all three agree. Nothing in the executable proves that the object at the end is the nameplate command queue. The last link is checked at run time: the first `Companion native submissions: queue chain module=0x... renderer=0x... queue=0x...` log line must show plausible, non-zero values in the world. Treat a `Found` here as "very likely", and do the in-game check before trusting a new build.
+
+**Shader catalogs cannot be checked here.** The shader CRC tables are content-addressed and the game's shaders are not in the executable. After a patch the log line `[ffxiv-catalog]` is the only evidence (appendix C).
+
+## 4. After the new build resolves: what the table still needs from you
+
+The search covers 81 seams and 77 fields of `GameBuild.h`, all the Rva and Guard fields. It does not cover the fields in `GameBuild.h` that the executable's code does not let it derive: 29 struct offsets (`companion` queue and batch header offsets, the CharaView entry offsets, the jitter object layout and others), 17 constants (sizes, counts, limits, and two sanity constants the jitter source checks live) and the CharaView anchor pattern. They keep the values the table already had. Section 5 explains how the tool lists them.
+
+## 5. `--emit-gamebuild`: the new table entry
+
+```
+ffxiv-resolve <exe> --emit-gamebuild <GameBuild.h> [--out <file>] [--allow-partial]
+```
+
+What it does:
+
+- It resolves the executable without the table (the pure pattern-search answer: no cross-check overwrite, no fallback to the table) and reads the given `GameBuild.h`.
+- It writes a **copy** of the header text with every bound field rewritten: each Rva, each struct offset a seam decodes, each guard byte array (same length), `timeDateStamp` and `sizeOfImage`. Comments, line endings and layout stay as they are. A value that is already right keeps the spelling it had.
+- The copy goes to `--out`, or to stdout. The source is never written, and `--out` may not name the source file or the input executable. Everything the tool says (the seam table, the changes, the review list) goes to stderr, so `> GameBuild.new.h` captures only the header.
+- **It refuses** (exit 2, nothing written) if the seam of any bound field is not usable on this executable, and lists the unresolved seams and the fields they fill. `--allow-partial` emits anyway: the unresolved fields keep their old text and get a trailing `// NOT re-verified for this build` (exit 4). A value found by one anchor, or one that rests on a weak seam, is written and marked for review.
+- A header that does not fit the field table (a bound member missing, an array whose length or literal count differs from the table, an initialiser that is not one integer literal) is an error, exit 1.
+
+The report has three parts you must read.
+
+1. **The seam status table** (every seam, its status, its value, how many candidates each anchor left) and **the values that changed** against the input header, one line each with old and new.
+2. **`== NOT SELF-HEALING / NOT RE-VERIFIED ==`.** The fields the resolver cannot derive, with the values that stand in the output: the 29 fixed struct offsets, the 17 constants, the CharaView pattern and mask, and every bound field whose seam failed (partial only). None of these was checked against the new executable. A patch that moved one of them is invisible to the tool. Check them by decompiling the code that reads them (appendix B names the functions), or by running the game and reading the log (the offsets are range-checked at run time, and the consumers refuse a read that fails). The jitter source offsets, `contextCacheOffset` and `targetsOffset` are written from the decoded instruction, but the strict shape that carries the offset also pins it: if a patch moved one, the shape seam fails and the codegen refuses, so a silently wrong value cannot come out of that path.
+3. **`== SHADER CATALOGS: NOT VERIFIABLE OFFLINE ==`.** The CRC catalogs (UI, scene, lighting, chara, companion, nameplate) cannot be checked against the executable: only the `[ffxiv-catalog]` line of the first in-game launch shows them. A healthy known build reads `UI 6/7` and `UI boundary ok`.
+
+The header's comments are copied unchanged. Anything that quotes the old build's addresses, the executable's SHA-256 or the game version (the `JitterBuild` and `JitterSourceBuild` notes, the CharaView accessor note) is stale; the tool lists the comment lines that still quote the old value of a changed field. Edit them by hand.
+
+## 6. Install, build, test, release
+
+1. Review `GameBuild.new.h` against the old file (`git diff --no-index OptiScaler\ext\ffxiv\GameBuild.h GameBuild.new.h`). Every changed line should be explainable: addresses move with the patch, guard arrays change only where a RIP-relative displacement sits in them.
+2. Copy it over `OptiScaler\ext\ffxiv\GameBuild.h`, fix the stale comments, and add the new executable's SHA-256, size and game version to the comment block.
+3. Update the tests that pin the table. `tests\ext\ffxiv\build\game_build.cpp` writes every RVA, offset and guard of the current build as a literal, by design, so a wrong edit fails it. Other tests name members or values of the header (chara, companion, jitter and the resolver tests that compare the entry text with the table). Run the full suite once; two of them were found only by the full run after the 2026.10.16 patch. Three more things carry build-C numbers on purpose and need the new ones. First, the real-executable tests (`resolve_golden_exe`, `gate_real_exe` and the `ffxiv_resolve_cli` runner) read `..\analysis\patch-20261016\ffxiv_dx11.exe`: point them at the new executable (their `Args` and the runner's `$gameExe`), or keep the old one as data and change what they expect. Second, `run_ffxiv_resolve_cli.ps1` pins the stamp `0x6ad10bfd`, the accessor's file offset `0x269fd0`, and the values `0x26abd0`, `0x290e490` and `0x290e498` of its negative control; these must be re-derived for the new build. Third, `resolve_emit_gamebuild.cpp` pins `0x290e498`, the `0x26abd0 -> 0x26ab40` line and a stale-comment case that relies on a header comment quoting `0x2ebd90`. Tests that plant their own committed bytes (the build-B and build-C fixtures) stay valid unchanged.
+4. Build (`tools\build-locked.ps1`) and test (`tools\test.ps1`; the full suite takes 6 to 40 minutes depending on other builds running). Check `tools\footprint.ps1` against the value before the change: the table edit is under `OptiScaler\ext\` and must not move it.
+5. Rebuild the CLI (the table is compiled into it) and re-run it against the new executable with `--strict --compare-table --margin`. It must exit 0 and say `the generated entry equals the table`. That proves the table you pinned is what the search finds.
+6. Play-test with [FFXIV-PATTERN-SEARCH-TEST-PLAN.md](FFXIV-PATTERN-SEARCH-TEST-PLAN.md) (runs 1 and 3 on the new build, default ini).
+7. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, what changed, what was reviewed by hand and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
+
+`GameBuild.h` holds one build (`kCurrentBuild`): the previous build is no longer in the table after the pin. It still runs through the unknown-build path (with `FfxivUnknownBuildHooks=true`) if its seams resolve.
+
+## 7. Build identities and history
+
+| | Game version | `TimeDateStamp` | `SizeOfImage` |
+|---|---|---|---|
+| Current (build C) | 2026.10.16 | `0x6ad10bfd` (2026-10-15 17:23 UTC) | `0x381f000` |
+| Previous (build B) | not recorded | `0x6ac3dc96` | `0x380a000` |
+
+Build C: executable sha256 `46A52AB1DBE80B9A8D6C4D4531BF66693904200C5135FACACD053EF28A5DE14A`, 51,976,960 bytes. Build B no longer exists on disk. What survives of it is a set of byte strings that were read from it in earlier work; the offline tests use them as the second build.
+
+B to C: every address moved. The globals by `+0x15000`, the nameplate module global by `+0x15090` (a different amount than its neighbours, and its naive address had no references), code by `-0xa0` to `+0x320`. Every guard was found again, and only the three guards that carry a RIP-relative displacement changed their bytes (settings, query size, renderer update). **RVA reuse trap:** an RVA of the old build can be a different function in the new one (`0x25f610` was the camera update in B and is the camera getter in C). Never carry an old RVA into a new anchor.
+
+Image identity is checked by the PE `TimeDateStamp` and `SizeOfImage` (`MatchBuild()`, `MatchCurrentProcess()`, and `ext/game/Game.cpp` at start-up); the disk hash is not checked at run time.
+
+## Appendix A. What each field of `GameBuild.h` is
+
+RVAs are relative to the image base. "Guard" is a byte array the hook code compares with the live bytes before it installs anything. The values are for build C.
+
+### A.1 Native quality (`ext/ffxiv/quality/FfxivNativeQualityHooks.h`, seams `quality.*`)
+
+| Field | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
 | `settingsInstructionsRva` | `0x3745d7` | Function body that loads the graphics settings and gates on `+0x54`, `+0x44`, `+0x45`, `+0x55` | 37 bytes | `SettingsGuardOk()`; if it fails, the settings read is disabled |
 | `querySizeRva` | `0x352350` | Wrapper around the game's DLSS size query (detoured) | 28 bytes | `DoInstall()` |
 | `rendererUpdateRva` | `0x2da5b0` | Renderer update (detoured) | 18 bytes | `DoInstall()` |
-| `resizeCallbacksRva` | `0x2369a0` | Resize-callback dispatcher (called, not detoured) | 20 bytes (generic prologue) | `DoInstall()` |
+| `resizeCallbacksRva` | `0x2369a0` | Resize-callback dispatcher (called, not detoured) | 20 bytes | `DoInstall()` |
 | `settingsPointerRva` | `0x290e470` | Global: pointer to the graphics settings | none | `DlaaRequiredNow()` |
 | `managerPointerRva` | `0x290e498` | Global: manager pointer | none | context lookup |
 | `devicePointerRva` | `0x2907d00` | Global: device pointer | none | resize-callback dispatch |
 | `settingsModeOffset` `0x54`, `settingsQualityOffset` `0x44`, `settingsDlaaOffset` `0x45`, `settingsRendererOffset` `0x47`, `settingsAdditionalOffset` `0x49`, `settingsSelectorOffset` `0x55` | | Fields of the settings structure; DLAA is required when `+0x54 == 2` and `+0x45 == 0` | via the settings guard | `DlaaRequiredNow()` |
 | `managerContextOffset` `0x4220`, `contextFlagsOffset` `0x181`, `contextCacheOffset` `0x150`, `deviceCallbacksOffset` `0x30`, `rendererSceneSizeOffset` `0x428` | | Manager to context, context flags and cache, device callback array (critical section at `+8`, count at `+0x38`), renderer scene size | none | live quality change and renderer update |
 
-### 3.2 Companion / nameplates (`ext/ffxiv/companion/`)
+### A.2 Companion / nameplates (`ext/ffxiv/companion/`, seams `companion.*`)
 
-| Name | Value | What it is | Guard | Used by |
+| Field | Value | What it is | Guard | Used by |
 |---|---|---|---|---|
 | `batch16Rva`, `batch32Rva` | `0x6e56d0`, `0x6e6270` | The two UI batch functions (16-bit and 32-bit index buffers), detoured | the same 16 bytes at both | `CompanionNative.cpp` |
 | `enqueueRva` | `0x240b80` | Command append (detoured) | 16 bytes | `CompanionNative.cpp` |
 | `bindStateRva` | `0x22d750` | Draw-state bind (detoured) | 16 bytes | `CompanionNative.cpp` |
-| `nameplateModulePointerRva` | `0x2ab8650` | Global: UI module pointer; the queue is `[[[g] + 8] + 8]` | **none** (medium confidence) | `CompanionNative.cpp`, `CompanionPackets.h`, `replay/FfxivNameplatePackets.h` |
-| `layoutSlotTableRva` | `0x217c760` | Read-only table: vertex slot per layout, 8-byte entries, low dwords `0,0,0,0,1,2,2,1,1` | none (pattern checked by hand) | `CompanionPackets.h`, `CompanionVisibilityQueue.h` |
+| `nameplateModulePointerRva` | `0x2ab8650` | Global: UI module pointer; the queue is `[[[g] + 8] + 8]` | none (medium confidence, section 3) | `CompanionNative.cpp`, `CompanionPackets.h`, `replay/FfxivNameplatePackets.h` |
+| `layoutSlotTableRva` | `0x217c760` | Read-only table: vertex slot per layout, 8-byte entries, low dwords `0,0,0,0,1,2,2,1,1` | none | `CompanionPackets.h`, `CompanionVisibilityQueue.h` |
 
-Structure offsets, all read by the Companion code; none has its own guard:
+Structure offsets, all read by the Companion code:
 
 - Renderer: `rendererBatchListOffset` `0x580`, `rendererBatchCountOffset` `0x588`, `rendererIndexBufferOffset` `0x1e0`, `rendererVertexAllocationOffset` `0x570`, `rendererVertexStrideOffset` `0x500`, `rendererVertexOffsetOffset` `0x504`, `rendererVertexSlotStride` `0x10`.
 - UI module and state: `moduleStatePointerOffset` `0x08`, `stateQueuePointerOffset` `0x08`, `resourceWrapperOffset` `0x68`, `nativeContextOffset` `0x17b8`, `drawStateCommandBackPointerOffset` `0x20`.
@@ -61,11 +172,42 @@ Structure offsets, all read by the Companion code; none has its own guard:
 - Queue: `queueHeadOffset` `0x50`, `queueRemainingOffset` `0x68`, `queueBlocksOffset` `0x6c`, `queueStridesOffset` `0x34`, `queueNextBlockOffset` `0x3f0`, entry size `nativeBatchEntrySize` 16.
 - Batch header (size `nativeBatchHeaderSize` 64): kind `0x00`, extension `0x04`, wrapper `0x10`, count `0x20`, vertices `0x28`, format `0x30` (low four bits are the layout); entry pointer `0x08`.
 - Draw command (`drawCommandType` 6, size `drawCommandSize` `0xb0`): type at `0x00`, `baseVertexOffset` `0x08`, `startIndexOffset` `0x14`, `indexCountOffset` `0x18`.
-- Declared but not read by any code today: `rendererQueuesOffset`, `rendererQueueCount`, `rendererQueueStride`, `drawStateFlagOffset`. They are kept as documentation of the structure.
+- Declared but not read by any code today: `rendererQueuesOffset`, `rendererQueueCount`, `rendererQueueStride`, `drawStateFlagOffset`.
 
-### 3.3 Things that are not addresses but break on a patch
+### A.3 Game jitter chain (`JitterBuild`, seams `camera.*`)
 
-Shader fingerprints. Several features recognise the game's shaders by size and CRC-32 of the compiled bytecode (and, for the lighting scan, by a 16-byte checksum). A patch that recompiles those shaders silently disables the feature, and the image-identity guard cannot see it. The tables are in:
+`cameraGlobalRva` `0x290dba0`: global holding the scene camera holder G; the camera is `[G + 0x3028]`, its 20-byte jitter object `{jx, jy, ndcX, ndcY, counter}` is at `[camera + 0x278]`. No guard: every hop is range- and readability-checked at run time. Read by `FfxivJitterProbe`.
+
+### A.4 Jitter source (`JitterSourceBuild`, seams `jitterSource.*`)
+
+Guard blocks: the jitter generator (`0x2ebd90`), the camera getter (`0x25f610`, returns `[camera+0x278]`), the NGX packet producer call (`0x37411d`, return address `0x374122`), the camera head (`0x25f690`), the phases block (`0x25f721`, 120 bytes, runs up to the strength block), the strength block (`0x25f799`, the generator call, return address `0x25f79e`), and the device size reader (`0xd3f73`). Offsets: settings `+0x4c` scale, `+0x54` mode (2 = DLSS), `+0x78` amount; renderer `+0x428` scene size, `+0x700`/`+0x704` extents; device `+0x8c`/`+0x90` output size. Globals: settings `0x290e470`, renderer `0x290e490`, device `0x2907d00`. Two constants the core assumes, checked live by their seams: `strengthFloorBits` (0.001f) and `ndcSignMaskBits` (`0x80000000`).
+
+## Appendix B. Finding an address by hand
+
+Use this when a seam is `NotFound`, `Ambiguous` or `Conflict` and you need to write a new anchor. Tools: a current Ghidra release (headless works) or another decompiler. Import the new `ffxiv_dx11.exe` as a PE x64 with the default analysers and let auto-analysis finish; for this 50 MB image that takes a long time, so prefer a headless import into a private project folder. Keep the old executable's notes next to it: the method is "find the same function again", not "search from scratch". Never carry an old RVA over.
+
+| Symbol | Recognise it by | Cross-check |
+|---|---|---|
+| `settingsInstructionsRva` | The first instruction is `mov r8, [rip+disp]` loading the settings global; then tests of bytes `+0x54`, `+0x44`, `+0x45` and a load of `+0x55` compared against 6 | `instruction address + 7 + disp` is `settingsPointerRva` |
+| `settingsPointerRva` | Target of that `mov` | Read by the size query (`+0x54 == 2`) |
+| `querySizeRva` | Decompiles to: manager global, `+0x4220` to the context, `settings+0x54 == 2`, copy of three size values out of the context | `address + 21 + 7 + disp` of the `mov rax,[rip+disp]` at `+21` is `managerPointerRva` |
+| `managerPointerRva` | Target of that `mov` | Context `+0x4220` is non-null in a running game |
+| `rendererUpdateRva` | Several hits for the fixed prologue bytes, the right one calls `resizeCallbacksRva` and reads settings `+0x54/+0x44/+0x45/+0x47/+0x49`; it has a single caller | The displacement in the prologue points at the stack cookie, not at a game global |
+| `resizeCallbacksRva` | The prologue is generic (more than a hundred hits). Identify by behaviour: enter a critical section at `param+8`, walk the callback array at `+0x30` (count at `+0x38`), call each, leave the section; called from the renderer update | Called by exactly the function above |
+| `devicePointerRva` | A global loaded by the command-append function (`enqueueRva`) before an atomic add on `[device+0xd4]`; referenced from over a thousand places | Same relative shift as the settings globals in the same section |
+| `batch16Rva`, `batch32Rva` | Two functions with the same prologue. The one that locks an index buffer as 16-bit values is `batch16`; both read the renderer list at `+0x580/+0x588`, the table at `layoutSlotTableRva`, and are called from the same dispatcher, which chooses by the index-buffer format | By address order if the decompiler cannot tell: in build C the 16-bit one comes first |
+| `enqueueRva` | Decompiles to: context index at `+0xc`, key at `+8`, a per-group counter at `ctx + index*0x18 + 0x28`, refill through the device global, write of a 16-byte (key, command) entry | Also called when an indexed queue command (type 6, size `0xb0`) is appended |
+| `bindStateRva` | Tests the byte at `state+0x49` and uses the native context at `+0x17b4/+0x17b3/+0x17b8` | |
+| `nameplateModulePointerRva` | A bss pointer global with hundreds of references such that `[[[g] + 8] + 8]` is the queue the batch functions fill (head at `+0x50`, remaining at `+0x68`, blocks at `+0x6c`, next-block pointer at `+0x3f0`). In the last two patches it moved by a different amount than its neighbours. Recipe that found it in 2026.10.16: scan `.text` for `mov r64, [rip+g]` followed within 14 bytes by two `mov r64, [r64+8]` loads and group by `g`; the right global has about nine hundred references | Run the game and read `Companion native submissions: queue chain module=... renderer=... queue=...`; all three must be plausible, non-zero heap or image addresses in the world |
+| `layoutSlotTableRva` | The only `.rdata` match of the nine-entry pattern (low dwords `0,0,0,0,1,2,2,1,1` in 8-byte entries), referenced by the batch functions as `table[layout*8]` | |
+| `cameraGlobalRva`, `cameraOffset`, `jitterPointerOffset` | Search the string `Jitter.Offset.X`; its only user is the game's DLSS evaluate wrapper (RVA `0x3787d0` in build C), which copies two floats of a descriptor. The function that records that descriptor from the scene camera (`0x374050`) loads `[[global] + 0x3028]` and then `[camera + 0x278]` | The one-line getter `0x25f610` returns `[camera + 0x278]`. Check that the object is `{float, float, float, float, int}` with `abs(jx), abs(jy) <= 0.5` |
+| jitter source blocks | The camera update (`0x25f690`) contains the only call of the Halton generator (`0x2ebd90`: `index % count + 1`, outputs `x - 0.5`, `y - 0.5`); its output pointer is the jitter object base (`[camera+0x278]`) and the second output is base+4. The native strength is `(amount - 0.001f) * ratio^2 + 0.001f` with `ratio = extent0 / extent2 * scale`; the game doubles it, multiplies by the jitter and divides by the render size to get the NDC translation. The NGX packet producer is the only caller of the camera getter that is followed by the DLSS evaluate descriptor | Dump the bytes of the new executable at each block and compare with the guard arrays |
+
+Struct offsets (the `+0x...` entries) rarely change in a patch. Those without a seam are not checked by any tool: renderer list and count, index buffer capacity, flags and CPU pointer, queue head, remaining, blocks, next-block, batch header fields, and the settings fields. Re-verify them by decompiling the same functions. If a function now loads a field from a different offset, edit that member and, if a strict shape carries the old offset, the shape too.
+
+## Appendix C. Shader fingerprints
+
+Several features recognise the game's shaders by size and CRC-32 of the compiled bytecode (and, for the lighting scan, by a 16-byte checksum). The image-identity check and the pattern search cannot see these: a patch that recompiles a shader silently disables the dependent feature, and only the `[ffxiv-catalog]` log line shows it. The tables:
 
 | File | What it identifies | Feature that goes inert |
 |---|---|---|
@@ -74,127 +216,4 @@ Shader fingerprints. Several features recognise the game's shaders by size and C
 | `OptiScaler/ext/hdr/FfxivHdrPreview.h` (`Tag()`), `OptiScaler/ext/ffxiv/ui/UiShaderCatalog.h` (`kUiCrcs`, `SceneStageOfCrc`) | the seven UI-only pixel shaders and the scene stages | HDR UI transmittance, and the HUD-less boundary detector |
 | `OptiScaler/ext/ffxiv/companion/CompanionGpu.h` (`Identify`), `replay/FfxivNameplateRenderer.h` | the nameplate pixel shaders per layout | Companion nameplate replay |
 
-How to refresh: the game's shaders are created through `ID3D11Device::CreatePixelShader`; the fork already computes the CRC at creation. The HUD-less diagnostics (`[HudLess] Diagnostics = true`) write one row per distinct pixel shader, with its CRC, size and stage, to `shaders.csv` in a run folder under `<game folder>\OptiScaler\hudless-diag\`; compare it against the tables. Retag by replacing the numbers; the stage meaning of each entry is in the comments next to it.
-
-## 4. Re-deriving the addresses
-
-Tools: a current Ghidra release (headless works; the previous remap used 12.1), or another decompiler. Import the **new** `ffxiv_dx11.exe` as a PE x64 with the default analysers and let auto-analysis finish; for this 50 MB image that takes a long time, and some tool deadlines will expire before it does, so prefer a headless import into a private project folder. Keep the **old** executable (or its notes) next to it, because the method is "find the same function again", not "search from scratch".
-
-### 4.1 Read the PE identity
-
-```powershell
-# prints TimeDateStamp, SizeOfImage and the section table of any PE file (read-only)
-$b = [System.IO.File]::ReadAllBytes('<new ffxiv_dx11.exe>')
-$pe = [BitConverter]::ToInt32($b, 0x3c)
-'TimeDateStamp = 0x{0:x8}' -f [BitConverter]::ToUInt32($b, $pe + 8)
-'SizeOfImage   = 0x{0:x}'  -f [BitConverter]::ToUInt32($b, $pe + 24 + 56)
-$n = [BitConverter]::ToUInt16($b, $pe + 6); $sec = $pe + 24 + [BitConverter]::ToUInt16($b, $pe + 20)
-0..($n - 1) | ForEach-Object { $o = $sec + 40 * $_
-  '{0,-8} VA 0x{1:x8} size 0x{2:x8} raw 0x{3:x8}' -f [Text.Encoding]::ASCII.GetString($b, $o, 8).TrimEnd([char]0), [BitConverter]::ToUInt32($b, $o + 12), [BitConverter]::ToUInt32($b, $o + 8), [BitConverter]::ToUInt32($b, $o + 20) }
-```
-
-### 4.2 Find each guarded function again
-
-Most guards survive a patch unchanged except for their RIP-relative displacements, so scan the new `.text` for the old guard with those displacement bytes wildcarded. Only the function bodies shift; the guard prologues are short and usually identical. Save the snippet below as `scan.ps1`.
-
-```powershell
-# usage: .\scan.ps1 -Exe <exe> -Pattern '4c 8b 05 ?? ?? ?? ?? 45 33 e4 41 80 78 54 02'
-param([string]$Exe, [string]$Pattern, [string]$Section = '.text')
-$b = [System.IO.File]::ReadAllBytes($Exe)
-$pe = [BitConverter]::ToInt32($b, 0x3c); $n = [BitConverter]::ToUInt16($b, $pe + 6); $sec = $pe + 24 + [BitConverter]::ToUInt16($b, $pe + 20)
-foreach ($i in 0..($n - 1)) { $o = $sec + 40 * $i
-  if ([Text.Encoding]::ASCII.GetString($b, $o, 8).TrimEnd([char]0) -eq $Section) { $va = [BitConverter]::ToUInt32($b, $o + 12); $size = [BitConverter]::ToUInt32($b, $o + 8); $raw = [BitConverter]::ToUInt32($b, $o + 20) } }
-$pat = $Pattern -split '\s+' | ForEach-Object { if ($_ -eq '??') { -1 } else { [Convert]::ToInt32($_, 16) } }
-$end = [Math]::Min($raw + $size, $b.Length) - $pat.Count
-for ($p = $raw; $p -le $end; $p++) {
-  if ($b[$p] -ne $pat[0]) { continue }
-  $ok = $true; for ($k = 1; $k -lt $pat.Count; $k++) { if ($pat[$k] -ge 0 -and $b[$p + $k] -ne $pat[$k]) { $ok = $false; break } }
-  if ($ok) { 'RVA 0x{0:x}' -f ($va + $p - $raw) } }
-```
-
-It takes about a minute on this image. Expect exactly one hit for each guard except `resizeCallbacks` (its prologue is generic) and the batch pair (exactly two hits, one for each function). Zero hits or many hits mean the function changed: go to the decompiler.
-
-### 4.3 Per-symbol method
-
-| Symbol | Recognise it by | Cross-check |
-|---|---|---|
-| `settingsInstructionsRva` | Unique 37-byte guard. The first instruction is `mov r8, [rip+disp]` loading the settings global; then tests of bytes `+0x54`, `+0x44`, `+0x45` and a load of `+0x55` compared against 6 | `instruction address + 7 + disp` is `settingsPointerRva` |
-| `settingsPointerRva` | Target of that `mov` | Read by the size query (`+0x54 == 2`) |
-| `querySizeRva` | Unique 28-byte guard; decompiles to: manager global, `+0x4220` to the context, `settings+0x54 == 2`, copy of three size values out of the context | `address + 21 + 7 + disp` of the `mov rax,[rip+disp]` at `+21` is `managerPointerRva` |
-| `managerPointerRva` | Target of that `mov` | Context `+0x4220` is non-null in a running game |
-| `rendererUpdateRva` | 18-byte guard; several hits for the fixed bytes, the right one calls `resizeCallbacksRva` and reads settings `+0x54/+0x44/+0x45/+0x47/+0x49`; it has a single caller | The displacement in the guard points at the stack cookie, not at a game global: do not use it to find anything |
-| `resizeCallbacksRva` | The prologue is generic (more than a hundred hits). Identify by behaviour: enter a critical section at `param+8`, walk the callback array at `+0x30` (count at `+0x38`), call each, leave the section; called from the renderer update | Called by exactly the function above |
-| `devicePointerRva` | A global loaded by the command-append function (`enqueueRva`) before an atomic add on `[device+0xd4]`; referenced from over a thousand places | Same relative shift as the settings globals in the same section |
-| `batch16Rva`, `batch32Rva` | The shared 16-byte guard has exactly two hits in `.text`. The one that locks an index buffer as 16-bit values is `batch16`; both read the renderer list at `+0x580/+0x588`, the table at `layoutSlotTableRva`, and are called from the same dispatcher, which chooses by the index-buffer format | By address order if the decompiler cannot tell: in the supported build the 16-bit one comes first |
-| `enqueueRva` | Unique 16-byte guard; decompiles to: context index at `+0xc`, key at `+8`, a per-group counter at `ctx + index*0x18 + 0x28`, refill through the device global, write of a 16-byte (key, command) entry | Also called when an indexed queue command (type 6, size `0xb0`) is appended |
-| `bindStateRva` | Unique 16-byte guard; tests the byte at `state+0x49` and uses the native context at `+0x17b4/+0x17b3/+0x17b8` | |
-| `nameplateModulePointerRva` | **No guard.** A bss pointer global with hundreds of references such that `[[[g] + 8] + 8]` is the queue the batch functions fill (the queue object has the head at `+0x50`, remaining at `+0x68`, blocks at `+0x6c`, next-block pointer at `+0x3f0`). Do **not** assume the old delta: in both of the last two patches this one moved by a different amount than the neighbouring globals (2026.10.16: +0x15090 while the others moved +0x15000), and the naive address had no references at all. Recipe that found it in 2026.10.16: scan `.text` for `mov r64, [rip+g]` followed within 14 bytes by two `mov r64, [r64+8]` loads and group by `g`; the right global has about nine hundred references, all in the UI code around the batch functions | Run the game and read the log line `Companion native submissions: queue chain module=... renderer=... queue=...`; all three must be plausible, non-zero heap or image addresses once you are in the world |
-| `layoutSlotTableRva` | The only `.rdata` match of the nine-entry pattern (low dwords `0,0,0,0,1,2,2,1,1` in 8-byte entries), referenced by the batch functions as `table[layout*8]` to pick the vertex slot | |
-
-Struct offsets (the `+0x...` rows) rarely change in a patch, but they are not guarded. Re-verify by decompiling the same functions: renderer list and count, index buffer capacity, flags and CPU pointer, queue head, remaining, blocks, next-block, batch header fields, and the settings fields above. If a function now loads a field from a different offset, edit that member.
-
-### 4.4 Edit and verify
-
-1. Edit `GameBuild.h` only: `timeDateStamp`, `sizeOfImage`, every changed RVA, and, if the new guard bytes differ, the corresponding `std::array` (copy the exact bytes at the new RVA; keep the array length).
-2. Build (`tools\build-locked.ps1`) and run the unit tests (`tools\test.ps1`). The tests do not read the game; they only prove the code still compiles and its pure logic is intact.
-3. Verify the candidate without the game by re-reading the bytes: for each RVA, check that the bytes at that address in the new executable equal the guard array (`scan.ps1` with the exact bytes, no wildcards, must return the RVA you wrote). Check the three RIP-relative globals with the arithmetic in the table.
-4. Verify in game (section 5).
-
-## 5. Verifying a candidate in game
-
-Use a copy of the game folder and the fork build with the edited `GameBuild.h`. Set `[Log] LogToFile = true` in `OptiScaler.ini` (the default is no log file), start the game and read `OptiScaler.log`. A correct build shows, in this order:
-
-- `Matched supported FFXIV build for game-module seams`
-- no `FFXIV probe: unsupported executable instructions; settings read disabled`
-- no `FFXIV native quality: instruction mismatch; hooks disabled`, `... update instruction mismatch; hooks disabled`, and no `FFXIV native quality: install attempt N/3 failed at <stage>, error <code>, thread <id>; giving up; native quality selection stays off for this session` (an `install attempt N/3 failed ... retrying` line is allowed when `installed on attempt N` follows; the line `FFXIV native quality v2: hook transaction result=0 (0=installed); native scene updates enabled` must appear exactly once)
-- `FFXIV lighting: native exposure hooks ready`
-- `Companion native submissions: queue chain module=0x... renderer=0x... queue=0x...` with plausible values, then `Companion native submissions: guarded batch hooks ready; substitution off until requested`
-- no `Companion native submissions: unsupported executable; no batch hooks installed`, `... batch byte guards rejected; native drawing unchanged`, `... queue hook byte guards rejected`
-
-Then exercise each feature once: change the in-game DLSS quality setting and check the log lines `FFXIV native DLAA gate: ...` follow it; turn nameplates on with the Companion replacement enabled and check they draw; switch on RenoDX scene HDR and HUD-less. The expected struct values are in the decompilation notes above; a wrong offset usually shows as a rejected read in the Companion statistics or a settings read of `0`.
-
-## 6. What happens on a build that does not match
-
-`ext::game::Current()` stays all-null, and the whole case is **silent**: no warning is logged, because every installer (the native-quality hooks, the lighting hooks, the Companion hooks) is reached only through a game-module pointer or the device-hook seam that tests one. The only visible sign is the missing `Matched supported FFXIV build for game-module seams` line. Each feature then does the following (from the places that test the game-module pointers under `OptiScaler/ext/`):
-
-| Feature | On an unknown build |
-|---|---|
-| Native quality hooks, DLAA gate | not installed (`EnsureHooks` is only called through the `quality` pointer); no log line |
-| `ForcePerfQuality` | **still applies** (the seam is not game-gated), but without the DLAA gate and without the geometry correction; the render size may then be wrong for this game |
-| Render geometry and sub-rectangle correction | off (`geometry` is null) |
-| Forced-quality colour scaling | off |
-| Lighting scan and NR history rejection from it | off (`lighting` is null); NR itself still runs |
-| Frame-marker pacing, FG guide matching | off (`fgMarkers` is null); XeFG and DLSS-G use upstream's frame timing |
-| OptiHDR output (`[HDR] FfxivHDR`) and its menu card | off: the request returns false when `hdr` is null; also no scene HDR |
-| HUD-less engine | no source (`hudless` is null); the mode has no effect |
-| Companion / nameplates | not installed (`Install` is only called when `hdr` is set); no log line. The `unsupported executable` warning belongs to a different case: an executable that is gated in but fails the match inside the installer, which the current call path does not produce |
-| Isolated NGX shutdown and the bridge's FFXIV-specific NR behaviour | upstream's default behaviour |
-| DLSS-G, XeFG, NR core, OptiScaler itself | work as in plain OptiScaler |
-
-So after a patch that is not yet followed, the game still runs with the fork's generic features; the FFXIV-specific ones are off and the log does not say which: look for the missing `Matched` line.
-
-## 7. Checklist
-
-Current build: game version 2026.10.16, `TimeDateStamp 0x6ad10bfd` (2026-10-15 17:23 UTC), `SizeOfImage 0x381f000`, executable sha256 `46A52AB1DBE80B9A8D6C4D4531BF66693904200C5135FACACD053EF28A5DE14A` (51,976,960 bytes). The previous build (`TimeDateStamp 0x6ac3dc96`, `SizeOfImage 0x380a000`) is no longer matched. In 2026.10.16 every address moved (the globals by +0x15000, the nameplate module global by +0x15090, code by -0xa0 to +0x320), every guard was found again, and only the three guards that carry a RIP-relative displacement changed their bytes. The nameplate module global and the queue structure offsets (`+0x50`, `+0x68`, `+0x6c`, `+0x34`, `+0x3f0`) have no byte guard and were not proven offline: confirm them with the in-game log line of section 5.
-
-1. Patch released; install it, keep a copy of the previous executable.
-2. Check the new executable offline against the existing guards: run `scan.ps1` (section 4.2) with the exact guard bytes from `GameBuild.h`, without wildcards, and compare each hit with the RVA in `GameBuild.h`. Running the old fork build on the new executable cannot tell you this, because the new timestamp stops it before any byte guard is reached. If every guard is found at its old RVA, only `TimeDateStamp` and `SizeOfImage` need editing (the three globals loaded by the guards, `settingsPointerRva`, `managerPointerRva` and the stack cookie, are then unchanged as well; `devicePointerRva`, the nameplate module global and the slot table are not covered by a guard, so confirm those with the in-game log of section 5). If a guard is missing or sits elsewhere, re-derive it (section 4).
-3. If a guard warning appears, find the function again (section 4), edit `GameBuild.h`, build, test, play (section 5).
-4. Check the shader fingerprint tables if the lighting scan, scene HDR, HUD-less boundary or nameplate replay stay off although the addresses were accepted.
-5. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, the evidence for each moved RVA, and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
-
-## 8. Game jitter chain (probe and correction, `ext/ffxiv/jitter`)
-
-| Name in `GameBuild.h` | Value | What it is | Guard | Used by |
-|---|---|---|---|---|
-| `JitterBuild::cameraGlobalRva` | `0x290dba0` | Global holding the scene camera holder G; the camera is `[G + 0x3028]`, its 20-byte jitter object `{jx, jy, ndcX, ndcY, counter}` is at `[camera + 0x278]` | none (pointer chain; every hop is range- and readability-checked at run time, the exe build must match) | `FfxivJitterProbe` |
-
-**Finding it again after a game patch.** Search the string `Jitter.Offset.X`; its only user is the game's DLSS evaluate wrapper (RVA `0x3787d0` in the supported build), which copies two floats of a descriptor. The function that records that descriptor from the scene camera (`0x374050`) loads `[[global] + 0x3028]` and then `[camera + 0x278]`: that global and those offsets are the constants. The one-line getter `0x25f610` returns `[camera + 0x278]`, and the camera update (`0x25f690`, the function that contains the fallback site below) loads that pointer into `rbx`, calls the Halton generator (`0x2ebd90`: `index % count + 1`, outputs `x - 0.5`, `y - 0.5`) with `rdx = rbx` (jx), `r8 = rbx + 4` (jy) and `r9d = [rbx + 0x10]` (counter), and increments the counter. Check offline that the object is `{float, float, float, float, int}` with `|jx|,|jy| <= 0.5`.
-
-**Fallback patch site (documented, NOT built).** The DLSS-mode cycle length is the immediate of `mov edx, 0xFFFFFFFF` at RVA `0x25f732` (bytes `BA FF FF FF FF`; guard: the 48 bytes at `0x25f721`: `48 8B 05 ?? ?? ?? ?? 0F 57 F6 48 8B 9F 78 02 00 00 BA FF FF FF FF 48 8B 88 28 04 00 00 48 8B F1 8B C1 48 C1 EE 20 F3 48 0F 2A F0 41 80 F8 02 74`). The game's own cycle never repeats in that mode, so it is not needed; a finite value there should only ever lengthen a finite cycle.
-
-## 9. Jitter source hooks (`JitterSourceBuild`, `ext/ffxiv/jitter`)
-
-Guard blocks in `GameBuild.h`, all verified against the supported executable (game version 2026.10.16, SHA-256 46A52AB1...): the jitter generator (`0x2ebd90`), the camera getter (`0x25f610`, returns `[camera+0x278]`), the NGX packet producer call (`0x37411d`, return address `0x374122`), the camera head (`0x25f690`), the phases block (`0x25f721`, 120 bytes, runs up to the strength block), the strength block (`0x25f799`, the generator call, return address `0x25f79e`), and the device size reader (`0xd3f73`). Offsets: settings +0x4c scale, +0x54 mode (2 = DLSS), +0x78 amount; renderer +0x428 scene size, +0x700/+0x704 extents; device +0x8c/+0x90 output size. Globals: settings `0x290e470`, renderer `0x290e490`, device `0x2907d00`.
-
-**Finding them again after a game patch.** The camera update contains the only call of the Halton generator; its output pointer is the jitter object base (`[camera+0x278]`) and the second output is base+4. The native strength is `(amount - 0.001f) * ratio^2 + 0.001f` with `ratio = extent0 / extent2 * scale`; the game doubles it, multiplies it by the jitter and divides by the render size to get the NDC translation. The NGX packet producer is the only caller of the camera getter that is followed by the DLSS evaluate descriptor. Re-verify every block with a byte dump of the new executable; any block that cannot be verified keeps the feature off (the log says `inactive (executable not matched)` or names the failed block).
+`OptiScaler/ext/ffxiv/catalog/CatalogTable.h` lists the same CRCs per catalog for the health log. How to refresh after a patch: the game's shaders are created through `ID3D11Device::CreatePixelShader`; the fork already computes the CRC at creation. The HUD-less diagnostics (`[HudLess] Diagnostics = true`) write one row per distinct pixel shader, with its CRC, size and stage, to `shaders.csv` in a run folder under `<game folder>\OptiScaler\hudless-diag\`; compare it against the tables. The `[ffxiv-catalog] near-miss` block and its `candidate` lines name uncatalogued shaders with the same structure as a missing one. Retag by replacing the numbers; the stage meaning of each entry is in the comments next to it.

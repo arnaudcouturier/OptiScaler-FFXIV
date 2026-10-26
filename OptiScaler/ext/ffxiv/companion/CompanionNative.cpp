@@ -5,6 +5,8 @@
 #include "CompanionGpu.h"
 #include "CompanionLayer.h"
 #include "ext/core/DetourThreads.h"
+#include "ext/ffxiv/resolve/Gate.h"
+#include "ext/ffxiv/resolve/ModulePath.h"
 #include "replay/FfxivNameplateLive.h"
 #include <detours/detours.h>
 #include <filesystem>
@@ -37,7 +39,7 @@ static thread_local Pending pending;
 static Packets::Queue Queue()
 {
     uintptr_t module = 0, renderer = 0, queue = 0;
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
     if (!Packets::Read(base + build.nameplateModulePointerRva, module) || !Packets::Read(module + build.moduleStatePointerOffset, renderer) ||
         !Packets::Read(renderer + build.stateQueuePointerOffset, queue)) return {};
     const auto snapshot = Packets::Snapshot(queue);
@@ -102,7 +104,7 @@ static void Invoke(Batch original, uintptr_t renderer, char mode)
     auto match = Packets::Match::Invalid;
     try
     {
-        if (Packets::Read(renderer + ext::ffxiv::kCurrentBuild.companion.rendererBatchListOffset, list) && Packets::Read(renderer + ext::ffxiv::kCurrentBuild.companion.rendererBatchCountOffset, count) &&
+        if (Packets::Read(renderer + ext::ffxiv::ActiveBuild().companion.rendererBatchListOffset, list) && Packets::Read(renderer + ext::ffxiv::ActiveBuild().companion.rendererBatchCountOffset, count) &&
             count && count <= Packets::MaxEntries)
         {
             entries.resize(count);
@@ -117,7 +119,7 @@ static void Invoke(Batch original, uintptr_t renderer, char mode)
     { pending.packets.clear(); ++fallbacks; original(renderer, mode); return; }
     {
         Packets::PointerScope scope;
-        if (!scope.Enter(renderer + ext::ffxiv::kCurrentBuild.companion.rendererBatchListOffset, list, reinterpret_cast<uintptr_t>(entries.data())))
+        if (!scope.Enter(renderer + ext::ffxiv::ActiveBuild().companion.rendererBatchListOffset, list, reinterpret_cast<uintptr_t>(entries.data())))
         { pending.packets.clear(); ++fallbacks; original(renderer, mode); return; }
         struct Guard { Guard() { pending.inside = true; } ~Guard() { pending.inside = false; } } guard;
         // The verified batch reads headers synchronously and derives indices into the
@@ -145,15 +147,19 @@ static void __fastcall OnBatch32(uintptr_t renderer, char mode) { VisibilityScop
 void Install()
 {
     if (installed.load() || batch16) return;
-    wchar_t executable[MAX_PATH] {};
-    GetModuleFileNameW(nullptr, executable, MAX_PATH);
-    if (_wcsicmp(std::filesystem::path(executable).filename().c_str(), L"ffxiv_dx11.exe")) return;
+    // the exe name, read without the MAX_PATH cut (the gate and the game selector read it the same way)
+    const std::wstring executable = ext::ffxiv::resolve::ReadModulePath([](wchar_t* buffer, std::uint32_t size) { return GetModuleFileNameW(nullptr, buffer, size); });
+    if (!ext::ffxiv::resolve::IsFfxivExeName(std::wstring_view(executable))) return;
     base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    // Shared with ext::ffxiv::quality::FfxivNativeQualityHooks::MatchedBuildOnce: both used to
-    // re-walk the DOS/NT headers themselves (see GameBuild.h's MatchCurrentProcess comment).
-    if (!ext::ffxiv::MatchCurrentProcess())
-    { LOG_WARN("Companion native submissions: unsupported executable; no batch hooks installed"); return; }
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    // The build gate (ext/ffxiv/resolve/Gate.h) replaces the old exact-build match: every companion seam usable (location AND shape of the four
+    // Detour sites), on an unknown build the key on, and under [FFXIV] FfxivLegacyGameBuild exactly the old "this is the known build". Seams.cpp only
+    // calls Install() when the gate said yes; this repeats the test so a direct caller cannot bypass it. The gate's own [ffxiv-gate] line says why.
+    if (!ext::ffxiv::FeatureEnabled(ext::ffxiv::resolve::Feature::CompanionNative))
+    { LOG_INFO("Companion native submissions: the build gate does not allow the hooks; no batch hooks installed"); return; }
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
+    // the header and queue-entry offsets index fixed buffers: refuse an offset outside them (the gate checks the same bounds)
+    if (!ext::ffxiv::CompanionOffsetsInBounds(build))
+    { LOG_WARN("Companion native submissions: a batch header offset is outside the header; no batch hooks installed"); return; }
     // Current disk SHA256 was verified as B38840761E2677128B6BEC1CEAEE3F2870CD84E1D38AB7958216373058383780. In-process guards also reject
     // patches/hook detours at either entry point instead of assuming disk identity suffices.
     std::array<unsigned char, 16> a, b;
@@ -173,8 +179,8 @@ void Install()
             constexpr auto plausible = [](uintptr_t p) { return p >= 0x10000 && p < 0x00007ffffffe0000ull; };
             uintptr_t module = 0, renderer = 0, queue = 0;
             if (Packets::Read(base + build.nameplateModulePointerRva, module) && plausible(module) &&
-                Packets::Read(module + ext::ffxiv::kCurrentBuild.companion.moduleStatePointerOffset, renderer) && plausible(renderer))
-                Packets::Read(renderer + ext::ffxiv::kCurrentBuild.companion.stateQueuePointerOffset, queue);
+                Packets::Read(module + ext::ffxiv::ActiveBuild().companion.moduleStatePointerOffset, renderer) && plausible(renderer))
+                Packets::Read(renderer + ext::ffxiv::ActiveBuild().companion.stateQueuePointerOffset, queue);
             LOG_INFO("Companion native submissions: queue chain module={:#x} renderer={:#x} queue={:#x}", module, renderer, queue);
         }
     }

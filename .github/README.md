@@ -43,11 +43,11 @@ Tested means played in game by the author on an RTX 4090. Neural Rendering, fram
 
 The [install guide](../docs/INSTALL.md) has the details, the settings of the tested setup and the uninstall steps.
 
-**Or let Lucent install it.** [Lucent](https://github.com/arnaudcouturier/lucent) is a separate Windows app, by the same author, that installs this fork for you, with ReShade and presets if you want them. It backs up every file it replaces, can repair its files if a game update replaces them (after a game patch the FFXIV features still wait for a fork update) and uninstalls cleanly. It deploys its own tested setups, which can lag behind the newest release here. The download and the list of files it installs are on its [website](https://arnaudcouturier.github.io/lucent/); questions about Lucent go to its own [issues](https://github.com/arnaudcouturier/lucent/issues).
+**Or let Lucent install it.** [Lucent](https://github.com/arnaudcouturier/lucent) is a separate Windows app, by the same author, that installs this fork for you, with ReShade and presets if you want them. It backs up every file it replaces, can repair its files if a game update replaces them (after a game patch the FFXIV features that hook the game's code still wait for a fork update) and uninstalls cleanly. It deploys its own tested setups, which can lag behind the newest release here. The download and the list of files it installs are on its [website](https://arnaudcouturier.github.io/lucent/); questions about Lucent go to its own [issues](https://github.com/arnaudcouturier/lucent/issues).
 
 ## Status
 
-The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) on OptiScaler nightly `d9b62110`. The first release was v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV-specific features follow one game build and switch themselves off after a game patch until the fork is updated. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) on OptiScaler nightly `d9b62110`. The first release was v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 

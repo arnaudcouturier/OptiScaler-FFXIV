@@ -14,6 +14,8 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
+#include "ext/ffxiv/ActiveBuild.h"
+#include "ext/ffxiv/BuildBounds.h"
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/quality/NativeQualityRetry.h"
 #include "ext/ffxiv/quality/NativeQualityTransaction.h"
@@ -32,37 +34,31 @@ inline bool ReadMemory(const void* address, void* output, size_t bytes)
 
 inline uintptr_t Base() { return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); }
 
-// Matches the running process against GameBuild.h via the shared ext::ffxiv::MatchCurrentProcess
-// walk (GameBuild.cpp/.h; also used by ext::ffxiv::companion::Native::Install): this module has
-// to work even if Game::Current() has not reached here yet. Computed once: the match cannot
-// change during the process lifetime.
-inline const NativeQualityBuild* MatchedBuildOnce()
+// The build this module reads is ext::ffxiv::ActiveBuild() (the resolved build, which equals GameBuild.h on the known build; the compile-time table
+// under [FFXIV] FfxivLegacyGameBuild), and only while the build gate (ext/ffxiv/resolve/Gate.h) has enabled the feature that asks. Nothing is
+// cached: the gate is immutable once the startup has published it, and a refusal computed BEFORE the startup (ActiveStarted() false) must never
+// stick, so the answers below are recomputed on every call (two atomic loads).
+inline const NativeQualityBuild* BuildFor(ext::ffxiv::resolve::Feature feature)
 {
-    const auto* build = ext::ffxiv::MatchCurrentProcess();
+    const GameBuild* build = ext::ffxiv::BuildFor(feature); // the one shared accessor (ActiveBuild.h): the build only while the gate enabled THIS feature
     return build != nullptr ? &build->nativeQuality : nullptr;
 }
-
-inline const NativeQualityBuild* Build()
-{
-    static const NativeQualityBuild* build = MatchedBuildOnce();
-    return build;
-}
+// The DLAA gate (reads the settings struct, hooks nothing).
+inline const NativeQualityBuild* Build() { return BuildFor(ext::ffxiv::resolve::Feature::QualityRead); }
+// The two detours, the direct resize call and the display-size cache write.
+inline const NativeQualityBuild* HookBuild() { return BuildFor(ext::ffxiv::resolve::Feature::QualityHooks); }
 
 // ---- Native DLAA gate (FfxivNativeQuality::NativeDlaaRequired in the oracle) --------------------------------------
 
-// Covers every settings offset read below; derived from GameBuild.h rather than the oracle's hardcoded 0x56; ties
-// the snapshot to kCurrentBuild specifically (today's only build), revisit if a future build's offsets grow past
-// this one's.
-inline constexpr size_t kSettingsSnapshotSize =
-    std::max({ kCurrentBuild.nativeQuality.settingsQualityOffset, kCurrentBuild.nativeQuality.settingsDlaaOffset,
-               kCurrentBuild.nativeQuality.settingsRendererOffset, kCurrentBuild.nativeQuality.settingsAdditionalOffset,
-               kCurrentBuild.nativeQuality.settingsModeOffset, kCurrentBuild.nativeQuality.settingsSelectorOffset }) +
-    1;
+// The snapshot buffer is a fixed maximum (ext/ffxiv/BuildBounds.h kMaxSettingsSnapshotBytes); the bytes read are max(the resolved settings offsets) + 1,
+// which is exactly the old compile-time 0x56 on the known build, and a healed offset at or above the maximum is refused here and by the gate.
 
 // Byte-verifies the settings read path once (fail closed, log once) and caches the result: both Attempt and
 // DlaaRequiredNow gate on this, matching the oracle's EnsureFfxivNativeQuality probe.
 inline bool SettingsGuardOk()
 {
+    if (!ext::ffxiv::ActiveStarted())
+        return false; // not decided yet: refuse for now, never latch it (the static below is only reached after the startup)
     static const bool ok = []
     {
         const auto* build = Build();
@@ -89,14 +85,19 @@ inline bool DlaaRequiredNow()
         return false;
 
     const auto* build = Build();
+    if (build == nullptr || !ext::ffxiv::SettingsOffsetsInBounds(*build))
+        return false;
     const auto base = Base();
 
+    // sized from the resolved offsets (0x56 on the known build); every index below is < size because size = max(offset) + 1
+    const size_t size = ext::ffxiv::SettingsSnapshotBytes(*build);
     uintptr_t settings = 0;
-    std::array<unsigned char, kSettingsSnapshotSize> snapshot {};
+    std::array<unsigned char, ext::ffxiv::kMaxSettingsSnapshotBytes> snapshot {};
     const bool valid =
+        size <= snapshot.size() &&
         ReadMemory(reinterpret_cast<const void*>(base + build->settingsPointerRva), &settings, sizeof(settings)) &&
-        settings != 0 && ReadMemory(reinterpret_cast<const void*>(settings), snapshot.data(), snapshot.size());
-    const bool required = valid && snapshot[build->settingsModeOffset] == 2 && snapshot[build->settingsDlaaOffset] == 0;
+        settings != 0 && ReadMemory(reinterpret_cast<const void*>(settings), snapshot.data(), size);
+    const bool required = valid && ext::ffxiv::DlaaRequiredFromSnapshot(snapshot.data(), size, *build);
 
     // Log only when the gate flips (first call included); the exchange keeps the per-frame path cheap.
     static std::atomic<int> lastRequired { -1 };
@@ -162,7 +163,7 @@ inline void ProcessPendingRequest(uintptr_t renderer)
     if (sequence == handled)
         return;
 
-    const auto* build = Build();
+    const auto* build = HookBuild();
     if (build == nullptr)
         return;
     const auto base = Base();
@@ -256,12 +257,19 @@ inline retry::StepResult Attempt()
     using retry::Stage;
     constexpr retry::StepResult kRefused { Outcome::Permanent, Stage::Guard, 0, 0 };
 
+    // Before the startup published the gate: not a verdict. Transient, so the retry installer asks again (250 ms, then 2 s) instead of latching.
+    if (!ext::ffxiv::ActiveStarted())
+        return { Outcome::Transient, Stage::Guard, 0, 0 };
+
+    // The build gate (Gate.h): the exe, the seams of the whole group and the unknown-build key decided at the startup (its [ffxiv-gate] line says why
+    // when it is off). Under the rollback key this is "the exact known build", the old MatchCurrentProcess.
+    const auto* build = HookBuild();
+    if (build == nullptr)
+        return kRefused;
+
     if (!SettingsGuardOk())
         return kRefused; // same probe NativeDlaaRequired fails closed on; EnsureFfxivNativeQuality refused to install here too
 
-    const auto* build = Build();
-    if (build == nullptr)
-        return kRefused;
     const auto base = Base();
 
     auto queryActual = build->querySizeInstructions;

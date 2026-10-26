@@ -90,7 +90,7 @@ struct RawObject
     std::int32_t counter = 0;
 };
 
-// `read(address, out, size)` returns false when any byte is unreadable. `build` is MatchCurrentProcess()'s answer (null = no match).
+// `read(address, out, size)` returns false when any byte is unreadable. `build` is the active build when the gate enabled the probe (ext/ffxiv/ActiveBuild.h; null = not enabled).
 // `maxJitter` is the largest |jx|, |jy| the object may hold: 0.5 (the game's own range) unless the source-level jitter fix divides the generator output by
 // the native strength, which lets the object reach 0.5 / strength (SourceNote).
 template <class Reader>

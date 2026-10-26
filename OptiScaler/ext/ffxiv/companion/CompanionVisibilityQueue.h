@@ -8,7 +8,7 @@ namespace ext::ffxiv::companion::VisibilityQueue
 struct Range {uintptr_t texture=0;UINT layout=0,first=0,count=0;};
 struct Draw
 {
-    std::array<unsigned char, ext::ffxiv::kCurrentBuild.companion.drawCommandSize> command{};
+    std::array<unsigned char, ext::ffxiv::kDrawCommandBytes> command{};
     std::vector<UINT> indices;
     std::vector<Range> ranges;
     ULONGLONG time=0;
@@ -27,7 +27,7 @@ inline bool Begin(uintptr_t base,uintptr_t renderer,UINT indexBytes,const std::v
 {
     if(batch.renderer || packets.empty())return false;
     NativeBatch next;next.renderer=renderer;next.indexBytes=indexBytes;
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
     uintptr_t allocation=0;if(!Packets::Read(renderer+build.rendererVertexAllocationOffset,allocation) || !allocation)return false;
     for(const auto& p:packets)
     {
@@ -36,9 +36,9 @@ inline bool Begin(uintptr_t base,uintptr_t renderer,UINT indexBytes,const std::v
         memcpy(&flags,p.header.data()+build.batchFormatOffset,4);memcpy(&count,p.header.data()+build.batchCountOffset,4);
         memcpy(&vertex,p.header.data()+build.batchVerticesOffset,8);memcpy(&wrapper,p.header.data()+build.batchWrapperOffset,8);
         UINT layout=flags&15;int slot=-1;UINT stride=0,offset=0;
-        if(!Packets::Read(base+Packets::VertexSlotTableRva+layout*build.layoutSlotEntrySize,slot) || slot<0 || slot>2 ||
+        if(!Packets::Read(base+Packets::VertexSlotTableRva()+layout*build.layoutSlotEntrySize,slot) || slot<0 || slot>2 ||
            !Packets::Read(renderer+build.rendererVertexStrideOffset+slot*build.rendererVertexSlotStride,stride) || !Packets::Read(renderer+build.rendererVertexOffsetOffset+slot*build.rendererVertexSlotStride,offset) ||
-           stride!=(layout==0?40u:layout==4?24u:32u) || !Packets::Read(wrapper+ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset,texture) || !texture ||
+           stride!=(layout==0?40u:layout==4?24u:32u) || !Packets::Read(wrapper+ext::ffxiv::ActiveBuild().companion.resourceWrapperOffset,texture) || !texture ||
            vertex<allocation+offset || (vertex-allocation-offset)%stride)return false;
         uint64_t first=(vertex-allocation-offset)/stride;
         if(first+count>UINT_MAX)return false;
@@ -56,7 +56,7 @@ inline void Emit(uintptr_t command)
     if(!batch.renderer)return;
     auto draw=std::make_shared<Draw>();
     if(!Packets::Read(command,draw->command))return;
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
     UINT type=0,count=0,start=0;memcpy(&type,draw->command.data()+build.drawCommandTypeOffset,4);if(type!=build.drawCommandType)return;
     memcpy(&count,draw->command.data()+build.indexCountOffset,4);memcpy(&start,draw->command.data()+build.startIndexOffset,4);
     if(!count || count%3 || count>256*1024)return;
@@ -82,11 +82,11 @@ inline void Emit(uintptr_t command)
 }
 inline void Bind(uintptr_t nativeContext,uintptr_t state)
 {
-    const auto& build = ext::ffxiv::kCurrentBuild.companion;
+    const auto& build = ext::ffxiv::ActiveBuild().companion;
     bound.reset();boundContext=0;if(state<build.drawStateCommandBackPointerOffset)return;
     std::shared_ptr<Draw> found;
     {std::lock_guard lock(mutex);auto it=queued.find(state-build.drawStateCommandBackPointerOffset);if(it==queued.end())return;found=std::move(it->second);queued.erase(it);}
-    std::array<unsigned char, ext::ffxiv::kCurrentBuild.companion.drawCommandSize> current{};
+    std::array<unsigned char, ext::ffxiv::kDrawCommandBytes> current{};
     if(GetTickCount64()-found->time>100 || !Packets::Read(state-build.drawStateCommandBackPointerOffset,current) || current!=found->command ||
        !Packets::Read(nativeContext+build.nativeContextOffset,boundContext)){++rejected;return;}
     bound=std::move(found);++boundCount;

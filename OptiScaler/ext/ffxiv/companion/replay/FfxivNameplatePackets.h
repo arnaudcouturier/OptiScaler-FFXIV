@@ -16,7 +16,7 @@ namespace ext::ffxiv::companion::replay::FfxivNameplatePackets
 inline std::atomic<bool> requested {false};
 inline std::mutex mutex;
 struct Queue { uintptr_t address=0, head=0; UINT blocks=0, remaining=0, count=0; std::array<UINT,3> strides{}; };
-struct Packet { uintptr_t source=0; UINT key=0, kind=0, layout=0, count=0, stride=0, error=0; std::array<unsigned char,ext::ffxiv::kCurrentBuild.companion.nativeBatchHeaderSize> header{}; std::vector<unsigned char> vertices; };
+struct Packet { uintptr_t source=0; UINT key=0, kind=0, layout=0, count=0, stride=0, error=0; std::array<unsigned char,ext::ffxiv::kNativeBatchHeaderBytes> header{}; std::vector<unsigned char> vertices; };
 struct Capture { Queue before,after; std::vector<Packet> packets; UINT rejected=0; bool ready=false; };
 inline Capture pending;
 inline void (*onCapture)(const Capture&)=nullptr;
@@ -31,8 +31,8 @@ using Packets::ReadBytes;
 inline Queue ReadQueue(uintptr_t queue)
 {
     Queue q;
-    if(!Read(queue+ext::ffxiv::kCurrentBuild.companion.queueHeadOffset,q.head) || !Read(queue+ext::ffxiv::kCurrentBuild.companion.queueRemainingOffset,q.remaining) || !Read(queue+ext::ffxiv::kCurrentBuild.companion.queueBlocksOffset,q.blocks) ||
-       !Read(queue+ext::ffxiv::kCurrentBuild.companion.queueStridesOffset,q.strides) || q.blocks>128 || q.remaining>64) return q;
+    if(!Read(queue+ext::ffxiv::ActiveBuild().companion.queueHeadOffset,q.head) || !Read(queue+ext::ffxiv::ActiveBuild().companion.queueRemainingOffset,q.remaining) || !Read(queue+ext::ffxiv::ActiveBuild().companion.queueBlocksOffset,q.blocks) ||
+       !Read(queue+ext::ffxiv::ActiveBuild().companion.queueStridesOffset,q.strides) || q.blocks>128 || q.remaining>64) return q;
     // Native reset writes blocks=0, remaining=1 before the first allocation.
     // There is no command to subtract until a block exists (see 14063da30).
     if(!q.blocks)
@@ -47,10 +47,10 @@ inline Queue ReadQueue(uintptr_t queue)
 inline Queue Snapshot(uintptr_t base)
 {
     uintptr_t module=0,renderer=0,queue=0;
-    if(!Read(base+ext::ffxiv::companion::Packets::UiModuleGlobalRva,module) || !Read(module+ext::ffxiv::kCurrentBuild.companion.moduleStatePointerOffset,renderer) || !Read(renderer+ext::ffxiv::kCurrentBuild.companion.stateQueuePointerOffset,queue)) return {};
+    if(!Read(base+ext::ffxiv::companion::Packets::UiModuleGlobalRva(),module) || !Read(module+ext::ffxiv::ActiveBuild().companion.moduleStatePointerOffset,renderer) || !Read(renderer+ext::ffxiv::ActiveBuild().companion.stateQueuePointerOffset,queue)) return {};
     return ReadQueue(queue);
 }
-// Current executable layout table (ext::ffxiv::companion::Packets::VertexSlotTableRva). These are shader variants,
+// Current executable layout table (ext::ffxiv::companion::Packets::VertexSlotTableRva()). These are shader variants,
 // not direct indices into the three vertex-buffer strides.
 inline constexpr std::array<UINT,9> vertexLayouts {0,0,0,0,1,2,2,1,1};
 inline Capture Copy(const Queue& before,const Queue& after)
@@ -63,21 +63,21 @@ inline Capture Copy(const Queue& before,const Queue& after)
     for(UINT index=0;index<after.count;++index)
     {
         if(index && index%64==0)
-            if(!Read(block+ext::ffxiv::kCurrentBuild.companion.queueNextBlockOffset,block)) { ++result.rejected; break; }
+            if(!Read(block+ext::ffxiv::ActiveBuild().companion.queueNextBlockOffset,block)) { ++result.rejected; break; }
         if(index<before.count) continue;
         std::array<uintptr_t,2> entry{};
         Packet p;
-        if(!Read(block+(index%64)*ext::ffxiv::kCurrentBuild.companion.nativeBatchEntrySize,entry) || !Read(entry[1],p.header)) { ++result.rejected; continue; }
+        if(!Read(block+(index%64)*ext::ffxiv::ActiveBuild().companion.nativeBatchEntrySize,entry) || !Read(entry[1],p.header)) { ++result.rejected; continue; }
         p.source=entry[1]; p.key=static_cast<UINT>(entry[0]);
         std::memcpy(&p.kind,p.header.data(),4);
-        UINT format=0; std::memcpy(&format,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchFormatOffset,4); p.layout=format&15;
+        UINT format=0; std::memcpy(&format,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchFormatOffset,4); p.layout=format&15;
         // Only basic geometry has a verified count/pointer layout. Clip/effect
         // records remain metadata and must never be fed to a generic renderer.
         if(p.kind==0x10 || p.kind==0x11 || (p.kind>=0x20 && p.kind<=0x23))
         {
             uintptr_t vertices=0;
-            std::memcpy(&p.count,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchCountOffset,4);
-            std::memcpy(&vertices,p.header.data()+ext::ffxiv::kCurrentBuild.companion.batchVerticesOffset,8);
+            std::memcpy(&p.count,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchCountOffset,4);
+            std::memcpy(&vertices,p.header.data()+ext::ffxiv::ActiveBuild().companion.batchVerticesOffset,8);
             if(p.layout<vertexLayouts.size()) p.stride=after.strides[vertexLayouts[p.layout]];
             const size_t n=static_cast<size_t>(p.count)*p.stride;
             if(!p.stride || p.stride>128 || p.count>65536 || n>4*1024*1024 || bytes+n>8*1024*1024)

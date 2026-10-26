@@ -69,10 +69,10 @@ inline void Publish(const std::vector<Packets::Packet>& packets)
     for (const auto& p : packets)
     {
         uintptr_t wrapper = 0, texture = 0; UINT flags = 0;
-        memcpy(&wrapper, p.header.data() + ext::ffxiv::kCurrentBuild.companion.batchWrapperOffset, 8);
-        memcpy(&flags, p.header.data() + ext::ffxiv::kCurrentBuild.companion.batchFormatOffset, 4);
+        memcpy(&wrapper, p.header.data() + ext::ffxiv::ActiveBuild().companion.batchWrapperOffset, 8);
+        memcpy(&flags, p.header.data() + ext::ffxiv::ActiveBuild().companion.batchFormatOffset, 4);
         // Identity hint only. Never call COM through this pointer; match a live API reference below.
-        if (!wrapper || !Packets::Read(wrapper + ext::ffxiv::kCurrentBuild.companion.resourceWrapperOffset, texture) || !texture) { ++readFailures; continue; }
+        if (!wrapper || !Packets::Read(wrapper + ext::ffxiv::ActiveBuild().companion.resourceWrapperOffset, texture) || !texture) { ++readFailures; continue; }
         bool duplicate = false;
         for (size_t i = 0; i < count; ++i) duplicate |= next[i].texture == texture && next[i].layout == (flags & 15);
         if (!duplicate && count < next.size()) next[count++] = {texture, flags & 15};

@@ -12,6 +12,7 @@
 #include "ext/ffxiv/chara/CharaDispatch.h" // ext: S11 character preview (CharaView)
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
 #include "ext/ffxiv/lighting/FfxivResolveGate.h"
+#include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
@@ -169,6 +170,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
     if (SUCCEEDED(hr) && out && *out && code && size>=32 && size<=0xFFFFFFFFull && !std::memcmp(code,"DXBC",4))
     {
         const UINT crc=Crc(code,size); // hashed once: the scene-stage tag and the UI boundary stamp share it
+        ext::ffxiv::catalog::OnPixelShaderCreated(code,size,crc); // ext: catalog health (counts every catalog CRC here, ALWAYS: armed or not; lock free, no allocation, no log)
         ext::hdr::FfxivSceneHdr::Tag(*out,crc);
         ext::ffxiv::chara::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
@@ -281,6 +283,7 @@ inline void Install(ID3D11Device* d)
         LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
         LIGHT_ATTACH(clearRtv,OnClearRtv);LIGHT_ATTACH(beginQuery,OnBegin);LIGHT_ATTACH(endQuery,OnEnd);LIGHT_ATTACH(createVs,OnCreateVertexShader); // ext: S11
 #undef LIGHT_ATTACH
+        ext::ffxiv::catalog::OnHooksInstalled(); // ext: time zero of the catalog health log (before the creation detour can run)
         if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
         return 0;
     });

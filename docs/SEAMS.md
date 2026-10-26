@@ -133,7 +133,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 **`ext/ffxiv/GameBuild.h` is the only file with FFXIV addresses:**
 - Every RVA, struct offset and byte guard, keyed by PE timestamp + image size.
 - This includes the offsets now hard-coded inside `ProcessFfxivQualityRequest`.
-- A game patch means editing this one file, following [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md).
+- A game patch means regenerating the entry with `tools/ffxiv-resolve --emit-gamebuild`, reviewing it and replacing this one file, following [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md). The anchors that find the same addresses at run time are patterns under `ext/ffxiv/resolve/` ([FFXIV-PATTERN-SEARCH.md](FFXIV-PATTERN-SEARCH.md)).
 
 ### 3.9 Hook bypass scope
 
