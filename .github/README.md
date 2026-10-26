@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="OptiScaler-FFXIV: upscaling, frame generation and HDR for Final Fantasy XIV" width="860">
+<img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS Neural Rendering, upscaling, frame generation and HDR for Final Fantasy XIV" width="860">
 
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
@@ -11,14 +11,14 @@
 
 ## What it is
 
-OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV. It provides upscaling, frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
+OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV. It provides DLSS Neural Rendering, upscaling, frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
 
 ## Highlights
 
 | Feature | What it does | Status |
 |---|---|---|
-| Upscaling | The game renders below your screen resolution and DLSS, FSR or XeSS upscales it, or DLAA runs at full resolution | DLSS tested; FSR and XeSS untested |
 | DLSS Neural Rendering | Adds detail to the upscaled image with NVIDIA's Neural Rendering model (NVIDIA RTX) | tested |
+| Upscaling | The game renders below your screen resolution and DLSS, FSR or XeSS upscales it, or DLAA runs at full resolution | DLSS tested; FSR and XeSS untested |
 | Frame generation | DLSS multi frame generation at 2x to 4x on RTX 40 cards; FSR or XeSS frame generation on other cards | DLSS tested; 5x and 6x are experimental; FSR and XeSS untested |
 | HDR10 output | HDR10 for the game, with RenoDX scene HDR as an option | tested |
 | ReShade depth alignment | Keeps ReShade's depth lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
@@ -47,7 +47,7 @@ The [install guide](../docs/INSTALL.md) has the details, the settings of the tes
 
 ## Status
 
-The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) on OptiScaler nightly `d9b62110`. The first release was v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release is v0.3.0 (tag `ffxiv-2026.10.26-d9b62110`) on OptiScaler nightly `d9b62110`. Earlier releases are v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) and v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). All were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 
