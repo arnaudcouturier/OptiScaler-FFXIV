@@ -294,7 +294,7 @@ void TestCoverageGuardRelease()
         }
         t.Fresh(0.40f);
         assert(!t.g.Blocking());
-        assert(t.g.Trips() == 1);
+        assert(t.g.Trips() == 1 && t.g.Releases() == 1); // a release is counted like a trip
     }
 
     // The release level is 0.75 x the limit: just under it counts, just over it does not
@@ -411,6 +411,7 @@ void TestCoverageGuardStarvation()
         }
         t.Stale(0.9f, true);
         assert(!t.g.Blocking());
+        assert(t.g.Trips() == 1 && t.g.Releases() == 1); // the starvation release counts as a release
     }
 
     // Presents that were not probed (no capture: loading screen, missing boundary) never count
@@ -474,6 +475,325 @@ void TestCoverageGuardStarvation()
         assert(!t.g.Blocking());
         t.Fresh(0.9f);
         assert(t.g.Blocking() && t.g.Trips() == 2);
+    }
+}
+
+// ---- the density policy of the guard ([HudLess] GuardMode = density) -----------------------------------------------------------------
+// Trips at 3 bad of the last 12 fresh samples, releases only after 60 consecutive clean fresh samples AND a present
+// that is not anchored after an off-screen UI draw (the release is decided after the boundary's same-frame answer: ResolveRelease).
+// The starvation release is the old one. "Clean" is as before: at or below 0.75 x the limit.
+struct DensityRig
+{
+    CoverageGuard g;
+    uint64_t seq = 0;
+    explicit DensityRig(GuardPolicy policy = GuardPolicy::Density)
+    {
+        g.Configure(0.60f, policy);
+        Fresh(0.9f); // the baseline: a readback from before the guard started is never a sample
+    }
+    // one present with a new readback, then the boundary's answer for the same present
+    void Fresh(float coverage, bool anchorLater = false, bool probed = true)
+    {
+        g.Update(coverage, ++seq, probed);
+        g.ResolveRelease(anchorLater);
+    }
+    void Stale(float coverage, bool anchorLater = false, bool probed = true)
+    {
+        g.Update(coverage, seq, probed);
+        g.ResolveRelease(anchorLater);
+    }
+    // the samples (0.9 = bad, 0.1 = clean) until it trips; 0 = never within `n`
+    int TripsAt(int n, int period)
+    {
+        for (int i = 1; i <= n; ++i)
+        {
+            Fresh(i % period == 0 ? 0.9f : 0.1f);
+            if (g.Blocking())
+                return i;
+        }
+        return 0;
+    }
+};
+
+void TestDensityGuard()
+{
+    static_assert(CoverageGuard::kDensityWindow == 12 && CoverageGuard::kDensityTripBad == 3 &&
+                  CoverageGuard::kDensityReleaseSamples == 60);
+
+    // 3 of the last 12 trip: every fourth sample bad trips at the 12th; the legacy guard never trips on that stream
+    assert(DensityRig().TripsAt(600, 4) == 12);
+    assert(DensityRig(GuardPolicy::Legacy).TripsAt(600, 4) == 0);
+    // 2 of any 12 never trip
+    assert(DensityRig().TripsAt(600, 6) == 0);
+    // three bad in a row trip at the third (legacy needs five): a run is covered by the 3-of-12 rule, there is no separate one
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(d.g.Blocking() && d.g.Trips() == 1);
+    }
+    // old samples fall out of the window: B B C*10 B is 2 of 12, then B is 2 of 12 again, the next one is 3
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        for (int i = 0; i < 10; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(d.g.Blocking());
+    }
+    // between the release level and the limit is not bad for the trip
+    {
+        DensityRig d;
+        for (int i = 0; i < 100; ++i)
+            d.Fresh(0.55f);
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+    }
+
+    // release: 59 clean samples do not, the 60th does (30 are the legacy number)
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        assert(d.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kDensityReleaseSamples - 1; ++i)
+        {
+            d.Fresh(0.1f);
+            assert(d.g.Blocking());
+        }
+        d.Fresh(0.1f);
+        assert(!d.g.Blocking() && d.g.Trips() == 1 && d.g.Releases() == 1);
+    }
+    // the clean samples must be consecutive; a sample in the band between the release level and the limit restarts the count
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.50f);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        assert(d.g.Blocking());
+        d.Fresh(0.1f);
+        assert(!d.g.Blocking());
+    }
+    // after a release the window starts empty: three new bad samples trip it again, two do not
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < 60; ++i)
+            d.Fresh(0.1f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(d.g.Blocking() && d.g.Trips() == 2);
+    }
+    // kUnknownFrames presents without a new readback forget the window, like the old streak
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        for (int i = 0; i < CoverageGuard::kUnknownFrames; ++i)
+            d.Stale(0.9f, false, false);
+        assert(d.g.Unknown());
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(d.g.Blocking());
+    }
+
+    // the same-frame fact holds a tripped guard: the present that would release is anchor-later, so it does not, and the count of clean
+    // samples starts again
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.1f, true); // the 60th clean sample, on an anchor-later present
+        assert(d.g.Blocking() && d.g.Releases() == 0 && d.g.Holds() == 1);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        assert(d.g.Blocking());
+        d.Fresh(0.1f);
+        assert(!d.g.Blocking() && d.g.Releases() == 1);
+    }
+    // ... also when the clean count was lower (a run of anchor-later presents keeps the fallback, whatever the readbacks say)
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < 40; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.1f, true);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        assert(d.g.Blocking());
+        d.Fresh(0.1f);
+        assert(!d.g.Blocking());
+        // anchor-later presents with no new readback at all: nothing progresses
+        DensityRig e;
+        for (int i = 0; i < 3; ++i)
+            e.Fresh(0.9f);
+        for (int i = 0; i < 100; ++i)
+            e.Stale(0.1f, true);
+        assert(e.g.Blocking());
+    }
+    // a present that never reached the boundary (nothing to ask) resolves its release without the fact, so a due release cannot stick
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < 59; ++i)
+            d.Fresh(0.1f);
+        d.g.Update(0.1f, ++d.seq, true); // the 60th clean sample, the present ended before the boundary answered
+        assert(d.g.Blocking());
+        d.g.ResolveRelease(false);
+        assert(!d.g.Blocking());
+    }
+    // an anchor-later present that is not tripped changes nothing
+    {
+        DensityRig d;
+        d.Fresh(0.1f, true);
+        d.Fresh(0.9f, true);
+        assert(!d.g.Blocking() && d.g.Holds() == 0);
+    }
+
+    // the starvation release is the old one: 120 probed presents without a fresh sample, whatever the boundary says
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        assert(d.g.Blocking());
+        for (int i = 1; i < CoverageGuard::kStarveFrames; ++i)
+        {
+            d.Stale(0.9f, true, true);
+            assert(d.g.Blocking());
+        }
+        d.Stale(0.9f, true, true);
+        assert(!d.g.Blocking() && d.g.Releases() == 1);
+    }
+
+    // the legacy policy ignores the fact and keeps its numbers: 5 in a row trip, 30 clean release, at once
+    {
+        DensityRig d(GuardPolicy::Legacy);
+        for (int i = 0; i < 4; ++i)
+            d.Fresh(0.9f, true);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f, true);
+        assert(d.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kReleaseSamples - 1; ++i)
+            d.Fresh(0.1f, true);
+        assert(d.g.Blocking());
+        d.Fresh(0.1f, true);
+        assert(!d.g.Blocking() && d.g.Holds() == 0);
+    }
+    // a changed policy starts the guard over
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        assert(d.g.Blocking());
+        d.g.Configure(0.60f, GuardPolicy::Legacy);
+        assert(!d.g.Blocking());
+    }
+    // the policy text: only "density" (any case) is density, everything else is legacy
+    assert(ParseGuardPolicy("density") == GuardPolicy::Density && ParseGuardPolicy(" Density ") == GuardPolicy::Density);
+    for (const char* text : { "legacy", "auto", "", "dens", "sticky", "1" })
+        assert(ParseGuardPolicy(text) == GuardPolicy::Legacy);
+}
+
+// ---- edges of the guard that the first round left open (found by the W2 mutation checks) -----------------------------------------------
+// The far edge of the window, the limit and the release level exactly, the window surviving a Reset, the call protocol of ResolveRelease,
+// and the older constants as literals (the other tests use their symbols).
+void TestGuardEdges()
+{
+    assert(CoverageGuard::kStarveFrames == 120 && CoverageGuard::kUnknownFrames == 8);
+
+    // the window is 12 fresh samples: bad samples 12 apart (the 1st and the 12th) trip together, 13 apart do not
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        for (int i = 0; i < 5; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.9f);
+        for (int i = 0; i < 4; ++i)
+            d.Fresh(0.1f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f); // the 12th sample: the first one is still inside the window
+        assert(d.g.Blocking());
+    }
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        for (int i = 0; i < 5; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.9f);
+        for (int i = 0; i < 5; ++i)
+            d.Fresh(0.1f);
+        d.Fresh(0.9f); // the 13th: the first one has left the window
+        assert(!d.g.Blocking());
+    }
+
+    // a sample exactly at the limit is not bad, one exactly at 0.75 x the limit is clean (both policies)
+    const float limit = 0.60f;
+    const float level = limit * CoverageGuard::kReleaseFraction;
+    for (const GuardPolicy policy : { GuardPolicy::Density, GuardPolicy::Legacy })
+    {
+        DensityRig d(policy);
+        for (int i = 0; i < 200; ++i)
+            d.Fresh(limit);
+        assert(!d.g.Blocking() && d.g.Trips() == 0);
+
+        DensityRig t(policy);
+        for (int i = 0; i < 6; ++i)
+            t.Fresh(0.9f);
+        assert(t.g.Blocking());
+        const int need = policy == GuardPolicy::Density ? CoverageGuard::kDensityReleaseSamples : CoverageGuard::kReleaseSamples;
+        for (int i = 0; i < need - 1; ++i)
+            t.Fresh(level);
+        assert(t.g.Blocking());
+        t.Fresh(level);
+        assert(!t.g.Blocking() && t.g.Releases() == 1);
+    }
+
+    // Reset forgets the density window: two bad samples before it, one after it, no trip
+    {
+        DensityRig d;
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        d.g.Reset();
+        d.Fresh(0.1f); // the first sample after a Reset is a baseline
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking() && d.g.Trips() == 0);
+    }
+
+    // ResolveRelease is asked after every Update; a release that is due (the 60th clean sample) is taken back by a band sample that
+    // comes before the answer
+    {
+        DensityRig d;
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        assert(d.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kDensityReleaseSamples - 1; ++i)
+            d.Fresh(0.1f);
+        d.g.Update(0.1f, ++d.seq, true); // the 60th clean sample: the release is due, the answer has not come yet
+        d.g.Update(0.5f, ++d.seq, true); // a band sample (above 0.75 x the limit, not over it): the clean run starts over
+        d.g.ResolveRelease(false);
+        assert(d.g.Blocking() && d.g.Releases() == 0);
     }
 }
 
@@ -563,7 +883,24 @@ void TestFormats()
     const std::string line = SummaryLine(Mode::UiFree, Phase::Active, Reason::None, w, 598, 1190, 6, "ok");
     assert(line == "HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
                    "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
-                   "slot waits 0; boundary: ok");
+                   "slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
+                   "anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
+
+    // The log counters come last, after every field that was there before, in this order
+    w.guardTrips = 2;
+    w.guardReleases = 1;
+    w.swappedBad = 3;
+    w.anchorFrames = 74;
+    w.anchorTakes = 598;
+    w.anchorLongest = 31;
+    w.tagChanges = 5;
+    const std::string counted = SummaryLine(Mode::UiFree, Phase::Active, Reason::None, w, 598, 1190, 6, "ok");
+    assert(counted.ends_with("slot waits 0; boundary: ok; guard trips 2 releases 1; swapped bad frames 3; "
+                             "anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 5"));
+    assert(counted.rfind("HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
+                         "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
+                         "slot waits 0; boundary: ok; ",
+                         0) == 0);
 
     // Ties break by first occurrence, counts first
     WindowStats b;
@@ -581,7 +918,8 @@ void TestFormats()
     clean.captured = 600;
     assert(SummaryLine(Mode::Recomposition, Phase::Active, Reason::None, clean, 0, 0, 0, "ok") ==
            "HudLess: mode recomposition, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage n/a; paste "
-           "built 0 pasted 0 skipped 0; slot waits 0; boundary: ok");
+           "built 0 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
+           "anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
     assert(SummaryLine(Mode::UiFree, Phase::Fallback, Reason::MaskCoverage, clean, 1, 2, 3, "not detected")
                .find("state Fallback(MaskCoverage);") != std::string::npos);
 
@@ -602,6 +940,8 @@ int main()
     TestCoverageGuard();
     TestCoverageGuardRelease();
     TestCoverageGuardStarvation();
+    TestDensityGuard();
+    TestGuardEdges();
     TestSlotRing();
     TestFormats();
     std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown), slot ring fences, log formats");

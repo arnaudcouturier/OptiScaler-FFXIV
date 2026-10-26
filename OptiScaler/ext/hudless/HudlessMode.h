@@ -47,6 +47,26 @@ constexpr Mode ParseMode(std::string_view text)
     return Mode::Off;
 }
 
+// [HudLess] GuardMode: how the mask coverage guard trips and releases (docs/HUDLESS.md section 5).
+//   legacy  trip on 5 fresh samples in a row over the limit, release after 30 in a row at or below 0.75 x the limit
+//   density trip on 3 bad of the last 12 fresh samples, release after 60 clean ones in a row, and a frame anchored after
+//           an off-screen UI draw keeps a tripped guard tripped at once
+enum class GuardPolicy : uint8_t
+{
+    Legacy,
+    Density,
+};
+
+// Case-insensitive; anything unknown (including "auto" and the empty string) is legacy: fail open, today's behaviour.
+constexpr GuardPolicy ParseGuardPolicy(std::string_view text)
+{
+    return detail::EqualsNoCase(detail::Trim(text), "density") ? GuardPolicy::Density : GuardPolicy::Legacy;
+}
+
+// [HudLess] HdrPaste: off | on. Only "on" (case-insensitive) switches the HDR paste path on; anything else, "auto" and the empty
+// string included, is off: fail open.
+constexpr bool ParseHdrPaste(std::string_view text) { return detail::EqualsNoCase(detail::Trim(text), "on"); }
+
 constexpr const char* ModeName(Mode mode)
 {
     switch (mode)

@@ -24,6 +24,11 @@ struct FrameImage
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t sequence = 0; // the source's own frame counter value at capture time (diagnostics only)
+    // Set by the FFXIV live source (ui::live::LiveSource::Take) whatever its result; the boundary provider returns early with it false
+    // while the detector is not armed or wanted or the shader catalog is not usable. Meaning: this frame's first UI draw into the
+    // backbuffer was preceded by UI draws into another render target (an off-screen window, for instance). Only counted and logged;
+    // false for a source that does not know.
+    bool anchoredAfterOffscreenUi = false;
 };
 
 enum class TakeResult : uint8_t

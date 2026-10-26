@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -328,12 +329,22 @@ class CoverageGuard
     static constexpr float kReleaseFraction = 0.75f;
     static constexpr int kStarveFrames = 120;
     static constexpr int kUnknownFrames = 8;
+    // The density policy ([HudLess] GuardMode = density): trips on kDensityTripBad bad samples among the last kDensityWindow fresh ones
+    // (which already covers kDensityTripBad in a row), releases after kDensityReleaseSamples clean ones in a row. Everything else is as above.
+    static constexpr int kDensityWindow = 12;
+    static constexpr int kDensityTripBad = 3;
+    static constexpr int kDensityReleaseSamples = 60;
 
-    // limit 0 = guard off
-    void Configure(float limit)
+    // limit 0 = guard off. A different policy starts the guard over.
+    void Configure(float limit, GuardPolicy policy = GuardPolicy::Legacy)
     {
         _limit = limit;
         _release = limit * kReleaseFraction;
+        if (policy != _policy)
+        {
+            _policy = policy;
+            Reset();
+        }
         if (_limit <= 0.f)
             Reset();
     }
@@ -347,6 +358,8 @@ class CoverageGuard
         _tripped = false;
         _seenSequence = 0;
         _baseSet = false;
+        _window = 0;
+        _releaseDue = false;
     }
 
     // Once per armed present, before the decision. `coverage` is PasteStatus::coverage (0..1, < 0 unknown),
@@ -368,7 +381,10 @@ class CoverageGuard
             if (_unknownRun < kUnknownFrames)
                 ++_unknownRun;
             if (_unknownRun >= kUnknownFrames)
+            {
                 _over = 0;
+                _window = 0; // the density window does not survive it either
+            }
             if (_tripped && probedLastPresent && ++_starve >= kStarveFrames)
                 ClearTrip();
             return;
@@ -381,9 +397,33 @@ class CoverageGuard
         if (_tripped)
         {
             if (coverage > _release)
+            {
                 _clean = 0; // still too much UI area, including the band up to the limit: stay tripped
+                _releaseDue = false;
+            }
+            else if (_policy == GuardPolicy::Density)
+            {
+                // The clean run is complete; the release itself waits for the boundary's answer for this present (ResolveRelease)
+                if (++_clean >= kDensityReleaseSamples)
+                    _releaseDue = true;
+            }
             else if (++_clean >= kReleaseSamples)
                 ClearTrip();
+            return;
+        }
+
+        if (_policy == GuardPolicy::Density)
+        {
+            const bool bad = coverage > _limit;
+            _window = static_cast<uint16_t>(((_window << 1) | (bad ? 1u : 0u)) & ((1u << kDensityWindow) - 1u));
+            if (std::popcount(static_cast<unsigned>(_window)) >= kDensityTripBad)
+            {
+                _tripped = true;
+                _clean = 0;
+                _starve = 0;
+                _releaseDue = false;
+                ++_trips;
+            }
             return;
         }
 
@@ -403,18 +443,43 @@ class CoverageGuard
         }
     }
 
+    // Density policy, once per present after the boundary was asked (or at the end of a present that never got that far, with false):
+    // `anchorLater` = this present's frame was anchored after an off-screen UI draw. While tripped such a present keeps the fallback at
+    // once, without waiting for its own readback (two presents later), and restarts the clean run. Otherwise a completed clean run
+    // releases the guard. The legacy policy releases inside Update and ignores the fact.
+    void ResolveRelease(bool anchorLater)
+    {
+        if (_policy != GuardPolicy::Density || !_tripped)
+            return;
+        if (anchorLater)
+        {
+            _clean = 0;
+            _releaseDue = false;
+            ++_holds;
+        }
+        else if (_releaseDue)
+            ClearTrip();
+    }
+
     // True while tripped: the engine must not swap the frame generation base.
     bool Blocking() const { return _tripped; }
     bool Unknown() const { return _limit > 0.f && _unknownRun >= kUnknownFrames; }
     int Trips() const { return _trips; }
+    // Every end of a trip: the clean run, or the starvation release.
+    int Releases() const { return _releases; }
+    // Presents on which an anchor-later frame held a tripped density guard (it restarted the clean run).
+    int Holds() const { return _holds; }
 
   private:
     void ClearTrip()
     {
+        ++_releases;
         _tripped = false;
         _over = 0;
         _clean = 0;
         _starve = 0;
+        _window = 0;
+        _releaseDue = false;
     }
 
     float _limit = 0.f;
@@ -424,10 +489,88 @@ class CoverageGuard
     int _starve = 0;
     int _unknownRun = 0;
     int _trips = 0;
+    int _releases = 0;
+    int _holds = 0;
+    GuardPolicy _policy = GuardPolicy::Legacy;
+    uint16_t _window = 0;     // density: the last kDensityWindow fresh samples, bit 0 the newest, 1 = over the limit
+    bool _releaseDue = false; // density: the clean run is complete, the boundary's answer for the present decides
     bool _tripped = false;
     bool _baseSet = false;
     uint64_t _seenSequence = 0;
 };
+
+// ---- The HDR stage before the paste producer (docs/HUDLESS.md section 8) -------------------------------------------------------------
+// Under HDR output the producer builds its image from a PQ copy of the final frame, which needs the slot's HDR stage. The readiness
+// check creates the stage only after a finished image exists, so on a present that is not probing nothing created it before the first
+// image and the producer found none (no image was ever built; inferred from reading the code, never observed in a game). Probing presents did create it first. [HudLess] HdrPaste = on creates
+// it before the producer on every HDR present; off keeps the old rule, because that path (the PQ conversion of the final frame) has not
+// run in a game yet.
+constexpr bool EnsureHdrStageBeforeProduce(bool hdrOutput, bool probing, bool hdrPaste)
+{
+    return hdrOutput && (probing || hdrPaste);
+}
+
+// The producer step of one present that produces: the stage first when the rule says so (a stage that cannot be made stops the
+// present), then the paste image. False when either failed.
+template <typename EnsureStage, typename Produce>
+bool ProduceWithHdrStage(bool hdrOutput, bool probing, bool hdrPaste, EnsureStage&& ensureStage, Produce&& produce)
+{
+    const bool stageReady = !EnsureHdrStageBeforeProduce(hdrOutput, probing, hdrPaste) || ensureStage();
+    return stageReady && produce();
+}
+
+// A stage that cannot be made is not made again on every present (each try recreates resources and writes an error): with HdrPaste = on
+// the failure is latched until the HDR output state or the setting changes (or the ring is dropped: Clear). With off nothing is latched.
+class HdrStageLatch
+{
+  public:
+    // The key of the latch: a different HDR output state or setting is a new situation, so the failure is forgotten. Called on every
+    // present that produces (SDR ones too, otherwise a switch to SDR and back would go unseen).
+    void Observe(bool hdrOutput, bool hdrPaste)
+    {
+        if (_known && (hdrOutput != _hdrOutput || hdrPaste != _hdrPaste))
+            _failed = false;
+        _hdrOutput = hdrOutput;
+        _hdrPaste = hdrPaste;
+        _known = true;
+    }
+    bool MayTry(bool hdrOutput, bool hdrPaste)
+    {
+        Observe(hdrOutput, hdrPaste);
+        return !_failed;
+    }
+    // True for the first failure since the latch was clear (the caller writes its one line then)
+    bool NoteFailure(bool hdrOutput, bool hdrPaste)
+    {
+        Observe(hdrOutput, hdrPaste);
+        const bool first = !_failed;
+        _failed = true;
+        return first;
+    }
+    void Clear() { _failed = false; }
+
+  private:
+    bool _known = false;
+    bool _hdrOutput = false;
+    bool _hdrPaste = false;
+    bool _failed = false;
+};
+
+// Creates the stage for the producer: with hdrPaste off exactly the plain call (the old behaviour, retried whenever it is reached); with
+// on a failed creation is latched, so the next presents do not try again, and `onLatched` runs once for it.
+template <typename Ensure, typename OnLatched>
+bool EnsureStageLatched(HdrStageLatch& latch, bool hdrOutput, bool hdrPaste, Ensure&& ensure, OnLatched&& onLatched)
+{
+    if (!hdrPaste)
+        return ensure();
+    if (!latch.MayTry(hdrOutput, hdrPaste))
+        return false;
+    if (ensure())
+        return true;
+    if (latch.NoteFailure(hdrOutput, hdrPaste))
+        onLatched();
+    return false;
+}
 
 // ---- Slot ring with reader fences (docs/HUDLESS.md section 6) --------------------------------------------------------
 // A slot is written by the D3D11 side only when every D3D12 queue operation that reads it has COMPLETED. The check is
@@ -563,6 +706,14 @@ struct WindowStats
     uint64_t coverageSamples = 0;
     float coverageMax = 0.f;
     uint64_t slotWaits = 0; // blocking waits on the game thread (only the stub-free design has none; counted for the log)
+    // Counters that only watch (they never feed a decision), at the end of the summary line
+    uint32_t guardTrips = 0;     // times the coverage guard tripped in the window
+    uint32_t guardReleases = 0;  // times it ended a trip (clean run or starvation)
+    uint64_t swappedBad = 0;     // swapped bases whose own paste image measured over the limit (counted when its readback arrives)
+    uint64_t anchorFrames = 0;   // presents whose frame was anchored after an off-screen UI draw (the boundary's own predicate)
+    uint64_t anchorTakes = 0;    // presents that asked the boundary for a frame (what the share is taken of)
+    uint32_t anchorLongest = 0;  // longest run of consecutive such presents, inside the window
+    uint64_t tagChanges = 0;     // presents whose set of tags sent to the frame generator differs from the previous present's
 };
 
 // Counts one fallback in the window
@@ -595,7 +746,8 @@ inline std::string FallbackBreakdown(const WindowStats& w)
 }
 
 // HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, NoBoundaryThisFrame 1);
-// mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok
+// mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0;
+// swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
 inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const WindowStats& w, uint64_t pasteBuilt,
                                uint64_t pastePasted, uint64_t pasteSkipped, const std::string& boundary)
 {
@@ -617,6 +769,12 @@ inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const Wind
 
     line += std::format("; paste built {} pasted {} skipped {}; slot waits {}; boundary: {}", pasteBuilt, pastePasted,
                         pasteSkipped, w.slotWaits, boundary);
+
+    const double share = w.anchorTakes == 0 ? 0.0 : 100.0 * static_cast<double>(w.anchorFrames) / static_cast<double>(w.anchorTakes);
+    line += std::format("; guard trips {} releases {}; swapped bad frames {}; anchor-later {} of {} frames ({:.1f}%), longest run "
+                        "{}; tag changes {}",
+                        w.guardTrips, w.guardReleases, w.swappedBad, w.anchorFrames, w.anchorTakes, share, w.anchorLongest,
+                        w.tagChanges);
     return line;
 }
 

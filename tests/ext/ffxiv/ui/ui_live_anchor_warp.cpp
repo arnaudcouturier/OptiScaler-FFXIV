@@ -272,6 +272,7 @@ void Run()
     const auto backbuffer = gpu.Read(bb.Get(), pitch); // after the HUD draws
     FrameOutcome outcome;
     CHECK(h.Present(&outcome) == TakeResult::Ok);
+    CHECK(h.img.anchoredAfterOffscreenUi); // the engine is told the frame was anchored after off-screen UI draws (the counter below counts it)
     CHECK(h.img.texture != nullptr);
     if (!h.img.texture)
         return; // a failure above; do not dereference
@@ -308,6 +309,7 @@ void Run()
         const TakeResult r = h.Present(&o);
         CHECK(r == TakeResult::NotThisFrame);
         CHECK(h.img.texture == nullptr);
+        CHECK(!h.img.anchoredAfterOffscreenUi); // off-screen UI draws only: there is no anchor to be late
         CHECK(std::string(source.LastReason()) == "no boundary in this frame");
         CHECK(o.record.candidates.r1 != 0);
         CHECK_EQ(o.r1b, 0u);
@@ -333,6 +335,7 @@ void Run()
         h.Draw(psUi.Get());
         CHECK_EQ(g_fx.calls, calls + 1);
         CHECK(h.Present() == TakeResult::Ok);
+        CHECK(!h.img.anchoredAfterOffscreenUi);     // HUD first: not anchor-later, as the counter says
         const auto st = source.GetStats();
         CHECK_EQ(st.captured, 2u);
         CHECK_EQ(st.anchorLater, 1u);               // R1b == R1 here: not counted

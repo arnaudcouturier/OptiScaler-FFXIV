@@ -144,6 +144,100 @@ void Events()
     }
 }
 
+// The same-frame "anchor after off-screen UI draws" fact: computed by the hook glue from the boundary's answer for the R1b draw (the
+// same r1 != r1b condition as the end-of-frame counter), kept per frame by the live source and handed to the engine with Take().
+void AnchorFact()
+{
+    Core core;
+    Core::DrawResult res;
+    res.counted = true;
+    res.ordinal = 40;
+    res.r1bChanged = true;
+    res.r1b = 40;
+    res.cand.r1 = 12; // a UI draw into another render target came first
+    CHECK(EventOf(core, res).anchorLater);
+    res.cand.r1 = 40; // the HUD came first
+    CHECK(!EventOf(core, res).anchorLater);
+    res.cand.r1 = 0;  // no R1 at all (cannot happen): nothing is claimed
+    CHECK(!EventOf(core, res).anchorLater);
+    res.cand.r1 = 12;
+    res.r1b = 0; // the R1b candidate was dropped by this draw
+    CHECK(!EventOf(core, res).anchorLater);
+
+    LiveSource s(Env {});
+    FrameImage img;
+    DrawEvent ev;
+    ev.r1bSet = true;
+    ev.anchorLater = true;
+    ev.sawSceneStage = true;
+    s.OnDraw(nullptr, ev); // not armed yet: nothing acts, the fact is still kept for the engine's Take()
+    CHECK(s.Take(img) == TakeResult::NotThisFrame);
+    CHECK(img.anchoredAfterOffscreenUi);
+    s.EndFrame();
+    CHECK(s.Take(img) == TakeResult::NotThisFrame);
+    CHECK(!img.anchoredAfterOffscreenUi); // forgotten at the end of the frame
+
+    // Each case below is a frame of a source that has not been armed yet (an armed source would copy: no GPU here)
+    auto flagAfter = [&](auto&& events)
+    {
+        LiveSource fresh(Env {});
+        FrameImage out;
+        events(fresh);
+        fresh.Take(out);
+        return out.anchoredAfterOffscreenUi;
+    };
+    // a menu frame (no scene stage seen) is not claimed
+    DrawEvent menu = ev;
+    menu.sawSceneStage = false;
+    CHECK(!flagAfter([&](LiveSource& f) { f.OnDraw(nullptr, menu); }));
+    // a later scene/post stage that drops the R1b candidate takes the fact with it
+    DrawEvent cleared;
+    cleared.r1bCleared = true;
+    CHECK(!flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, ev);
+            f.OnDraw(nullptr, cleared);
+        }));
+    // ... and the next R1b of the frame decides: first off-screen UI before it (claimed), then the HUD first (not)
+    DrawEvent hudFirst = ev;
+    hudFirst.anchorLater = false;
+    CHECK(flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, hudFirst);
+            f.OnDraw(nullptr, cleared);
+            f.OnDraw(nullptr, ev);
+        }));
+    CHECK(!flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, ev);
+            f.OnDraw(nullptr, cleared);
+            f.OnDraw(nullptr, hudFirst);
+        }));
+    // an R1b that replaces the earlier one without a clear in between decides on its own
+    CHECK(!flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, ev);
+            f.OnDraw(nullptr, hudFirst);
+        }));
+    CHECK(flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, hudFirst);
+            f.OnDraw(nullptr, ev);
+        }));
+    // released with the device: nothing stays set
+    CHECK(!flagAfter(
+        [&](LiveSource& f)
+        {
+            f.OnDraw(nullptr, ev);
+            f.Release();
+        }));
+}
+
 // The end-of-frame note: which counter an acting frame without a capture lands in, and the "anchor after off-screen draws" count.
 void Notes()
 {
@@ -211,6 +305,7 @@ int main()
     Guard();
     Arming();
     Events();
+    AnchorFact();
     Notes();
     Lines();
     return Finish("ui_live_decide");

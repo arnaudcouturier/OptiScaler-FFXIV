@@ -484,6 +484,17 @@ int main(int argc, char** argv)
     CHECK(has("DLSSG", "UIRecomposition") && has("XeFG", "UnlockMFG") && has("DlssNr", "ScanExposure"));
     CHECK(frags.count("Companion") == 1 && frags.count("HudLess") == 1 && frags.count("DlssNr") == 1);
 
+    // the two ini-only developer keys of the HUD-less guard and the HDR paste ship as auto (the code default applies) and say which default
+    // that is (string keys: the comparison below does not read them)
+    {
+        const std::string hudlessIni = menuscan::ReadFile(repo + "/OptiScaler/ext/ini/HudLess.ini");
+        auto hasLine = [&](const std::string& text)
+        { return hudlessIni.find("\n" + text + "\r\n") != std::string::npos || hudlessIni.find("\n" + text + "\n") != std::string::npos; };
+        CHECK(hasLine("GuardMode=auto") && hasLine("HdrPaste=auto"));
+        CHECK(frags.at("HudLess").at("GuardMode").find("legacy or density - Default (auto) is legacy") != std::string::npos);
+        CHECK(frags.at("HudLess").at("HdrPaste").find("off or on - Default (auto) is off") != std::string::npos);
+    }
+
     // the documented default of every bool/int/float key equals the default the code declares
     {
         const auto decls = ScanDecls(repo + "/OptiScaler/ext");

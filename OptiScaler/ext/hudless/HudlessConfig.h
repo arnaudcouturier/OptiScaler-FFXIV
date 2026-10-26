@@ -36,10 +36,17 @@ struct HudlessConfig
     CustomOptional<bool> steadyTiming { false };               // SteadyTiming
     CustomOptional<float> coverageGuard { kGuardDefault };     // CoverageGuard, 0 = off
     CustomOptional<bool> showDetectedUi { false };             // ShowDetectedUi (debug tint on the pasted area)
+    // legacy | density. A string key, ini only (see hudless::GuardPolicy); anything else reads as legacy.
+    CustomOptional<std::string> guardMode { "legacy" };        // GuardMode
+    // off | on. A string key, ini only. on = under HDR output the paste's HDR stage is made before the first paste image (the PQ
+    // conversion path of the paste has not run in a game yet); anything else reads as off.
+    CustomOptional<std::string> hdrPaste { "off" };            // HdrPaste
 
     // Values as the engine uses them: out-of-range or non-finite input is clamped / replaced, the stored text is not
     // rewritten.
     hudless::Mode GetMode() const { return hudless::ParseMode(mode.value_or_default()); }
+    bool HdrPasteOn() const { return hudless::ParseHdrPaste(hdrPaste.value_or_default()); }
+    hudless::GuardPolicy GetGuardPolicy() const { return hudless::ParseGuardPolicy(guardMode.value_or_default()); }
     float Threshold() const
     {
         const float v = maskThreshold.value_or_default();

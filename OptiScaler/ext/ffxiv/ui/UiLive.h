@@ -142,6 +142,9 @@ struct DrawEvent
     bool r1bSet = false;      // this draw became the R1b candidate (first UI draw into the backbuffer since the last scene stage)
     bool r1bCleared = false;  // this draw dropped the R1b candidate (a later scene/post stage superseded it)
     bool sawSceneStage = false;
+    // With r1bSet: UI draws into another render target came before this draw since the last scene stage (R1 sits before R1b, the same
+    // r1 != r1b test as the end-of-frame "anchor after off-screen UI draws" counter). Only reported to the engine, it changes nothing here.
+    bool anchorLater = false;
     uint32_t bbWidth = 0, bbHeight = 0; // swapchain backbuffer of this frame (0 = unknown)
     uint64_t frame = 0;
 };
@@ -155,6 +158,7 @@ inline DrawEvent EventOf(const Core& core, const Core::DrawResult& res)
         return ev;
     ev.r1bSet = res.r1b != 0 && res.r1b == res.ordinal;
     ev.r1bCleared = res.r1b == 0;
+    ev.anchorLater = ev.r1bSet && res.cand.r1 != 0 && res.cand.r1 != res.r1b;
     ev.sawSceneStage = core.Tracker().Summary().sawSceneStage;
     ev.bbWidth = core.BackbufferShape().width;
     ev.bbHeight = core.BackbufferShape().height;
@@ -205,6 +209,11 @@ class LiveSource
     void OnDraw(ID3D11DeviceContext* c, const DrawEvent& ev)
     {
         std::lock_guard lock(_mutex);
+        // The frame's final R1b decides the same-frame fact for the engine (a later R1b replaces it, a dropped one takes it away)
+        if (ev.r1bSet)
+            _anchorLaterFrame = ev.anchorLater && ev.sawSceneStage;
+        else if (ev.r1bCleared)
+            _anchorLaterFrame = false;
         if (ev.r1bCleared && _captured)
         {
             // The effects and the copy already happened at the earlier candidate: this frame cannot be used.
@@ -268,6 +277,7 @@ class LiveSource
     {
         std::lock_guard lock(_mutex);
         out = {};
+        out.anchoredAfterOffscreenUi = _anchorLaterFrame;
         _tookThisFrame = true;
         ++_stats.takes;
         if (_captured && !_consumed && _snapshot)
@@ -325,7 +335,7 @@ class LiveSource
         const bool wasArmed = _armed;
         _armed = _tookThisFrame;
         _tookThisFrame = false;
-        _captured = _handled = _consumed = _hadEvent = false;
+        _captured = _handled = _consumed = _hadEvent = _anchorLaterFrame = false;
         _reason = Reason::None;
         ++_framesSinceEffectsLine;
 
@@ -378,7 +388,7 @@ class LiveSource
     {
         std::lock_guard lock(_mutex);
         _snapshot.Reset();
-        _armed = _tookThisFrame = _captured = _handled = _consumed = _hadEvent = false;
+        _armed = _tookThisFrame = _captured = _handled = _consumed = _hadEvent = _anchorLaterFrame = false;
     }
 
     Stats GetStats()
@@ -441,6 +451,7 @@ class LiveSource
     // frame state
     bool _armed = false, _tookThisFrame = false;
     bool _handled = false, _captured = false, _consumed = false, _hadEvent = false;
+    bool _anchorLaterFrame = false; // the frame's R1b came after off-screen UI draws (handed to the engine with Take())
     Reason _reason = Reason::None;
     DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;
     uint32_t _width = 0, _height = 0;

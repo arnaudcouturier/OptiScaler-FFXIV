@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstdio>
 #include <deque>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,7 @@ struct FakeSource final : IHudlessSource
     bool armed = true;
     TakeResult result = TakeResult::Ok;
     const char* reason = "";
+    bool anchorLater = false; // the boundary's same-frame fact: the first backbuffer UI draw came after off-screen UI draws
     int takes = 0;
     int activeCalls = 0;
     bool Active() override
@@ -34,6 +36,7 @@ struct FakeSource final : IHudlessSource
         out.width = 3840;
         out.height = 2160;
         out.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        out.anchoredAfterOffscreenUi = anchorLater;
         return result;
     }
     const char* LastReason() override { return reason; }
@@ -54,6 +57,7 @@ struct FakeHost final : IEngineHost
     bool pasteReady = true;
     bool sceneOwns = false;
     bool pausedByPreset = false; // the DLSS-G render preset takes the UI recomposition away
+    GuardPolicy policy = GuardPolicy::Legacy; // [HudLess] GuardMode
     int pausedQueries = 0;
     int stages = 0;
     std::vector<std::string> log;
@@ -65,6 +69,7 @@ struct FakeHost final : IEngineHost
     bool HdrOutput() override { ++calls; return hdr; }
     bool DebugCompareOn() override { ++calls; return compare; }
     float CoverageLimit() override { ++calls; return limit; }
+    GuardPolicy CoverageGuardPolicy() override { return policy; }
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
     Reason CheckCapture(const FrameImage&) override { ++calls; return check; }
     Reason StageCapture(const FrameImage&) override { ++calls; ++stages; return stage; }
@@ -81,13 +86,15 @@ struct Run
     Reason reason;
 };
 
-// One full present: Pre, UiFreeFrame, Post (bookkeeping only)
-Run Present(Core& core, Mode mode, const PasteCounters& paste = {})
+// One full present: Pre, UiFreeFrame, Post (bookkeeping only). `tags` is the tag set the host sent (-1 = what the engine sends over SDR:
+// the hud-less tag exactly when the core wants tags).
+Run Present(Core& core, Mode mode, const PasteCounters& paste = {}, int tags = -1)
 {
     Run r {};
     r.staged = core.BeginPresent(mode, paste);
     r.swapped = core.DecideBase();
     r.reason = core.PresentReason();
+    core.NoteTagSet(tags >= 0 ? static_cast<uint8_t>(tags) : (core.WantsTags() ? 1 : 0));
     core.EndPresent();
     return r;
 }
@@ -534,6 +541,8 @@ struct Replay
     Core core { host };
     float coverage = 0.f;     // mask coverage of the images produced from now on
     bool noBoundary = false;  // the game shows no UI boundary in this present (fade to a loading screen, menu, ...)
+    bool anchorFlag = false;  // the boundary says this present's frame was anchored after an off-screen UI draw
+    std::vector<float> imageCoverage; // the mask coverage the present's own paste image will measure
 
     struct Image
     {
@@ -563,17 +572,19 @@ struct Replay
         {
             const Image image = inFlight.front();
             inFlight.pop_front();
-            counters.produced = image.ordinal;
             counters.coverage = image.coverage;
             counters.coverageSequence = image.ordinal;
             if (image.valid)
                 completed = true;
         }
+        counters.produced = produced; // builds are counted when they are submitted, as UiPaste::Snapshot() does
 
         host.source.result = (noBoundary || !tookLast) ? TakeResult::NotThisFrame : TakeResult::Ok;
+        host.source.anchorLater = anchorFlag;
         host.pasteReady = completed;
         const int takesBefore = host.source.takes;
-        const Run r = Present(core, Mode::UiFree, counters);
+        const Run r = Present(core, Mode::UiFree, counters, host.hdr ? 0 : -1);
+        imageCoverage.push_back(coverage);
         tookLast = host.source.takes > takesBefore;
 
         const PasteAction action = core.PasteDecision();
@@ -1183,7 +1194,8 @@ void TestSteadyGameplayReplay()
     assert(lines.size() == 2);
     assert(lines[1] ==
            "HudLess: mode ui_free, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage avg 12.0% max 12.0%; "
-           "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok");
+           "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
+           "anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
 
 // A black screen inside a cutscene (the boundary still fires, the mask covers nearly everything): after the trip the
@@ -1197,7 +1209,8 @@ void TestBlackScreenSummary()
     assert(lines.size() == 2);
     assert(lines[1] ==
            "HudLess: mode ui_free, state Fallback(MaskCoverage); 600 presents: 0 captured, 600 fallbacks (MaskCoverage 600); "
-           "mask coverage avg 95.0% max 95.0%; paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok");
+           "mask coverage avg 95.0% max 95.0%; paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 "
+           "releases 0; swapped bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
 
 // One fade: the displayed state changes twice (into Fallback(MaskCoverage) at the trip, back to Active after the release),
@@ -1308,9 +1321,618 @@ void TestPausedByPreset()
     }
 }
 
+// ---- the decisions of the engine core, recorded -----------------------------------------------------------------------------------
+// A deterministic mix of coverage, lost boundaries and fades is replayed and every present's decision (staged, swapped, reason, paste
+// action, paste visible, tags wanted) is folded into one hash. The literals were recorded before the log counters existed: the counters
+// only watch, so the same streams must keep producing them (and the boundary's same-frame facts, which the counters read, must not
+// move a decision in the legacy guard).
+struct Lcg
+{
+    uint32_t s = 12345;
+    uint32_t Next()
+    {
+        s = s * 1664525u + 1013904223u;
+        return s >> 8;
+    }
+};
+
+uint64_t DecisionDigest(const Replay& r)
+{
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](uint64_t v)
+    {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    for (size_t i = 0; i < r.runs.size(); ++i)
+    {
+        mix(r.runs[i].staged);
+        mix(r.runs[i].swapped);
+        mix(static_cast<uint64_t>(r.runs[i].reason));
+        mix(static_cast<uint64_t>(r.actions[i]));
+        mix(r.visible[i]);
+        mix(r.tags[i]);
+    }
+    mix(r.flips);
+    return h;
+}
+
+// Scenario k: the stream the digest is taken over. `flagged` (the boundary's anchor-later fact) is set by `flag(present)` when given.
+template <typename FlagFn> uint64_t ScenarioDigest(int k, FlagFn&& flag)
+{
+    Replay replay;
+    Lcg rng;
+    int burstLeft = 0;
+    for (int n = 1; n <= 4000; ++n)
+    {
+        switch (k)
+        {
+        case 0: // steady HUD
+            replay.coverage = 0.12f;
+            break;
+        case 1: // random mix: calm, half-screen windows, fades, lost boundaries
+        {
+            const uint32_t v = rng.Next() % 100;
+            replay.coverage = v < 70 ? 0.12f : (v < 85 ? 0.50f : 0.95f);
+            replay.noBoundary = (rng.Next() % 100) < 4;
+            break;
+        }
+        case 2: // every other frame bad
+            replay.coverage = (n % 2) ? 0.95f : 0.10f;
+            break;
+        case 3: // every fourth frame bad
+            replay.coverage = (n % 4 == 0) ? 0.95f : 0.10f;
+            break;
+        default: // bursts of 5-60 bad frames
+            if (burstLeft == 0 && (rng.Next() % 150) == 0)
+                burstLeft = 5 + static_cast<int>(rng.Next() % 56);
+            replay.coverage = burstLeft > 0 ? 0.95f : 0.10f;
+            if (burstLeft > 0)
+                --burstLeft;
+            break;
+        }
+        flag(replay, n);
+        replay.Step();
+    }
+    return DecisionDigest(replay);
+}
+
+void TestDecisionsRecorded()
+{
+    // Streams 0, 2 and 3 share a value: with the legacy guard an alternating or every-fourth bad frame never trips it, so every
+    // present is swapped, exactly as in steady play.
+    static constexpr uint64_t kRecorded[5] = { 11994251758413254906ull, 15914297416367574552ull, 11994251758413254906ull,
+                                               11994251758413254906ull, 1196904380689745642ull };
+    uint64_t got[5];
+    for (int k = 0; k < 5; ++k)
+    {
+        got[k] = ScenarioDigest(k, [](Replay&, int) {});
+        std::printf("scenario %d digest %llu\n", k, static_cast<unsigned long long>(got[k]));
+        std::fflush(stdout);
+    }
+    for (int k = 0; k < 5; ++k)
+        assert(got[k] == kRecorded[k]);
+    // The boundary's anchor-later fact is only counted: any pattern of it leaves every decision where it was
+    for (int k = 0; k < 5; ++k)
+        assert(ScenarioDigest(k, [](Replay& r, int n) { r.anchorFlag = (n % 11) < 6 || (n % 97) < 40; }) == kRecorded[k]);
+}
+
+// ---- the counters of the 600-present line ------------------------------------------------------------------------------------------
+uint64_t NumberAfter(const std::string& line, const std::string& key)
+{
+    const size_t at = line.find(key);
+    assert(at != std::string::npos);
+    return std::stoull(line.substr(at + key.size()));
+}
+
+// What follows "boundary: ok; ": the counters, exactly as written
+std::string CounterTail(const Replay& replay)
+{
+    const auto lines = SummaryLines(replay);
+    assert(!lines.empty());
+    const size_t at = lines[0].find("; guard trips ");
+    assert(at != std::string::npos);
+    return lines[0].substr(at + 2);
+}
+
+void TestLogCounters()
+{
+    // Three bad frames, never the five in a row that trip the legacy guard: each swapped base whose own image measured over the limit
+    // is counted when that readback arrives. Two runs of anchor-later frames (5 and 3), 600 acting frames. The base is swapped from
+    // present 3 on: one change of the tag set.
+    {
+        Replay r;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = (n >= 100 && n <= 102) ? 0.95f : 0.10f;
+            r.anchorFlag = (n >= 300 && n <= 304) || (n >= 400 && n <= 402);
+            r.Step();
+        }
+        assert(CounterTail(r) == "guard trips 0 releases 0; swapped bad frames 3; anchor-later 8 of 600 frames (1.3%), longest run 5; "
+                                 "tag changes 1");
+    }
+    // A burst of 20 bad frames: the legacy guard needs five readbacks, so the bad frames 300..305 were swapped (six); the probing
+    // presents after the trip are not. One trip, one release; the base goes out at the trip and back at the release (tag set 0 -> 1
+    // -> 0 -> 1 = three changes).
+    {
+        Replay r;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = (n >= 300 && n <= 319) ? 0.95f : 0.10f;
+            r.Step();
+        }
+        assert(r.flips == 3);
+        assert(CounterTail(r) == "guard trips 1 releases 1; swapped bad frames 6; anchor-later 0 of 600 frames (0.0%), longest run 0; "
+                                 "tag changes 3");
+    }
+    // Over HDR output the engine sends no tags at all: the base still changes three times, the tag set never
+    {
+        Replay r;
+        r.host.hdr = true;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = (n >= 300 && n <= 319) ? 0.95f : 0.10f;
+            r.Step();
+        }
+        assert(r.flips == 3);
+        assert(CounterTail(r).ends_with("tag changes 0"));
+    }
+    // A present that sent nothing (the host noted no tag set, as when it returns before tagging) is a present without tags
+    {
+        FakeHost host;
+        Core core(host);
+        core.BeginPresent(Mode::UiFree, {});
+        core.DecideBase();
+        core.NoteTagSet(1);
+        core.EndPresent();
+        core.BeginPresent(Mode::UiFree, {});
+        core.DecideBase();
+        core.EndPresent();
+        for (int n = 3; n <= 600; ++n)
+            Present(core, Mode::UiFree);
+        std::string line;
+        for (const auto& l : host.log)
+            if (l.find("600 presents") != std::string::npos)
+                line = l;
+        assert(!line.empty() && line.ends_with("tag changes 3")); // 0 -> 1, 1 -> 0, 0 -> 1
+    }
+    // The tag set is a set: hud-less alone and hud-less with the UI image are two different sets
+    {
+        FakeHost host;
+        Core core(host);
+        for (int n = 1; n <= 600; ++n)
+            Present(core, Mode::Recomposition, {}, n < 100 ? 3 : (n < 200 ? 1 : 3));
+        std::string line;
+        for (const auto& l : host.log)
+            if (l.find("600 presents") != std::string::npos)
+                line = l;
+        assert(line.ends_with("tag changes 3")); // 0 -> 3, 3 -> 1, 1 -> 3
+    }
+    // A random stream against a reference computed from the replay's own records (the swapped state and the measured coverage of every
+    // present); anchor-later frames in runs of 7
+    {
+        Replay r;
+        Lcg rng;
+        for (int n = 1; n <= 600; ++n)
+        {
+            const uint32_t v = rng.Next() % 100;
+            r.coverage = v < 70 ? 0.12f : (v < 85 ? 0.50f : 0.95f);
+            r.noBoundary = (rng.Next() % 100) < 4;
+            r.anchorFlag = (n % 40) < 7;
+            r.Step();
+        }
+        uint64_t swappedBad = 0, flagged = 0, longest = 0, run = 0;
+        for (size_t i = 0; i < 600; ++i)
+        {
+            if (r.actions[i] == PasteAction::Produce && r.runs[i].swapped && r.imageCoverage[i] > 0.60f &&
+                i + 1 + Replay::kLatency <= 600)
+                ++swappedBad; // its readback arrives kLatency presents later, inside this window
+            const bool flag = (static_cast<int>(i + 1) % 40) < 7;
+            flagged += flag;
+            run = flag ? run + 1 : 0;
+            longest = std::max(longest, run);
+        }
+        const auto lines = SummaryLines(r);
+        assert(!lines.empty() && swappedBad > 0 && flagged > 0);
+        assert(NumberAfter(lines[0], "swapped bad frames ") == swappedBad);
+        assert(NumberAfter(lines[0], "anchor-later ") == flagged);
+        assert(NumberAfter(lines[0], "longest run ") == longest);
+    }
+    // A guard that is off (CoverageGuard = 0) has no limit to be over: nothing is a bad frame
+    {
+        Replay r;
+        r.host.limit = 0.f;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = 0.95f;
+            r.Step();
+        }
+        assert(CounterTail(r).find("swapped bad frames 0;") != std::string::npos);
+    }
+}
+
+// ---- [HudLess] GuardMode = density, end to end ---------------------------------------------------------------------------------------
+// Streams where a frame is bad exactly when the boundary says it was anchored after off-screen UI draws (the cause class the policy is
+// for); a bad frame's image measures 0.95, a clean one 0.10. Flips are changes of the swapped base; 3600 presents are one minute at 60 fps.
+struct StreamResult
+{
+    uint64_t flips = 0;
+    uint64_t swappedBad = 0;           // swapped presents whose own image was bad
+    uint64_t swappedBadAfterTrip = 0;  // ... after the first present that fell back to MaskCoverage
+    bool tripped = false;
+    size_t releasedAt = 0;             // index of the first swapped present after the first trip (0 = none)
+};
+
+template <typename BadFn> StreamResult RunStream(GuardPolicy policy, int presents, BadFn&& badAt, Replay* keep = nullptr)
+{
+    Replay local;
+    Replay& r = keep ? *keep : local;
+    r.host.policy = policy;
+    for (int n = 1; n <= presents; ++n)
+    {
+        const bool bad = badAt(n);
+        r.coverage = bad ? 0.95f : 0.10f;
+        r.anchorFlag = bad;
+        r.Step();
+    }
+    StreamResult out;
+    out.flips = r.flips;
+    for (size_t i = 0; i < r.runs.size(); ++i)
+    {
+        if (!out.tripped && r.runs[i].reason == Reason::MaskCoverage)
+            out.tripped = true;
+        else if (out.tripped && out.releasedAt == 0 && r.runs[i].swapped)
+            out.releasedAt = i;
+        if (r.runs[i].swapped && r.imageCoverage[i] > 0.60f)
+        {
+            ++out.swappedBad;
+            out.swappedBadAfterTrip += out.tripped;
+        }
+    }
+    return out;
+}
+
+void TestDensityReplay()
+{
+    constexpr int kMinute = 3600;
+    const StreamResult legacy2 = RunStream(GuardPolicy::Legacy, kMinute, [](int n) { return n % 2 == 0; });
+    const StreamResult dense2 = RunStream(GuardPolicy::Density, kMinute, [](int n) { return n % 2 == 0; });
+    // every other frame bad: the legacy guard never sees five in a row, so it pastes about half of a minute's frames bad; the density
+    // guard trips within the first dozen presents, and from its first trip on no bad frame is ever swapped
+    assert(legacy2.swappedBad > 1500 && !legacy2.tripped && legacy2.flips == 1);
+    assert(dense2.tripped && dense2.swappedBad <= 8 && dense2.swappedBadAfterTrip == 0 && dense2.releasedAt == 0 && dense2.flips == 2);
+
+    const StreamResult legacy4 = RunStream(GuardPolicy::Legacy, kMinute, [](int n) { return n % 4 == 0; });
+    const StreamResult dense4 = RunStream(GuardPolicy::Density, kMinute, [](int n) { return n % 4 == 0; });
+    assert(legacy4.swappedBad > 700 && !legacy4.tripped);
+    assert(dense4.tripped && dense4.swappedBad <= 8 && dense4.swappedBadAfterTrip == 0 && dense4.releasedAt == 0);
+
+    // bursts of 5 to 60 bad frames with 35 clean presents between them: legacy releases after 30 clean samples and trips again at the
+    // next burst, density needs 60 and stays in the fallback (time in fallback looks like mode off)
+    for (const int burst : { 5, 10, 20, 40, 60 })
+    {
+        const int period = burst + 35;
+        auto bursts = [=](int n) { return ((n - 1) % period) < burst; };
+        const StreamResult l = RunStream(GuardPolicy::Legacy, kMinute, bursts);
+        const StreamResult d = RunStream(GuardPolicy::Density, kMinute, bursts);
+        assert(l.flips >= 2 * static_cast<uint64_t>(kMinute / period - 2)); // out and back in, every burst
+        assert(d.flips == 2);                                                 // the bootstrap swap and the one trip
+        assert(d.flips * 10 < l.flips);
+        assert(d.swappedBadAfterTrip == 0 && d.swappedBad < l.swappedBad);
+    }
+
+    // far apart bursts (the guard releases between them under both policies): never more flips than legacy, and a burst costs at most
+    // the three bad frames that trip it plus the two presents the readback takes
+    for (const int burst : { 5, 20, 60 })
+    {
+        const int period = burst + 200;
+        auto bursts = [=](int n) { return ((n - 1) % period) < burst; };
+        const StreamResult l = RunStream(GuardPolicy::Legacy, 5 * period, bursts);
+        const StreamResult d = RunStream(GuardPolicy::Density, 5 * period, bursts);
+        assert(d.flips <= l.flips);
+        assert(d.swappedBad <= 5u * 5u);
+        assert(d.swappedBad <= l.swappedBad);
+    }
+}
+
+// The boundary's same-frame fact holds a tripped guard at the very present that would have released it, instead of waiting for the
+// readback of the bad frame (two presents later): that frame is not swapped.
+void TestDensityHoldsRelease()
+{
+    auto stream = [](bool flagTheBadFrame)
+    {
+        auto r = std::make_unique<Replay>();
+        r->host.policy = GuardPolicy::Density;
+        for (int n = 1; n <= 150; ++n)
+        {
+            const bool bad = (n >= 10 && n <= 12) || n == 74;
+            r->coverage = bad ? 0.95f : 0.10f;
+            r->anchorFlag = bad && (flagTheBadFrame || n != 74);
+            r->Step();
+        }
+        return r;
+    };
+
+    // images 10..12 are the three bad samples (arrive at presents 12..14): tripped at present 14; images 13.. are clean, the 60th clean
+    // sample arrives at present 74, the present whose own frame is bad
+    const auto plain = stream(false); // the frame is bad but the boundary did not say so: released, the bad frame is swapped
+    assert(plain->runs[13].reason == Reason::MaskCoverage && !plain->runs[72].swapped);
+    assert(plain->runs[73].swapped && plain->imageCoverage[73] > 0.60f);
+
+    const auto held = stream(true);
+    for (size_t i = 13; i <= 134; ++i)
+        assert(!held->runs[i].swapped && held->runs[i].reason == Reason::MaskCoverage);
+    assert(held->imageCoverage[73] > 0.60f);
+    // the bad frame's own readback (present 76) restarts the count; 60 clean samples later (present 136) the guard lets go
+    assert(held->runs[135].swapped && held->runs[135].reason == Reason::None);
+
+    // the paste hold is the old one: the first kLeaveHold presents after the last swapped one still show the paste, then it is gone
+    for (size_t i = 13; i < 13 + Core::kLeaveHold; ++i)
+        assert(held->visible[i] && held->actions[i] == PasteAction::Produce);
+    for (size_t i = 13 + Core::kLeaveHold; i <= 134; ++i)
+        assert(!held->visible[i] && held->actions[i] == PasteAction::Produce);
+}
+
+// A readback that stops arriving: the starvation release is the same 120 probed presents, with the density policy too
+void TestDensityStarvation()
+{
+    FakeHost host;
+    host.policy = GuardPolicy::Density;
+    Core core(host);
+    PasteCounters frozen;
+    std::vector<Run> runs;
+    for (uint64_t i = 1; i <= 4; ++i)
+    {
+        frozen.produced = i;
+        frozen.coverageSequence = i;
+        frozen.coverage = 0.9f;
+        runs.push_back(Present(core, Mode::UiFree, frozen));
+    }
+    // baseline at present 1, three bad samples at 2..4: tripped at present 4 (the legacy guard needs five)
+    assert(runs[2].reason == Reason::None && runs[3].reason == Reason::MaskCoverage);
+    for (uint64_t i = 5; i <= 4 + CoverageGuard::kStarveFrames; ++i)
+        runs.push_back(Present(core, Mode::UiFree, frozen)); // the same readback again and again
+    for (uint64_t i = 4; i < 4 + CoverageGuard::kStarveFrames; ++i)
+        assert(runs[i - 1].reason == Reason::MaskCoverage); // presents 4..123
+    assert(runs[4 + CoverageGuard::kStarveFrames - 1].reason == Reason::None && runs[4 + CoverageGuard::kStarveFrames - 1].swapped);
+    assert(!core.Snapshot().coverageTripped);
+}
+
+// A tripped guard whose due release is not decided by a present that reached the boundary (no frame generation, say) still lets go
+void TestDensityReleaseWithoutBoundary()
+{
+    FakeHost host;
+    host.policy = GuardPolicy::Density;
+    Core core(host);
+    PasteCounters p;
+    auto step = [&](uint64_t i, float coverage)
+    {
+        p.produced = i;
+        p.coverageSequence = i;
+        p.coverage = coverage;
+        return Present(core, Mode::UiFree, p);
+    };
+    for (uint64_t i = 1; i <= 4; ++i)
+        step(i, 0.9f); // tripped at present 4
+    assert(core.Snapshot().coverageTripped);
+    for (uint64_t i = 5; i < 5 + CoverageGuard::kDensityReleaseSamples - 1; ++i)
+        step(i, 0.1f);
+    assert(core.Snapshot().coverageTripped);
+    host.fgActive = false; // the present that brings the 60th clean sample never gets as far as the boundary
+    step(5 + CoverageGuard::kDensityReleaseSamples - 1, 0.1f);
+    assert(!core.Snapshot().coverageTripped);
+    host.fgActive = true;
+    assert(step(5 + CoverageGuard::kDensityReleaseSamples, 0.1f).swapped);
+}
+
+// The policy is announced once, only when it is not the default; legacy writes no new line
+void TestDensityLogLine()
+{
+    auto lines = [](GuardPolicy policy)
+    {
+        Replay r;
+        r.host.policy = policy;
+        r.Steps(50);
+        std::vector<std::string> out;
+        for (const auto& l : r.host.log)
+            if (l.rfind("HudLess: coverage guard", 0) == 0)
+                out.push_back(l);
+        return out;
+    };
+    assert(lines(GuardPolicy::Legacy).empty());
+    const auto density = lines(GuardPolicy::Density);
+    assert(density.size() == 1 && density[0].find("density") != std::string::npos);
+    // 3 of the last 12 already cover 3 in a row: the text names no separate "in a row" trip
+    assert(density[0].find("or 5 in a row") == std::string::npos);
+
+    // It is written whenever density becomes active: again after a switch away and back
+    Replay r;
+    r.host.policy = GuardPolicy::Density;
+    r.Steps(20);
+    r.host.policy = GuardPolicy::Legacy;
+    r.Steps(20);
+    r.host.policy = GuardPolicy::Density;
+    r.Steps(20);
+    size_t count = 0;
+    for (const auto& l : r.host.log)
+        count += l.rfind("HudLess: coverage guard", 0) == 0;
+    assert(count == 2);
+}
+
+// ---- edges of the log counters that the first round left open (found by the W2 mutation checks) --------------------------------------
+std::string SummaryOf(const FakeHost& host, const char* presents = "600 presents")
+{
+    std::string line;
+    for (const auto& l : host.log)
+        if (l.find(presents) != std::string::npos)
+            line = l;
+    return line;
+}
+
+void TestCounterEdges()
+{
+    // A swapped base whose image measures exactly at the limit is not a bad frame (bad = over the limit)
+    {
+        Replay r;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = 0.60f;
+            r.Step();
+        }
+        assert(CounterTail(r).find("swapped bad frames 0;") != std::string::npos);
+    }
+    // A readback whose ring entry belongs to another image (the ring wrapped) is attributed to nothing: 132 shares the entry of 100
+    {
+        FakeHost host;
+        Core core(host);
+        PasteCounters p;
+        for (uint64_t n = 1; n <= 600; ++n)
+        {
+            p.produced = n; // one image per present, the base swapped from the first present on
+            p.coverageSequence = n == 100 ? 132 : n;
+            p.coverage = n == 100 ? 0.95f : 0.10f;
+            Present(core, Mode::UiFree, p);
+        }
+        assert(SummaryOf(host).find("swapped bad frames 0;") != std::string::npos);
+    }
+    // The longest run is a figure of its own window: a run of ten anchor-later frames across the window edge is 5 + 5
+    {
+        Replay r;
+        for (int n = 1; n <= 1200; ++n)
+        {
+            r.anchorFlag = n >= 596 && n <= 605;
+            r.Step();
+        }
+        const auto lines = SummaryLines(r);
+        assert(lines.size() == 2);
+        assert(NumberAfter(lines[0], "longest run ") == 5 && NumberAfter(lines[1], "longest run ") == 5);
+    }
+    // The counters start again with a mode change: the run of anchor-later frames and the tag set of the old mode are not carried over
+    {
+        FakeHost host;
+        Core core(host);
+        for (int n = 1; n <= 100; ++n)
+        {
+            host.source.anchorLater = n >= 96;
+            Present(core, Mode::UiFree, {}, 1);
+        }
+        for (int n = 101; n <= 700; ++n)
+        {
+            host.source.anchorLater = n <= 103;
+            Present(core, Mode::Recomposition, {}, 1);
+        }
+        const std::string line = SummaryOf(host);
+        assert(!line.empty() && line.find("mode recomposition") != std::string::npos);
+        assert(NumberAfter(line, "longest run ") == 3);
+        assert(line.ends_with("tag changes 1")); // 0 -> 1 at the first present of the new mode
+    }
+    // ... and a readback of an image the old mode built is not attributed to the new one
+    {
+        FakeHost host;
+        Core core(host);
+        PasteCounters p;
+        for (uint64_t n = 1; n <= 50; ++n)
+        {
+            p.produced = n;
+            p.coverageSequence = n;
+            p.coverage = 0.10f;
+            Present(core, Mode::UiFree, p);
+        }
+        p.produced = 50;
+        Present(core, Mode::Off, p);
+        for (uint64_t n = 51; n <= 700; ++n)
+        {
+            p.produced = n;
+            p.coverageSequence = n == 52 ? 48 : n; // the late readback of image 48 (built over a swapped base), over the limit
+            p.coverage = n == 52 ? 0.95f : 0.10f;
+            Present(core, Mode::UiFree, p);
+        }
+        assert(SummaryOf(host).find("swapped bad frames 0;") != std::string::npos);
+    }
+    // The fact is kept per present whatever the result of the Take: a due release meets an anchor-later present whose Take found no
+    // boundary, and the guard still holds (the release comes at the 60th clean sample, present 74, as in TestDensityHoldsRelease)
+    {
+        auto stream = [](bool fact)
+        {
+            auto r = std::make_unique<Replay>();
+            r->host.policy = GuardPolicy::Density;
+            for (int n = 1; n <= 80; ++n)
+            {
+                r->coverage = (n >= 10 && n <= 12) ? 0.95f : 0.10f;
+                r->noBoundary = n == 74;
+                r->anchorFlag = fact && n == 74;
+                r->Step();
+            }
+            return r;
+        };
+        const auto freed = stream(false);
+        const auto held = stream(true);
+        assert(freed->runs[74].reason != Reason::MaskCoverage); // without the fact the guard let go at present 74
+        assert(held->runs[74].reason == Reason::MaskCoverage);  // with it, present 75 is still a probing one
+    }
+    // A release decided in the last present of a window is counted in that window: by the boundary's answer, or at the end of a
+    // present that never got as far as the boundary. Three bad images (536..538) trip the guard at present 540, the 60th clean one
+    // arrives at present 600.
+    for (const bool boundary : { true, false })
+    {
+        Replay r;
+        r.host.policy = GuardPolicy::Density;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r.coverage = (n >= 536 && n <= 538) ? 0.95f : 0.10f;
+            r.host.fgActive = boundary || n != 600;
+            r.Step();
+        }
+        const auto lines = SummaryLines(r);
+        assert(lines.size() == 1);
+        assert(NumberAfter(lines[0], "guard trips ") == 1 && NumberAfter(lines[0], "releases ") == 1);
+    }
+    // The announcement names the numbers the guard really uses
+    {
+        Replay r;
+        r.host.policy = GuardPolicy::Density;
+        r.Steps(5);
+        std::string line;
+        for (const auto& l : r.host.log)
+            if (l.rfind("HudLess: coverage guard", 0) == 0)
+                line = l;
+        assert(line.find("trips on " + std::to_string(CoverageGuard::kDensityTripBad) + " bad of the last " +
+                         std::to_string(CoverageGuard::kDensityWindow) + " samples") != std::string::npos);
+        assert(line.find("releases after " + std::to_string(CoverageGuard::kDensityReleaseSamples) + " clean ones in a row") !=
+               std::string::npos);
+    }
+    // A host that does not answer the policy runs today's guard
+    {
+        struct PlainHost final : IEngineHost
+        {
+            bool FrameGenActive() override { return true; }
+            Provider FrameGenProvider() override { return Provider::DlssG; }
+            bool HdrOutput() override { return false; }
+            bool DebugCompareOn() override { return false; }
+            float CoverageLimit() override { return 0.6f; }
+            IHudlessSource* Source() override { return nullptr; }
+            Reason CheckCapture(const FrameImage&) override { return Reason::None; }
+            Reason StageCapture(const FrameImage&) override { return Reason::None; }
+            bool PausedByPreset() override { return false; }
+            bool PasteReady() override { return true; }
+            bool SceneHdrOwnsFrame() override { return false; }
+            void Log(const std::string&) override {}
+        } host;
+        assert(host.CoverageGuardPolicy() == GuardPolicy::Legacy);
+    }
+}
+
 int main()
 {
     TestOff();
+    TestDecisionsRecorded();
+    TestLogCounters();
+    TestDensityReplay();
+    TestDensityHoldsRelease();
+    TestDensityStarvation();
+    TestDensityReleaseWithoutBoundary();
+    TestDensityLogLine();
+    TestCounterEdges();
     TestPausedByPreset();
     TestReasons();
     TestPasteDecision();

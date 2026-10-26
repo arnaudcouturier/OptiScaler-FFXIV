@@ -46,6 +46,8 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "SteadyTiming", steadyTiming);
     b.Add("HudLess", "CoverageGuard", coverageGuard);
     b.Add("HudLess", "ShowDetectedUi", showDetectedUi);
+    b.Add("HudLess", "GuardMode", guardMode);
+    b.Add("HudLess", "HdrPaste", hdrPaste);
 }
 
 void HudlessConfig::PostLoad() { hudless::Publish(GetMode()); }

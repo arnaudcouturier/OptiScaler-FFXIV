@@ -39,6 +39,8 @@ struct IEngineHost
     virtual bool DebugCompareOn() = 0;
     // [HudLess] CoverageGuard, 0 = off.
     virtual float CoverageLimit() = 0;
+    // [HudLess] GuardMode. Asked only in ui_free; the default is today's guard.
+    virtual GuardPolicy CoverageGuardPolicy() { return GuardPolicy::Legacy; }
     virtual IHudlessSource* Source() = 0;
     // Size / format / sample count of the capture against the bridge's backbuffer: None, SizeMismatch,
     // FormatUnsupported, MsaaOrArray or CaptureRejected.
@@ -104,6 +106,9 @@ class Core
     bool BeginPresent(Mode mode, const PasteCounters& paste)
     {
         const bool probedLast = _probing;
+        _anchorThisPresent = false;
+        _guardResolved = false;
+        _tagSet = 0;
         // The hold follows the FINAL state of the previous present (Reject() may have undone its swap): a swapped present
         // grants kLeaveHold presents of visible paste, every other present uses one up.
         if (_swapped)
@@ -135,6 +140,7 @@ class Core
             _baseline = paste;
             _window = {};
             _sinceSummary = 0;
+            RestartCounters(paste);
         }
 
         if (mode == Mode::Off)
@@ -142,6 +148,8 @@ class Core
             _active = false;
             _holdLeft = 0;
             _reason = Reason::ModeOff;
+            _lastTagSet = 0;
+            _producedSwapped = false;
             return false;
         }
         _active = true;
@@ -149,14 +157,37 @@ class Core
 
         if (mode == Mode::UiFree)
         {
-            _guard.Configure(_host.CoverageLimit());
+            const float limit = _host.CoverageLimit();
+            const GuardPolicy policy = _host.CoverageGuardPolicy();
+            _guard.Configure(limit, policy);
+            if (policy != _announcedPolicy)
+            {
+                _announcedPolicy = policy;
+                if (policy == GuardPolicy::Density)
+                    _host.Log("HudLess: coverage guard: density is active (trips on 3 bad of the last 12 samples, releases after 60 "
+                              "clean ones in a row; a frame anchored after off-screen UI draws keeps it tripped)");
+            }
             _guard.Update(paste.coverage, paste.coverageSequence, probedLast);
+
+            // Log counters only (nothing below feeds a decision): the guard's trips and releases, and the images the producer
+            // built since the last present (the previous present's: its base was swapped or not).
+            NoteGuardEvents();
+            if (paste.produced > _lastProduced)
+            {
+                _lastProduced = paste.produced;
+                _images[paste.produced % _images.size()] = { paste.produced, _producedSwapped };
+            }
+
             if (paste.coverage >= 0.f && paste.coverageSequence != 0 && paste.coverageSequence != _lastSampledSequence)
             {
                 _lastSampledSequence = paste.coverageSequence;
                 _window.coverageSum += static_cast<double>(paste.coverage);
                 ++_window.coverageSamples;
                 _window.coverageMax = std::max(_window.coverageMax, paste.coverage);
+                // A swapped base whose own image measured over the limit (limit 0 = guard off: no limit to be over)
+                const ImageNote& note = _images[paste.coverageSequence % _images.size()];
+                if (limit > 0.f && paste.coverage > limit && note.ordinal == paste.coverageSequence && note.swapped)
+                    ++_window.swappedBad;
             }
         }
 
@@ -188,7 +219,22 @@ class Core
             return Fail(Reason::DebugTintOn);
 
         FrameImage image;
-        switch (source->Take(image))
+        const TakeResult taken = source->Take(image);
+        // Log counters only: the boundary's same-frame fact, whatever the result of the Take
+        ++_window.anchorTakes;
+        if (image.anchoredAfterOffscreenUi)
+        {
+            ++_window.anchorFrames;
+            _anchorThisPresent = true;
+        }
+        if (mode == Mode::UiFree)
+        {
+            // The density guard decides a due release (or a hold) with the boundary's answer for this very present
+            _guard.ResolveRelease(image.anchoredAfterOffscreenUi);
+            _guardResolved = true;
+            NoteGuardEvents();
+        }
+        switch (taken)
         {
         case TakeResult::NoSource:
             _boundary = "no source";
@@ -268,8 +314,25 @@ class Core
         if (!_active)
             return;
 
+        // A present that never got as far as the boundary resolves the guard without its answer, so a due release cannot stay pending
+        if (_mode == Mode::UiFree && !_guardResolved)
+        {
+            _guard.ResolveRelease(false);
+            NoteGuardEvents();
+        }
+
         ++_window.presents;
         ++_sinceSummary;
+
+        // Log counters only: the tag set of this present against the last one, the run of anchor-later presents, and whether the
+        // images this present built carry a swapped base
+        if (_tagSet != _lastTagSet)
+            ++_window.tagChanges;
+        _lastTagSet = _tagSet;
+        _anchorRun = _anchorThisPresent ? _anchorRun + 1 : 0;
+        _window.anchorLongest = std::max(_window.anchorLongest, _anchorRun);
+        _producedSwapped = _mode == Mode::UiFree && _swapped && PasteDecision() == PasteAction::Produce;
+
         if (_reason == Reason::None)
         {
             ++_captured;
@@ -300,8 +363,13 @@ class Core
             _window = {};
             _baseline = _paste;
             _sinceSummary = 0;
+            _anchorRun = 0; // the longest run is a figure of its own window
         }
     }
+
+    // What the host sent to the frame generator in this present: bit 0 the hud-less tag, bit 1 the UI tag. Called once from the third
+    // seam; a present that never calls it (nothing staged, no frame generator, HDR output) sent no tags.
+    void NoteTagSet(uint8_t tags) { _tagSet = tags; }
 
     // A blocking wait happened on the game thread (only a recopy-style path can cause one; none exists today).
     void NoteBlockingWait() { ++_window.slotWaits; }
@@ -363,6 +431,33 @@ class Core
     }
 
   private:
+    // The guard's trips and releases since the last look, into the window (a release may come with the boundary's answer, after Update)
+    void NoteGuardEvents()
+    {
+        _window.guardTrips += static_cast<uint32_t>(_guard.Trips() - _lastTrips);
+        _window.guardReleases += static_cast<uint32_t>(_guard.Releases() - _lastReleases);
+        _lastTrips = _guard.Trips();
+        _lastReleases = _guard.Releases();
+    }
+
+    // The counters start again with a mode change: nothing from before is attributed to the new mode
+    void RestartCounters(const PasteCounters& paste)
+    {
+        _lastProduced = paste.produced;
+        _producedSwapped = false;
+        _images = {};
+        _lastTrips = _guard.Trips();
+        _lastReleases = _guard.Releases();
+        _lastTagSet = 0;
+        _anchorRun = 0;
+    }
+
+    struct ImageNote
+    {
+        uint64_t ordinal = 0; // the producer's ordinal of the image (PasteCounters::produced right after it was built)
+        bool swapped = false; // the present that built it had swapped the base
+    };
+
     IEngineHost& _host;
     StateTracker _tracker;
     CoverageGuard _guard;
@@ -386,5 +481,18 @@ class Core
     bool _swapped = false;
     bool _probing = false;
     int _holdLeft = 0;
+
+    // Log counters (observation only)
+    std::array<ImageNote, 32> _images {};
+    uint64_t _lastProduced = 0;
+    bool _producedSwapped = false; // the previous present ran the producer on a swapped base
+    int _lastTrips = 0;
+    int _lastReleases = 0;
+    uint8_t _tagSet = 0;
+    uint8_t _lastTagSet = 0;
+    bool _anchorThisPresent = false;
+    uint32_t _anchorRun = 0;
+    bool _guardResolved = false;                        // this present's ResolveRelease ran (after the boundary was asked)
+    GuardPolicy _announcedPolicy = GuardPolicy::Legacy; // written to the log each time density becomes active
 };
 } // namespace ext::hudless

@@ -27,12 +27,14 @@ int main()
     assert(defaults.coverageGuard.value_or_default() == 0.60f);
     assert(!defaults.showDetectedUi.value_or_default());
     assert(defaults.Threshold() == 0.008f && defaults.Dilation() == 1 && defaults.CoverageLimit() == 0.60f);
+    assert(defaults.hdrPaste.value_or_default() == "off" && !defaults.HdrPasteOn()); // the HDR paste is opt-in: untried in a game
+    assert(defaults.guardMode.value_or_default() == "legacy" && defaults.GetGuardPolicy() == hudless::GuardPolicy::Legacy);
 
     // Exactly the documented keys of section 11 (Diagnostics is bound by package A), in the documented order.
     config::Binder binder;
     defaults.Bind(binder);
-    const std::vector<std::string> expectedKeys { "Mode",        "MaskThreshold", "MaskDilation", "PasteCleanup",
-                                                  "SteadyTiming", "CoverageGuard", "ShowDetectedUi" };
+    const std::vector<std::string> expectedKeys { "Mode",         "MaskThreshold", "MaskDilation", "PasteCleanup",
+                                                  "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "HdrPaste" };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
     {
@@ -58,6 +60,11 @@ int main()
     assert(std::string(hudless::ModeName(Mode::Recomposition)) == "recomposition");
     assert(std::string(hudless::ModeName(Mode::UiFree)) == "ui_free");
 
+    // HdrPaste: only "on" switches the HDR paste path on; every other text (and the ini value auto) is off, fail open
+    assert(hudless::ParseHdrPaste("on") && hudless::ParseHdrPaste("ON") && hudless::ParseHdrPaste("  On \t"));
+    for (const char* text : { "off", "auto", "", "true", "1", "yes", "enabled", "onn", "of" })
+        assert(!hudless::ParseHdrPaste(text));
+
     // Nothing is published before the config loads.
     assert(hudless::CurrentMode() == Mode::Off);
     assert(!hudless::Wanted());
@@ -71,6 +78,8 @@ int main()
     ini.SetValue("HudLess", "SteadyTiming", "true");
     ini.SetValue("HudLess", "CoverageGuard", "0.25");
     ini.SetValue("HudLess", "ShowDetectedUi", "true");
+    ini.SetValue("HudLess", "HdrPaste", "On");
+    ini.SetValue("HudLess", "GuardMode", "Density");
     ini.SetValue("FrameGen", "ExternalUIFreeFrameGen", "false"); // the old keys are not read
     config::Load(ini);
 
@@ -82,6 +91,8 @@ int main()
     assert(cfg.steadyTiming.value_or_default());
     assert(std::abs(cfg.CoverageLimit() - 0.25f) < 1e-6f);
     assert(cfg.showDetectedUi.value_or_default());
+    assert(cfg.HdrPasteOn());
+    assert(cfg.GetGuardPolicy() == hudless::GuardPolicy::Density);
     assert(hudless::CurrentMode() == Mode::UiFree);
     assert(hudless::Wanted());
     assert(ext::Active(ext::F::Hudless));

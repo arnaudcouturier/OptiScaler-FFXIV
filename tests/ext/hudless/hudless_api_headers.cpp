@@ -43,6 +43,7 @@ int main()
     assert(!iface.Active());
     assert(iface.Take(image) == TakeResult::NoSource);
     assert(image.texture == nullptr && image.format == DXGI_FORMAT_UNKNOWN && image.width == 0 && image.height == 0);
+    assert(!image.anchoredAfterOffscreenUi); // a source that knows nothing about off-screen UI never claims it
     source.armed = true;
     assert(iface.Active());
     assert(iface.Take(image) == TakeResult::NotThisFrame);

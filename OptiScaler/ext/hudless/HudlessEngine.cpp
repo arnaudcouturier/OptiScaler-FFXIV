@@ -115,6 +115,7 @@ class Engine final : public IEngineHost, private FenceReader
     bool HdrOutput() override { return Access::Hudless::HdrOutput(*_sc); }
     bool DebugCompareOn() override { return State::Instance().fgHudlessCompare; }
     float CoverageLimit() override { return ext::Cfg().hudless.CoverageLimit(); }
+    GuardPolicy CoverageGuardPolicy() override { return ext::Cfg().hudless.GetGuardPolicy(); }
     IHudlessSource* Source() override { return ext::game::Current().hudless; }
     Reason CheckCapture(const FrameImage& image) override;
     Reason StageCapture(const FrameImage& image) override;
@@ -156,6 +157,7 @@ class Engine final : public IEngineHost, private FenceReader
     void Bind(Dx11wDx12SC& sc);
     bool EnsureSlot(size_t index, UINT width, UINT height, DXGI_FORMAT format);
     bool EnsureHdrStage(size_t index);
+    bool EnsureHdrStageOnce(size_t index);
     ID3D12Resource* BuildHdrFinal(Dx11wDx12SC& sc, Slot& slot, ID3D12Resource* finalImage, ID3D12CommandQueue* queue);
     void AddReader(size_t index, ID3D12Fence* fence, uint64_t value);
     void PinFence(ID3D12Fence* fence);
@@ -169,6 +171,7 @@ class Engine final : public IEngineHost, private FenceReader
     void NoteRefusal(const std::string& why);
 
     std::vector<std::string> _refusals; // texts NoteRefusal already logged
+    HdrStageLatch _hdrLatch;            // HdrPaste = on: a failed creation of the HDR stage is not retried on every present
     Core _core;
     SlotRing<kSlots> _ring;
     std::array<Slot, kSlots> _slots;
@@ -454,6 +457,18 @@ bool Engine::EnsureHdrStage(size_t index)
     return true;
 }
 
+// The producer's way to the stage: with HdrPaste off the plain EnsureHdrStage (retried whenever reached, as before); with on a failed
+// creation is not tried again until the HDR output state or the setting changes, and says so once.
+bool Engine::EnsureHdrStageOnce(size_t index)
+{
+    return EnsureStageLatched(_hdrLatch, HdrOutput(), ext::Cfg().hudless.HdrPasteOn(), [&] { return EnsureHdrStage(index); },
+                              []
+                              {
+                                  LOG_WARN("HudLess: HdrPaste: the HDR paste stage could not be created, not trying again until the HDR "
+                                           "output state or the setting changes");
+                              });
+}
+
 // Converts the final image to PQ with the production OptiHDR converter (the same call the bridge makes on its copy source)
 // on an engine-owned list that executes on the FG queue before UiPaste::Produce submits, and keeps the result in an
 // engine-owned image (the converter's pooled image may be reused as soon as the list completes, before the producer ran).
@@ -551,6 +566,7 @@ void Engine::RetireAll()
     _stagedSlot = -1;
     _baseSwapped = false;
     _next = 0;
+    _hdrLatch.Clear();
     UiPaste::Release();
     UiImage::Release();
 }
@@ -801,6 +817,7 @@ void Engine::Post(Dx11wDx12SC& sc)
             break;
         }
         AddReader(index, tagged.readerFence, tagged.readerValue);
+        _core.NoteTagSet(static_cast<uint8_t>((tagged.hudlessTagged ? 1 : 0) | (tagged.uiTagged ? 2 : 0)));
 
         // In ui_free the base is the hud-less image (or the normal frame): a refused tag costs nothing. In recomposition
         // the tags ARE the feature.
@@ -815,9 +832,12 @@ void Engine::Post(Dx11wDx12SC& sc)
     if (action == PasteAction::Produce)
     {
         // A probing present never asked PasteReady, the only other caller of EnsureHdrStage: under HDR output the
-        // conversion resources of this slot have to be there before the paste image can be built.
-        const bool hdrReady = !_core.Probing() || !HdrOutput() || EnsureHdrStage(index);
-        produced = hdrReady && ProducePaste(sc, slot, finalImage, fg);
+        // conversion resources of this slot have to be there before the paste image can be built. [HudLess] HdrPaste = on
+        // does the same on every HDR present (PasteReady only gets there after a first image exists); see HudlessLogic.h.
+        _hdrLatch.Observe(HdrOutput(), ext::Cfg().hudless.HdrPasteOn());
+        produced = ProduceWithHdrStage(HdrOutput(), _core.Probing(), ext::Cfg().hudless.HdrPasteOn(),
+                                       [&] { return EnsureHdrStageOnce(index); },
+                                       [&] { return ProducePaste(sc, slot, finalImage, fg); });
     }
     else if (action == PasteAction::Invalidate)
         UiPaste::Invalidate(ReasonText(_core.PresentReason()));
