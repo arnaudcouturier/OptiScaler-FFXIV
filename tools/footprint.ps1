@@ -21,7 +21,7 @@ try {
 
     $forkOnly = @(
         '^OptiScaler/ext/', '^docs/', '^tools/', '^tests/ext/',
-        '^\.github/README\.md$', '^\.github/workflows/ffxiv-'
+        '^\.github/README\.md$', '^\.github/assets/', '^\.github/workflows/ffxiv-'
     )
 
     $rows = @()

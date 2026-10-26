@@ -45,17 +45,33 @@ Left out on purpose: `.pdb`, `.exp`, `.lib` (use `-IncludeSymbols` to ship the `
 - Everything under `OptiScaler\` is redistributed on the same terms as upstream OptiScaler's own releases; check upstream's current practice if its list of bundled libraries changes.
 - Read `INSTALL.txt` and `NOTICE.txt` in the extracted archive once.
 - Run the smoke test in [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 9 with the archive extracted over a clean copy of the game folder.
-- Check that the status text in [.github/README.md](../.github/README.md) matches the release (tested features, supported game build).
+- Check that the release status paragraph and the table in [STATUS.md](STATUS.md) and the status section of [.github/README.md](../.github/README.md) match the release (tag names, tested features, supported game build).
 
 ## 3. Tag and publish (by hand)
 
 ```powershell
 git tag -a ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN] -m "<summary>"
 git push origin ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]
-gh release create ffxiv-<...> dist\OptiScaler-FFXIV-ffxiv-<...>.zip --prerelease --title "<tag>" --notes-file <notes>
+gh release create ffxiv-<...> dist\OptiScaler-FFXIV-ffxiv-<...>.zip --prerelease --title "v<version>" --notes-file <notes>
 ```
 
-Use `--prerelease` for `-rcN` tags. The release notes should say which features are tested (copy the table from the README), the upstream sha the build is based on, the supported FFXIV build (the `TimeDateStamp` in `ext/ffxiv/GameBuild.h`), the archive's SHA-256, and that the archive does not include NVIDIA files. Convention for the tag: [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 10.
+Use `--prerelease` for `-rcN` tags. The release notes should say which features are tested (copy the table from [STATUS.md](STATUS.md)), the upstream sha the build is based on, the supported FFXIV build (the `TimeDateStamp` in `ext/ffxiv/GameBuild.h`), the archive's SHA-256, and that the archive does not include NVIDIA files. Convention for the tag: [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 10. The release name is the version number below.
+
+### Release numbering
+
+Each GitHub release is named with a version number (`--title "v<version>"`). The git tag keeps the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, because `tools\package-release.ps1` and the build's version string rely on the `ffxiv-` prefix.
+
+- Major: a change that breaks existing settings or drops support.
+- Minor: a new feature.
+- Patch: fixes only.
+- `-rcN`: a candidate that has not been through the wider play-test yet.
+
+| Version | Tag | Date | Upstream base |
+|---|---|---|---|
+| v1.0.0 | `ffxiv-2026.10.23-d9b62110` | 2026-10-23 | `d9b62110` |
+| v1.1.0-rc1 | `ffxiv-2026.10.25-d9b62110-rc1` | 2026-10-25 | `d9b62110` |
+
+Add a row for every release. [STATUS.md](STATUS.md) and the status section of the README name the current release by version first and by tag second.
 
 ## 4. Rolling back a release
 

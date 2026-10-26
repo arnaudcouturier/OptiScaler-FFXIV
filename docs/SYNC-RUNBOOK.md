@@ -26,7 +26,7 @@ git diff --stat "$base" upstream/master | Select-Object -Last 1
 Then list the files **both sides** changed. Those are the only files that can conflict textually:
 
 ```powershell
-$fork = '^(OptiScaler/ext/|docs/|tools/|tests/ext/|\.github/README\.md)'
+$fork = '^(OptiScaler/ext/|docs/|tools/|tests/ext/|\.github/README\.md|\.github/assets/)'
 git diff --name-only $base upstream/master | Sort-Object > $env:TEMP\up.txt
 git diff --name-only $base main | Where-Object { $_ -notmatch $fork } | Sort-Object > $env:TEMP\fork.txt
 Compare-Object (Get-Content $env:TEMP\up.txt) (Get-Content $env:TEMP\fork.txt) -IncludeEqual -ExcludeDifferent | ForEach-Object InputObject

@@ -10,6 +10,7 @@ This repo is OptiScaler `master` (nightly) plus a stack of fork commits. This do
    - `tools/**`
    - `tests/ext/**`
    - `.github/README.md`
+   - `.github/assets/**`
    - `.github/workflows/ffxiv-*.yml`
 2. **Upstream files may only contain:**
    - `#include "ext/Seams.h"`. This is the only fork header upstream files include.

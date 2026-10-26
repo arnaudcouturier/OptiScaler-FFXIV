@@ -7,10 +7,10 @@ name: ffxiv-ci
 on:
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '.github/README.md', '*.md']
+    paths-ignore: ['docs/**', '.github/README.md', '.github/assets/**', '*.md']
   pull_request:
     branches: [main]
-    paths-ignore: ['docs/**', '.github/README.md', '*.md']
+    paths-ignore: ['docs/**', '.github/README.md', '.github/assets/**', '*.md']
 
 concurrency:
   group: ffxiv-ci-${{ github.ref }}

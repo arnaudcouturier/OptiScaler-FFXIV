@@ -1,6 +1,6 @@
 # Feature reference
 
-What this repository bundles on top of OptiScaler, where each piece comes from and lives, how it attaches to upstream files and how to configure it. The short status table is in [.github/README.md](../.github/README.md); this file is the long version and uses the same status words. Long histories, review rounds and measurements are in [docs/notes/](notes/); the entries link to them. Credit and licences: [ATTRIBUTION.md](ATTRIBUTION.md).
+What this repository bundles on top of OptiScaler, where each piece comes from and lives, how it attaches to upstream files and how to configure it. The short status table is in [STATUS.md](STATUS.md) (the README has a one-screen summary); this file is the long version and uses the same status words. Long histories, review rounds and measurements are in [docs/notes/](notes/); the entries link to them. Credit and licences: [ATTRIBUTION.md](ATTRIBUTION.md).
 
 **Status words.** *tested* means the author played the game with it on an RTX 4090. *untested* means it compiles and follows the same code paths as the tested features, but nobody has verified it on real hardware (or in game) yet. Where a feature runs inside a tested path but was never exercised alone, the entry says so. Nothing here is a promise that a feature works on your system.
 
@@ -58,7 +58,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Origin.** Ported from SirenBrink's fork at the import base (originally Dagherbou's NR work, with y4my4my4m's multipass, janblade's PassFeedback and later work by wilsjo2), moved under `ext/nr` behind seams. Of the 47 files in `ext/nr` that have a counterpart at the import base, 22 are identical apart from line endings and 25 add about 8% more lines; about 20% of the lines in `ext/nr` are in files with no counterpart. The integration layer (NrSeams, NrHooks, the `[DlssNr]` config binder, build-time shaders) and `VitCapture` are fork code.
 
-**What it does.** Runs NVIDIA's DLSS Neural Rendering model on the frame, before ordinary super resolution (pre-SR) or after it, in one to three passes with per-pass profiles. A colour pipeline maps the game's image into what the model expects and back (white point, exposure, reversible tone mapping). It includes the exposure scan (reads the game's exposure from resource creation and unordered-access views) and named user presets. It needs NVIDIA's `nvngx_dlssnr.dll`; see [Install](../.github/README.md#install).
+**What it does.** Runs NVIDIA's DLSS Neural Rendering model on the frame, before ordinary super resolution (pre-SR) or after it, in one to three passes with per-pass profiles. A colour pipeline maps the game's image into what the model expects and back (white point, exposure, reversible tone mapping). It includes the exposure scan (reads the game's exposure from resource creation and unordered-access views) and named user presets. It needs NVIDIA's `nvngx_dlssnr.dll`; see [INSTALL.md](INSTALL.md).
 
 **Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested.
 
