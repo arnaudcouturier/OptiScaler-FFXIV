@@ -1,27 +1,25 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS upscaling, frame generation and HDR for Final Fantasy XIV on DirectX 11" width="860">
+<img src="assets/banner.svg" alt="OptiScaler-FFXIV: upscaling, frame generation and HDR for Final Fantasy XIV" width="860">
 
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](../LICENSE)
-[![Game](https://img.shields.io/badge/FFXIV-DirectX%2011-5b6b7c?style=flat-square)](#requirements)
-[![GPU](https://img.shields.io/badge/GPU-NVIDIA%20RTX-5b6b7c?style=flat-square)](#requirements)
 [![Built on OptiScaler](https://img.shields.io/badge/built%20on-OptiScaler-5b6b7c?style=flat-square)](https://github.com/optiscaler/OptiScaler)
 
 </div>
 
 ## What it is
 
-OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV on DirectX 11. It provides DLSS upscaling, DLSS frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
+OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV. It provides upscaling, frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
 
 ## Highlights
 
 | Feature | What it does | Status |
 |---|---|---|
-| DLSS upscaling | The game renders below your screen resolution and DLSS upscales it, or DLAA runs at full resolution | tested |
-| DLSS Neural Rendering | Adds detail to the upscaled image with NVIDIA's Neural Rendering model | tested |
-| Frame generation | DLSS multi frame generation at 2x to 4x on RTX 40 cards | tested; 5x and 6x are experimental |
+| Upscaling | The game renders below your screen resolution and DLSS, FSR or XeSS upscales it, or DLAA runs at full resolution | DLSS tested; FSR and XeSS untested |
+| DLSS Neural Rendering | Adds detail to the upscaled image with NVIDIA's Neural Rendering model (NVIDIA RTX) | tested |
+| Frame generation | DLSS multi frame generation at 2x to 4x on RTX 40 cards; FSR or XeSS frame generation on other cards | DLSS tested; 5x and 6x are experimental; FSR and XeSS untested |
 | HDR10 output | HDR10 for the game, with RenoDX scene HDR as an option | tested |
 | ReShade depth alignment | Keeps ReShade's depth lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
 | HUD-less frame generation | Handles the interface separately from the game picture during frame generation | optional, tested in SDR; one of its two modes is experimental |
@@ -31,16 +29,16 @@ Tested means played in game by the author on an RTX 4090. Neural Rendering, fram
 
 ## Requirements
 
-- Windows and the DirectX 11 version of Final Fantasy XIV (`ffxiv_dx11.exe`).
-- An NVIDIA RTX graphics card. Only an RTX 4090 has been tested.
-- NVIDIA's own DLSS files. They cannot be redistributed here, so you bring them yourself; the [install guide](../docs/INSTALL.md) names them.
+- Windows and Final Fantasy XIV (`ffxiv_dx11.exe`).
+- For the DLSS features (DLSS upscaling, Neural Rendering, DLSS frame generation), an NVIDIA RTX graphics card; AMD and Intel cards use FSR or XeSS instead. Only an RTX 4090 has been tested.
+- For the DLSS features, NVIDIA's own files. They cannot be redistributed here, so you bring them yourself; the [install guide](../docs/INSTALL.md) names them.
 - ReShade 6.8.0, only for the ReShade features.
 
 ## Get started
 
 1. Download the zip of the release you want from the [Releases](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases) page.
 2. Close the game. In the folder that contains `ffxiv_dx11.exe`, back up the files the install guide lists.
-3. Extract the zip into that folder and overwrite, then add NVIDIA's files.
+3. Extract the zip into that folder and overwrite, then add NVIDIA's files if you use DLSS.
 4. Start the game, press Insert and switch on the features you want.
 
 The [install guide](../docs/INSTALL.md) has the details, the settings of the tested setup and the uninstall steps.
