@@ -7,9 +7,8 @@
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?include_prereleases&display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](../LICENSE)
-[![Game](https://img.shields.io/badge/game-FINAL%20FANTASY%20XIV%20(DirectX%2011)-5b6b7c?style=flat-square)](#requirements)
+[![Game](https://img.shields.io/badge/FINAL%20FANTASY%20XIV-DirectX%2011%2C%20Windows-5b6b7c?style=flat-square)](#requirements)
 [![GPU](https://img.shields.io/badge/GPU-NVIDIA%20RTX-5b6b7c?style=flat-square)](#requirements)
-[![Platform](https://img.shields.io/badge/platform-Windows-5b6b7c?style=flat-square)](#requirements)
 [![Built on OptiScaler](https://img.shields.io/badge/built%20on-OptiScaler-5b6b7c?style=flat-square)](https://github.com/optiscaler/OptiScaler)
 
 </div>
