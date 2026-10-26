@@ -71,9 +71,9 @@ The project is at 0.x, the initial development range of semantic versioning.
 | Version | Tag | Date | Upstream base |
 |---|---|---|---|
 | v0.1.0 | `ffxiv-2026.10.23-d9b62110` | 2026-10-23 | `d9b62110` |
-| v0.2.0-rc1 | `ffxiv-2026.10.25-d9b62110-rc1` | 2026-10-25 | `d9b62110` |
+| v0.2.0 | `ffxiv-2026.10.25-d9b62110-rc1` | 2026-10-25 | `d9b62110` |
 
-Add a row for every release. [STATUS.md](STATUS.md) and the status section of the README name the current release by version first and by tag second.
+The v0.2.0 row keeps the `-rc1` tag: it was published as a candidate and promoted to a normal release unchanged, so the tag and archive names were left alone. Add a row for every release. [STATUS.md](STATUS.md) and the status section of the README name the current release by version first and by tag second.
 
 ## 4. Rolling back a release
 

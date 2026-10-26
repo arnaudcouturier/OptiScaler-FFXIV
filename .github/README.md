@@ -2,7 +2,7 @@
 
 <img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS upscaling, frame generation and HDR for Final Fantasy XIV on DirectX 11" width="860">
 
-[![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?include_prereleases&display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
+[![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](../LICENSE)
 [![Game](https://img.shields.io/badge/FFXIV-DirectX%2011-5b6b7c?style=flat-square)](#requirements)
@@ -47,7 +47,7 @@ The [install guide](../docs/INSTALL.md) has the details, the settings of the tes
 
 ## Status
 
-The current release candidate is v0.2.0-rc1 (tag `ffxiv-2026.10.25-d9b62110-rc1`), a pre-release on OptiScaler nightly `d9b62110`. The latest full release is v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV-specific features follow one game build and switch themselves off after a game patch until the fork is updated. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110-rc1`) on OptiScaler nightly `d9b62110`. The first release was v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV-specific features follow one game build and switch themselves off after a game patch until the fork is updated. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 
