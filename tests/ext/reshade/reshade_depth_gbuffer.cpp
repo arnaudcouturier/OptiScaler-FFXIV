@@ -583,6 +583,7 @@ void DirtySlotNewViews()
     g.Finish();
     const uint64_t stuck = g.fake.sem.at("NORMALS").first;
     g.fake.forceNewTarget = true; // the engine now makes different views for every request
+    g.fake.described[stuck] = Plain(3840, 2160, kRgba8); // (the stuck copy is a plain output-sized view: without the guard it would be taken as the add-on's source)
     g.r.NextFrame();
     const int remapsBefore = static_cast<int>(g.fake.remaps.size());
     CHECK(g.Begin() == Outcome::Bound);
