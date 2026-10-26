@@ -31,7 +31,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [XeFG / XeMFG](#xefg-and-xemfg) | ported from SirenBrink's fork (Citrus333's base) | untested |
 | [HUD-less frame generation](#hud-less-frame-generation) | adapted from byunjoe's code in SirenBrink's fork; native capture and engine layers are fork code | opt-in; SDR with DLSS-G 2x-4x tested, HDR untested |
 | [ReShade built-in add-on](#reshade-built-in-add-on) | fork | tested as part of HUD-less, ReShade 6.8.0 only |
-| [Automatic ReShade scene depth](#automatic-reshade-scene-depth) (`[FFXIV] AutomaticReShadeDepth`) | fork | opt-in, off by default; new; unit-tested on fakes and a WARP device, the live ReShade side has not run in game |
+| [Automatic ReShade scene depth](#automatic-reshade-scene-depth) (`[FFXIV] AutomaticReShadeDepth`) | fork | opt-in, off by default; unit-tested on fakes and a WARP device; played in game on 2026-10-25 with one preset (see [STATUS.md](STATUS.md)) |
 | [Window mode](#window-mode) (log probe, border fix, deferred mode switch) | fork | opt-in, off by default; tested (RTX 4090) on 2026-10-19: border fix and two held-back mode switches with DLSS-G on; the open points listed in the entry were not exercised |
 | [FFXIV native quality, render geometry, colour scaling](#ffxiv-module) | ported from SirenBrink's fork | tested |
 | [Native quality hook install retry](#native-quality-and-forced-quality) (up to 3 attempts) | follows SirenBrink's approach, fork code | new; tested against the real Detours library; the install succeeded on its first attempt in every game log since 2026-10-22; the retry path itself (a failed first attempt) has never been seen in game |

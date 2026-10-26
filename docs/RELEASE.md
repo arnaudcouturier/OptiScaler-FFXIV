@@ -77,7 +77,7 @@ Add a row for every release. [STATUS.md](STATUS.md) and the status section of th
 
 ## 4. Rolling back a release
 
-`gh release delete <tag> --yes` removes the release; `git push origin :refs/tags/<tag>` and `git tag -d <tag>` remove the tag. People who installed the archive restore the backup they made (install step 2) or follow the uninstall text in `INSTALL.txt`.
+`gh release delete <tag> --yes` removes the release; `git push origin :refs/tags/<tag>` and `git tag -d <tag>` remove the tag. People who installed the archive restore the backup they made (install step 1) or follow the uninstall text in `INSTALL.txt`.
 
 ## 5. GitHub Actions: inactive drafts and how to switch them on
 

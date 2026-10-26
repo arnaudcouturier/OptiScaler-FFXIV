@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?include_prereleases&display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](../LICENSE)
-[![Game](https://img.shields.io/badge/FINAL%20FANTASY%20XIV-DirectX%2011%2C%20Windows-5b6b7c?style=flat-square)](#requirements)
+[![Game](https://img.shields.io/badge/FFXIV-DirectX%2011-5b6b7c?style=flat-square)](#requirements)
 [![GPU](https://img.shields.io/badge/GPU-NVIDIA%20RTX-5b6b7c?style=flat-square)](#requirements)
 [![Built on OptiScaler](https://img.shields.io/badge/built%20on-OptiScaler-5b6b7c?style=flat-square)](https://github.com/optiscaler/OptiScaler)
 
@@ -27,7 +27,7 @@ OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiSca
 | HUD-less frame generation | Handles the interface separately from the game picture during frame generation | optional, tested in SDR; one of its two modes is experimental |
 | Character preview | DLSS, spatial anti-aliasing and Neural Rendering in the character preview | optional, tested on earlier builds with one preview window |
 
-Tested means played in game by the author on an RTX 4090. Every feature above is off until you switch it on in the menu or in `OptiScaler.ini`.
+Tested means played in game by the author on an RTX 4090. Neural Rendering, frame generation, HDR10 output and the optional features are off until you switch them on in the menu or in `OptiScaler.ini`; upscaling follows the quality set in the game.
 
 ## Requirements
 
