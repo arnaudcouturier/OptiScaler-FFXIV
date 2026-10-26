@@ -51,6 +51,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [DLSS presets L and M](#dlss-presets-l-and-m) | upstream OptiScaler; forwarding origin not determined | check recipe only |
 | [Menu style (Ember)](#menu-style-ember) (`[Menu] Style`) | fork | opt-in, off by default (classic); tested (RTX 4090) |
 | [Linear-light NR mode, HDR PNG with menu (F2, F3, F4)](#linear-light-nr-mode-and-hdr-png-with-menu-f2-f3-f4) | adapted from SirenBrink's v6.0 (same features) | untested |
+| [Update check off by default](#update-check-off-by-default) (`[Hotfix] CheckForUpdate`) | upstream key; the default is the fork's | always in effect; unit-tested, not looked at in game |
 | [Menu layout](#menu-layout), card registry and manifest | fork (tabs, cards and Custom Tab are upstream) | offline tests only |
 
 ## DLSS Neural Rendering (NR)
@@ -538,6 +539,14 @@ The automatic bias does not engage while "MB Scale Override" is on (one warning,
 | F2 | NR compute-shader edit for the "Linear light" proxy | `ext/nr/shaders/dlssnr.hlsl` | none | none |
 | F3 | NR HDR mapping "Linear light + composed" | `ext/nr/` (config, menu, presets), `ext/ini/DlssNr.ini` | `[DlssNr] ReversibleMode = 5` | `dlss_nr` |
 | F4 | HDR PNG "Include OptiScaler menu" | `ext/hdr/screenshot/` (`MenuCapture.h`), `ext/ini/HDR.ini` | `[HDR] ScreenshotMenu` | `ffxiv_hdr` |
+
+## Update check off by default
+
+**Origin.** Upstream OptiScaler's `[Hotfix] CheckForUpdate`; making `auto` mean off is the fork's.
+
+**What it does.** The fork does not check for updates. Upstream OptiScaler asks its own GitHub project for a newer version at every launch; for this fork that would name the wrong releases and be a network call nobody asked for, so an unset key means off here. The releases of this fork are on its GitHub page. `CheckForUpdate=true` in the ini, or ticking "Check for Update" in the menu (then Save Settings and restart the game: the check only runs at launch), turns the check back on, and it then still asks upstream OptiScaler's GitHub project, not this fork's. Save Settings keeps a `true` you set (upstream alone would save it as `auto`, which is off here); an unset key is saved as `auto` and an explicit `false` as `false`.
+
+**Status.** Always in effect. Unit-tested on the real option class, config load and save; not looked at in game. **Config.** `[Hotfix] CheckForUpdate` (upstream's key, shipped as `auto`; its comment line "Default (auto) is true" is upstream's text, and the fork's note in `ext/ini/Hotfix.ini` says what `auto` means here). **Menu.** Upstream's "Check for Update" checkbox (Plugins / Startup card). **Code and seams.** `ext/core/UpdateCheck.*` and two hook pointers in `ext/core/ExtConfig.*`; no upstream line is edited. Test: `tests/ext/core/update_check`.
 
 ## Menu layout
 

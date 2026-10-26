@@ -137,6 +137,9 @@ void Save(CSimpleIniA& ini)
         b.save(b, ini);
 
     Cfg().hdr.Retire(ini);
+
+    if (ext::ExtConfig::updateCheckOnSaved != nullptr)
+        ext::ExtConfig::updateCheckOnSaved(ini);
 }
 
 void SaveXeFG(CSimpleIniA& ini)
@@ -218,6 +221,9 @@ void ExtConfig::Bind(config::Binder& b)
 
 void ExtConfig::PostLoad()
 {
+    if (updateCheckOnLoaded != nullptr)
+        updateCheckOnLoaded();
+
     fg.PostLoad();
     nr.PostLoad();
     hdr.PostLoad();

@@ -183,6 +183,14 @@ struct ExtConfig
 
     void Bind(config::Binder& b);
     void PostLoad(); // validation that ran right after reading the keys (end of config::Load)
+
+    // The upstream update check ([Hotfix] CheckForUpdate, an upstream key: it is not bound here). ext/core/UpdateCheck.cpp registers both
+    // hooks when the DLL's static initialisers run, which is before DllMain reads the config for the first time. Pointers rather than
+    // calls so that ExtConfig.cpp keeps no link dependency on the glue (it needs the process-wide Config): the unit tests that build
+    // ExtConfig.cpp alone find them null and nothing happens.
+    using IniHook = void (*)(CSimpleIniA& ini);
+    static inline void (*updateCheckOnLoaded)() = nullptr; // end of every config::Load (PostLoad)
+    static inline IniHook updateCheckOnSaved = nullptr;    // end of every config::Save, after upstream wrote its keys
 };
 
 ExtConfig& Cfg();

@@ -28,6 +28,11 @@
       outside OptiScaler\ stops the script with exit 5 before any archive is written; there is no switch to ignore it. One in a
       third-party library under OptiScaler\ (FidelityFX, XeSS, Direct3D 12 core) is a vendor build path: it is reported as a
       warning with the string, and the file is packed. The scan does not look at .pdb files (-IncludeSymbols packs them knowingly).
+    * Tag-first: the build embeds `git describe` of the commit it was built from (ext\ext.props, the version in the banner) as a
+      NUL-terminated string in OptiScaler.dll, which is packed as winmm.dll. The script reads that string, prints it, and stops with
+      exit 6 before anything is classified or written unless it equals the tag named by -Version. The tag therefore has to exist, locally,
+      on the commit that was built: create it first, build, package, smoke test, then push the tag (docs\RELEASE.md). There is no switch
+      to skip the check; tools\package.ps1 (the development package) never calls this script.
   After writing the archive the script extracts it to a scratch folder and checks every hash against SHA256SUMS.txt, and checks that
   -Package was not modified (its tree hash before and after).
 
@@ -37,10 +42,13 @@
     3  a file in -Package is unclassified, a licence or notice file is missing, or the ini lacks a fork section
     4  verification of the written archive failed (hash or file count mismatch, or -Package changed)
     5  a packed binary contains a user profile path (the privacy scan above); nothing is written
+    6  the version string embedded in OptiScaler.dll is not the tag of -Version, or there is none (the DLL was built before the tag, or on
+       another commit); nothing is written, and no output folder is created
 .PARAMETER Package
   Folder produced by tools\package.ps1 (contains OptiScaler.dll, OptiScaler.ini, the forwarder).
 .PARAMETER Version
   Release tag, for example ffxiv-2026.10.23-d9b62110 (convention: ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]); the leading "ffxiv-" may be left out.
+  The package must have been built on the commit this tag points at, after the tag was created (see Tag-first above).
 .PARAMETER Exclude
   File names or package-relative paths to leave out of the archive. Default: libxell.dll (Intel's XeLL library: its licence file does not name it, so it is not redistributed; pass -Exclude @() to pack it anyway).
 .PARAMETER OutDir
@@ -63,13 +71,42 @@ function Fail([string]$Message, [int]$Code) { Write-Host "[release] $Message" -F
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $OutDir) { $OutDir = Join-Path $root 'dist' }
 
-if ($Version -notmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(-rc\d+)?$') {
+if ($Version -cnotmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(-rc\d+)?$') {
     Fail "Version '$Version' does not follow ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]" 2
 }
 if (-not (Test-Path -LiteralPath $Package -PathType Container)) { Fail "Package folder not found: $Package" 2 }
 $Package = (Resolve-Path -LiteralPath $Package).Path
 foreach ($need in 'OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll') {
     if (-not (Test-Path -LiteralPath (Join-Path $Package $need) -PathType Leaf)) { Fail "$need is missing in $Package (run tools\package.ps1 first)" 2 }
+}
+$tag = if ($Version.StartsWith('ffxiv-', [StringComparison]::Ordinal)) { $Version } else { "ffxiv-$Version" }
+
+# ---------------------------------------------------------------- tag-first: the DLL has to carry the tag's name
+# The build writes `git describe --tags --always --match "ffxiv-*"` of the commit it was built from into OptiScaler.dll as a C string
+# literal (ext\ext.props; the banner prints it). On the tagged commit it is the tag; on a later commit it reads <tag>-<n>-g<sha>, and a build
+# made before the new tag existed carries the previous tag in that form; with no ffxiv-* tag reachable it is a bare sha. The archive is
+# named by the tag, so the DLL has to say the same: the bytes that were smoke-tested are the bytes that ship. Only a string that stands on
+# its own (a NUL before and after) and has the shape of a describe result counts, so the tag quoted inside a longer text does not.
+# Nothing has been written yet at this point.
+$describeShape = [regex]::new('ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?(?:-\d+-g[0-9a-f]{7,40})?(?=\x00)', 'CultureInvariant, Compiled')
+$dllText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes((Join-Path $Package 'OptiScaler.dll')))   # one char per byte
+$found = [System.Collections.Generic.List[string]]::new()
+foreach ($m in $describeShape.Matches($dllText)) {
+    # the NUL in front is checked here, not as a look-behind, so that the regex can search for the literal prefix
+    if ($m.Index -gt 0 -and $dllText[$m.Index - 1] -eq [char]0 -and -not $found.Contains($m.Value)) { $found.Add($m.Value) }
+}
+$embedded = @($found)
+if ($embedded.Count -eq 0) {
+    Fail ("no version string found in OptiScaler.dll (packed as winmm.dll): the DLL was built before the tag, or no ffxiv-* tag was reachable from the commit it was built on. " +
+          "Create the annotated tag $tag on the commit to be tested, rebuild, package again (docs\RELEASE.md section 1).") 6
+}
+foreach ($e in $embedded) { Write-Host "[release] embedded version string (OptiScaler.dll, packed as winmm.dll): $e" }
+if ($embedded.Count -gt 1) {
+    Fail "OptiScaler.dll holds $($embedded.Count) different version strings (listed above), so the one the build embedded cannot be told apart." 6
+}
+if ($embedded[0] -cne $tag) {
+    Fail ("the DLL was built before the tag, or on another commit: it carries '$($embedded[0])' but -Version names '$tag'. " +
+          "Create the annotated tag on the commit to be tested, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
 }
 
 # ---------------------------------------------------------------- classification tables
@@ -214,7 +251,6 @@ try {
     if ($u) { $srcUrl = ($u -replace '^https://[^@/]+@', 'https://' -replace '\.git$', '').Trim() }
 } catch { }
 if (-not $srcUrl) { $srcUrl = '(the repository this archive was built from)' }
-$tag = if ($Version.StartsWith('ffxiv-')) { $Version } else { "ffxiv-$Version" }
 
 # ---------------------------------------------------------------- stage
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -286,6 +322,8 @@ SETTINGS (OptiScaler.ini, all of them can also be changed in the menu; restart t
   Two things are ON by default in FFXIV: the automatic mipmap bias ([Mipmap] MipmapBiasAuto) and the quality change without the 500 ms pause
   ([NgxRelease] SkipReleaseSleep). Set them to false to turn them off.
   Menu look:                               [Menu] Style=ember       (flat charcoal menu; set [Menu] AccentColorR/G/B for the accent, default is blue)
+  Updates:                                 this fork does not check for new versions; its releases are at $srcUrl.
+                                           [Hotfix] CheckForUpdate=true turns on upstream OptiScaler's check, which asks upstream's project, not this one.
 
 BRING YOUR OWN (not included: not redistributable from this repository)
 $(($byo | ForEach-Object { "  $_" }) -join "`n")
@@ -303,8 +341,11 @@ KNOWN LIMITS
   * DLSS presets L and M cost more fps than K (heavier models); K is the default.
   * libxell.dll (Intel XeLL) is not part of this archive.
   * 5x and 6x multi frame generation on RTX 40 are experimental; one GPU hang happened at 6x. Use 4x or lower.
-  * The FFXIV-specific features (native quality, nameplates, lighting, HDR, HUD-less) are tied to one game build. After a game
-    patch they switch themselves off (see the log) until the fork is updated; the rest keeps working.
+  * After a game patch, the FFXIV features that go by program name or shader (scene HDR, lighting, HUD-less, geometry, markers, the mipmap
+    bias) keep running, and so do DLSS-G, XeFG and Neural Rendering. The features that read or hook the game's code (native quality, the
+    jitter probe and jitter source, the Companion native hooks, the character preview lookup) are tied to one game build: they stay off until
+    the fork is updated (the log says which), unless you set [FFXIV] FfxivUnknownBuildHooks=true, which runs each of them if the fork
+    found every address it needs.
 
 UNINSTALL
   Close the game and delete only what this archive installed, in the folder that contains ffxiv_dx11.exe:

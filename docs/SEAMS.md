@@ -141,7 +141,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 
 ### 3.10 Logging and version
 
-`ext::core::Banner()` is called once after upstream's version line. It logs `OptiScaler-FFXIV <tag> (<fork sha>) on upstream <upstream sha>`. The upstream version line is not edited.
+`ext::core::Banner()` is called once after upstream's version line. It logs `OptiScaler-FFXIV <tag> on upstream <upstream sha>`. The upstream version line is not edited. It also applies the default of the upstream update check (`ext/core/UpdateCheck.h`), so that a launch without a readable `OptiScaler.ini` does not start it.
 
 ## 4. Seam catalog
 

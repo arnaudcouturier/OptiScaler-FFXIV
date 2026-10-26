@@ -146,6 +146,8 @@ pwsh -File tools\package.ps1 -Target <package folder>
 
 Expected: the build prints `[build] OK`. `tools\test.ps1` builds and runs every recipe under `tests\ext` and ends with `passed N, failed 0, manual M`. The warp tests use the Direct3D software adapter and need no GPU; manual recipes are listed and never run. At the time of the first real sync (`main` `0d8264f2`) a run gave 108 passed, 0 failed, 7 manual (89 at `c3277532`, then the focus-gate test and the character-preview tests); N should equal the number on `main` unless the sync added or removed recipes, so run `tools\test.ps1` on `main` first and write that number down. These are list counts, not results of a run: treat `0 failed` as the criterion and the count as a sanity check, and write the real numbers into the sync commit message.
 
+When this build is the one to release, do section 10 step 1 first, then create its tag (step 2) on the commit you build, and build on the tagged commit: the build embeds `git describe`, and `tools\package-release.ps1` refuses a DLL whose embedded string is not the tag (exit 6, [RELEASE.md](RELEASE.md) section 1). `tools\package.ps1` for a development build needs no tag.
+
 If the shipped `OptiScaler.ini` changed upstream, check that `tools\package.ps1` still merges every fragment (`[package] [Section] merged` lines, one per fragment in `OptiScaler\ext\ini\`).
 
 ## 8. Worked example: `fd6c2870` to `46e1dd3d`
@@ -198,12 +200,12 @@ Use the freshly packaged build in a copy of the game folder (back up first; see 
 ## 10. Publish
 
 1. Update [UPSTREAM-BASE](UPSTREAM-BASE) to the new upstream sha, and the catalog for any seam that was added, removed or moved (a seam change and its catalog change belong in the same commit). The sha also appears, as history or as a fallback, in `OptiScaler/ext/ext.props` (banner fallback used only when no tag can be read) and in the fallbacks of `tools/footprint.ps1`; those were deliberately left alone in the first real sync: update them only if you rely on the fallback.
-2. Tag with the convention `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, for example `ffxiv-2026.10.23-d9b62110`: the date is the tag day, the sha8 is the upstream commit the stack sits on, `-rcN` marks a release candidate that has not been through the full play-test. An annotated tag: `git tag -a <tag> -m "<summary>"`.
+2. Tag with the convention `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, for example `ffxiv-2026.10.23-d9b62110`: the date is the tag day, the sha8 is the upstream commit the stack sits on, `-rcN` marks a release candidate that has not been through the full play-test. An annotated tag, created locally AFTER step 1's commit, on the commit to be tested, before the build you package and smoke-test (section 7, then section 9): `git tag -a <tag> -m "<summary>"`. If the smoke test fails, delete the tag (`git tag -d <tag>`) and create it again on the fixed commit. It is pushed only in step 4, after the smoke test passed.
 3. The packaging and the release steps are in [RELEASE.md](RELEASE.md). If GitHub Actions are enabled on the repository, enabling them also enabled upstream's six workflows, which are kept disabled one by one with `gh workflow disable` (exact procedure in RELEASE.md section 5). A sync can add a new upstream workflow file, and a new file starts active: before pushing, run `gh workflow list --all` and disable every workflow that is not one of the fork's own `ffxiv-*` drafts.
-4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag. The repository owner does this step.
+4. Publishing a rebased `main` moves the branch. Keep the old tip reachable first (the last release tag already does; if the tip is not tagged, `git tag archive/main-before-<sha8> main`), then `git push --force-with-lease origin <sync branch>:main` and push the new tag (the one created in step 2; it is not pushed earlier). The repository owner does this step.
 
 ## 11. Rollback
 
 - During the sync: `git rebase --abort` (or `git merge --abort`), `git switch main`, `git branch -D sync-<sha8>`. Nothing public changed.
-- After building but before publishing: delete the sync branch; `main` was never touched.
+- After building but before publishing: delete the sync branch and the local tag (`git tag -d <tag>`); `main` was never touched and nothing public carries the tag.
 - After publishing: `git push --force-with-lease origin <old tip>:main`, delete the new tag (`git push origin :refs/tags/<tag>`, `git tag -d <tag>`), and restore [UPSTREAM-BASE] from the old commit. Users who installed the new package restore their backup (see [RELEASE.md](RELEASE.md)).

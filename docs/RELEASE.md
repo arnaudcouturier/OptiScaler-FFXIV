@@ -2,10 +2,14 @@
 
 How a release archive is built, checked and published, and what to do before the repository's GitHub Actions are switched on. Publishing is always done by hand: nothing in this repository pushes, tags or publishes by itself.
 
-## 1. Build, test, package
+## 1. Tag, build, test, package
+
+The tag comes first. The build writes the output of `git describe` into the DLL, and the archive has to carry the name of the release it is published as, so the annotated tag is created locally on the commit to be tested before that commit is built. The bytes that are smoke-tested are then the bytes that ship. Nothing is pushed until the smoke test has passed (section 3). Build from a clean tree: `git describe` has no marker for uncommitted changes, so a dirty tree builds a DLL that carries the tag name and is not the tagged commit.
 
 ```powershell
 git submodule update --init --recursive
+git status --short                                          # prints nothing: the tag names exactly this tree
+git tag -a ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN] -m "<summary>"    # local only
 pwsh -File tools\build-locked.ps1 -Rebuild
 pwsh -File tools\test.ps1                                   # 0 failed
 pwsh -File tools\footprint.ps1                              # record the numbers
@@ -15,7 +19,9 @@ pwsh -File tools\package-release.ps1 -Package <package folder> -Version ffxiv-<y
 
 `tools\package.ps1` copies the build output to the target folder and merges the fragments in `OptiScaler\ext\ini\` into the shipped `OptiScaler.ini`. `tools\package-release.ps1` turns that folder into `dist\OptiScaler-FFXIV-<Version>.zip`. It never writes to the package folder (it hashes the folder before and after to prove it), writes a `.gitignore` containing `*` into `dist\` so an archive cannot be committed by accident, and finishes by extracting the archive to a scratch folder and re-checking every hash.
 
-Exit codes of `package-release.ps1`: 0 ok, 2 bad arguments or a missing required file, 3 a file it cannot classify or a licence file that is missing, 4 verification failed, 5 a packed binary contains a user profile path.
+Exit codes of `package-release.ps1`: 0 ok, 2 bad arguments or a missing required file, 3 a file it cannot classify or a licence file that is missing, 4 verification failed, 5 a packed binary contains a user profile path, 6 the version string inside the DLL is not the tag.
+
+Exit 6 is the tag-first check. Before anything is classified or written, the script reads the version string that the build embedded in `OptiScaler.dll` (the one that becomes `winmm.dll`) and prints it. Unless it equals `-Version` (with the `ffxiv-` prefix, which may be left out of the argument), the script stops and creates neither the archive nor the `dist\` folder. The string is exactly the tag when the build was made on the tagged commit. A build made on a later commit reads `<tag>-<n>-g<sha>`, and a build made before the new tag existed reads the previous tag in that form, so it never equals the new name. With no `ffxiv-` tag reachable at all the build embeds a bare sha, and the script finds no version string. Fix: create or re-create the tag on the commit to be tested (section 1), rebuild, package again. There is no switch to skip the check. `tools\package.ps1` (the development package) and preview builds do not use it and stay untagged.
 
 Exit 5 is the privacy scan: before anything is written, every packed `.dll`, `.exe` and `.addon*` is searched (ASCII and UTF-16LE) for a drive letter followed by `:\Users\`, which a build can leave in the PE debug directory or in assertion strings and which would publish the Windows user name of the build machine. The message names the file and the string. There is no switch to skip it: rebuild so that the path is not embedded (the forwarder links with `/PDBALTPATH:%_PDB%`, which keeps only the `.pdb` file name). A match inside a third-party library under `OptiScaler\` (FidelityFX, XeSS, Direct3D 12 core) is reported as a warning with the string and the file is packed, because it can only be the vendor's build path; read the warning once. Files under `Licenses\` are classified like every other file (a blocked name there is left out and reported) and scanned too.
 
@@ -49,17 +55,20 @@ Left out on purpose: `.pdb`, `.exp`, `.lib` (use `-IncludeSymbols` to ship the `
 
 ## 3. Tag and publish (by hand)
 
+The tag already exists locally: it was created in section 1, before the build. Push it only after the smoke test of the archive has passed ([SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 9):
+
 ```powershell
-git tag -a ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN] -m "<summary>"
 git push origin ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]
 gh release create ffxiv-<...> dist\OptiScaler-FFXIV-ffxiv-<...>.zip --prerelease --title "v<version>" --notes-file <notes>
 ```
+
+If the smoke test fails, nothing is public yet. Fix the problem and commit it, delete the tag and create it again on the new commit (`git tag -d <tag>`, then `git tag -a <tag> -m "<summary>"`), then build, package and test again. Rebuild after every re-created tag: `package-release.ps1` compares the tag's name inside the DLL with `-Version`, not the commit behind it, so a DLL built before the fix still carries the same name. Use one tag per tested commit, and never move a tag that has been pushed: use a new one (a higher `-rcN`, or a later date) instead.
 
 Use `--prerelease` for `-rcN` tags. The release notes should say which features are tested (copy the table from [STATUS.md](STATUS.md)), the upstream sha the build is based on, the supported FFXIV build (the `TimeDateStamp` in `ext/ffxiv/GameBuild.h`), the archive's SHA-256, and that the archive does not include NVIDIA files. Convention for the tag: [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md) section 10. The release name is the version number below.
 
 ### Release numbering
 
-Each GitHub release is named with a version number (`--title "v<version>"`). The git tag keeps the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, because `tools\package-release.ps1` and the build's version string rely on the `ffxiv-` prefix.
+Each GitHub release is named with a version number (`--title "v<version>"`). The git tag has the date form `ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]`, because `tools\package-release.ps1` and the build's version string rely on the `ffxiv-` prefix. The tag is the name the DLL carries inside (section 1), so a tag names one tested build. A candidate that passes the wider play-test is not promoted by adding a second tag to the same commit: the final release is its own tag on a commit that is built, packaged and smoke-tested under that name, and the `-rcN` tag stays what it was.
 
 The project is at 0.x, the initial development range of semantic versioning.
 

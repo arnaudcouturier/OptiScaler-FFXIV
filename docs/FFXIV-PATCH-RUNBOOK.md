@@ -119,7 +119,7 @@ The header's comments are copied unchanged. Anything that quotes the old build's
 4. Build (`tools\build-locked.ps1`) and test (`tools\test.ps1`; the full suite takes 6 to 40 minutes depending on other builds running). Check `tools\footprint.ps1` against the value before the change: the table edit is under `OptiScaler\ext\` and must not move it.
 5. Rebuild the CLI (the table is compiled into it) and re-run it against the new executable with `--strict --compare-table --margin`. It must exit 0 and say `the generated entry equals the table`. That proves the table you pinned is what the search finds.
 6. Play-test with [FFXIV-PATTERN-SEARCH-TEST-PLAN.md](FFXIV-PATTERN-SEARCH-TEST-PLAN.md) (runs 1 and 3 on the new build, default ini).
-7. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, what changed, what was reviewed by hand and what was verified in game. Tag a release candidate (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10).
+7. Commit as `[ffxiv] GameBuild.h: rebase onto <game version>` with the old and new `TimeDateStamp`, what changed, what was reviewed by hand and what was verified in game. Then create the release candidate's tag locally and package from a build made after it, because the tag name is embedded in the DLL (see [SYNC-RUNBOOK.md](SYNC-RUNBOOK.md), section 10, and [RELEASE.md](RELEASE.md), section 1).
 
 `GameBuild.h` holds one build (`kCurrentBuild`): the previous build is no longer in the table after the pin. It still runs through the unknown-build path (with `FfxivUnknownBuildHooks=true`) if its seams resolve.
 
