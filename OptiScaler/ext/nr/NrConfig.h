@@ -73,6 +73,14 @@ struct NrConfig
     CustomOptional<float> spatialOffsetY { 0.0f };
     CustomOptional<float> spatialShiftX { 0.0f };
     CustomOptional<float> spatialShiftY { 0.0f };
+    // Which profile the spatial switch drives: 0 peripheral (the compression curve above), 1 foveated (any other value is peripheral).
+    CustomOptional<uint32_t> spatialProfile { 0 };
+    // Foveated profile, in pixels of the output: the full-density centre, one falloff length, and the edge density per axis (0.25..1).
+    CustomOptional<float> foveaWidth { 2400.0f };
+    CustomOptional<float> foveaHeight { 1350.0f };
+    CustomOptional<float> foveaFalloff { 400.0f };
+    CustomOptional<float> foveaEdgeX { 0.5f };
+    CustomOptional<float> foveaEdgeY { 0.5f };
     // Spatial feedback between passes (clamped to 0..1 on load).
     CustomOptional<float> passFeedback { 1.0f };
     // Clamped to 1..2 on load.

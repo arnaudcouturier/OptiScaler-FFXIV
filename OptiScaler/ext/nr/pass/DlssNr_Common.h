@@ -250,7 +250,7 @@ struct alignas(256) DlssNrConstants
     uint32_t ResidualRejection;
     float ReferencePreExposure;
     float PassFeedback;
-    uint32_t SpatialResidual; // 1 unpacked spatial residual; 2 fused native spatial resolve
+    uint32_t SpatialResidual; // low byte: 1 unpacked spatial residual, 2 fused native spatial resolve; bit 8 selects the foveated profile
     float SpatialWorkSize[3] = {}; // model width/height; [2] selects HDR-relative carrier in modes 5/6/10
     float SpatialWarp[28] = {}; // seven float4 fields; retains the 256-byte CB
 

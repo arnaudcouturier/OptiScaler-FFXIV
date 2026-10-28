@@ -72,9 +72,13 @@ int wmain(int argc,wchar_t** argv) try {
         expect(dd[y*5+x]==dep[dy*16+dx]);expect(mm[(y*5+x)*2]==float(mx));expect(mm[(y*5+x)*2+1]==-float(my));
     }
     std::puts("PASS: typed NR guide resize, padded independent regions, point depth and unchanged vector units");
-    for(float scale : {1.0f,.75f}) { // shader maths validated independently of the production native-only gate
+    for(unsigned profile : {0u,1u}) for(float scale : {1.0f,.75f}) { // shader maths validated independently of the production native-only gate
         Settings settings{};settings.enabled=true;settings.offsetX=7;settings.offsetY=-4;
-        auto layout=Build(settings,320,160,scale);expect(layout.active);
+        if(profile==1){ // the foveated profile through the same fused path: the profile bit rides in the selector word
+            settings.profile=Profile::Foveated;settings.foveaWidth=200;settings.foveaHeight=100;settings.foveaFalloff=30;
+            settings.foveaEdgeX=.5f;settings.foveaEdgeY=.35f;
+        }
+        auto layout=Build(settings,320,160,scale,320,160);expect(layout.active&&layout.profile==(profile?Profile::Foveated:Profile::Peripheral));
         std::vector<float> proxy(layout.modelW*layout.modelH*4),answer(proxy.size()),base(320*160*4);
         for(unsigned y=0;y<layout.modelH;++y)for(unsigned x=0;x<layout.modelW;++x){auto i=(y*layout.modelW+x)*4;
             proxy[i]=.1f+.6f*x/layout.modelW;proxy[i+1]=.15f+.5f*y/layout.modelH;proxy[i+2]=.3f;proxy[i+3]=1;
@@ -93,14 +97,15 @@ int wmain(int argc,wchar_t** argv) try {
             k.TransferStrength=strength;k.ColourStrength=1;k.MaxRatio=3;
             k.SkinProtection=1;k.SkinDetail=.6f;k.SkinColour=.7f;k.EnvironmentDetail=1;k.EnvironmentColour=1;
             r.run(k,up,ua,o,out,keep);auto legacy=r.read(out);
-            k.SpatialResidual=2;const auto warp=pw::MakeShaderConstants(layout.warp);
-            k.SpatialWorkSize[0]=warp.workWidth;k.SpatialWorkSize[1]=warp.workHeight;
-            const float* fields[]={&warp.bandCenterX,&warp.halfSpanNegX,&warp.halfSpanPosX,&warp.sideWorkNegX,&warp.sideWorkPosX,&warp.sideEdgeSlopeNegX,&warp.workScaleX};
-            for(unsigned i=0;i<7;++i)std::memcpy(k.SpatialWarp+i*4,fields[i],16);
+            const auto resolveWarp=MakeResolveWarp(layout,true);
+            expect(resolveWarp.residual==(profile?(2u|DlssNr::Foveated::kResolveFoveatedBit):2u));
+            k.SpatialResidual=resolveWarp.residual;
+            k.SpatialWorkSize[0]=resolveWarp.workSize[0];k.SpatialWorkSize[1]=resolveWarp.workSize[1];
+            std::memcpy(k.SpatialWarp,resolveWarp.fields,sizeof(resolveWarp.fields));
             r.run(k,p,a,o,out,keep);auto fused=r.read(out);
             for(size_t i=0;i<fused.size();++i)expect(std::isfinite(fused[i]) && std::abs(fused[i]-legacy[i])<.0002f);
         }
     }
-    std::puts("PASS: fused native spatial resolve matches legacy unpack/resolve (SDR/HDR, all reversible curves, strengths, skin protection, shifted periphery)");
+    std::puts("PASS: fused native spatial resolve matches legacy unpack/resolve, peripheral and foveated profiles (SDR/HDR, all reversible curves, strengths, skin protection, shifted periphery)");
     return 0;
 } catch(const std::exception& e){std::fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

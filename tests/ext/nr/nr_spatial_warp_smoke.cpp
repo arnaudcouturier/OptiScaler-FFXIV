@@ -11,7 +11,8 @@
 using Microsoft::WRL::ComPtr;
 using namespace DlssNr::Spatial;
 void check(HRESULT r) { if (FAILED(r)) throw std::runtime_error("D3D failure"); }
-void expect(bool v) { if (!v) throw std::runtime_error("Spatial shader reference mismatch"); }
+void expectAt(bool v, int line) { if (!v) { std::fprintf(stderr, "reference mismatch at line %d\n", line); throw std::runtime_error("Spatial shader reference mismatch"); } }
+#define expect(v) expectAt((v), __LINE__)
 struct Texture { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv; ComPtr<ID3D11UnorderedAccessView> uav; unsigned w,h,channels; };
 struct Runner {
     ComPtr<ID3D11Device> d; ComPtr<ID3D11DeviceContext> c; ComPtr<ID3D11ComputeShader> color,guides;
@@ -50,8 +51,17 @@ struct Runner {
         c->Unmap(staging.Get(),0);return result;
     }
 };
-int wmain(int argc,wchar_t**argv) try {
-    expect(argc==2);Runner r(argv[1]);Settings s{};s.enabled=true;auto layout=Build(s,320,160,1.0f);expect(layout.active);
+float HostPack(const Layout& l, bool y, float v) {
+    return l.profile == Profile::Foveated ? DlssNr::Foveated::Pack(v, y ? l.fovea.y : l.fovea.x) : pw::Pack(v, y ? l.warp.y : l.warp.x);
+}
+float HostUnpack(const Layout& l, bool y, float v) {
+    return l.profile == Profile::Foveated ? DlssNr::Foveated::Unpack(v, y ? l.fovea.y : l.fovea.x) : pw::Unpack(v, y ? l.warp.y : l.warp.x);
+}
+// One layout through the pack, guide and unpack dispatches, checked against the host reference of its own profile. strictDepth
+// compares every depth texel; otherwise the texels whose source position sits on an integer boundary are skipped (float rounding can
+// pick the neighbouring texel there).
+void RunCase(Runner& r, const Layout& layout, bool strictDepth) {
+    expect(layout.active);
     DlssNr::GuideRegions regions{{4,3,320,160},{4,3,320,160}};
     std::vector<float> col(320*160*4),dep(328*168),mv(328*168*2);
     for(unsigned y=0;y<160;++y)for(unsigned x=0;x<320;++x){auto i=(y*320+x)*4;col[i]=(x+.5f)/320;col[i+1]=(y+.5f)/160;col[i+2]=.25;col[i+3]=.75;}
@@ -62,19 +72,55 @@ int wmain(int argc,wchar_t**argv) try {
     r.run(MakeConstants(layout,100,regions,1,1,320,160),color,color,color,packed,dummy);
     r.run(MakeConstants(layout,101,regions,1,1,320,160),color,depth,motion,pd,pm);
     const auto pc=r.read(packed),dd=r.read(pd),mm=r.read(pm);
+    unsigned depthChecked=0;
     for(unsigned y=0;y<layout.modelH;++y)for(unsigned x=0;x<layout.modelW;++x){
-        auto i=y*layout.modelW+x;float nx=pw::Unpack(x+.5f,layout.warp.x),ny=pw::Unpack(y+.5f,layout.warp.y);
-        expect(std::abs(mm[i*2]-(pw::Pack(nx+2,layout.warp.x)-pw::Pack(nx,layout.warp.x)))<.003f);
-        expect(std::abs(mm[i*2+1]-(pw::Pack(ny-1,layout.warp.y)-pw::Pack(ny,layout.warp.y)))<.003f);
-        auto dx=std::clamp(int(4+nx),4,323),dy=std::clamp(int(3+ny),3,162);
-        expect(std::abs(dd[i]-dep[dy*328+dx])<.00001f);expect(std::abs(pc[i*4+3]-.75f)<.00001f);
+        auto i=y*layout.modelW+x;float nx=HostUnpack(layout,false,x+.5f),ny=HostUnpack(layout,true,y+.5f);
+        if(!(std::abs(mm[i*2]-(HostPack(layout,false,nx+2)-HostPack(layout,false,nx)))<.003f))std::fprintf(stderr,"motion x at (%u,%u): gpu %f host %f native %f\n",x,y,mm[i*2],HostPack(layout,false,nx+2)-HostPack(layout,false,nx),nx);
+        if(!(std::abs(mm[i*2+1]-(HostPack(layout,true,ny-1)-HostPack(layout,true,ny)))<.003f))std::fprintf(stderr,"motion y at (%u,%u): gpu %f host %f native %f\n",x,y,mm[i*2+1],HostPack(layout,true,ny-1)-HostPack(layout,true,ny),ny);
+        expect(std::abs(mm[i*2]-(HostPack(layout,false,nx+2)-HostPack(layout,false,nx)))<.003f);
+        expect(std::abs(mm[i*2+1]-(HostPack(layout,true,ny-1)-HostPack(layout,true,ny)))<.003f);
+        // point-sampled depth: skip the texels whose source position sits on an integer boundary, where float rounding can pick the neighbour
+        const float fx=nx-std::floor(nx),fy=ny-std::floor(ny);
+        if(strictDepth||(fx>1e-3f&&fx<1-1e-3f&&fy>1e-3f&&fy<1-1e-3f)){ // the plain peripheral case compares every texel, as it always did
+            auto dx=std::clamp(int(4+nx),4,323),dy=std::clamp(int(3+ny),3,162);
+            expect(std::abs(dd[i]-dep[dy*328+dx])<.00001f);++depthChecked;
+        }
+        expect(std::abs(pc[i*4+3]-.75f)<.00001f);
     }
+    expect(depthChecked>layout.modelW*layout.modelH*9/10);
     auto a=r.make(320,160,4),b=r.make(320,160,4);
     r.run(MakeConstants(layout,102,regions,1,1,320,160),packed,packed,packed,a,b);
     auto aa=r.read(a),bb=r.read(b);expect(aa==bb);
     for(unsigned y=8;y<152;++y)for(unsigned x=8;x<312;++x){auto i=(y*320+x)*4;
+        if(!(std::abs(aa[i]-col[i])<.004f && std::abs(aa[i+1]-col[i+1])<.007f))std::fprintf(stderr,"reconstruction at (%u,%u): gpu %f %f want %f %f\n",x,y,aa[i],aa[i+1],col[i],col[i+1]);
         expect(std::abs(aa[i]-col[i])<.004f && std::abs(aa[i+1]-col[i+1])<.007f);
     }
+}
+int wmain(int argc,wchar_t**argv) try {
+    expect(argc==2);Runner r(argv[1]);
+    Settings s{};s.enabled=true;auto layout=Build(s,320,160,1.0f);expect(layout.active);
+    RunCase(r,layout,true);
     std::puts("PASS: WARP spatial pack/unpack geometry, padded depth, endpoint-transformed motion, alpha and zero-edit identity");
+    // The peripheral profile moved off centre on both axes: its centre slot is a fraction of each side's own half-span, so the two
+    // sides of an axis carry different values in it (the foveated slots carry the same pixel length on both sides). A shader that
+    // read the sides' slots the wrong way round packs the wrong map.
+    Settings po{};po.enabled=true;po.offsetX=5;po.offsetY=-4;
+    auto offsetLayout=Build(po,320,160,1.0f);expect(offsetLayout.active&&offsetLayout.profile==Profile::Peripheral);
+    const auto offsetKernel=pw::MakeShaderConstants(offsetLayout.warp);
+    expect(offsetKernel.sideCenterNegX!=offsetKernel.sideCenterPosX&&offsetKernel.sideCenterNegY!=offsetKernel.sideCenterPosY);
+    RunCase(r,offsetLayout,false);
+    std::puts("PASS: WARP peripheral pack/unpack geometry with an offset centre (different centre slot per side, both axes)");
+    // The foveated profile, shifted off centre on both axes so the two sides of each axis differ (one falloff is cut by the frame
+    // edge), different edge densities per axis: the GPU map must follow the host reference of that profile.
+    Settings f{};f.enabled=true;f.profile=Profile::Foveated;f.foveaWidth=200;f.foveaHeight=100;f.foveaFalloff=30;
+    f.foveaEdgeX=.5f;f.foveaEdgeY=.35f;f.offsetX=5;f.offsetY=-4;
+    auto foveated=Build(f,320,160,1.0f,320,160);expect(foveated.active&&foveated.profile==Profile::Foveated);
+    expect(foveated.fovea.x.side[0].span!=foveated.fovea.x.side[1].span&&foveated.fovea.y.side[0].falloff<foveated.fovea.y.side[1].falloff);
+    RunCase(r,foveated,false);
+    // and with a global working scale below one
+    auto scaled=Build(f,320,160,.8f,320,160);expect(scaled.active);
+    scaled.ordinaryW=320;scaled.ordinaryH=160; // the unpack pass writes the native grid (the pass patches in its aligned ordinary size)
+    RunCase(r,scaled,false);
+    std::puts("PASS: WARP foveated pack/unpack geometry, offset sides, per-axis edge density, endpoint-transformed motion");
     return 0;
 } catch(const std::exception&e){std::fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

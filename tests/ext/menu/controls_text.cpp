@@ -153,6 +153,28 @@ const Row kRows[] = {
       .write = "&nr.spatialShiftY,shiftLimitsY.first,shiftLimitsY.second,0.0f", .keyPrefix = "&nr.spatialShiftY",
       .block = { "applied when the slider is released" }, .fold = kNrAdvanced, .guard = "if (spatialOn)\n{" },
 
+    // Foveated spatial profile (SpatialProfile and the Fovea keys), drawn in the NR card under the spatial compression switch. The
+    // sliders commit on release like the other spatial ones; the pixel sliders print the share of the output beside them.
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Combo(\"Spatial profile\"",
+      .write = "nr.spatialProfile=(uint32_t)spatialProfile;", .keyPrefix = "nr.spatialProfile=",
+      .block = { "Foveated: a full-detail centre set in output pixels", "switching it restarts the NR history" },
+      .fileHas = { "ImGui::Checkbox(\"Peripheral spatial compression (experimental)\"", "const auto readout = CurrentSpatialReadout();" } },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Centre width\"",
+      .write = "&nr.foveaWidth,64.0f,(float)outW,2400.0f", .keyPrefix = "&nr.foveaWidth",
+      .block = { "applied when the slider is released", "of the output width" } },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Centre height\"",
+      .write = "&nr.foveaHeight,64.0f,(float)outH,1350.0f", .keyPrefix = "&nr.foveaHeight",
+      .block = { "applied when the slider is released", "of the output height" } },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Falloff length\"",
+      .write = "&nr.foveaFalloff,0.0f,0.5f*(float)outW,400.0f", .keyPrefix = "&nr.foveaFalloff",
+      .block = { "applied when the slider is released" } },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Edge density (horizontal)\"",
+      .write = "&nr.foveaEdgeX,0.25f,1.0f,0.5f", .keyPrefix = "&nr.foveaEdgeX",
+      .block = { "applied when the slider is released" } },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "DeferredSlider(\"Edge density (vertical)\"",
+      .write = "&nr.foveaEdgeY,0.25f,1.0f,0.5f", .keyPrefix = "&nr.foveaEdgeY",
+      .block = { "applied when the slider is released" } },
+
     // WP4 item 5: the four diagnostic/tuning keys of the Character preview, inside DrawDebugSection (= the closed "Advanced (debug)"
     // fold: chara_menu_text pins that DrawDebugSection is called only from that fold). All four are read live.
     { .home = kChara, .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::SliderInt(\"Keep preview NR models after closing (seconds)\"",

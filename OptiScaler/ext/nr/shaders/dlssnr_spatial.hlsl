@@ -70,6 +70,8 @@ RWTexture2D<float4> gTarget0 : register(u0); // RGBA16F packed colour / unpacked
 RWTexture2D<float4> gTarget1 : register(u1); // RGBA16F unpacked model answer
 #endif
 
+// bit 1 of the flags word selects the foveated profile (pw::ShaderConstants::flags)
+#define PW_FOVEATED ((gOptions.z & 2u) != 0u)
 #include "dlssnr_spatial_warp.hlsli"
 
 float4 SamplePackedColour(float2 nativePixel, float2 workPixel)

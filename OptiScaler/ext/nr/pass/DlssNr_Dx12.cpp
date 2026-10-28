@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "ext/nr/presr/PassProfiles.h"
 #include "ext/nr/NrModelSize.h"
+#include "ext/nr/NrSettle.h"
+#include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/presr/PreSrModelHints.h"
 
 #include <set>
@@ -43,6 +45,7 @@
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
 
+#include <chrono>
 #include <mutex>
 #include <atomic>
 #include <format>
@@ -173,7 +176,11 @@ struct NrState
     // The second half of the model-output ping-pong. The base proxy stays immutable: pass 0 writes
     // output (A), pass 1 writes this (B), and pass 2 writes A again. Only the final answer is composed.
     ID3D12Resource* passScratch = nullptr;
-    DlssNr::Spatial::Layout spatialLayout {};
+    // The spatial geometry the model and the scratch were built for, the settle state of the request that differs from it,
+    // and what the menu reads.
+    DlssNr::Spatial::Geometry applied {};
+    DlssNr::Settle::State settle {};
+    DlssNr::SpatialReadout spatialReadout {};
     bool spatialFailed = false;
     std::string spatialStatus = "disabled";
     ID3D12Resource *spatialColor = nullptr, *spatialDepth = nullptr, *spatialMotion = nullptr;
@@ -1870,42 +1877,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    // What the model works at. The frame and its edit stay full resolution; only the model's input and
-    // answer change size, and the resolve enlarges (or minifies) the answer while compositing. Below 1
-    // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
-    // working size so the model denoises a super-native input, which the resolve then samples back down.
-    // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
-    float workScale = nr.workingScale.value_or_default();
-    if (!std::isfinite(workScale))
-        workScale = 1.0f;
-    workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
-    auto spatialLayout = DlssNr::Spatial::Build(DlssNr::Spatial::ReadSettings(nr), width, height, workScale);
-    const bool spatialChanged = spatialLayout != g_nr.spatialLayout;
-    if (spatialChanged) g_nr.spatialFailed = false;
-    g_nr.spatialLayout = spatialLayout;
-    // This first integration keeps the existing supersampling downfilter untouched.
-    // Spatial packing is supported through 100%; larger model scales use ordinary NR.
-    const bool spatial = spatialLayout.active && workScale <= 1.0f && !g_nr.spatialFailed;
-    g_nr.spatialStatus = !spatialLayout.requested ? "disabled" : g_nr.spatialFailed ? "fallback: spatial processing failed" :
-        workScale > 1.0f ? "inactive: spatial test supports model resolution up to 100%" : spatialLayout.reason;
-    const auto ordinaryWidth = DlssNr::AlignWorkSize((unsigned int)(width * workScale + .5f), width);
-    const auto ordinaryHeight = DlssNr::AlignWorkSize((unsigned int)(height * workScale + .5f), height);
-    const auto workWidth = spatial ? spatialLayout.modelW : ordinaryWidth;
-    const auto workHeight = spatial ? spatialLayout.modelH : ordinaryHeight;
-    spatialLayout.ordinaryW = ordinaryWidth; spatialLayout.ordinaryH = ordinaryHeight;
-    g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
-    const bool reduced = workWidth != width || workHeight != height;
-    const bool fusedSpatial = spatial && ordinaryWidth == width && ordinaryHeight == height &&
-        nr.compare.value_or_default() != 1 && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-    if (fusedSpatial) g_nr.spatialStatus = "active (fused native resolve)";
-    static int lastSpatialResolve = -1;
-    const int spatialResolve = spatial ? (fusedSpatial ? 2 : 1) : 0;
-    if (lastSpatialResolve != spatialResolve)
-    {
-        lastSpatialResolve = spatialResolve;
-        LOG_INFO("DLSS-NR spatial resolve: {}", spatialResolve == 2 ? "fused native (two rasters and unpack bypassed)" :
-                 spatialResolve == 1 ? "legacy filtered unpack" : "disabled");
-    }
     const unsigned int configuredPasses =
         std::clamp(nr.passes.value_or_default(),
                    1u, nr.unlockPasses.value_or_default() ? DlssNr::MaxPassCount
@@ -1921,18 +1892,109 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
-    const bool resolutionChanged = spatialChanged || g_nr.width != width || g_nr.height != height ||
-                                   g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
-    const bool placementChanged = g_nr.feature != nullptr &&
-        (g_nr.beforeUpscale != frame.BeforeUpscale ||
-         g_nr.rayReconstruction != frame.RayReconstruction);
+    // What the model works at. The frame and its edit stay full resolution; only the model's input and
+    // answer change size, and the resolve enlarges (or minifies) the answer while compositing. Below 1
+    // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
+    // working size so the model denoises a super-native input, which the resolve then samples back down.
+    // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
+    //
+    // Two geometries exist at any time: the one that is asked for (the settings now) and the one that is running (what the model and
+    // the scratch were built for). A change of the model's working size is only acted on once the request has held for the settle
+    // time (NrSettle.h); until then every consumer below reads the running geometry. A change of the warp alone resets the NR
+    // history and nothing else; a change of the frame size, of the placement, of the tuning, or a spatial fallback never waits.
+    const auto requestedSettings = DlssNr::Spatial::ReadSettings(nr);
+    auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
+                                                   (unsigned int) desc.Height, nr.workingScale.value_or_default(),
+                                                   g_nr.spatialFailed);
+    if (g_nr.spatialFailed && requested.layout != g_nr.applied.layout)
+    {
+        // A new layout gets a fresh attempt at spatial processing.
+        g_nr.spatialFailed = false;
+        requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
+                                                  (unsigned int) desc.Height, nr.workingScale.value_or_default(), false);
+    }
+    // The menu readout follows what is asked for, so a slider answers at once even while the picture waits.
+    g_nr.spatialReadout = { true, requested.layout.requested, requested.spatial,
+                            requested.spatial ? requested.layout.pixelShare : 1.0f, requested.workW, requested.workH,
+                            (unsigned int) desc.Width, (unsigned int) desc.Height };
 
     // The model reads its tuning once, while the feature is built, so a changed setting only takes
     // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
     // never called, which is why every one of these controls appeared to do nothing until something
     // else -- a resolution change -- happened to force a rebuild by accident.
     const bool tuningChanged = !TuningMatchesFeature(nr, requestedPasses);
+    const bool placementChanged = g_nr.feature != nullptr &&
+        (g_nr.beforeUpscale != frame.BeforeUpscale ||
+         g_nr.rayReconstruction != frame.RayReconstruction);
 
+    // Only a running model has anything to wait for. What the running model was built with is the identity it reports, not the
+    // geometry's own record, so a geometry that no longer matches the scratch is replaced at once (fail open).
+    DlssNr::Settle::Action settleAction = DlssNr::Settle::Action::RebuildNow;
+    DlssNr::Settle::Identity appliedId {};
+    if (g_nr.feature != nullptr)
+    {
+        appliedId = DlssNr::Spatial::IdentityOf(g_nr.applied);
+        appliedId.frameW = g_nr.width;
+        appliedId.frameH = g_nr.height;
+        appliedId.workW = g_nr.workWidth;
+        appliedId.workH = g_nr.workHeight;
+        const bool consistent = g_nr.applied.workW == g_nr.workWidth && g_nr.applied.workH == g_nr.workHeight;
+        const bool immediate = !consistent || g_nr.spatialFailed || placementChanged || tuningChanged;
+        const auto nowMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+        settleAction = DlssNr::Settle::Decide(g_nr.settle, appliedId, DlssNr::Spatial::IdentityOf(requested), nowMs, immediate);
+    }
+    else
+        g_nr.settle = {};
+
+    // The one place that chooses; everything below reads `geometry`.
+    const DlssNr::Spatial::Geometry& geometry = DlssNr::Settle::Pick(settleAction, g_nr.applied, requested);
+    const float workScale = geometry.workScale;
+    auto spatialLayout = geometry.layout;
+    const bool spatial = geometry.spatial;
+    const auto ordinaryWidth = geometry.ordinaryW;
+    const auto ordinaryHeight = geometry.ordinaryH;
+    const auto workWidth = geometry.workW;
+    const auto workHeight = geometry.workH;
+    const bool fusedSpatial = DlssNr::Spatial::FusedNative(geometry, nr.compare.value_or_default() == 1,
+                                                           desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    g_nr.spatialStatus = DlssNr::Spatial::StatusText(geometry, g_nr.spatialFailed, fusedSpatial);
+    g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
+    const bool reduced = workWidth != width || workHeight != height;
+    static int lastSpatialResolve = -1;
+    const int spatialResolve = spatial ? (fusedSpatial ? 2 : 1) : 0;
+    if (lastSpatialResolve != spatialResolve)
+    {
+        lastSpatialResolve = spatialResolve;
+        LOG_INFO("DLSS-NR spatial resolve: {}", spatialResolve == 2 ? "fused native (two rasters and unpack bypassed)" :
+                 spatialResolve == 1 ? "legacy filtered unpack" : "disabled");
+    }
+    if (settleAction == DlssNr::Settle::Action::HistoryReset)
+    {
+        // Only the warp changed: the constants follow it from the next dispatch on and the model keeps its size, but what it
+        // remembers was laid out under the old warp.
+        g_nr.reset = true;
+        for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
+        LOG_INFO("DLSS-NR: spatial layout changed, model history reset (no rebuild)");
+    }
+    const bool frameChanged = g_nr.feature != nullptr && (g_nr.width != width || g_nr.height != height);
+    // The unpack scratch is sized by the ordinary grid, so a change of that alone (a working-scale step with spatial on) is a work-size
+    // change as well, even when the model's own size stays the same.
+    const bool workChanged = g_nr.feature != nullptr &&
+                             DlssNr::Settle::WorkScratchStale(appliedId, workWidth, workHeight, ordinaryWidth, ordinaryHeight);
+    // What a change invalidates: nothing, what is sized by the model's working size, or everything.
+    DlssNr::Settle::Identity adoptedId = appliedId;
+    adoptedId.frameW = width;
+    adoptedId.frameH = height;
+    adoptedId.workW = workWidth;
+    adoptedId.workH = workHeight;
+    adoptedId.ordW = ordinaryWidth;
+    adoptedId.ordH = ordinaryHeight;
+    const auto parkScope = placementChanged ? DlssNr::Settle::ParkScope::All
+                                            : DlssNr::Settle::ParkScopeFor(appliedId, adoptedId);
+    if (DlssNr::Settle::AdoptsRequested(settleAction))
+        g_nr.applied = requested;
+    const bool resolutionChanged = frameChanged || workChanged;
     if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged || placementChanged))
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
@@ -1951,37 +2013,47 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         // Resolution and seam changes invalidate the scratch state. Tuning does not, and throwing
-        // resources away for it would mean a reallocation every time a slider moves.
+        // resources away for it would mean a reallocation every time a slider moves. A change of the working size alone keeps
+        // what is sized by the frame (the staging copies and the native-size answer); a change of the frame size parks it all.
         if (resolutionChanged || placementChanged)
         {
             if (placementChanged)
                 ForgetCalibration();
 
-            ParkNrResource(g_nr.output);
-            ParkNrResource(g_nr.passScratch);
-            ParkNrResource(g_nr.feedbackScratch);
-            g_nr.feedbackScratchFailed = false;
-            ParkNrResource(g_nr.colorCopy);
-            ParkNrResource(g_nr.hdrCopy);
-            ParkNrResource(g_nr.colorSmall);
-            ParkNrResource(g_nr.outputNative);
-            ParkNrResource(g_nr.activeColor);
-            ParkNrResource(g_nr.depthSmall);
-            ParkNrResource(g_nr.motionSmall);
-            for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion,
-                               &g_nr.spatialProxy, &g_nr.spatialAnswer }) ParkNrResource(*r);
-            g_nr.passScratchFailed = false;
+            if (DlssNr::Settle::ParksWorkScratch(parkScope))
+            {
+                ParkNrResource(g_nr.output);
+                ParkNrResource(g_nr.passScratch);
+                ParkNrResource(g_nr.feedbackScratch);
+                g_nr.feedbackScratchFailed = false;
+                ParkNrResource(g_nr.colorSmall);
+                ParkNrResource(g_nr.depthSmall);
+                ParkNrResource(g_nr.motionSmall);
+                for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion,
+                                   &g_nr.spatialProxy, &g_nr.spatialAnswer }) ParkNrResource(*r);
+                g_nr.passScratchFailed = false;
+            }
+            if (DlssNr::Settle::ParksFrameScratch(parkScope))
+            {
+                ParkNrResource(g_nr.colorCopy);
+                ParkNrResource(g_nr.hdrCopy);
+                ParkNrResource(g_nr.outputNative);
+                ParkNrResource(g_nr.activeColor);
+            }
         }
     }
 
+    // Each is checked on its own: a working-size change parks the model's output but keeps the frame-sized copies.
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, desc.Format, workWidth, workHeight);
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
-        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
     }
+    if (g_nr.colorCopy == nullptr)
+        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+    if (g_nr.hdrCopy == nullptr)
+        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
 
     if (cropColor && g_nr.activeColor == nullptr)
         g_nr.activeColor = CreateScratch(device, desc.Format, width, height);
@@ -3044,16 +3116,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : ordinaryAnswer;
         if (spatial)
         {
-            resolveParams.Transfer = 1; resolveParams.SpatialResidual = fusedSpatial ? 2u : 1u;
+            // The selector word also carries the profile (a high bit), so the shader reads the per-side slots the right way.
+            const auto resolveWarp = DlssNr::Spatial::MakeResolveWarp(spatialLayout, fusedSpatial);
+            resolveParams.Transfer = 1; resolveParams.SpatialResidual = resolveWarp.residual;
             if (fusedSpatial)
             {
-                const auto warp = pw::MakeShaderConstants(spatialLayout.warp);
-                resolveParams.SpatialWorkSize[0] = warp.workWidth;
-                resolveParams.SpatialWorkSize[1] = warp.workHeight;
-                const float* fields[] = { &warp.bandCenterX, &warp.halfSpanNegX, &warp.halfSpanPosX,
-                    &warp.sideWorkNegX, &warp.sideWorkPosX, &warp.sideEdgeSlopeNegX, &warp.workScaleX };
-                for (unsigned i = 0; i < 7; ++i)
-                    std::memcpy(resolveParams.SpatialWarp + i * 4, fields[i], 4 * sizeof(float));
+                resolveParams.SpatialWorkSize[0] = resolveWarp.workSize[0];
+                resolveParams.SpatialWorkSize[1] = resolveWarp.workSize[1];
+                std::memcpy(resolveParams.SpatialWarp, resolveWarp.fields, sizeof(resolveWarp.fields));
             }
         }
 
@@ -3205,6 +3275,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 namespace DlssNr
 {
 std::string SpatialStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialStatus; }
+SpatialReadout CurrentSpatialReadout() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialReadout; }
 
 void CurrentModelSize(unsigned int& width, unsigned int& height)
 {

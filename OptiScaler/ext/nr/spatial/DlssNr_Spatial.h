@@ -2,30 +2,48 @@
 
 #include "ext/nr/presr/DlssNr_Guides.h"
 #include "ext/nr/NrModelSize.h"
+#include "ext/nr/NrSettle.h"
+#include "ext/nr/spatial/FoveatedWarp.h"
 #include "ext/nr/third_party/peripheral_warp/SpatialWarp.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <utility>
 
 namespace DlssNr::Spatial
 {
 
+// Which spatial profile the master switch (SpatialCompression) drives.
+enum class Profile : uint32_t
+{
+    Peripheral = 0, // the compression curve of PeripheralWarp: centre and work budget as percentages
+    Foveated = 1,   // full-density centre zone, smoothstep falloff, flat edge plateau; sizes in output pixels
+};
+
 struct Settings
 {
     bool enabled = false;
+    Profile profile = Profile::Peripheral;
     float centerX = 80, centerY = 80;
     float workX = 90, workY = 90;
-    float offsetX = 0, offsetY = 0;
-    float shiftX = 0, shiftY = 0;
+    float offsetX = 0, offsetY = 0; // both profiles: percent of the frame extent
+    float shiftX = 0, shiftY = 0;   // Peripheral only
+    // Foveated only. Pixels of the output (what the user sees), not of the frame the model processes.
+    float foveaWidth = Foveated::kDefaultWidth, foveaHeight = Foveated::kDefaultHeight;
+    float foveaFalloff = Foveated::kDefaultFalloff;
+    float foveaEdgeX = Foveated::kDefaultEdge, foveaEdgeY = Foveated::kDefaultEdge;
     bool operator==(const Settings& o) const
     {
         const auto same = [](float a, float b) { return a == b || (std::isnan(a) && std::isnan(b)); };
-        return enabled == o.enabled && same(centerX, o.centerX) && same(centerY, o.centerY) && same(workX, o.workX) &&
-               same(workY, o.workY) && same(offsetX, o.offsetX) && same(offsetY, o.offsetY) && same(shiftX, o.shiftX) &&
-               same(shiftY, o.shiftY);
+        return enabled == o.enabled && profile == o.profile && same(centerX, o.centerX) && same(centerY, o.centerY) &&
+               same(workX, o.workX) && same(workY, o.workY) && same(offsetX, o.offsetX) && same(offsetY, o.offsetY) &&
+               same(shiftX, o.shiftX) && same(shiftY, o.shiftY) && same(foveaWidth, o.foveaWidth) &&
+               same(foveaHeight, o.foveaHeight) && same(foveaFalloff, o.foveaFalloff) && same(foveaEdgeX, o.foveaEdgeX) &&
+               same(foveaEdgeY, o.foveaEdgeY);
     }
     bool operator!=(const Settings& o) const { return !(*this == o); }
 };
@@ -34,6 +52,8 @@ template <class ConfigLike> Settings ReadSettings(const ConfigLike& nr)
 {
     Settings s;
     s.enabled = nr.spatialCompression.value_or_default();
+    s.profile = nr.spatialProfile.value_or_default() == static_cast<uint32_t>(Profile::Foveated) ? Profile::Foveated
+                                                                                                 : Profile::Peripheral;
     s.centerX = nr.spatialCenterX.value_or_default();
     s.centerY = nr.spatialCenterY.value_or_default();
     s.workX = nr.spatialWorkX.value_or_default();
@@ -42,10 +62,15 @@ template <class ConfigLike> Settings ReadSettings(const ConfigLike& nr)
     s.offsetY = nr.spatialOffsetY.value_or_default();
     s.shiftX = nr.spatialShiftX.value_or_default();
     s.shiftY = nr.spatialShiftY.value_or_default();
+    s.foveaWidth = nr.foveaWidth.value_or_default();
+    s.foveaHeight = nr.foveaHeight.value_or_default();
+    s.foveaFalloff = nr.foveaFalloff.value_or_default();
+    s.foveaEdgeX = nr.foveaEdgeX.value_or_default();
+    s.foveaEdgeY = nr.foveaEdgeY.value_or_default();
     return s;
 }
 
-inline float MaxCenterOffset(float centerPercent) { return std::max(0.0f, (100.0f - centerPercent) * .5f - .5f); }
+inline float MaxCenterOffset(float centerPercent) { return Foveated::MaxOffsetPercent(centerPercent); }
 
 inline float MinimumWorkPercent(float globalScale)
 {
@@ -79,41 +104,85 @@ struct Rect
 struct Layout
 {
     Settings settings {};
+    Profile profile = Profile::Peripheral;
     bool requested = false, active = false;
     std::string reason;
     uint32_t nativeW = 0, nativeH = 0, ordinaryW = 0, ordinaryH = 0, modelW = 0, modelH = 0;
     float globalScale = 1;
+    float pixelShare = 1; // the share of the ordinary NR pixels the model actually processes (1 when the layout is inactive)
     pw::Layout warp {};
+    Foveated::Layout fovea {};
     Rect centerBounds {}, workBounds {}; // Native-frame normalized extents, including offset and shift.
-    bool operator==(const Layout& o) const
+
+    // Everything that makes two layouts run differently, as one fixed list of exact values (a NaN is one value, -0 is 0). Equality
+    // and the settle key both come from it, so a field cannot be in one and forgotten in the other. The Foveated profile
+    // contributes its effective values (after the clamp against the frame), the Peripheral one its settings; a disabled layout
+    // contributes only that it is disabled.
+    static constexpr size_t kKeyFields = 18;
+    std::array<uint64_t, kKeyFields> KeyFields() const
     {
-        return settings == o.settings && nativeW == o.nativeW && nativeH == o.nativeH &&
-               (globalScale == o.globalScale || (std::isnan(globalScale) && std::isnan(o.globalScale))) &&
-               active == o.active;
+        std::array<uint64_t, kKeyFields> k {};
+        const auto bits = [](double v)
+        {
+            if (std::isnan(v))
+                return uint64_t { 0x7ff8000000000000ull };
+            if (v == 0)
+                v = 0;
+            uint64_t u = 0;
+            std::memcpy(&u, &v, sizeof u);
+            return u;
+        };
+        size_t i = 0;
+        k[i++] = requested ? 1 : 0;
+        k[i++] = nativeW;
+        k[i++] = nativeH;
+        k[i++] = bits(globalScale);
+        if (!requested)
+            return k;
+        k[i++] = active ? 1 : 0;
+        k[i++] = static_cast<uint64_t>(profile);
+        if (profile == Profile::Peripheral)
+        {
+            for (float v : { settings.centerX, settings.centerY, settings.workX, settings.workY, settings.offsetX,
+                             settings.offsetY, settings.shiftX, settings.shiftY })
+                k[i++] = bits(v);
+            return k;
+        }
+        for (const Foveated::Axis* axis : { &fovea.x, &fovea.y })
+        {
+            k[i++] = axis->warped ? 1 : 0;
+            k[i++] = bits(axis->centre);
+            k[i++] = bits(axis->falloff);
+            k[i++] = bits(axis->edge);
+            k[i++] = bits(axis->offsetPercent);
+            k[i++] = axis->workExtent;
+        }
+        return k;
     }
+    bool operator==(const Layout& o) const { return KeyFields() == o.KeyFields(); }
     bool operator!=(const Layout& o) const { return !(*this == o); }
+    // A 64-bit digest of KeyFields for the settle decision (FNV-1a).
+    uint64_t Key() const
+    {
+        uint64_t h = 1469598103934665603ull;
+        for (uint64_t v : KeyFields())
+            for (int shift = 0; shift < 64; shift += 8)
+                h = (h ^ ((v >> shift) & 0xffu)) * 1099511628211ull;
+        return h;
+    }
 };
 
-inline uint32_t EvenExtent(uint32_t native, double fraction)
-{
-    if (fraction == 1.0)
-        return native;
-    double value = static_cast<double>(native) * fraction;
-    const double nearest = std::round(value);
-    if (std::abs(value - nearest) <= 1e-6 * std::max(1.0, std::abs(value)))
-        value = nearest;
-    uint32_t result = static_cast<uint32_t>(std::ceil(value));
-    if (result & 1u)
-        ++result;
-    if (fraction < 1.0)
-        result = std::min(result, native & ~1u);
-    return std::max(2u, result);
-}
+using DlssNr::EvenExtent;
 
-inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float globalScale)
+// The layout for a frame of nativeW x nativeH that the model processes. outputW x outputH is the output the Foveated pixel settings
+// are written against: the pre-SR pass runs on an active rectangle inside a larger colour allocation, so the two differ there
+// (0 means the same as the frame). The settings themselves are never changed.
+inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float globalScale, uint32_t outputW = 0,
+                    uint32_t outputH = 0)
 {
     Layout result {};
     result.settings = s;
+    result.profile = s.profile;
     result.requested = s.enabled;
     result.nativeW = nativeW;
     result.nativeH = nativeH;
@@ -131,6 +200,32 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
     if (nativeW < 2 || nativeH < 2 || !std::isfinite(globalScale) || globalScale < .25f || globalScale > 2.0f)
     {
         result.reason = "invalid frame or global scale";
+        return result;
+    }
+    if (s.profile == Profile::Foveated)
+    {
+        Foveated::Inputs in;
+        in.frameW = nativeW;
+        in.frameH = nativeH;
+        in.outputW = outputW;
+        in.outputH = outputH;
+        in.width = s.foveaWidth;
+        in.height = s.foveaHeight;
+        in.falloff = s.foveaFalloff;
+        in.edgeX = s.foveaEdgeX;
+        in.edgeY = s.foveaEdgeY;
+        in.offsetX = s.offsetX;
+        in.offsetY = s.offsetY;
+        in.globalScale = globalScale;
+        result.fovea = Foveated::BuildLayout(in);
+        result.reason = result.fovea.reason;
+        if (result.fovea.active)
+        {
+            result.modelW = result.fovea.workW;
+            result.modelH = result.fovea.workH;
+            result.pixelShare = result.fovea.share;
+            result.active = true;
+        }
         return result;
     }
     const auto validAxis = [](float center, float work, float offset, float shift)
@@ -186,6 +281,9 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
                           (y.bandCenter + y.halfBand + y.allotted[1]) / nativeH };
     result.modelW = modelW;
     result.modelH = modelH;
+    result.pixelShare = static_cast<float>(static_cast<double>(modelW) * modelH /
+                                           (static_cast<double>(OrdinaryWorkSize(nativeW, globalScale)) *
+                                            OrdinaryWorkSize(nativeH, globalScale)));
     result.active = true;
     result.reason = "active";
     return result;
@@ -202,6 +300,40 @@ struct alignas(16) Constants
 static_assert(sizeof(Constants) == 256);
 static_assert(offsetof(Constants, warp) == 16);
 
+// The shader constants of the active profile.
+inline pw::ShaderConstants MakeShaderConstants(const Layout& layout)
+{
+    return layout.profile == Profile::Foveated ? Foveated::MakeShaderConstants(layout.fovea)
+                                               : pw::MakeShaderConstants(layout.warp);
+}
+
+// What the fused native resolve (the main NR shader warping directly) is given: the selector word and the 28 floats of the
+// seven float4 fields that follow the model size in its constant buffer. The profile rides in a high bit of the selector.
+struct ResolveWarp
+{
+    uint32_t residual = 0;
+    float workSize[2] = {};
+    float fields[28] = {};
+};
+
+inline ResolveWarp MakeResolveWarp(const Layout& layout, bool fused)
+{
+    ResolveWarp r;
+    r.residual = fused ? 2u : 1u;
+    if (!fused)
+        return r;
+    if (layout.profile == Profile::Foveated)
+        r.residual |= Foveated::kResolveFoveatedBit;
+    const auto warp = MakeShaderConstants(layout);
+    r.workSize[0] = warp.workWidth;
+    r.workSize[1] = warp.workHeight;
+    const float* fields[] = { &warp.bandCenterX, &warp.halfSpanNegX, &warp.halfSpanPosX, &warp.sideWorkNegX,
+                              &warp.sideWorkPosX, &warp.sideEdgeSlopeNegX, &warp.workScaleX };
+    for (unsigned i = 0; i < 7; ++i)
+        std::memcpy(r.fields + i * 4, fields[i], 4 * sizeof(float));
+    return r;
+}
+
 inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideRegions& regions, float mvX, float mvY,
                                uint32_t nativeW, uint32_t nativeH)
 {
@@ -209,7 +341,7 @@ inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideR
     c.mode = mode;
     c.width = mode == 102 ? layout.ordinaryW : layout.modelW;
     c.height = mode == 102 ? layout.ordinaryH : layout.modelH;
-    c.warp = pw::MakeShaderConstants(layout.warp);
+    c.warp = MakeShaderConstants(layout);
     c.depthRect[0] = static_cast<float>(regions.depth.x);
     c.depthRect[1] = static_cast<float>(regions.depth.y);
     c.depthRect[2] = static_cast<float>(regions.depth.width);
@@ -224,6 +356,74 @@ inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideR
     c.motionScale[0] = mvX;
     c.motionScale[1] = mvY;
     return c;
+}
+
+// Everything the pass derives from one set of requests: the working scale, the layout, the sizes the model and the unpack work at.
+// The pass makes one for what is asked for and keeps one for what is running; every consumer reads the one it was told to.
+struct Geometry
+{
+    float workScale = 1.0f;
+    Layout layout {}; // ordinaryW/H hold the aligned ordinary working size, which is what the unpack pass is told
+    uint32_t frameW = 0, frameH = 0, ordinaryW = 0, ordinaryH = 0, workW = 0, workH = 0;
+    bool spatial = false; // the spatial warp is in use
+};
+
+inline float SanitizeWorkScale(float scale)
+{
+    if (!std::isfinite(scale))
+        scale = 1.0f;
+    return scale < 0.25f ? 0.25f : (scale > 2.0f ? 2.0f : scale);
+}
+
+// Spatial packing is supported through 100%; larger model scales use ordinary NR, and so does a spatial fallback.
+inline Geometry MakeGeometry(const Settings& s, uint32_t frameW, uint32_t frameH, uint32_t outputW, uint32_t outputH,
+                             float workScale, bool spatialFailed)
+{
+    Geometry g;
+    g.workScale = SanitizeWorkScale(workScale);
+    g.frameW = frameW;
+    g.frameH = frameH;
+    g.layout = Build(s, frameW, frameH, g.workScale, outputW, outputH);
+    g.spatial = g.layout.active && g.workScale <= 1.0f && !spatialFailed;
+    g.ordinaryW = OrdinaryWorkSize(frameW, g.workScale);
+    g.ordinaryH = OrdinaryWorkSize(frameH, g.workScale);
+    g.workW = g.spatial ? g.layout.modelW : g.ordinaryW;
+    g.workH = g.spatial ? g.layout.modelH : g.ordinaryH;
+    g.layout.ordinaryW = g.ordinaryW;
+    g.layout.ordinaryH = g.ordinaryH;
+    return g;
+}
+
+// The model answer is resolved straight from the packed grid (no unpack rasters) when the frame is the ordinary size.
+inline bool FusedNative(const Geometry& g, bool compareSideBySide, bool formatIsFp16)
+{
+    return g.spatial && g.ordinaryW == g.frameW && g.ordinaryH == g.frameH && !compareSideBySide && formatIsFp16;
+}
+
+inline std::string StatusText(const Geometry& g, bool spatialFailed, bool fused)
+{
+    if (fused)
+        return "active (fused native resolve)";
+    if (!g.layout.requested)
+        return "disabled";
+    if (spatialFailed)
+        return "fallback: spatial processing failed";
+    if (g.workScale > 1.0f)
+        return "inactive: spatial test supports model resolution up to 100%";
+    return g.layout.reason;
+}
+
+inline Settle::Identity IdentityOf(const Geometry& g)
+{
+    Settle::Identity id;
+    id.frameW = g.frameW;
+    id.frameH = g.frameH;
+    id.workW = g.workW;
+    id.workH = g.workH;
+    id.layoutKey = g.layout.Key();
+    id.ordW = g.ordinaryW;
+    id.ordH = g.ordinaryH;
+    return id;
 }
 
 } // namespace DlssNr::Spatial

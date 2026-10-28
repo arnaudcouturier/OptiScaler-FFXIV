@@ -47,6 +47,12 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "SpatialOffsetY", spatialOffsetY);
     b.Add("DlssNr", "SpatialShiftX", spatialShiftX);
     b.Add("DlssNr", "SpatialShiftY", spatialShiftY);
+    b.Add("DlssNr", "SpatialProfile", spatialProfile);
+    b.Add("DlssNr", "FoveaWidth", foveaWidth);
+    b.Add("DlssNr", "FoveaHeight", foveaHeight);
+    b.Add("DlssNr", "FoveaFalloff", foveaFalloff);
+    b.Add("DlssNr", "FoveaEdgeX", foveaEdgeX);
+    b.Add("DlssNr", "FoveaEdgeY", foveaEdgeY);
     b.Add("DlssNr", "PassFeedback", passFeedback);
     b.Add("DlssNr", "VitEvery", vitEvery);
     b.Add("DlssNr", "VitAllowUnverified", vitAllowUnverified);

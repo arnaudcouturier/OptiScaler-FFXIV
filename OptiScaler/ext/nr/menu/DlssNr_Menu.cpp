@@ -227,12 +227,53 @@ void RenderMenu(float menuResScale)
         HelpMarker("Preserves the central image and spends fewer NR pixels at the edges.\nColor, depth and motion are transformed together. Uses matched residual composition.\nThis test supports DX12 model resolutions up to 100%; larger scales use ordinary NR.");
         if (spatial)
         {
-            if (DeferredSlider("Central region", &nr.spatialCenterX, 10.0f, 95.0f, 80.0f, "%.0f%%"))
-                nr.spatialCenterY = nr.spatialCenterX.value_or_default();
-            if (DeferredSlider("Peripheral work budget", &nr.spatialWorkX, 25.0f, 100.0f, 90.0f, "%.0f%%"))
-                nr.spatialWorkY = nr.spatialWorkX.value_or_default();
+            static const char* spatialProfiles[] = { "Peripheral", "Foveated" };
+            int spatialProfile = nr.spatialProfile.value_or_default() == 1 ? 1 : 0;
+            if (ImGui::Combo("Spatial profile", &spatialProfile, spatialProfiles, IM_ARRAYSIZE(spatialProfiles)))
+                nr.spatialProfile = (uint32_t) spatialProfile;
+            HelpMarker("Peripheral: a central region in full detail and a compressed periphery, set as percentages of the frame.\nFoveated: a full-detail centre set in output pixels, a smooth falloff and a flat edge density, separately for width and height.\nBoth keep the centre at the native pixel density and use the placement offsets in the Advanced fold. The profile applies after a short pause once you release a slider or change it; switching it restarts the NR history.");
+            const auto readout = CurrentSpatialReadout();
+            if (spatialProfile == 0)
+            {
+                // Menu only: while linked the horizontal slider sets both axes, which is how it always worked.
+                static bool linkXY = true;
+                if (DeferredSlider("Central region", &nr.spatialCenterX, 10.0f, 95.0f, 80.0f, "%.0f%%") && linkXY)
+                    nr.spatialCenterY = nr.spatialCenterX.value_or_default();
+                if (!linkXY)
+                    DeferredSlider("Central region (vertical)", &nr.spatialCenterY, 10.0f, 95.0f, 80.0f, "%.0f%%");
+                if (DeferredSlider("Peripheral work budget", &nr.spatialWorkX, 25.0f, 100.0f, 90.0f, "%.0f%%") && linkXY)
+                    nr.spatialWorkY = nr.spatialWorkX.value_or_default();
+                if (!linkXY)
+                    DeferredSlider("Peripheral work budget (vertical)", &nr.spatialWorkY, 25.0f, 100.0f, 90.0f, "%.0f%%");
+                ImGui::Checkbox("Link X and Y", &linkXY);
+                HelpMarker("On: the central region and work budget sliders set both axes together. Off: they set the horizontal axis and two more sliders appear for the vertical one. Menu only, not saved.");
+            }
+            else
+            {
+                const unsigned int outW = readout.outputW != 0 ? readout.outputW : 3840u;
+                const unsigned int outH = readout.outputH != 0 ? readout.outputH : 2160u;
+                DeferredSlider("Centre width", &nr.foveaWidth, 64.0f, (float) outW, 2400.0f, "%.0f px");
+                HelpMarker("Width of the full-detail centre, in pixels of the output. At the full output width the horizontal axis is not compressed.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.0f%% of the output width", Foveated::PercentOf(nr.foveaWidth.value_or_default(), outW));
+                DeferredSlider("Centre height", &nr.foveaHeight, 64.0f, (float) outH, 1350.0f, "%.0f px");
+                HelpMarker("Height of the full-detail centre, in pixels of the output. At the full output height the vertical axis is not compressed.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.0f%% of the output height", Foveated::PercentOf(nr.foveaHeight.value_or_default(), outH));
+                DeferredSlider("Falloff length", &nr.foveaFalloff, 0.0f, 0.5f * (float) outW, 400.0f, "%.0f px");
+                HelpMarker("How many output pixels the detail takes to ease from full down to the edge density, on every side and both axes. Cut short where the frame edge comes first.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                DeferredSlider("Edge density (horizontal)", &nr.foveaEdgeX, 0.25f, 1.0f, 0.5f, "%.2f");
+                HelpMarker("The share of the native pixel density kept toward the left and right edges. 1 means no compression on this axis.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                DeferredSlider("Edge density (vertical)", &nr.foveaEdgeY, 0.25f, 1.0f, 0.5f, "%.2f");
+                HelpMarker("The same toward the top and bottom edges.\nThe change is applied when the slider is released. Saved in the NR presets.");
+            }
+            if (readout.valid)
+                ImGui::TextWrapped("NR pixels: %.0f%% of full (model %ux%u)", readout.share * 100.0f, readout.modelW, readout.modelH);
             ImGui::TextWrapped("%s", SpatialStatus().c_str());
-            ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
+            if (spatialProfile == 0)
+                ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
+            else
+                ImGui::TextDisabled("Foveated turns itself off when it would save less than 5% of the NR pixels.");
         }
 
         RenderRuntimePicker(nr);
@@ -1267,20 +1308,30 @@ void RenderMenu(float menuResScale)
             const bool spatialOn = nr.spatialCompression.value_or_default();
             if (spatialOn)
             {
-                ImGui::TextDisabled("Peripheral spatial compression: placement (experimental)");
                 const auto placement = Spatial::ReadSettings(nr);
-                const float maxOffsetX = Spatial::MaxCenterOffset(placement.centerX);
-                const float maxOffsetY = Spatial::MaxCenterOffset(placement.centerY);
+                const bool foveated = placement.profile == Spatial::Profile::Foveated;
+                ImGui::TextDisabled(foveated ? "Foveated spatial compression: placement (experimental)"
+                                             : "Peripheral spatial compression: placement (experimental)");
+                const auto placementReadout = CurrentSpatialReadout();
+                const float centreXPercent = foveated ? Foveated::PercentOf(placement.foveaWidth, placementReadout.outputW != 0 ? placementReadout.outputW : 3840u)
+                                                      : placement.centerX;
+                const float centreYPercent = foveated ? Foveated::PercentOf(placement.foveaHeight, placementReadout.outputH != 0 ? placementReadout.outputH : 2160u)
+                                                      : placement.centerY;
+                const float maxOffsetX = Spatial::MaxCenterOffset(centreXPercent);
+                const float maxOffsetY = Spatial::MaxCenterOffset(centreYPercent);
                 const auto shiftLimitsX = Spatial::WorkShiftLimits(placement, false);
                 const auto shiftLimitsY = Spatial::WorkShiftLimits(placement, true);
                 DeferredSlider("Central region offset (horizontal)", &nr.spatialOffsetX, -maxOffsetX, maxOffsetX, 0.0f, "%.1f%%");
                 HelpMarker("Moves the central region away from the middle of the frame, in percent of the frame width. Limited so the region stays inside the frame; the status line above says why a value is refused.\nThe change is applied when the slider is released. Saved in the NR presets.");
                 DeferredSlider("Central region offset (vertical)", &nr.spatialOffsetY, -maxOffsetY, maxOffsetY, 0.0f, "%.1f%%");
                 HelpMarker("The same, in percent of the frame height.\nThe change is applied when the slider is released. Saved in the NR presets.");
-                DeferredSlider("Work shift (horizontal)", &nr.spatialShiftX, shiftLimitsX.first, shiftLimitsX.second, 0.0f, "%.1f%%");
-                HelpMarker("Moves part of the peripheral work budget from one side of the central region to the other, in percent of the frame width. Limited by the work budget and the room each side has.\nThe change is applied when the slider is released. Saved in the NR presets.");
-                DeferredSlider("Work shift (vertical)", &nr.spatialShiftY, shiftLimitsY.first, shiftLimitsY.second, 0.0f, "%.1f%%");
-                HelpMarker("The same, in percent of the frame height.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                if (!foveated)
+                {
+                    DeferredSlider("Work shift (horizontal)", &nr.spatialShiftX, shiftLimitsX.first, shiftLimitsX.second, 0.0f, "%.1f%%");
+                    HelpMarker("Moves part of the peripheral work budget from one side of the central region to the other, in percent of the frame width. Limited by the work budget and the room each side has.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                    DeferredSlider("Work shift (vertical)", &nr.spatialShiftY, shiftLimitsY.first, shiftLimitsY.second, 0.0f, "%.1f%%");
+                    HelpMarker("The same, in percent of the frame height.\nThe change is applied when the slider is released. Saved in the NR presets.");
+                }
             }
             else
                 ImGui::TextDisabled("The placement of the peripheral spatial compression appears here when it is switched on.");

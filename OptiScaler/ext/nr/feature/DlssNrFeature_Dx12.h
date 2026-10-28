@@ -201,6 +201,18 @@ CalibrationReading Calibration();
 // Whether the model is loaded and running, for the overlay.
 bool IsRunning();
 std::string SpatialStatus();
+
+// What the spatial profiles amount to for the frame being processed, for the menu: the share of the ordinary NR pixels the model
+// handles, its size, and the output the Foveated pixel sizes are written against.
+struct SpatialReadout
+{
+    bool valid = false; // a frame has been seen
+    bool requested = false, active = false;
+    float share = 1.0f; // 1 while the profile is inactive
+    unsigned int modelW = 0, modelH = 0;
+    unsigned int outputW = 0, outputH = 0;
+};
+SpatialReadout CurrentSpatialReadout();
 void CurrentModelSize(unsigned int& width, unsigned int& height);
 // Private residual-upscaler status; separate from the NR model's own running status/time.
 std::string DeferredDlssStatus();

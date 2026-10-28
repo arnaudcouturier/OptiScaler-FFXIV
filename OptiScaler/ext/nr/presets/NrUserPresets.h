@@ -27,6 +27,10 @@ template<class C, class F> void Fields(C& c, F&& f)
     NR_FIELD(SpatialWorkX, spatialWorkX, 25, 100); NR_FIELD(SpatialWorkY, spatialWorkY, 25, 100);
     NR_FIELD(SpatialOffsetX, spatialOffsetX, -50, 50); NR_FIELD(SpatialOffsetY, spatialOffsetY, -50, 50);
     NR_FIELD(SpatialShiftX, spatialShiftX, -50, 50); NR_FIELD(SpatialShiftY, spatialShiftY, -50, 50);
+    NR_FIELD(SpatialProfile, spatialProfile, 0, 1);
+    NR_FIELD(FoveaWidth, foveaWidth, 0, 16384); NR_FIELD(FoveaHeight, foveaHeight, 0, 16384);
+    NR_FIELD(FoveaFalloff, foveaFalloff, 0, 16384);
+    NR_FIELD(FoveaEdgeX, foveaEdgeX, 0.25, 1); NR_FIELD(FoveaEdgeY, foveaEdgeY, 0.25, 1);
     NR_FIELD(VitEvery, vitEvery, 1, 2); NR_FIELD(PassFeedback, passFeedback, 0, 1);
     NR_FIELD(Passes, passes, 1, 30); NR_FIELD(UnlockPasses, unlockPasses, 0, 1);
     NR_FIELD(Preset, preset, 0, 3); NR_FIELD(Style, style, 0, 2);
@@ -101,6 +105,11 @@ inline Json Upgrade(Json j)
         for (const char* key : {"SpatialCenterX", "SpatialCenterY"}) if (!j.contains(key)) j[key] = 80.0;
         for (const char* key : {"SpatialWorkX", "SpatialWorkY"}) if (!j.contains(key)) j[key] = 90.0;
         for (const char* key : {"SpatialOffsetX", "SpatialOffsetY", "SpatialShiftX", "SpatialShiftY"}) if (!j.contains(key)) j[key] = 0.0;
+        if (!j.contains("SpatialProfile")) j["SpatialProfile"] = 0;
+        if (!j.contains("FoveaWidth")) j["FoveaWidth"] = 2400.0;
+        if (!j.contains("FoveaHeight")) j["FoveaHeight"] = 1350.0;
+        if (!j.contains("FoveaFalloff")) j["FoveaFalloff"] = 400.0;
+        for (const char* key : {"FoveaEdgeX", "FoveaEdgeY"}) if (!j.contains(key)) j[key] = 0.5;
         if (!j.contains("VitEvery")) j["VitEvery"] = 1;
         if (!j.contains("PassFeedback")) j["PassFeedback"] = 1.0;
     }

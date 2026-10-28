@@ -245,6 +245,8 @@ int main(int argc, char** argv)
     CHECK(world.menuFiles.size() >= 15 && !world.upstreamMenu.empty());
     CHECK(has("DLSSG", "UIRecomposition") && has("XeFG", "UnlockMFG") && has("XeFG", "MaxInterpolatedFrames"));
     CHECK(has("DLSSG", "AmpereMfgKernelImage") && has("DLSSG", "AmpereMfgLogLevel") && has("DlssNr", "SpatialOffsetX"));
+    CHECK(has("DlssNr", "SpatialProfile") && has("DlssNr", "FoveaWidth") && has("DlssNr", "FoveaHeight") && has("DlssNr", "FoveaFalloff"));
+    CHECK(has("DlssNr", "FoveaEdgeX") && has("DlssNr", "FoveaEdgeY"));
     CHECK(has("DlssNr", "ScanExposure") && has("DlssNr", "AutoCapture") && has("DlssNr", "VitCapture") && has("HudLess", "ReShadePresets"));
     CHECK(has("FFXIV", "PreviewNRLingerSeconds") && has("FFXIV", "PreviewNRLate") && has("FFXIV", "PreviewGuideCapture") && has("HDR", "PreviewNRTrace"));
     CHECK(has("Hotfix", "RenderSizeFromWidthHeight") && has("XeFG", "ResetOnUpscalerChange") && has("Companion", "HudReplacement"));

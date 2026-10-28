@@ -51,6 +51,9 @@ cbuffer Params : register(b0)
 
 #define gNativeWorkSize float4(gWidth, gHeight, gSpatialWorkWidth, gSpatialWorkHeight)
 #include "HdrCompatibility.hlsli"
+// gSpatialResidual: the low byte is 1 (unpacked) or 2 (fused native resolve), bit 8 selects the foveated profile
+#define gSpatialMode (gSpatialResidual & 255u)
+#define PW_FOVEATED ((gSpatialResidual & 256u) != 0u)
 #include "dlssnr_spatial_warp.hlsli"
 
 // Bringing an impossible colour back into a possible one.
@@ -912,7 +915,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // Adapt Mattjaas's fused spatial resolve principle: native uniform output
     // needs no intermediate unpack rasters. Reduced/zoomed paths retain their
     // two-stage filter, because fusing those would change their footprint.
-    float2 modelUv = gSpatialResidual == 2 ? PwPack(cmpUv * gNativeWorkSize.xy) / gNativeWorkSize.zw : cmpUv;
+    float2 modelUv = gSpatialMode == 2 ? PwPack(cmpUv * gNativeWorkSize.xy) / gNativeWorkSize.zw : cmpUv;
     float4 proxySample = gSource.SampleLevel(gLinear, modelUv, 0);
     float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
 
@@ -1013,7 +1016,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
 
-    if (gTransfer == 1 && (modelRanSmall || gSpatialResidual != 0))
+    if (gTransfer == 1 && (modelRanSmall || gSpatialMode != 0))
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
