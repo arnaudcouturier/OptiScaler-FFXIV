@@ -179,6 +179,17 @@ void IdentityConditions()
     CHECK(Near(Pack(123.5f, id), 123.5, 1e-3) && Near(Unpack(2000.25f, id), 2000.25, 1e-3));
     const Axis idScaled = BuildAxis(Input(3840, 4000, 400, .5f), .8f);
     CHECK(idScaled.workExtent == 3072 && Near(Pack(1920, idScaled), 1536, 1e-2) && Near(Unpack(1536, idScaled), 1920, 1e-2));
+    // the working extent is made even BEFORE it goes on the 16 grid (the 16 grid hides the even rounding almost everywhere): 2160 * 0.27 = 583.2
+    // is 584, which lands on 592; rounding 583 straight to the grid would give 576. 2160 * 0.44 = 950.4 -> 952 -> 960 (not 944).
+    CHECK(BuildAxis(Input(2160, 4000, 400, .5f), .27f).workExtent == 592 && BuildAxis(Input(2160, 4000, 400, .5f), .44f).workExtent == 960);
+    // a scale that is not usable (zero, negative, not a number) works as 100%, never as a larger one
+    {
+        const AxisInput warped = Input(2160, 1300, 400, .5f);
+        const uint32_t atOne = BuildAxis(warped, 1.0f).workExtent;
+        CHECK(atOne < 2160 && BuildAxis(warped, 0.0f).workExtent == atOne && BuildAxis(warped, -1.0f).workExtent == atOne);
+        CHECK(BuildAxis(warped, NAN).workExtent == atOne && BuildAxis(warped, INFINITY).workExtent == atOne);
+        CHECK(BuildAxis(warped, 2.0f).workExtent > atOne);
+    }
     // non-finite or absurd input fails open
     CHECK(!BuildAxis(Input(3840, NAN, 400, .5f), 1.0f).warped);
     CHECK(!BuildAxis(Input(3840, 2400, 400, NAN), 1.0f).warped);

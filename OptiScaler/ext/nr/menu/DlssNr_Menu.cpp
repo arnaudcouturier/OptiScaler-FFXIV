@@ -6,6 +6,7 @@
 #include "ext/game/Game.h"
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/NrHooks.h"
+#include "ext/nr/NrReadout.h"
 #include "ext/nr/amd/AmdBridge.h"
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/native/DlssNrNative.h"
@@ -106,6 +107,9 @@ static bool DeferredSlider(const char* label, Option* opt, float mn, float mx,
         HelpMarker("Fine detail for pixels the model identifies as skin. -1 follows Local structure; 0 reduces skin detail.\nSkin colour is controlled separately. Values above 1 are experimental.");
     return changed;
 }
+
+// "NR time: x.xx ms" of whichever backend is running, or "NR time: n/a" while nothing is measured.
+static std::string NrTimeLine() { return NrTimeText(IsRunningVk() ? LastGpuTimeVk() : LastGpuTime()); }
 
 // An absent later-pass setting inherits pass 1. The first combo item represents that absence; the
 // remaining items map directly to the model's zero-based profile values.
@@ -269,6 +273,7 @@ void RenderMenu(float menuResScale)
             }
             if (readout.valid)
                 ImGui::TextWrapped("NR pixels: %.0f%% of full (model %ux%u)", readout.share * 100.0f, readout.modelW, readout.modelH);
+            ImGui::TextDisabled("%s", NrTimeLine().c_str());
             ImGui::TextWrapped("%s", SpatialStatus().c_str());
             if (spatialProfile == 0)
                 ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
@@ -484,6 +489,7 @@ void RenderMenu(float menuResScale)
         if (modelWidth && modelHeight)
             ImGui::TextDisabled("Model input: %u x %u; network: %u x %u", modelWidth, modelHeight,
                                 (modelWidth + 1) / 2, (modelHeight + 1) / 2);
+        ImGui::TextDisabled("%s", NrTimeLine().c_str());
         if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 200, "%d%%"))
             pendingScale = scalePercent;
 
@@ -499,7 +505,48 @@ void RenderMenu(float menuResScale)
             ImGui::TextDisabled("NR scale: %.2fx. Higher resolution increases GPU cost.",
                                 scalePercent / 100.0f);
 
-        if (scalePercent > 100)
+        // Per-axis resolution: 0 means "same as Model resolution". The effective scale of each axis decides what the controls below it
+        // offer (the downscaler for an enlarged axis, the enlargement mode for a reduced one).
+        static int pendingAxisX = -1, pendingAxisY = -1;
+        if (ImGui::TreeNode("Advanced: per-axis resolution##nr_axis"))
+        {
+            // The text of a format string needs a conversion for the typed value to be read back (Ctrl+click): 0 is shown as
+            // "0 (same as Model resolution)". A typed 1..24 is shown as the 25 that is applied.
+            int axisXPercent = pendingAxisX >= 0 ? pendingAxisX : AxisPercentOfScale(nr.workingScaleX.value_or_default());
+            if (ImGui::SliderInt("Horizontal model resolution", &axisXPercent, 0, 200,
+                                 axisXPercent == 0 ? "%d (same as Model resolution)" : "%d%%"))
+                pendingAxisX = AxisPercentApplied(axisXPercent);
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingAxisX >= 0)
+            {
+                nr.workingScaleX = AxisScaleFromPercent(pendingAxisX);
+                pendingAxisX = -1;
+            }
+            HelpMarker("The model's resolution across the frame, as a share of its width. 0 follows Model resolution.\nWith a different value on each axis the model runs at (horizontal x width) by (vertical x height); cost follows the product. Applied when the slider is released, after a short pause. A mixed above/below 100% model size is not supported: the lower axis is raised to 100%. If the model refuses a size that differs per axis, the pass works at Model resolution on both axes until a scale setting changes. DirectX 12 only: Vulkan and the AMD bridge use Model resolution for both axes.");
+
+            int axisYPercent = pendingAxisY >= 0 ? pendingAxisY : AxisPercentOfScale(nr.workingScaleY.value_or_default());
+            if (ImGui::SliderInt("Vertical model resolution", &axisYPercent, 0, 200,
+                                 axisYPercent == 0 ? "%d (same as Model resolution)" : "%d%%"))
+                pendingAxisY = AxisPercentApplied(axisYPercent);
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingAxisY >= 0)
+            {
+                nr.workingScaleY = AxisScaleFromPercent(pendingAxisY);
+                pendingAxisY = -1;
+            }
+            HelpMarker("The same down the frame, as a share of its height. 0 follows Model resolution.\nApplied when the slider is released, after a short pause. A mixed above/below 100% model size is not supported: the lower axis is raised to 100%. DirectX 12 only.");
+            ImGui::TreePop();
+        }
+        // What the pass works at: the keys, or Model resolution on both axes while the model's refusal of a per-axis size holds, then
+        // the mixed above/below 100% rule. The same function the pass calls, so the controls below follow the numbers in use.
+        const float uniformShown = pendingScale >= 0 ? pendingScale / 100.0f : nr.workingScale.value_or_default();
+        const AnamorphicLatch refusal = AnamorphicLatchState();
+        const AxisScales shownScales = EffectiveScales(refusal, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(), uniformShown);
+        const float effectiveScaleX = shownScales.x;
+        const float effectiveScaleY = shownScales.y;
+        const bool aboveFull = effectiveScaleX > 1.0f || effectiveScaleY > 1.0f;
+        if (AnamorphicLatchHolds(refusal, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(), uniformShown))
+            ImGui::TextDisabled("The model refused a size that differs per axis: working at Model resolution on both axes.");
+
+        if (aboveFull)
         {
             static const char* dsNames[] = { "FSR1", "Bicubic", "Catmull-Rom", "Lanczos2",
                                              "Lanczos3", "Kaiser2", "Kaiser3", "MAGIC" };
@@ -514,11 +561,11 @@ void RenderMenu(float menuResScale)
         }
 
 
-        // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
+        // Meaningful only when the model runs BELOW the frame's size on some axis and above it on none. At 100% -- and above, where
         // supersampling composites its down-legged answer at native -- the residual collapses to the
         // model's own picture and the two modes are identical, so the control says so by going grey.
         {
-            const bool reduced = nr.workingScale.value_or_default() < 0.999f;
+            const bool reduced = !aboveFull && (effectiveScaleX < 0.999f || effectiveScaleY < 0.999f);
 
             if (!reduced)
                 ImGui::BeginDisabled();
@@ -532,7 +579,20 @@ void RenderMenu(float menuResScale)
             if (!reduced)
                 ImGui::EndDisabled();
 
-            HelpMarker("Below 100% model resolution: Classic enlarges the model output; Matched residual enlarges only its changes.\nMatched residual can reduce blur and colour shifts. No effect at 100% or above.");
+            HelpMarker("Below 100% model resolution: Classic enlarges the model output; Matched residual enlarges only its changes.\nMatched residual can reduce blur and colour shifts. No effect at 100% or above, nor while an axis is above 100% (greyed out).");
+
+            // Depth-aware enlargement: needs a reduced model and the ordinary (non-spatial) path.
+            const auto depthReadout = CurrentSpatialReadout();
+            const bool depthSpatial = depthReadout.valid ? depthReadout.active : nr.spatialCompression.value_or_default();
+            ImGui::BeginDisabled(!reduced || depthSpatial);
+            bool depthAware = nr.depthAwareResolve.value_or_default();
+            if (ImGui::Checkbox("Depth-aware enlargement", &depthAware))
+                nr.depthAwareResolve = depthAware;
+            ImGui::EndDisabled();
+            HelpMarker("Below 100% model resolution, weights the enlargement of the model's answer by the game's depth, so it does not blend across the edge of an object.\nOff by default. DirectX 12 only. Does nothing at 100% or above, nor while an axis is above 100% (greyed out), and is off while spatial compression is active. Applies live.");
+            const std::string depthStatus = DepthAwareStatus();
+            if (!depthStatus.empty())
+                ImGui::TextDisabled("%s", depthStatus.c_str());
         }
 
         ImGui::SeparatorText("Effect strength");

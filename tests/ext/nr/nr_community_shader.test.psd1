@@ -6,5 +6,5 @@
     IncludeDirs = @('{repo}/OptiScaler')
     Libs        = @('d3d11.lib', 'd3dcompiler.lib')
     Defines     = @('NOMINMAX')
-    Args        = @('{out}/shaders/dlssnr.hlsl', '{out}/shaders/dlssnr_spatial.hlsl', '{out}/shaders/dlssnr_guide_match.hlsl')
+    Args        = @('{out}/shaders/dlssnr.hlsl', '{out}/shaders/dlssnr_spatial.hlsl', '{out}/shaders/dlssnr_guide_match.hlsl', '{out}/shaders/dlssnr_v040_reference.hlsl')
 }

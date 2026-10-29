@@ -190,6 +190,7 @@ void EveryFieldOfTheLayoutChangesEqualityAndKey()
         edits.push_back({ "nativeW", [](Layout& l) { l.nativeW += 1; } });
         edits.push_back({ "nativeH", [](Layout& l) { l.nativeH += 1; } });
         edits.push_back({ "globalScale", [](Layout& l) { l.globalScale = .9f; } });
+        edits.push_back({ "globalScaleY", [](Layout& l) { l.globalScaleY = .9f; } });
         return edits;
     };
 
@@ -227,7 +228,7 @@ void EveryFieldOfTheLayoutChangesEqualityAndKey()
         const SettingMember m = member.second;
         edits.push_back({ "settings." + member.first, [m](Layout& l) { l.settings.*m += 1; } });
     }
-    CHECK(edits.size() == 14);
+    CHECK(edits.size() == 15);
     EachEditChangesEqualityAndKey(peripheral, edits, __LINE__);
 
     // the fields of the other profile are not in a profile's list (the rest of the list is the same)
@@ -343,6 +344,11 @@ void FloatsInTheKeyHaveOneCanonicalForm()
             g2.globalScale = other;
             CHECK(g1 == g2 && g1.Key() == g2.Key());
             CHECK(g1 != peripheral && g1.Key() != peripheral.Key());
+            Layout y1 = peripheral, y2 = peripheral;
+            y1.globalScaleY = one;
+            y2.globalScaleY = other;
+            CHECK(y1 == y2 && y1.Key() == y2.Key());
+            CHECK(y1 != peripheral && y1.Key() != peripheral.Key());
         }
 }
 

@@ -59,6 +59,9 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "VitCapture", vitCapture);
     b.Add("DlssNr", "VitFirstPassOnly", vitFirstPassOnly);
     b.Add("DlssNr", "WorkingScale", workingScale);
+    b.Add("DlssNr", "DepthAwareResolve", depthAwareResolve);
+    b.Add("DlssNr", "WorkingScaleX", workingScaleX);
+    b.Add("DlssNr", "WorkingScaleY", workingScaleY);
     b.AddEnum("DlssNr", "ScalingDownscaler", scalingDownscaler, Scaler::Count);
     b.Add("DlssNr", "AutoCapture", autoCapture);
     b.Add("DlssNr", "ScanExposure", scanExposure);

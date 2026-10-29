@@ -60,6 +60,16 @@ void AlignWorkSizeNeverRoundsAReductionUpPastNative() {
     CHECK(AlignWorkSize(1084, 1081) == 1088 && AlignWorkSize(1100, 1081) == 1104);
     CHECK(AlignWorkSize(1, 1081) == 16 && AlignWorkSize(7, 1081) == 16);
 }
+
+
+void WorkScaleAndGuideRulesOfTheAxes() {
+    using DlssNr::EffectiveAxisScale;
+    using DlssNr::SanitizeWorkScale;
+    CHECK(SanitizeWorkScale(.24f) == .25f && SanitizeWorkScale(2.01f) == 2.0f && SanitizeWorkScale(.8f) == .8f);
+    CHECK(EffectiveAxisScale(0.0f, .6f) == .6f && EffectiveAxisScale(.9f, .6f) == .9f && EffectiveAxisScale(-1.0f, .6f) == .6f);
+    // the guides are matched only when the model is reduced on both axes, unless the axes differ (axis_scale has the cases)
+    CHECK(DlssNr::MatchGuidesToWork(false, 960, 540, 1920, 1080, false) && !DlssNr::MatchGuidesToWork(false, 960, 1080, 1920, 1080, false));
+}
 } // namespace
 
 int main() {
@@ -80,6 +90,7 @@ int main() {
     EvenExtentRules();
     OrdinaryWorkSizeRoundsHalfUp();
     AlignWorkSizeNeverRoundsAReductionUpPastNative();
+    WorkScaleAndGuideRulesOfTheAxes();
     if (failures != 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

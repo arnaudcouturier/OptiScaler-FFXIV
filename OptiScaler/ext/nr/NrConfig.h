@@ -92,6 +92,13 @@ struct NrConfig
     CustomOptional<bool> vitFirstPassOnly { true };
     // Fraction of the frame's resolution the model works at (only the model's contribution is computed small).
     CustomOptional<float> workingScale { 1.0f };
+    // Weight the enlargement of a reduced model's answer by the depth under each filter tap, so it does not blend across silhouettes. DX12
+    // only; inactive with spatial compression and at model resolution 100% or above.
+    CustomOptional<bool> depthAwareResolve { false };
+    // Per-axis model resolution (DX12 only; the Vulkan and AMD paths use WorkingScale alone). 0 follows WorkingScale, otherwise the scale
+    // of that axis, 0.25..2. The model works at (x * width) by (y * height).
+    CustomOptional<float> workingScaleX { 0.0f };
+    CustomOptional<float> workingScaleY { 0.0f };
     // Downscaler for NR supersampling (working scale > 1).
     CustomOptional<Scaler> scalingDownscaler { Scaler::Lanczos3 };
     // Write one set of matched before/after frames per session after the capture delay (180 frames). SEAMS 3.4: real key, default false keeps the oracle behaviour (no capture).

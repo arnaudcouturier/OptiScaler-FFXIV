@@ -182,7 +182,11 @@ struct NrState
     DlssNr::Settle::State settle {};
     DlssNr::SpatialReadout spatialReadout {};
     bool spatialFailed = false;
+    // The model refused a model size that differs per axis: the pass works at the uniform WorkingScale until one of the three scale keys
+    // changes (NrModelSize.h). Guarded by g_nrMutex like the rest.
+    DlssNr::AnamorphicLatch anamorphic {};
     std::string spatialStatus = "disabled";
+    std::string depthAwareStatus; // the depth-aware enlargement: empty while its key is off
     ID3D12Resource *spatialColor = nullptr, *spatialDepth = nullptr, *spatialMotion = nullptr;
     ID3D12Resource *spatialProxy = nullptr, *spatialAnswer = nullptr;
     ID3D12Resource* feedbackScratch = nullptr;
@@ -708,6 +712,22 @@ void ParkNrResource(ID3D12Resource*& res)
     g_nrLifetime.Retire([retired] { retired->Release(); });
 }
 
+// Everything that is sized by the model's working size (the staging copies and the native-size answer stay). Used when the working size
+// changes with a running model, and when a model that refused a size is replaced by one at another size.
+void ParkWorkSizeScratch()
+{
+    ParkNrResource(g_nr.output);
+    ParkNrResource(g_nr.passScratch);
+    ParkNrResource(g_nr.feedbackScratch);
+    g_nr.feedbackScratchFailed = false;
+    ParkNrResource(g_nr.colorSmall);
+    ParkNrResource(g_nr.depthSmall);
+    ParkNrResource(g_nr.motionSmall);
+    for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion, &g_nr.spatialProxy, &g_nr.spatialAnswer })
+        ParkNrResource(*r);
+    g_nr.passScratchFailed = false;
+}
+
 void TickNrRetired() { g_nrLifetime.Collect(); }
 
 // The inject point decides which buffer is being measured -- the upscaler's linear output or the
@@ -796,6 +816,8 @@ struct RuntimeHost
         g_nr.reset = true;
         // A fallback to ordinary NR that the old model caused (the packed evaluation failed) is tried again with the new one.
         g_nr.spatialFailed = false;
+        // ... and so is a model size the old model refused.
+        g_nr.anamorphic = {};
         // The deferred pre-SR generation keeps its own hold / half-resolution history and a pending residual: all of it describes the
         // old model's output. A Precision change cancels it the same way.
         DlssNr::DeferredSr::Cancel();
@@ -1516,7 +1538,8 @@ DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
 
     LOG_DEBUG("{0} start!", _name);
 
-    // Five inputs, two outputs, one constant buffer, and a clamped linear sampler.
+    // Six inputs (the sixth is the game's depth, read only by the depth-aware enlargement), two outputs, one constant buffer, and a
+    // clamped linear sampler.
     //
     // The sampler exists because the model may be run below full resolution, in which case its answer
     // has to be read back at a different size from the frame it is being transferred onto.
@@ -1566,12 +1589,20 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
                                   ID3D12Resource* InSource, ID3D12Resource* InModel,
                                   ID3D12Resource* InOriginal, ID3D12Resource* InMotion,
                                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline)
+                                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline, ID3D12Resource* InDepth)
 {
     if (!_init || InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr)
         return false;
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+
+    // The depth-aware bit of the selector word only travels with a depth: without one the sixth input below is the source as a stand-in,
+    // and the shader would read that picture's colour as depth. Only the main shader reads this word (the spatial and guide shaders
+    // keep their own constants in the same bytes, where this offset is part of a float).
+    DlssNrConstants constants = InConstants;
+    if (pipeline == nullptr)
+        constants.SpatialResidual = DlssNr::DepthAware::ResolveSelector(constants.SpatialResidual, InDepth != nullptr);
+
     const auto acquired = _descriptorSlots.Acquire(InCmdList);
     if (!acquired)
     {
@@ -1592,6 +1623,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
         InOriginal != nullptr ? InOriginal : InSource,
         InMotion != nullptr ? InMotion : InSource,
         InPrevEdit != nullptr ? InPrevEdit : InSource,
+        InDepth != nullptr ? InDepth : InSource,
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
@@ -1611,7 +1643,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     for (uint32_t i = 0; i < kUavCount; ++i)
         CreateUnorderedAccessView(_device, uavs[i], currentHeap.GetUavCPU(i), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], InConstants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, _constantBuffers[slot], constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -1625,8 +1657,8 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 
     // Sized from the constants rather than from a resource, because the pass that shrinks the proxy
     // writes fewer pixels than its source has.
-    const UINT dispatchWidth = (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
-    const UINT dispatchHeight = (InConstants.Height + _numThreadsY - 1) / _numThreadsY;
+    const UINT dispatchWidth = (constants.Width + _numThreadsX - 1) / _numThreadsX;
+    const UINT dispatchHeight = (constants.Height + _numThreadsY - 1) / _numThreadsY;
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
 
     return true;
@@ -1903,15 +1935,24 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // time (NrSettle.h); until then every consumer below reads the running geometry. A change of the warp alone resets the NR
     // history and nothing else; a change of the frame size, of the placement, of the tuning, or a spatial fallback never waits.
     const auto requestedSettings = DlssNr::Spatial::ReadSettings(nr);
+    // The model's scale on each axis: WorkingScaleX / WorkingScaleY when set, otherwise WorkingScale (both equal = the one scale). Two things
+    // can change what the keys ask for (NrModelSize.h, one rule for every reader): a model size the runtime refused (the uniform
+    // WorkingScale is used until a scale key changes) and a mix of one axis above 100% and one below (the lower is raised to 100%).
+    const float scaleKeyX = nr.workingScaleX.value_or_default();
+    const float scaleKeyY = nr.workingScaleY.value_or_default();
+    const float scaleKeyUniform = nr.workingScale.value_or_default();
+    g_nr.anamorphic = DlssNr::RefreshAnamorphicLatch(g_nr.anamorphic, scaleKeyX, scaleKeyY, scaleKeyUniform);
+    const DlssNr::AxisScales axisScales = DlssNr::EffectiveScales(g_nr.anamorphic, scaleKeyX, scaleKeyY, scaleKeyUniform);
+    const float scaleX = axisScales.x;
+    const float scaleY = axisScales.y;
     auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
-                                                   (unsigned int) desc.Height, nr.workingScale.value_or_default(),
-                                                   g_nr.spatialFailed);
+                                                   (unsigned int) desc.Height, scaleX, scaleY, g_nr.spatialFailed);
     if (g_nr.spatialFailed && requested.layout != g_nr.applied.layout)
     {
         // A new layout gets a fresh attempt at spatial processing.
         g_nr.spatialFailed = false;
         requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
-                                                  (unsigned int) desc.Height, nr.workingScale.value_or_default(), false);
+                                                  (unsigned int) desc.Height, scaleX, scaleY, false);
     }
     // The menu readout follows what is asked for, so a slider answers at once even while the picture waits.
     g_nr.spatialReadout = { true, requested.layout.requested, requested.spatial,
@@ -1939,7 +1980,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         appliedId.workW = g_nr.workWidth;
         appliedId.workH = g_nr.workHeight;
         const bool consistent = g_nr.applied.workW == g_nr.workWidth && g_nr.applied.workH == g_nr.workHeight;
-        const bool immediate = !consistent || g_nr.spatialFailed || placementChanged || tuningChanged;
+        // A model size the runtime refused is replaced at once (the running geometry is the refused one until it is adopted away).
+        const bool anamorphicRefused = g_nr.anamorphic.failed && g_nr.applied.Anamorphic();
+        const bool immediate = !consistent || g_nr.spatialFailed || anamorphicRefused || placementChanged || tuningChanged;
         const auto nowMs = (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch()).count();
         settleAction = DlssNr::Settle::Decide(g_nr.settle, appliedId, DlssNr::Spatial::IdentityOf(requested), nowMs, immediate);
@@ -1959,6 +2002,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const bool fusedSpatial = DlssNr::Spatial::FusedNative(geometry, nr.compare.value_or_default() == 1,
                                                            desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
     g_nr.spatialStatus = DlssNr::Spatial::StatusText(geometry, g_nr.spatialFailed, fusedSpatial);
+    g_nr.depthAwareStatus.clear(); // set again where the resolve decides; a frame that returns early does not keep an old answer
     g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
     const bool reduced = workWidth != width || workHeight != height;
     static int lastSpatialResolve = -1;
@@ -2021,18 +2065,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 ForgetCalibration();
 
             if (DlssNr::Settle::ParksWorkScratch(parkScope))
-            {
-                ParkNrResource(g_nr.output);
-                ParkNrResource(g_nr.passScratch);
-                ParkNrResource(g_nr.feedbackScratch);
-                g_nr.feedbackScratchFailed = false;
-                ParkNrResource(g_nr.colorSmall);
-                ParkNrResource(g_nr.depthSmall);
-                ParkNrResource(g_nr.motionSmall);
-                for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion,
-                                   &g_nr.spatialProxy, &g_nr.spatialAnswer }) ParkNrResource(*r);
-                g_nr.passScratchFailed = false;
-            }
+                ParkWorkSizeScratch();
             if (DlssNr::Settle::ParksFrameScratch(parkScope))
             {
                 ParkNrResource(g_nr.colorCopy);
@@ -2193,10 +2226,24 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g_nr.modelError = g_nr.lastModelError();
                 createReason = g_nr.modelError;
             }
-            ext::nr::runtime::FailModel(g_nr.fail, createReason);
             const auto initResult = (unsigned int) (g_nr.lastInit != nullptr ? *g_nr.lastInit : 0);
             const auto createResult = (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0);
 
+            // A size that differs per axis may be what the model refused (none was ever tried on it): not a failure of the model.
+            // Fail open to the uniform WorkingScale; the next frame builds at that size, so what was made for the refused size goes.
+            if (geometry.Anamorphic())
+            {
+                g_nr.anamorphic = DlssNr::LatchAnamorphic(scaleKeyX, scaleKeyY, scaleKeyUniform);
+                ParkWorkSizeScratch();
+                LOG_WARN("DLSS-NR: the model would not initialise at {}x{} (horizontal {:.0f}%, vertical {:.0f}%): init 0x{:X} ({}), create 0x{:X} ({}); "
+                         "working at the uniform model resolution of {:.0f}% until a scale setting changes",
+                         workWidth, workHeight, geometry.workScaleX * 100.0f, geometry.workScaleY * 100.0f, initResult, NgxResultName(initResult),
+                         createResult, NgxResultName(createResult), DlssNr::SanitizeWorkScale(scaleKeyUniform) * 100.0f);
+                device->Release();
+                return;
+            }
+
+            ext::nr::runtime::FailModel(g_nr.fail, createReason);
             // Cast before formatting. These are ints, and "0x{:X}" on a negative int prints
             // 0x-452FFFFF, which no one can decode back to 0xBAD00001.
             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
@@ -2704,6 +2751,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
+    // The game's depth as the model reads it, before the guides are replaced by the working-size copies below: the depth-aware
+    // enlargement reads this one at native resolution.
+    ID3D12Resource* const nativeDepth = depthIn;
+
     struct SpatialReadScope {
         ID3D12GraphicsCommandList* cmd;
         std::vector<ID3D12Resource*> resources;
@@ -2731,7 +2782,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // averaging across silhouettes would invent geometry. Native and supersample
     // paths keep the original guides. Spatial compression already packs its own.
     bool matchedGuides = false;
-    if (reduced && !spatial && workWidth < width && workHeight < height)
+    if (DlssNr::MatchGuidesToWork(spatial, workWidth, workHeight, width, height, geometry.Anamorphic()))
     {
         if (!g_nr.depthSmall) g_nr.depthSmall = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
         if (!g_nr.motionSmall) g_nr.motionSmall = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
@@ -2760,8 +2811,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
     const auto refW = reference.width ? reference.width : motionWidth;
     const auto refH = reference.height ? reference.height : motionHeight;
-    const float mvToWorkX = DlssNr::ModelMotionScale(matchedGuides ? workWidth : motionWidth, refW);
-    const float mvToWorkY = DlssNr::ModelMotionScale(matchedGuides ? workHeight : motionHeight, refH);
+    // Each axis of the vectors follows the ratio of its own axis (the model may work at a different scale across and down).
+    const auto mvToWork = DlssNr::ModelMotionScales(matchedGuides ? workWidth : motionWidth,
+                                                    matchedGuides ? workHeight : motionHeight, refW, refH);
+    const float mvToWorkX = mvToWork.x;
+    const float mvToWorkY = mvToWork.y;
     const bool privateGuides = spatial || matchedGuides;
     const auto modelDepthW = privateGuides ? workWidth : guideWidth;
     const auto modelDepthH = privateGuides ? workHeight : guideHeight;
@@ -3127,6 +3181,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
         }
 
+        // Depth-aware enlargement (key DepthAwareResolve): the four taps of the reduced model's filter are weighted by the native depth.
+        // Not with the spatial warp (it samples the model in warped space) and not when nothing is enlarged.
+        ID3D12Resource* resolveDepth = nullptr;
+        {
+            const auto depthState = DlssNr::DepthAware::Decide(
+                nr.depthAwareResolve.value_or_default(), spatial,
+                DlssNr::DepthAware::Enlarging(workWidth, workHeight, width, height, workScale > 1.0f), nativeDepth != nullptr, workScale > 1.0f);
+            g_nr.depthAwareStatus = DlssNr::DepthAware::StatusText(depthState);
+            if (depthState == DlssNr::DepthAware::State::Active)
+            {
+                const float depthRect[4] = { (float) depthBaseX, (float) depthBaseY, (float) guideWidth, (float) guideHeight };
+                resolveParams.SpatialResidual = DlssNr::DepthAware::kResolveBit;
+                DlssNr::DepthAware::PackFields(resolveParams.SpatialWarp, depthRect, g_nr.guideDepthInverted);
+                resolveDepth = nativeDepth;
+            }
+        }
+
         // Pre-SR Color is not guaranteed to have UAV support. Write directly when legal; otherwise
         // resolve into hdrCopy while the original Color remains readable, then copy the result back.
         ID3D12Resource* resolveOriginal = targetSupportsUav ? g_nr.hdrCopy : target;
@@ -3143,7 +3214,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, resolveOriginal, motionIn,
-                     exposureTex, resolveTarget, nullptr);
+                     exposureTex, resolveTarget, nullptr, nullptr, resolveDepth);
 
         if (!targetSupportsUav)
         {
@@ -3187,12 +3258,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.modelError = g_nr.lastModelError();
             evaluateReason = g_nr.modelError;
         }
-        // With spatial packing the pass falls back to ordinary NR (cleared by a runtime switch); without it the model is what failed.
+        // With spatial packing the pass falls back to ordinary NR (cleared by a runtime switch); a model size that differs per axis falls
+        // back to the uniform WorkingScale (cleared by a change of a scale key or a runtime switch); without either the model is what failed.
+        // The spatial fallback comes first: the ordinary NR it falls back to may still be at the refused size, which then ends here.
+        const bool anamorphicFallback = !spatial && geometry.Anamorphic();
         if (spatial) { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: packed NR evaluation failed"; }
+        else if (anamorphicFallback) g_nr.anamorphic = DlssNr::LatchAnamorphic(scaleKeyX, scaleKeyY, scaleKeyUniform);
         else ext::nr::runtime::FailModel(g_nr.fail, evaluateReason);
-        LOG_ERROR("DLSS-NR evaluate returned 0x{:X} ({}): {}", (uint32_t) result,
-                  NgxResultName((unsigned int) result),
-                  spatial ? "spatial processing disabled; ordinary NR will retry next frame" : "disabled for this session");
+        if (anamorphicFallback)
+            LOG_WARN("DLSS-NR evaluate returned 0x{:X} ({}) at {}x{} (horizontal {:.0f}%, vertical {:.0f}%): working at the uniform model resolution of {:.0f}% "
+                     "until a scale setting changes", (uint32_t) result, NgxResultName((unsigned int) result), workWidth, workHeight,
+                     geometry.workScaleX * 100.0f, geometry.workScaleY * 100.0f, DlssNr::SanitizeWorkScale(scaleKeyUniform) * 100.0f);
+        else
+            LOG_ERROR("DLSS-NR evaluate returned 0x{:X} ({}): {}", (uint32_t) result,
+                      NgxResultName((unsigned int) result),
+                      spatial ? "spatial processing disabled; ordinary NR will retry next frame" : "disabled for this session");
     }
 
     // On an evaluation failure, intermediate A/B inputs may still be readable. Restore both persistent
@@ -3275,6 +3355,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 namespace DlssNr
 {
 std::string SpatialStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialStatus; }
+std::string DepthAwareStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.depthAwareStatus; }
+AnamorphicLatch AnamorphicLatchState() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.anamorphic; }
 SpatialReadout CurrentSpatialReadout() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialReadout; }
 
 void CurrentModelSize(unsigned int& width, unsigned int& height)
@@ -3849,7 +3931,12 @@ ExposureStatus GameExposureStatus()
     return s;
 }
 
-std::optional<double> LastGpuTime() { return g_lastGpuTime; }
+// Read from the menu thread while the pass writes it under the same lock.
+std::optional<double> LastGpuTime()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    return g_lastGpuTime;
+}
 
 
 

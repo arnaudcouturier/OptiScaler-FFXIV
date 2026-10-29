@@ -7,3 +7,6 @@ $dst = Join-Path $Out 'shaders'
 New-Item -ItemType Directory -Path $dst -Force | Out-Null
 Copy-Item -Path (Join-Path $Repo 'OptiScaler\ext\nr\shaders\*') -Destination $dst
 Copy-Item -Path (Join-Path $Repo 'OptiScaler\ext\shaders\common\*') -Destination $dst
+# The resolve shader as it was before the depth-aware enlargement was added: the reference the new shader must match bit for bit
+# while the feature is off (nr_community_shader).
+Copy-Item -Path (Join-Path $Repo 'tests\ext\nr\fixtures\dlssnr_v040_reference.hlsl') -Destination $dst

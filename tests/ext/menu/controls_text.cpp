@@ -175,6 +175,24 @@ const Row kRows[] = {
       .write = "&nr.foveaEdgeY,0.25f,1.0f,0.5f", .keyPrefix = "&nr.foveaEdgeY",
       .block = { "applied when the slider is released" } },
 
+    // Depth-aware enlargement of a reduced model (DepthAwareResolve), in the Model resolution part of the NR card next to the
+    // enlargement mode; greyed out (not hidden) while it cannot apply.
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::Checkbox(\"Depth-aware enlargement\"",
+      .write = "nr.depthAwareResolve=depthAware;", .keyPrefix = "nr.depthAwareResolve=",
+      .block = { "Off by default", "DirectX 12 only", "Applies live", "off while spatial compression is active" },
+      .fileHas = { "ImGui::BeginDisabled(!reduced || depthSpatial);", "const std::string depthStatus = DepthAwareStatus();" } },
+
+    // Per-axis model resolution (WorkingScaleX / WorkingScaleY), a closed fold under the Model resolution slider. 0 follows the
+    // slider; the value is written when the handle is let go, like the slider above it.
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::SliderInt(\"Horizontal model resolution\"",
+      .write = "nr.workingScaleX=AxisScaleFromPercent(pendingAxisX);", .keyPrefix = "nr.workingScaleX=",
+      .block = { "0 follows Model resolution", "released, after a short pause", "DirectX 12 only", "mixed above/below 100% model size is not supported: the lower axis is raised to 100%" },
+      .fold = "ImGui::TreeNode(\"Advanced: per-axis resolution##nr_axis\")" },
+    { .home = kNr, .file = "nr/menu/DlssNr_Menu.cpp", .widget = "ImGui::SliderInt(\"Vertical model resolution\"",
+      .write = "nr.workingScaleY=AxisScaleFromPercent(pendingAxisY);", .keyPrefix = "nr.workingScaleY=",
+      .block = { "0 follows Model resolution", "released, after a short pause", "DirectX 12 only", "mixed above/below 100% model size is not supported: the lower axis is raised to 100%" },
+      .fold = "ImGui::TreeNode(\"Advanced: per-axis resolution##nr_axis\")" },
+
     // WP4 item 5: the four diagnostic/tuning keys of the Character preview, inside DrawDebugSection (= the closed "Advanced (debug)"
     // fold: chara_menu_text pins that DrawDebugSection is called only from that fold). All four are read live.
     { .home = kChara, .file = "ffxiv/chara/CharaMenu.cpp", .widget = "ImGui::SliderInt(\"Keep preview NR models after closing (seconds)\"",

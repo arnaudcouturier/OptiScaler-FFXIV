@@ -510,6 +510,15 @@ int main(int argc, char** argv)
         CHECK(frags.at("HudLess").at("HdrPaste").find("off or on - Default (auto) is off") != std::string::npos);
     }
 
+    // the S2 per-axis keys and the depth-aware switch ship as auto (the code default applies): the shipped VALUE matters, not
+    // just the key presence (CK11/CK12/CK13 change auto to 0.5/true, which the key-presence rule cannot see).
+    {
+        const std::string nrIni = menuscan::ReadFile(repo + "/OptiScaler/ext/ini/DlssNr.ini");
+        auto hasNrLine = [&](const std::string& text)
+        { return nrIni.find("\n" + text + "\r\n") != std::string::npos || nrIni.find("\n" + text + "\n") != std::string::npos; };
+        CHECK(hasNrLine("WorkingScaleX=auto") && hasNrLine("WorkingScaleY=auto") && hasNrLine("DepthAwareResolve=auto"));
+    }
+
     // the documented default of every bool/int/float key equals the default the code declares
     {
         const auto decls = ScanDecls(repo + "/OptiScaler/ext");

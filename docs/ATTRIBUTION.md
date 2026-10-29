@@ -19,6 +19,7 @@ A few features follow code SirenBrink published later, in v6.0 (commit `e17a7362
 | AMD HIP pre-SR | import base | SirenBrink, adapting Ainquisition's `amd-v084-minimal` and MatheusGViana's AMD project | moved |
 | Spatial compression, ResidualFG | import base | SirenBrink and wilsjo2; `PeripheralWarp` by BeliyG3 and ShyVortex (MIT licence kept next to the code) | moved |
 | NR Foveated spatial profile (`[DlssNr] SpatialProfile = 1`) | design follows maximedgoulet/FoveatedDLSS5 (MIT, copyright Carlos Lopez Jr. 2025, from RenoDX; its foveated grid is that repository's own work) | maximedgoulet | the maths (centre zone, smoothstep falloff, edge plateau, packed distance and its inverse) is written independently here from the described design, no source was copied; the Peripheral profile stays credited to `PeripheralWarp` by BeliyG3 as above |
+| NR per-axis model resolution and depth-aware enlargement (`[DlssNr] WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`) | ideas follow xenmods/DLSSNR-Cost-Scaler (MIT) | xenmods | the code is the fork's own, written from the description; no source was copied |
 | NR model version picker | follows SirenBrink's v6.0 (`5bfa6e92`, `50ca6733`) | SirenBrink | same `NR.<version>` folders, `[DlssNr] Runtime` key, selection with a revision, three search roots and switch order; this fork's catalog, scan, card and rebuild code is separate |
 | HDR10 output (OptiHDR), FG HDR, HDR menu layer, HDR PNG capture | import base | SirenBrink | moved behind seams |
 | RenoDX scene HDR and its NR/DLSS scene input | import base | RenoDX by clshortfuse (Carlos Lopez Jr., MIT); the FFXIV shaders are by Ersh and Pumbo; adapted by SirenBrink | moved; notices in `OptiScaler/ext/hdr/shaders/renodx/` |
@@ -44,6 +45,6 @@ The fork first derived these features from an unpublished community build, a `wi
 
 ## People and projects
 
-Dagherbou, y4my4my4m, wilsjo2, byunjoe, SirenBrink, janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, maximedgoulet (FoveatedDLSS5), stegalloway, mavismmg, dashdogy, clshortfuse (RenoDX), Ersh and Pumbo (RenoDX FFXIV mod), the OptiScaler team. If your work is here and credited wrongly or not at all, open an issue and it will be fixed.
+Dagherbou, y4my4my4m, wilsjo2, byunjoe, SirenBrink, janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, maximedgoulet (FoveatedDLSS5), xenmods (DLSSNR-Cost-Scaler), stegalloway, mavismmg, dashdogy, clshortfuse (RenoDX), Ersh and Pumbo (RenoDX FFXIV mod), the OptiScaler team. If your work is here and credited wrongly or not at all, open an issue and it will be fixed.
 
 Thank you.

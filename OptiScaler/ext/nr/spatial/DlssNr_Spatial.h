@@ -108,7 +108,8 @@ struct Layout
     bool requested = false, active = false;
     std::string reason;
     uint32_t nativeW = 0, nativeH = 0, ordinaryW = 0, ordinaryH = 0, modelW = 0, modelH = 0;
-    float globalScale = 1;
+    float globalScale = 1;  // the model's working scale of the horizontal axis
+    float globalScaleY = 1; // ... and of the vertical axis (the same unless the model runs at a different scale per axis)
     float pixelShare = 1; // the share of the ordinary NR pixels the model actually processes (1 when the layout is inactive)
     pw::Layout warp {};
     Foveated::Layout fovea {};
@@ -118,7 +119,7 @@ struct Layout
     // and the settle key both come from it, so a field cannot be in one and forgotten in the other. The Foveated profile
     // contributes its effective values (after the clamp against the frame), the Peripheral one its settings; a disabled layout
     // contributes only that it is disabled.
-    static constexpr size_t kKeyFields = 18;
+    static constexpr size_t kKeyFields = 19;
     std::array<uint64_t, kKeyFields> KeyFields() const
     {
         std::array<uint64_t, kKeyFields> k {};
@@ -137,6 +138,7 @@ struct Layout
         k[i++] = nativeW;
         k[i++] = nativeH;
         k[i++] = bits(globalScale);
+        k[i++] = bits(globalScaleY);
         if (!requested)
             return k;
         k[i++] = active ? 1 : 0;
@@ -173,12 +175,13 @@ struct Layout
 };
 
 using DlssNr::EvenExtent;
+using DlssNr::SanitizeWorkScale;
 
 // The layout for a frame of nativeW x nativeH that the model processes. outputW x outputH is the output the Foveated pixel settings
 // are written against: the pre-SR pass runs on an active rectangle inside a larger colour allocation, so the two differ there
 // (0 means the same as the frame). The settings themselves are never changed.
-inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float globalScale, uint32_t outputW = 0,
-                    uint32_t outputH = 0)
+inline Layout BuildAxes(const Settings& s, uint32_t nativeW, uint32_t nativeH, float globalScale, float globalScaleY,
+                        uint32_t outputW = 0, uint32_t outputH = 0)
 {
     Layout result {};
     result.settings = s;
@@ -187,9 +190,11 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
     result.nativeW = nativeW;
     result.nativeH = nativeH;
     result.globalScale = globalScale;
-    const float ordinaryScale = std::isfinite(globalScale) ? std::clamp(globalScale, .25f, 2.0f) : 1.0f;
-    result.ordinaryW = std::max(1u, static_cast<uint32_t>(std::lround(nativeW * ordinaryScale)));
-    result.ordinaryH = std::max(1u, static_cast<uint32_t>(std::lround(nativeH * ordinaryScale)));
+    result.globalScaleY = globalScaleY;
+    const float ordinaryScaleX = std::isfinite(globalScale) ? std::clamp(globalScale, .25f, 2.0f) : 1.0f;
+    const float ordinaryScaleY = std::isfinite(globalScaleY) ? std::clamp(globalScaleY, .25f, 2.0f) : 1.0f;
+    result.ordinaryW = std::max(1u, static_cast<uint32_t>(std::lround(nativeW * ordinaryScaleX)));
+    result.ordinaryH = std::max(1u, static_cast<uint32_t>(std::lround(nativeH * ordinaryScaleY)));
     result.modelW = result.ordinaryW;
     result.modelH = result.ordinaryH;
     if (!s.enabled)
@@ -197,7 +202,8 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
         result.reason = "disabled";
         return result;
     }
-    if (nativeW < 2 || nativeH < 2 || !std::isfinite(globalScale) || globalScale < .25f || globalScale > 2.0f)
+    if (nativeW < 2 || nativeH < 2 || !std::isfinite(globalScale) || globalScale < .25f || globalScale > 2.0f ||
+        !std::isfinite(globalScaleY) || globalScaleY < .25f || globalScaleY > 2.0f)
     {
         result.reason = "invalid frame or global scale";
         return result;
@@ -217,6 +223,7 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
         in.offsetX = s.offsetX;
         in.offsetY = s.offsetY;
         in.globalScale = globalScale;
+        in.globalScaleY = globalScaleY;
         result.fovea = Foveated::BuildLayout(in);
         result.reason = result.fovea.reason;
         if (result.fovea.active)
@@ -245,7 +252,7 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
     const uint32_t rawW = EvenExtent(nativeW, s.workX * .01);
     const uint32_t rawH = EvenExtent(nativeH, s.workY * .01);
     const uint32_t modelW = AlignWorkSize(EvenExtent(nativeW, static_cast<double>(globalScale) * s.workX * .01), nativeW);
-    const uint32_t modelH = AlignWorkSize(EvenExtent(nativeH, static_cast<double>(globalScale) * s.workY * .01), nativeH);
+    const uint32_t modelH = AlignWorkSize(EvenExtent(nativeH, static_cast<double>(globalScaleY) * s.workY * .01), nativeH);
     if (modelW < nativeW * .25f || modelH < nativeH * .25f || s.centerX * .01f >= static_cast<float>(rawW) / nativeW ||
         s.centerY * .01f >= static_cast<float>(rawH) / nativeH)
     {
@@ -283,10 +290,17 @@ inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float
     result.modelH = modelH;
     result.pixelShare = static_cast<float>(static_cast<double>(modelW) * modelH /
                                            (static_cast<double>(OrdinaryWorkSize(nativeW, globalScale)) *
-                                            OrdinaryWorkSize(nativeH, globalScale)));
+                                            OrdinaryWorkSize(nativeH, globalScaleY)));
     result.active = true;
     result.reason = "active";
     return result;
+}
+
+// One scale for both axes (the common case); BuildAxes takes one per axis.
+inline Layout Build(const Settings& s, uint32_t nativeW, uint32_t nativeH, float globalScale, uint32_t outputW = 0,
+                    uint32_t outputH = 0)
+{
+    return BuildAxes(s, nativeW, nativeH, globalScale, globalScale, outputW, outputH);
 }
 
 struct alignas(16) Constants
@@ -362,36 +376,40 @@ inline Constants MakeConstants(const Layout& layout, uint32_t mode, const GuideR
 // The pass makes one for what is asked for and keeps one for what is running; every consumer reads the one it was told to.
 struct Geometry
 {
-    float workScale = 1.0f;
+    float workScale = 1.0f; // the larger of the two axis scales: above 1.0 means the model supersamples on some axis
+    float workScaleX = 1.0f, workScaleY = 1.0f;
     Layout layout {}; // ordinaryW/H hold the aligned ordinary working size, which is what the unpack pass is told
     uint32_t frameW = 0, frameH = 0, ordinaryW = 0, ordinaryH = 0, workW = 0, workH = 0;
     bool spatial = false; // the spatial warp is in use
+    bool Anamorphic() const { return workScaleX != workScaleY; }
 };
-
-inline float SanitizeWorkScale(float scale)
-{
-    if (!std::isfinite(scale))
-        scale = 1.0f;
-    return scale < 0.25f ? 0.25f : (scale > 2.0f ? 2.0f : scale);
-}
 
 // Spatial packing is supported through 100%; larger model scales use ordinary NR, and so does a spatial fallback.
 inline Geometry MakeGeometry(const Settings& s, uint32_t frameW, uint32_t frameH, uint32_t outputW, uint32_t outputH,
-                             float workScale, bool spatialFailed)
+                             float workScaleX, float workScaleY, bool spatialFailed)
 {
     Geometry g;
-    g.workScale = SanitizeWorkScale(workScale);
+    g.workScaleX = SanitizeWorkScale(workScaleX);
+    g.workScaleY = SanitizeWorkScale(workScaleY);
+    g.workScale = std::max(g.workScaleX, g.workScaleY);
     g.frameW = frameW;
     g.frameH = frameH;
-    g.layout = Build(s, frameW, frameH, g.workScale, outputW, outputH);
+    g.layout = BuildAxes(s, frameW, frameH, g.workScaleX, g.workScaleY, outputW, outputH);
     g.spatial = g.layout.active && g.workScale <= 1.0f && !spatialFailed;
-    g.ordinaryW = OrdinaryWorkSize(frameW, g.workScale);
-    g.ordinaryH = OrdinaryWorkSize(frameH, g.workScale);
+    g.ordinaryW = OrdinaryWorkSize(frameW, g.workScaleX);
+    g.ordinaryH = OrdinaryWorkSize(frameH, g.workScaleY);
     g.workW = g.spatial ? g.layout.modelW : g.ordinaryW;
     g.workH = g.spatial ? g.layout.modelH : g.ordinaryH;
     g.layout.ordinaryW = g.ordinaryW;
     g.layout.ordinaryH = g.ordinaryH;
     return g;
+}
+
+// One scale for both axes: what the geometry was before the per-axis keys.
+inline Geometry MakeGeometry(const Settings& s, uint32_t frameW, uint32_t frameH, uint32_t outputW, uint32_t outputH,
+                             float workScale, bool spatialFailed)
+{
+    return MakeGeometry(s, frameW, frameH, outputW, outputH, workScale, workScale, spatialFailed);
 }
 
 // The model answer is resolved straight from the packed grid (no unpack rasters) when the frame is the ordinary size.

@@ -18,6 +18,14 @@ inline float ModelMotionScale(unsigned textureExtent, unsigned referenceExtent)
     return referenceExtent ? float(textureExtent) / float(referenceExtent) : 1.0f;
 }
 
+// The same per axis: motion vectors handed to a model whose frame has a different scale horizontally and vertically (the per-axis
+// model resolution) are scaled by the horizontal ratio in x and the vertical ratio in y.
+struct MotionScales { float x, y; };
+inline MotionScales ModelMotionScales(unsigned textureW, unsigned textureH, unsigned referenceW, unsigned referenceH)
+{
+    return { ModelMotionScale(textureW, referenceW), ModelMotionScale(textureH, referenceH) };
+}
+
 inline GuideExtent GuideRenderExtent(GuideExtent reportedRender, GuideExtent syntheticSource)
 {
     return syntheticSource.width != 0 && syntheticSource.height != 0 ? syntheticSource : reportedRender;

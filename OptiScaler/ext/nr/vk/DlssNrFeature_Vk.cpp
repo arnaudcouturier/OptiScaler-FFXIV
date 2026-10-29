@@ -520,7 +520,12 @@ unsigned long long FramesVk() { return g_vk.frames; }
 
 bool ExposureOfferedVk() { return g_vk.exposureOffered; }
 
-std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
+// Read from the menu thread (the NR time line, the per-shader row) while the evaluation writes it under g_vkMutex.
+std::optional<double> LastGpuTimeVk()
+{
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+    return g_vk.lastGpuTime;
+}
 
 static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
                              VkPhysicalDevice physicalDevice, VkDevice device, bool beforeSr, bool rayReconstruction,

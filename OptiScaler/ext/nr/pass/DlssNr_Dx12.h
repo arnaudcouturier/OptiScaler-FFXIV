@@ -17,6 +17,7 @@
 //   Down     the proxy -> a smaller proxy, when the model is asked to work below full resolution
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
+#include "ext/nr/DepthAwareWeights.h"
 #include "ext/nr/pass/DlssNr_Common.h"
 #include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/pass/DlssNr_DescriptorSlots.h"
@@ -56,10 +57,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                          ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,
                          ID3D12Resource* target, ID3D12Resource* second);
 
-    // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots
+    // The shader reads six inputs and writes two, and not every mode uses all of them. Unused slots
     // still need a view bound -- an unbound descriptor is not an empty read, it is a read from
-    // nothing -- so a stand-in is written into whichever are spare.
-    static constexpr uint32_t kSrvCount = 5;
+    // nothing -- so a stand-in is written into whichever are spare. The sixth input (the game's depth)
+    // is read only by the depth-aware enlargement of the resolve; every other dispatch binds the stand-in.
+    static constexpr uint32_t kSrvCount = 6;
     static constexpr uint32_t kUavCount = 2;
 
     uint32_t _numThreadsX = 8;
@@ -95,5 +97,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   // nothing reads it now and every caller passes nullptr. Kept only so the binding
                   // table keeps its shape -- not evidence that temporal accumulation exists.
                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline = nullptr);
+                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline = nullptr,
+                  // The game's depth, for the depth-aware enlargement of the resolve only; null binds the stand-in.
+                  ID3D12Resource* InDepth = nullptr);
 };

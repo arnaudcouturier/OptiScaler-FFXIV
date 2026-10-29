@@ -16,6 +16,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [NR model version picker](#nr-model-version-picker) (`OptiScaler\NR.<version>`, switch live) | follows SirenBrink's approach, fork code | new; unit-tested; tested (RTX 4090) on 2026-10-23: live switch and reload from an `NR.<version>` folder work; `NR.310.8.0.0` cannot create its feature on this GPU (NR skips itself, switching back recovers); a switch between two different working models was not seen |
 | [NR pause on focus loss](#nr-pause-on-focus-loss) | follows SirenBrink's approach, fork code | experimental, off by default; new; unit-tested; the preview pause has not run in game |
 | [NR spatial compression profiles](#nr-spatial-compression-profiles) (Peripheral and Foveated, independent X and Y, NR pixel share, 500 ms settle) | Peripheral: ported (PeripheralWarp by BeliyG3); Foveated: design follows maximedgoulet/FoveatedDLSS5, fork code | experimental, off by default; new; unit-tested (maths, settle decision, layout, presets, menu pins); the shader checks pass on the D3D11 software adapter; not tried in game |
+| [NR per-axis model resolution and depth-aware enlargement](#nr-per-axis-model-resolution-and-depth-aware-enlargement) (`WorkingScaleX`/`WorkingScaleY`, `DepthAwareResolve`, NR time readout) | ideas follow xenmods/DLSSNR-Cost-Scaler, fork code | experimental, off by default; new; unit-tested and checked on the D3D11 software adapter with synthetic depth; not tried in game |
 | [NR native path](#nr-native-path-and-vit-capture) | ported from SirenBrink's fork | tested (part of NR) |
 | [NR ViT capture](#nr-native-path-and-vit-capture) | fork | diagnostic only |
 | [NR ViT reuse](#nr-native-path-and-vit-capture) (`VitEvery`) | ported from SirenBrink's fork | untested |
@@ -65,7 +66,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested.
 
-**Config.** `[DlssNr]` (88 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
+**Config.** `[DlssNr]` (91 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
 
 **Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off shortcut in the Keybinds list.
 
@@ -124,6 +125,22 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 **Config.** `[DlssNr] SpatialProfile` (0 Peripheral, the default; 1 Foveated), `FoveaWidth` (2400), `FoveaHeight` (1350), `FoveaFalloff` (400), `FoveaEdgeX`, `FoveaEdgeY` (0.5, clamped to 0.25 to 1). The pixel defaults are sized for a 3840x2160 output and give about 78% of the NR pixels. `SpatialCompression` stays false by default. All six are saved in the NR presets; a preset saved before they existed loads with these defaults. **Menu.** `dlss_nr` card, under "Peripheral spatial compression (experimental)": a "Spatial profile" combo, the sliders of the chosen profile, the readout; the offsets are in the closed Advanced fold (see "Menu layout").
 
 **Code and seams.** `ext/nr/spatial/FoveatedWarp.h` (host maths), `ext/nr/NrSettle.h` (settle decision, partial-park selection), `ext/nr/spatial/DlssNr_Spatial.h` (layout, geometry), `ext/nr/shaders/dlssnr_spatial_warp.hlsli` (shared by `dlssnr_spatial.hlsl` and `dlssnr.hlsl`; the profile is a bit in the constant `flags` word and in the high bits of the resolve selector, no constant buffer grew), `ext/nr/pass/DlssNr_Dx12.cpp`.
+
+### NR per-axis model resolution and depth-aware enlargement
+
+**Origin.** The ideas follow xenmods/DLSSNR-Cost-Scaler (MIT): a model size that differs per axis and a depth-aware enlargement of the model's answer. The code is this fork's own, written from the description; no source was copied.
+
+**What it does.**
+
+- *Per-axis model resolution* (`[DlssNr] WorkingScaleX`, `WorkingScaleY`, default 0 = follow `WorkingScale`): the model works at (X x width) by (Y x height), each 0.25 to 2. Cost follows the product. DirectX 12 only: the Vulkan path and the AMD bridge use `WorkingScale` for both axes. With a different scale per axis the guides are resampled to the model's size on each axis and the motion vectors are scaled per axis. Spatial compression stays limited to 100% on both axes. A model resolution above 100% on one axis and below 100% on the other is not supported: when either axis is above 100% the other is raised to at least 100% (150% across with 50% down runs 150% x 100%); the menu, the guides and the motion vectors use the raised numbers. If the NR runtime refuses a model size that differs per axis, the pass logs one line and works at the uniform Model resolution on both axes until Model resolution or the horizontal or vertical setting changes (or the model file is switched); a refusal at a uniform size still ends NR for the session.
+- *Depth-aware enlargement* (`[DlssNr] DepthAwareResolve`, default off): when the model works below the frame's size, each of the four taps used to enlarge its answer (Classic) or its changes (Matched residual) is weighted by how close the game's depth under the tap is to the depth under the output pixel, so the answer does not bleed across the edge of an object. Plain filter when the depth is unusable. DirectX 12 only; inactive with spatial compression, at model resolution 100% on both axes, and while either axis is above 100% (the checkbox and the Enlargement mode are greyed out and the status line says so).
+- *NR time* readout: "NR time: x.xx ms" (GPU time of the last NR evaluation, "n/a" until measured) under the model size and next to the NR pixel share.
+
+**Status.** Experimental and off by default. Unit-tested (sizes per axis, the mixed-axis rule, the refusal latch, the depth weights against a host reference) and checked on the D3D11 software adapter with synthetic depth; with the keys at their defaults the shader output is bit-identical to the previous shader. Not tried in game: an anamorphic model size has never been run through the NR runtime, and the depth-aware resolve has not run on the real depth buffer.
+
+**Config.** `[DlssNr] WorkingScaleX`, `WorkingScaleY` (0), `DepthAwareResolve` (false); all three are saved in the NR presets. **Menu.** `dlss_nr` card: Model resolution > Advanced: per-axis resolution, Model resolution > Depth-aware enlargement, and the NR time line.
+
+**Code and seams.** `ext/nr/NrModelSize.h` (per-axis scales, the mixed-axis rule, the refusal latch), `ext/nr/DepthAwareWeights.h` (depth weights, shared threshold), `ext/nr/NrReadout.h`, `ext/nr/shaders/dlssnr.hlsl`, `ext/nr/pass/DlssNr_Dx12.cpp`. No new seam.
 
 ### Other NR paths
 

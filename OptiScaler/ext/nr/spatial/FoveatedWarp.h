@@ -71,7 +71,9 @@ struct Inputs
     float width = kDefaultWidth, height = kDefaultHeight, falloff = kDefaultFalloff;
     float edgeX = kDefaultEdge, edgeY = kDefaultEdge;
     float offsetX = 0, offsetY = 0; // percent of the frame extent
-    float globalScale = 1;
+    float globalScale = 1;  // the model's working scale of the horizontal axis (and of the vertical one unless globalScaleY is set)
+    float globalScaleY = 0; // the vertical axis' own scale; not a positive number = the same as globalScale
+    float ScaleY() const { return globalScaleY > 0.0f ? globalScaleY : globalScale; }
 };
 
 struct Layout
@@ -243,7 +245,9 @@ inline Layout BuildLayout(const Inputs& in)
 {
     Layout l {};
     l.reason = "invalid frame or global scale";
-    if (in.frameW < 2 || in.frameH < 2 || !std::isfinite(in.globalScale) || in.globalScale < .25f || in.globalScale > 2.0f)
+    const float scaleY = in.ScaleY();
+    if (in.frameW < 2 || in.frameH < 2 || !std::isfinite(in.globalScale) || in.globalScale < .25f || in.globalScale > 2.0f ||
+        !std::isfinite(scaleY) || scaleY < .25f || scaleY > 2.0f)
         return l;
     AxisInput ax;
     ax.extent = in.frameW;
@@ -258,11 +262,11 @@ inline Layout BuildLayout(const Inputs& in)
     ay.edge = in.edgeY;
     ay.offsetPercent = in.offsetY;
     l.x = BuildAxis(ax, in.globalScale);
-    l.y = BuildAxis(ay, in.globalScale);
+    l.y = BuildAxis(ay, scaleY);
     l.workW = l.x.workExtent;
     l.workH = l.y.workExtent;
     l.ordinaryW = OrdinaryWorkSize(in.frameW, in.globalScale);
-    l.ordinaryH = OrdinaryWorkSize(in.frameH, in.globalScale);
+    l.ordinaryH = OrdinaryWorkSize(in.frameH, scaleY);
     l.share = static_cast<float>(static_cast<double>(l.workW) * l.workH / (static_cast<double>(l.ordinaryW) * l.ordinaryH));
     if (l.workW < in.frameW * .25f || l.workH < in.frameH * .25f)
     {

@@ -156,5 +156,68 @@ int main(int argc, char** argv)
         Apply(partial, upgraded);
         REQUIRE(upgraded.foveaWidth.value() == 1800.0f && upgraded.foveaHeight.value() == 1350.0f && upgraded.spatialProfile.value() == 0u);
     }
+    // Per-axis model resolution: 0 = follow WorkingScale (today), 0.25..2 otherwise; saved in the presets, old files get 0.
+    {
+        ext::NrConfig fresh;
+        REQUIRE(fresh.workingScaleX.value_or_default() == 0.0f && fresh.workingScaleY.value_or_default() == 0.0f);
+        REQUIRE(!fresh.depthAwareResolve.value_or_default() && Capture(fresh)["DepthAwareResolve"] == false);
+        const auto freshJson = Capture(fresh);
+        REQUIRE(freshJson["WorkingScaleX"] == 0 && freshJson["WorkingScaleY"] == 0);
+        fresh.workingScale = 0.8f;
+        fresh.workingScaleX = 0.6f;
+        fresh.workingScaleY = 1.25f;
+        const auto saved = Capture(fresh);
+        ext::NrConfig other;
+        Apply(saved, other);
+        REQUIRE(Capture(other) == saved && other.workingScaleX.value() == 0.6f && other.workingScaleY.value() == 1.25f);
+        REQUIRE(other.workingScale.value() == 0.8f);
+        auto edges = saved;
+        edges["WorkingScaleX"] = 0; edges["WorkingScaleY"] = 2.0;
+        Apply(edges, other);
+        REQUIRE(Capture(other) == edges);
+        // ... and the other way round: the horizontal key reaches 2.0 as well, the vertical one 0
+        auto swappedEdges = saved;
+        swappedEdges["WorkingScaleX"] = 2.0; swappedEdges["WorkingScaleY"] = 0;
+        Apply(swappedEdges, other);
+        REQUIRE(Capture(other) == swappedEdges && other.workingScaleX.value() == 2.0f && other.workingScaleY.value() == 0.0f);
+        Apply(edges, other);
+        REQUIRE(Capture(other) == edges);
+        const std::pair<const char*, Json> bad[] = { { "WorkingScaleX", -0.01 }, { "WorkingScaleX", 2.01 }, { "WorkingScaleY", -1 },
+                                                      { "WorkingScaleY", 3 }, { "WorkingScaleX", "half" }, { "WorkingScaleY", true } };
+        for (const auto& [key, value] : bad)
+        {
+            auto broken = saved;
+            broken[key] = value;
+            bool refused = false;
+            try { Apply(broken, other); } catch (...) { refused = true; }
+            REQUIRE(refused && Capture(other) == edges);
+        }
+        fresh.depthAwareResolve = true;
+        {
+            const auto withDepth = Capture(fresh);
+            ext::NrConfig third;
+            Apply(withDepth, third);
+            REQUIRE(third.depthAwareResolve.value() && Capture(third) == withDepth);
+            auto brokenDepth = withDepth;
+            brokenDepth["DepthAwareResolve"] = 2;
+            bool refusedDepth = false;
+            try { Apply(brokenDepth, third); } catch (...) { refusedDepth = true; }
+            REQUIRE(refusedDepth && third.depthAwareResolve.value());
+            auto olderDepth = withDepth;
+            olderDepth.erase("DepthAwareResolve");
+            Apply(olderDepth, third);
+            REQUIRE(!third.depthAwareResolve.value());
+        }
+        // a file written before these keys existed gets 0 (follow) and keeps its WorkingScale
+        auto older = saved;
+        older.erase("WorkingScaleX"); older.erase("WorkingScaleY");
+        ext::NrConfig upgraded;
+        Apply(older, upgraded);
+        REQUIRE(upgraded.workingScaleX.value() == 0.0f && upgraded.workingScaleY.value() == 0.0f && upgraded.workingScale.value() == 0.8f);
+        auto half = older;
+        half["WorkingScaleX"] = 0.5;
+        Apply(half, upgraded);
+        REQUIRE(upgraded.workingScaleX.value() == 0.5f && upgraded.workingScaleY.value() == 0.0f);
+    }
     std::cout << "PASS: all-pass round trip, inheritance, atomic validation, NR-only scope, Unicode names, persistence, failed-save retention and the foveated spatial keys\n";
 }

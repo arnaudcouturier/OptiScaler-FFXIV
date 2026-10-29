@@ -4,6 +4,7 @@
 #include "ext/gpu/GpuSubmission.h"
 #include <string>
 
+#include "ext/nr/NrModelSize.h"
 #include "ext/nr/pass/DlssNr_Common.h"
 #include <nvsdk_ngx.h>
 
@@ -201,6 +202,10 @@ CalibrationReading Calibration();
 // Whether the model is loaded and running, for the overlay.
 bool IsRunning();
 std::string SpatialStatus();
+// "depth-aware resolve: ..." while [DlssNr] DepthAwareResolve is on (active, or why it is not), empty while it is off.
+std::string DepthAwareStatus();
+// The model size the runtime refused, if it did: while it holds the pass works at the uniform WorkingScale (see AnamorphicLatch).
+AnamorphicLatch AnamorphicLatchState();
 
 // What the spatial profiles amount to for the frame being processed, for the menu: the share of the ordinary NR pixels the model
 // handles, its size, and the output the Foveated pixel sizes are written against.

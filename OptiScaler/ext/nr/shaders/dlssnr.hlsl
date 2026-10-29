@@ -281,6 +281,12 @@ RWTexture2D<float4> gKeep     : register(u1);  // encode: the untouched copy. un
 #endif
 SamplerState        gLinear   : register(s0);  // so the edit can be read at a different size
 
+// The game's depth, read only by the depth-aware enlargement (resolve with a reduced model, bit 9 of gSpatialResidual). Direct3D 12
+// only: Vulkan keeps its descriptor layout and the plain filter. With the feature off nothing reads it.
+#ifndef VK_MODE
+Texture2D<float4>   gDepth    : register(t5);
+#endif
+
 // The picture white point. Sources 0 (paper white) and 2 (scan) resolve it on the CPU and pass it in
 // gWhitePoint; source 1 (the game's own exposure) also passes a CPU value in gWhitePoint as a fallback,
 // but when the exposure texture is bound (D3D12) it is recomputed HERE from the live exposure --
@@ -301,6 +307,80 @@ float WhitePoint()
     return max(gWhitePoint, 1e-4);
 }
 
+
+// ---- depth-aware enlargement (a joint bilateral upsample; DepthAwareWeights.h is the host reference, keep the two in step) ----
+// The feature is selected by bit 9 of gSpatialResidual with the spatial mode byte 0 (the warp samples the model in warped space, so
+// it keeps its own filter). Its parameters ride in the constant slots the spatial warp uses: the depth's valid rectangle in
+// gBandCenter, sigma, epsilon, the reversed-depth flag and the weight sum under which the plain filter is used in gSideNeg.x/.y/.z/.w.
+#define DEPTH_AWARE (((gSpatialResidual & 512u) != 0u) && (gSpatialResidual & 255u) == 0u)
+#define gDepthRect gBandCenter
+#define gDepthSigma gSideNeg.x
+#define gDepthEpsilon gSideNeg.y
+#define gDepthReversed (gSideNeg.z != 0.0)
+#define gDepthMinSum gSideNeg.w
+
+#ifndef VK_MODE
+// The depth under a position of the frame: the valid rectangle spread over the whole frame, one point load, whatever size the texture has.
+float DepthAt(float2 frameUv)
+{
+    int2 lo = int2(gDepthRect.xy);
+    int2 hi = int2(gDepthRect.xy + gDepthRect.zw) - 1;
+    int2 texel = clamp(int2(gDepthRect.xy + frameUv * gDepthRect.zw), lo, hi);
+    return gDepth.Load(int3(texel, 0)).x;
+}
+
+bool DepthUsable(float d) { return isfinite(d) && d >= 0.0 && d <= 1.0; }
+float DepthDisparity(float d) { return gDepthReversed ? d : 1.0 - d; }
+
+// True when the model's textures are smaller than the frame, i.e. there is an enlargement to weight.
+bool ModelIsReduced()
+{
+    uint w, h;
+    gSource.GetDimensions(w, h);
+    return w != gWidth || h != gHeight;
+}
+
+// The proxy and the model's answer at a position of the frame, read from the reduced textures with the four bilinear taps weighted by
+// how close the depth under each tap is to the depth under the pixel. The same weights for both, so the residual between them
+// (matched residual) and the picture itself (classic) are enlarged alike.
+void DepthAwareSamples(float2 frameUv, out float4 proxyOut, out float4 modelOut)
+{
+    uint tw, th;
+    gSource.GetDimensions(tw, th);
+    const int2 last = int2(tw, th) - 1;
+    const float2 size = float2(tw, th);
+    const float2 pos = frameUv * size - 0.5;
+    const float2 baseTap = floor(pos);
+    const float2 f = pos - baseTap;
+    const int2 i0 = clamp(int2(baseTap), int2(0, 0), last);
+    const int2 i1 = clamp(int2(baseTap) + 1, int2(0, 0), last);
+    const int2 taps[4] = { int2(i0.x, i0.y), int2(i1.x, i0.y), int2(i0.x, i1.y), int2(i1.x, i1.y) };
+    const float bilinear[4] = { (1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y };
+
+    const float pixelDepth = DepthAt(frameUv);
+    const float pixelDisparity = DepthDisparity(pixelDepth);
+    bool usable = DepthUsable(pixelDepth);
+    float weights[4];
+    float sum = 0.0;
+    [unroll] for (int k = 0; k < 4; ++k)
+    {
+        const float tapDepth = DepthAt((float2(taps[k]) + 0.5) / size);
+        usable = usable && DepthUsable(tapDepth);
+        weights[k] = bilinear[k] * exp(-abs(pixelDisparity - DepthDisparity(tapDepth)) / (gDepthSigma * max(pixelDisparity, gDepthEpsilon)));
+        sum += weights[k];
+    }
+    const bool depthWeighted = usable && sum > gDepthMinSum;
+
+    proxyOut = 0.0;
+    modelOut = 0.0;
+    [unroll] for (int j = 0; j < 4; ++j)
+    {
+        const float w = depthWeighted ? weights[j] / sum : bilinear[j];
+        proxyOut += w * gSource.Load(int3(taps[j], 0));
+        modelOut += w * gModel.Load(int3(taps[j], 0));
+    }
+}
+#endif
 
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 
@@ -916,8 +996,17 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // needs no intermediate unpack rasters. Reduced/zoomed paths retain their
     // two-stage filter, because fusing those would change their footprint.
     float2 modelUv = gSpatialMode == 2 ? PwPack(cmpUv * gNativeWorkSize.xy) / gNativeWorkSize.zw : cmpUv;
-    float4 proxySample = gSource.SampleLevel(gLinear, modelUv, 0);
-    float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
+    float4 proxySample;
+    float4 modelSample;
+#ifndef VK_MODE
+    [branch] if (DEPTH_AWARE && ModelIsReduced())
+        DepthAwareSamples(cmpUv, proxySample, modelSample);
+    else
+#endif
+    {
+        proxySample = gSource.SampleLevel(gLinear, modelUv, 0);
+        modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
+    }
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
     // Linear light (mode 5) was not sRGB encoded on the way in either, so it is read back the same way.
