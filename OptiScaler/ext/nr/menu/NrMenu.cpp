@@ -4,6 +4,8 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/nr/DlssNr.h"
+#include "ext/nr/NrHotkeys.h"
+#include "ext/nr/NrModelSize.h"
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 #include "ext/nr/feature/DlssNrFeature_Dx12.h"
 
@@ -15,10 +17,15 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
+#include <format>
+#include <string>
 
 // What the NR series puts into upstream's menu (docs/SEAMS.md 3.6, catalog group `menu`):
 //   * the card `dlss_nr` (tab Upscaling, A5/A6/A12; the body is DlssNr_Menu.cpp)
 //   * the toggle shortcut (A5): key `[DlssNr] ToggleKey`, Keybinds slot 14, toast
+//   * the model-resolution shortcuts: keys `[DlssNr] ScaleUpKey`/`ScaleDownKey`, Keybinds slots 16/17, toast
+//   * the enlargement shortcut: key `[DlssNr] TransferToggleKey`, Keybinds slot 18, toast
 //   * the overlays: comparison labels (A6) and the exposure-scan lamp (A4)
 //   * the "Neural Rendering" row of the per-shader GPU times (A1)
 // Was inline in menu_common.cpp (U5 rows 2, 3, 12, 13, 15, 29, 30, 32, 34-36, 39, 40).
@@ -46,6 +53,71 @@ void OnTogglePressed(ext::menu::Ctx&)
     toast.setTitle("DLSS Neural Rendering");
     toast.setContent(nr.enabled.value_or_default() ? "On" : "Off");
     ImGui::InsertNotification(toast);
+}
+
+// ---- model-resolution and enlargement shortcuts ----------------------------------------------------------------------
+void* ScaleUpKeyOption() { return &ext::Cfg().nr.scaleUpKey; }
+void* ScaleDownKeyOption() { return &ext::Cfg().nr.scaleDownKey; }
+void* TransferToggleKeyOption() { return &ext::Cfg().nr.transferToggleKey; }
+
+void ShowHotkeyToast(const char* title, const std::string& content)
+{
+    ImGuiToast toast { ImGuiToastType::Info, 2000 };
+    toast.setTitle(title);
+    toast.setContent(content.c_str());
+    ImGui::InsertNotification(toast);
+}
+
+// Whether a per-axis key currently overrides the uniform Model resolution: exactly the values the pass uses
+// instead of it (a zero, negative or non-finite key follows the uniform one). The scale keys only step the
+// uniform WorkingScale and never touch the per-axis keys, so the toast says when one of them wins.
+bool PerAxisOverrides()
+{
+    const auto& nr = ext::Cfg().nr;
+    const float x = nr.workingScaleX.value_or_default(), y = nr.workingScaleY.value_or_default();
+    return (std::isfinite(x) && x > 0.0f) || (std::isfinite(y) && y > 0.0f);
+}
+
+// Shortcuts are polled on every present, menu open or closed, and their handlers run in the shortcut pass of the menu
+// frame: the same render-thread pass that commits the Model resolution slider.
+// One press steps the uniform Model resolution by 5% through the same rule the slider commits, so the hotkey and
+// the slider write identical values. The pass rebuilds the model once after its 500 ms settle, exactly like after
+// a slider change: there is no second debounce path here.
+void StepModelResolution(bool up)
+{
+    auto& nr = ext::Cfg().nr;
+
+    nr.workingScale = DlssNr::Hotkeys::StepWorkingScale(nr.workingScale.value_or_default(), up);
+    LOG_DEBUG("NR model resolution key pressed, setting WorkingScale to {}", nr.workingScale.value_or_default());
+
+    const int percent = (int) std::lround(nr.workingScale.value_or_default() * 100.0f);
+    std::string content = std::format("Model resolution {}%", percent);
+    if (PerAxisOverrides())
+        content += " (per-axis keys override)";
+    ShowHotkeyToast("DLSS Neural Rendering", content);
+}
+
+void OnScaleUpPressed(ext::menu::Ctx&) { StepModelResolution(true); }
+void OnScaleDownPressed(ext::menu::Ctx&) { StepModelResolution(false); }
+
+void OnTransferTogglePressed(ext::menu::Ctx&)
+{
+    auto& nr = ext::Cfg().nr;
+
+    // The same numbers the Enlargement combo is greyed from, through the same rule, so the key is a no-op
+    // exactly while the combo is greyed.
+    const DlssNr::AnamorphicLatch latch = DlssNr::AnamorphicLatchState();
+    const DlssNr::AxisScales scales =
+        DlssNr::EffectiveScales(latch, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(),
+                                nr.workingScale.value_or_default());
+    const bool toggleable = DlssNr::Hotkeys::TransferToggleable(scales.x, scales.y);
+    if (!toggleable)
+        return;
+    nr.transfer = DlssNr::Hotkeys::ToggleTransfer(nr.transfer.value_or_default(), toggleable);
+    LOG_DEBUG("NR enlargement key pressed, setting Transfer to {}", nr.transfer.value_or_default());
+
+    ShowHotkeyToast("DLSS Neural Rendering",
+                     nr.transfer.value_or_default() == 1 ? "Enlargement: Matched residual" : "Enlargement: Classic");
 }
 
 // ---- overlays --------------------------------------------------------------------------------------------------
@@ -234,6 +306,12 @@ struct NrMenuRegistration
         ext::menu::Register({ "dlss_nr", "Upscaling", "DLSS Neural Rendering", DrawNrCard, "upscaler" });
         ext::menu::RegisterShortcut({ "Neural Rendering", 14, ToggleKeyOption,
                                       "Neural Rendering key pressed, will be toggling the pass", OnTogglePressed });
+        ext::menu::RegisterShortcut({ "NR model resolution up", 16, ScaleUpKeyOption,
+                                      "NR model resolution up key pressed", OnScaleUpPressed });
+        ext::menu::RegisterShortcut({ "NR model resolution down", 17, ScaleDownKeyOption,
+                                      "NR model resolution down key pressed", OnScaleDownPressed });
+        ext::menu::RegisterShortcut({ "NR enlargement mode", 18, TransferToggleKeyOption,
+                                      "NR enlargement toggle key pressed", OnTransferTogglePressed });
         ext::menu::RegisterOverlay({ DrawNrOverlays, NrWantsFrame });
         ext::menu::RegisterTimeRow({ "Neural Rendering", NrGpuTime });
     }

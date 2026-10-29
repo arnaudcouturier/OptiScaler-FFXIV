@@ -17,6 +17,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [NR pause on focus loss](#nr-pause-on-focus-loss) | follows SirenBrink's approach, fork code | experimental, off by default; new; unit-tested; the preview pause has not run in game |
 | [NR spatial compression profiles](#nr-spatial-compression-profiles) (Peripheral and Foveated, independent X and Y, NR pixel share, 500 ms settle) | Peripheral: ported (PeripheralWarp by BeliyG3); Foveated: design follows maximedgoulet/FoveatedDLSS5, fork code | experimental, off by default; new; unit-tested (maths, settle decision, layout, presets, menu pins); the shader checks pass on the D3D11 software adapter; not tried in game |
 | [NR per-axis model resolution and depth-aware enlargement](#nr-per-axis-model-resolution-and-depth-aware-enlargement) (`WorkingScaleX`/`WorkingScaleY`, `DepthAwareResolve`, NR time readout) | ideas follow xenmods/DLSSNR-Cost-Scaler, fork code | experimental, off by default; new; unit-tested and checked on the D3D11 software adapter with synthetic depth; not tried in game |
+| [NR hotkeys](#nr-hotkeys) (`[DlssNr] ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`) | fork | off until a key is bound; new; unit-tested; not tried in game |
 | [NR native path](#nr-native-path-and-vit-capture) | ported from SirenBrink's fork | tested (part of NR) |
 | [NR ViT capture](#nr-native-path-and-vit-capture) | fork | diagnostic only |
 | [NR ViT reuse](#nr-native-path-and-vit-capture) (`VitEvery`) | ported from SirenBrink's fork | untested |
@@ -67,9 +68,9 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested.
 
-**Config.** `[DlssNr]` (91 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
+**Config.** `[DlssNr]` (94 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
 
-**Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off shortcut in the Keybinds list.
+**Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off, model resolution and enlargement shortcuts in the Keybinds list.
 
 **Code and seams.** `ext/nr/` (`pass/DlssNr_Dx12.cpp` is the D3D12 pass; `presr/`, `exposure/`, `presets/`; shaders in `shaders/`, compiled at build time). The forwarder `ext/nr/forwarder/dlssnr_forwarder.cpp` is the second project in `OptiScaler.sln`; its odd output name `nvngx.dll_dlssnr.dll` is deliberate, because NVIDIA's model only answers a caller whose module path contains `nvngx.dll`. Seams: nr, restrack, dx11bridge, menu, gpu.
 
@@ -142,6 +143,18 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 **Config.** `[DlssNr] WorkingScaleX`, `WorkingScaleY` (0), `DepthAwareResolve` (false); all three are saved in the NR presets. **Menu.** `dlss_nr` card: Model resolution > Advanced: per-axis resolution, Model resolution > Depth-aware enlargement, and the NR time line.
 
 **Code and seams.** `ext/nr/NrModelSize.h` (per-axis scales, the mixed-axis rule, the refusal latch), `ext/nr/DepthAwareWeights.h` (depth weights, shared threshold), `ext/nr/NrReadout.h`, `ext/nr/shaders/dlssnr.hlsl`, `ext/nr/pass/DlssNr_Dx12.cpp`. No new seam.
+
+### NR hotkeys
+
+**Origin.** Fork code, following the existing NR toggle key.
+
+**What it does.** Three in-game hotkeys, all unbound by default: model resolution up and down (one press steps the uniform `WorkingScale` by 5%, from 25% to 200%, to a whole percent, so the key and the Model resolution slider write the same values) and the enlargement mode toggle (Classic/Matched residual, a no-op while the Enlargement combo is greyed out). Only the uniform scale moves: per-axis keys keep overriding it, and the toast says when they do. A press of a model resolution key changes the setting once, and the pass rebuilds the model once after its 500 ms settle, exactly like after a slider change; the enlargement toggle takes effect at once, with no rebuild. A press while the Model resolution slider is being dragged is replaced by the slider value when the slider is released. Each press shows a toast with the new value.
+
+**Status.** New; unit-tested, not tried in game.
+
+**Config.** `[DlssNr] ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey` (all unbound by default). The keys are not part of the saved NR presets. **Menu.** Three rows in the Keybinds list.
+
+**Code and seams.** `ext/nr/NrHotkeys.h` (the step and toggle rules, shared with the Enlargement combo), `ext/nr/menu/NrMenu.cpp` (the press handlers and the Keybinds rows). Seam: menu (shortcut slots 16-18).
 
 ### Other NR paths
 

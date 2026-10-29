@@ -6,6 +6,7 @@
 #include "ext/game/Game.h"
 #include "ext/nr/DlssNr.h"
 #include "ext/nr/NrHooks.h"
+#include "ext/nr/NrHotkeys.h"
 #include "ext/nr/NrReadout.h"
 #include "ext/nr/amd/AmdBridge.h"
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
@@ -564,8 +565,9 @@ void RenderMenu(float menuResScale)
         // Meaningful only when the model runs BELOW the frame's size on some axis and above it on none. At 100% -- and above, where
         // supersampling composites its down-legged answer at native -- the residual collapses to the
         // model's own picture and the two modes are identical, so the control says so by going grey.
+        // One rule for the combo and the enlargement hotkey (NrHotkeys.h): the key is a no-op exactly while this is greyed.
         {
-            const bool reduced = !aboveFull && (effectiveScaleX < 0.999f || effectiveScaleY < 0.999f);
+            const bool reduced = DlssNr::Hotkeys::TransferToggleable(effectiveScaleX, effectiveScaleY);
 
             if (!reduced)
                 ImGui::BeginDisabled();

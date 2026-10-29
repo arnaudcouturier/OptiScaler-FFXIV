@@ -36,6 +36,11 @@ struct NrConfig
     CustomOptional<bool> residualFgApproxCamera { false };
     // Toggles the pass in game. Unbound by default.
     CustomOptional<int> toggleKey { UnboundKey };
+    // Steps the uniform model resolution by 5% per press in game. Unbound by default.
+    CustomOptional<int> scaleUpKey { UnboundKey };
+    CustomOptional<int> scaleDownKey { UnboundKey };
+    // Flips the enlargement mode (Classic/Matched residual) in game. Unbound by default.
+    CustomOptional<int> transferToggleKey { UnboundKey };
     // Experimental: pause the NR pass while the game window is not the foreground window or is minimised (the plain
     // upscaler output is shown), resume when focus returns. Does not change `enabled`. Decision logic: NrFocusGate.h.
     CustomOptional<bool> disableOnFocusLoss { false };

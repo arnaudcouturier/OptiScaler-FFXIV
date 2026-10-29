@@ -317,7 +317,7 @@ struct NotCompared
 const NotCompared kNotCompared[] = {
     { "[DlssNr] ", "the NR fragment documents grouped keys with one shared comment, so most of its comments carry no "
                    "'Default (auto) is' (the ones that do are compared); the generated Pass2/Pass3 keys have no named member; "
-                   "ToggleKey's default is the UnboundKey constant of Config.h, outside ext" },
+                   "the key-binding keys (ToggleKey, ScaleUpKey, ScaleDownKey, TransferToggleKey) default to the UnboundKey constant of Config.h, outside ext" },
     { "[HDR] Screenshot", "the screenshot keys describe their default in prose (-1 = unbound, formats by name)" },
     { "[Mipmap] MipmapBiasAuto:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): the default depends on the game (on for FFXIV, off elsewhere) and an explicit false must survive a save" },
     { "[Mipmap] AutomaticFFXIV", "the alias of MipmapBiasAuto, declared without a default for the same reason" },
@@ -483,6 +483,7 @@ int main(int argc, char** argv)
     CHECK(has("Companion", "HudReplacement") && has("Companion", "HudInterpolation"));
     CHECK(has("HudLess", "Diagnostics") && has("HudLess", "ReShadeProbe") && has("HudLess", "ReShadePresets"));
     CHECK(has("DLSSG", "UIRecomposition") && has("XeFG", "UnlockMFG") && has("DlssNr", "ScanExposure"));
+    CHECK(has("DlssNr", "ScaleUpKey") && has("DlssNr", "ScaleDownKey") && has("DlssNr", "TransferToggleKey"));
     CHECK(frags.count("Companion") == 1 && frags.count("HudLess") == 1 && frags.count("DlssNr") == 1);
 
     // the two ini-only developer keys of the HUD-less guard and the HDR paste ship as auto (the code default applies) and say which default
@@ -519,6 +520,15 @@ int main(int argc, char** argv)
         auto hasNrLine = [&](const std::string& text)
         { return nrIni.find("\n" + text + "\r\n") != std::string::npos || nrIni.find("\n" + text + "\n") != std::string::npos; };
         CHECK(hasNrLine("WorkingScaleX=auto") && hasNrLine("WorkingScaleY=auto") && hasNrLine("DepthAwareResolve=auto"));
+    }
+
+    // the three NR hotkeys ship as auto (unbound: a press does nothing until the Keybinds list binds one).
+    // Like the keys above, the shipped VALUE matters, not just the key presence.
+    {
+        const std::string nrIni = menuscan::ReadFile(repo + "/OptiScaler/ext/ini/DlssNr.ini");
+        auto hasNrLine = [&](const std::string& text)
+        { return nrIni.find("\n" + text + "\r\n") != std::string::npos || nrIni.find("\n" + text + "\n") != std::string::npos; };
+        CHECK(hasNrLine("ScaleUpKey=auto") && hasNrLine("ScaleDownKey=auto") && hasNrLine("TransferToggleKey=auto"));
     }
 
     // the documented default of every bool/int/float key equals the default the code declares

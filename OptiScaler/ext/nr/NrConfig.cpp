@@ -25,6 +25,9 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "Precision", precision);
     b.Add("DlssNr", "ResidualFGApproxCamera", residualFgApproxCamera);
     b.Add("DlssNr", "ToggleKey", toggleKey, true); // hex when positive (a key code), like the reference build
+    b.Add("DlssNr", "ScaleUpKey", scaleUpKey, true); // hex when positive (a key code), like the toggle key
+    b.Add("DlssNr", "ScaleDownKey", scaleDownKey, true); // hex when positive (a key code), like the toggle key
+    b.Add("DlssNr", "TransferToggleKey", transferToggleKey, true); // hex when positive (a key code), like the toggle key
     b.Add("DlssNr", "DisableOnFocusLoss", disableOnFocusLoss);
     b.Add("DlssNr", "PauseOnFocusLoss", pauseOnFocusLoss);
     b.Add("DlssNr", "TransferStrength", transferStrength);

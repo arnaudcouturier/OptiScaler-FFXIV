@@ -319,14 +319,16 @@ int main(int argc, char** argv)
         CHECK(Count(menu, "constfloateffectiveScaleX=shownScales.x;") == 1 && Count(menu, "constfloateffectiveScaleY=shownScales.y;") == 1);
         CHECK(Count(menu, "constboolaboveFull=effectiveScaleX>1.0f||effectiveScaleY>1.0f;") == 1);
         CHECK(Count(menu, "if(aboveFull){") == 1);
-        CHECK(Count(menu, "constboolreduced=!aboveFull&&(effectiveScaleX<0.999f||effectiveScaleY<0.999f);") == 1);
+        // The Enlargement combo is greyed by the one toggle rule the hotkey shares (NrHotkeys.h): the key is a no-op
+        // exactly while the combo is greyed, and the menu keeps no grey-out rule of its own.
+        CHECK(Count(menu, "constboolreduced=DlssNr::Hotkeys::TransferToggleable(effectiveScaleX,effectiveScaleY);") == 1);
         CHECK(!Has(menu, "EffectiveAxisScale(")); // the menu has no scale rule of its own
         CHECK(Count(menu, "if(AnamorphicLatchHolds(refusal,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),uniformShown))ImGui::TextDisabled(\"Themodelrefusedasizethatdiffersperaxis:workingatModelresolutiononbothaxes.\");") == 1);
         // the order: the uniform scale and the latch are read before the scales, the scales before the controls that follow them
         {
             const size_t shown = menu.find("constAxisScalesshownScales=EffectiveScales(");
             const size_t downscaler = menu.find("if(aboveFull){");
-            const size_t reducedAt = menu.find("constboolreduced=!aboveFull&&");
+            const size_t reducedAt = menu.find("constboolreduced=DlssNr::Hotkeys::TransferToggleable(");
             const size_t checkbox = menu.find("ImGui::BeginDisabled(!reduced||depthSpatial);");
             CHECK(shown != std::string::npos && downscaler != std::string::npos && reducedAt != std::string::npos && checkbox != std::string::npos);
             CHECK(shown < downscaler && downscaler < reducedAt && reducedAt < checkbox);
