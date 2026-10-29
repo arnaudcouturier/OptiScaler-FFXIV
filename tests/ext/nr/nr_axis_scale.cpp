@@ -389,19 +389,19 @@ void AxisEqualityNeedsBothAxesAndEffectiveFollowsUniform()
     using DlssNr::AxisScales;
     using DlssNr::EffectiveScales;
     const DlssNr::AnamorphicLatch none {};
-    // RM15/RM17/RM18: AxisScales == needs both axes (each mutant wrongly reports one of these as equal).
+    // AxisScales == compares both axes: a pair that differs on one axis only is not equal.
     CHECK(!(EffectiveScales(none, .5f, 1.0f, .8f) == AxisScales { .5f, .9f }));
     CHECK(!(EffectiveScales(none, .5f, 1.0f, .8f) == AxisScales { .9f, 1.0f }));
-    // EF16: a Y key of 0 follows the uniform scale (the mutant leaves Y at 1.0).
+    // A Y key of 0 follows the uniform scale, not 100%.
     CHECK((EffectiveScales(none, .5f, 0.0f, .8f) == AxisScales { .5f, .8f }));
-    // EF18: the uniform fallback and the 25%..200% clamp happen before the mixed-axes raise (a +Inf key follows the uniform
-    // scale; the mutant raises the raw Inf first, contaminating the other axis to 1.0, then sanitises to (1.0, 1.0)).
+    // The uniform fallback and the 25%..200% clamp happen before the mixed-axes raise: a +Inf key follows the uniform scale
+    // and leaves the other axis alone (raising the raw Inf first would also lift the other axis to 100%).
     CHECK((EffectiveScales(none, kInf, .5f, .6f) == AxisScales { .6f, .5f }));
 }
 
 void LayoutsDifferingOnlyByTheSwappedScales()
 {
-    // LY20: KeyFields slots 3 and 4 are the X scale then the Y scale (bits of globalScale, then bits of globalScaleY).
+    // KeyFields slots 3 and 4 hold the X scale then the Y scale (bits of globalScale, then of globalScaleY), at fixed places.
     uint64_t halfBits = 0, fullBits = 0;
     {
         double half = .5, full = 1.0;

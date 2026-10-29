@@ -345,23 +345,26 @@ int main(int argc, char** argv)
         CHECK(Count(menu, "if(ImGui::IsItemDeactivatedAfterEdit()&&pendingScale>=0){nr.workingScale=std::clamp(pendingScale,25,200)/100.0f;pendingScale=-1;}") == 1);
     }
 
-    // ---- S2 fix round 2: the anamorphic create/evaluate logs, the runtime-switch clear and the enlargement grey/tooltips -----
-    // PW20: the create-branch warning names the horizontal share then the vertical one (width then height, like the evaluate log).
+    // ---- the per-axis refusal logs, the runtime-switch clear, and the enlargement greying and tooltips -----
+    // The create-branch warning names the horizontal share then the vertical one (width then height, like the evaluate log).
     CHECK(Count(pass, "geometry.workScaleX*100.0f,geometry.workScaleY*100.0f,initResult,") == 1);
-    // PW28: the evaluate log warns for the fallback to the uniform size and errors for the session-ending failure.
+    // The evaluate log warns for the fallback to the uniform size and errors for the session-ending failure.
     CHECK(Count(pass, "if(anamorphicFallback)LOG_WARN(\"DLSS-NRevaluatereturned") == 1);
-    // PW61: a runtime switch forgets both the spatial fallback and the refused per-axis size. The ClearHistory body clears the
+    // A runtime switch forgets both the spatial fallback and the refused per-axis size. The ClearHistory body clears the
     // latch member and the spatial flag (a whole-file count would also see the new-layout retry, so this is anchored to the function).
     {
         const size_t clearAt = pass.find("voidClearHistory(){");
         const size_t clearEnd = pass.find("voidDropReuseCaches()", clearAt == std::string::npos ? 0 : clearAt);
         CHECK(clearAt != std::string::npos && clearEnd != std::string::npos && clearAt < clearEnd);
         if (clearAt != std::string::npos && clearEnd != std::string::npos && clearAt < clearEnd)
-            CHECK(Has(pass.substr(clearAt, clearEnd - clearAt), "g_nr.spatialFailed=false;"));
+        {
+            const std::string clearBody = pass.substr(clearAt, clearEnd - clearAt);
+            CHECK(Has(clearBody, "g_nr.spatialFailed=false;") && Has(clearBody, "g_nr.anamorphic={};"));
+        }
     }
-    // MN28/MN29/MN30: the Enlargement combo is greyed exactly while the model is not reduced (native or above 100%).
+    // The Enlargement combo is greyed exactly while the model is not reduced (native or above 100%).
     CHECK(Count(menu, "if(!reduced)ImGui::BeginDisabled();") == 1 && Count(menu, "if(!reduced)ImGui::EndDisabled();") == 1);
-    // MN52/MN53/MN54: the tooltips keep their above-100% and refusal clauses.
+    // The tooltips keep their above-100% and refusal clauses.
     CHECK(Count(menu, "Noeffectat100%orabove,norwhileanaxisisabove100%(greyedout).") == 1);
     CHECK(Count(menu, "Doesnothingat100%orabove,norwhileanaxisisabove100%(greyedout),andisoffwhile") == 1);
     CHECK(Count(menu, "Ifthemodelrefusesasizethatdiffersperaxis,thepassworksatModelresolutiononbothaxesuntilascalesettingchanges.") == 1);

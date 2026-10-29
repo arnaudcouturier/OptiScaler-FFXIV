@@ -98,8 +98,8 @@ try
         slots.ResetRecording(commands.Get());
     }
     {
-        // A token of an older generation than the slot is refused (!=, not <): the slot has since been leased again, so the token
-        // names a recording that no longer owns it. DB05 accepts it (< is false for a newer slot), the original refuses (!=).
+        // A token of an older generation than the slot is refused: the slot has since been leased again, so the token names a
+        // recording that no longer owns it (any generation mismatch refuses, an older one included).
         DlssNr::DescriptorSlots<2> slots;
         const auto first = slots.Acquire(commands.Get());
         expect(first.has_value(), "stale token test: the first lease failed");
