@@ -12,7 +12,8 @@
 // This does not call slInit -- it only needs to exercise LoadLibraryCheckW's dispatch, not a
 // working Streamline session, so it has no dependency on sl.h / a device / a window.
 //
-// The recipe builds it, stages the isolated directory (product DLL, ini, plugin copy) and runs it. By hand: run in an isolated directory with an OptiScaler.ini containing [Log] LogToFile=true (LogLevel
+// The recipe is manual: this test hangs on the current lock order (see its Note and
+// docs/notes/streamline-loader-lock-hazard.md), so build and run it by hand under a timeout. By hand: run in an isolated directory with an OptiScaler.ini containing [Log] LogToFile=true (LogLevel
 // left at its default 0/trace, which already includes LOG_ERROR) and OptiDllPath pointed at a
 // harmless FGInput/FGOutput so hookDlss/hookDlssg actually run (shouldHookSl just needs the
 // plugin directory below to not be OptiScaler's own private Streamline path, which an ad hoc

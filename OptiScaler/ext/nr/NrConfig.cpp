@@ -67,6 +67,7 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "WorkingScaleY", workingScaleY);
     b.AddEnum("DlssNr", "ScalingDownscaler", scalingDownscaler, Scaler::Count);
     b.Add("DlssNr", "AutoCapture", autoCapture);
+    b.Add("DlssNr", "ReplayCapture", replayCapture);
     b.Add("DlssNr", "ScanExposure", scanExposure);
     b.Add("DlssNr", "WhitePointSource", whitePointSource);
     b.Add("DlssNr", "WhitePointScale", whitePointScale);

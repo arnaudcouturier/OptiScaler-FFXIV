@@ -16,6 +16,8 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include "ext/nr/diag/NrReplayFormat.h"
+
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -34,7 +36,8 @@ struct Shot
     unsigned long long bytes = 0;
 };
 
-// Captures a run of consecutive frames of two images at once.
+// Captures a run of consecutive frames of two images at once: the frame the upscaler produced and the same frame
+// with the model's edit applied.
 class FrameCapture
 {
   public:
@@ -52,41 +55,68 @@ class FrameCapture
     bool isActive() const { return active_; }
     unsigned int progress() const { return captured_; }
 
-    // Records copies of both images for this frame. Both must be in the state given.
-    void record(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* before,
-                D3D12_RESOURCE_STATES beforeState, ID3D12Resource* after, D3D12_RESOURCE_STATES afterState)
+    // Records the copy of the frame as the upscaler produced it, before the model's edit is composed onto it.
+    // The caller passes the untouched game frame; it must be in the state given.
+    void recordBefore(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* before,
+                      D3D12_RESOURCE_STATES beforeState)
     {
-        if (!active_ || before == nullptr || after == nullptr)
+        if (!active_ || before == nullptr)
             return;
 
         // Recording stops the moment the run is complete, and does not resume until write() has
         // released everything.
         //
-        // ready_ is set here but acted on eight frames later, because the caller has to let the GPU
-        // finish with these copies before mapping them. Without this guard those eight frames each
-        // recorded another one: captured_ walked past the end of a vector sized to exactly wanted_,
-        // and the garbage read back as a Shot had its pointer handed to CopyTextureRegion. The device
-        // was removed and the game went down with nothing in the log -- every single time anyone
-        // pressed the button.
+        // ready_ is set when the last frame is recorded but acted on eight frames later, because the
+        // caller has to let the GPU finish with these copies before mapping them. Without this guard
+        // those eight frames each recorded another one: captured_ walked past the end of a vector sized
+        // to exactly wanted_, and the garbage read back as a Shot had its pointer handed to
+        // CopyTextureRegion. The device was removed and the game went down with nothing in the log --
+        // every single time anyone pressed the button.
         if (ready_ || captured_ >= wanted_)
             return;
 
-        if (!ensure(device, before, after))
+        if (!ensure(device, beforeShots_, beforeDesc_, before))
         {
             active_ = false;
             return;
         }
 
-        // ensure() sizes the vectors to wanted_. Belt and braces: an index into them is never taken
-        // on trust again.
-        if (captured_ >= beforeShots_.size() || captured_ >= afterShots_.size())
+        // ensure() sizes the vector to wanted_. Belt and braces: an index into it is never taken on trust.
+        if (captured_ >= beforeShots_.size())
         {
             ready_ = true;
             return;
         }
 
         copy(cmd, before, beforeState, beforeShots_[captured_]);
+        beforeTaken_ = true;
+    }
+
+    // Records the copy of the frame once the model's edit is applied. Counts the frame only when the
+    // matching "before" was taken in the same frame, so the two images of a pair are always one frame.
+    void recordAfter(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* after,
+                     D3D12_RESOURCE_STATES afterState)
+    {
+        if (!active_ || after == nullptr || !beforeTaken_)
+            return;
+
+        if (ready_ || captured_ >= wanted_)
+            return;
+
+        if (!ensure(device, afterShots_, afterDesc_, after))
+        {
+            active_ = false;
+            return;
+        }
+
+        if (captured_ >= afterShots_.size())
+        {
+            ready_ = true;
+            return;
+        }
+
         copy(cmd, after, afterState, afterShots_[captured_]);
+        beforeTaken_ = false;
         ++captured_;
 
         if (captured_ >= wanted_)
@@ -143,25 +173,23 @@ class FrameCapture
         afterShots_.clear();
         active_ = false;
         ready_ = false;
+        beforeTaken_ = false;
         captured_ = 0;
     }
 
   private:
-    bool ensure(ID3D12Device* device, ID3D12Resource* before, ID3D12Resource* after)
+    bool ensure(ID3D12Device* device, std::vector<Shot>& shots, D3D12_RESOURCE_DESC& desc, ID3D12Resource* source)
     {
-        if (!beforeShots_.empty())
+        if (!shots.empty())
             return true;
 
-        beforeShots_.resize(wanted_);
-        afterShots_.resize(wanted_);
-        beforeDesc_ = before->GetDesc();
-        afterDesc_ = after->GetDesc();
-        beforeDesc_.Format = TypedForCopy(beforeDesc_.Format);
-        afterDesc_.Format = TypedForCopy(afterDesc_.Format);
+        shots.resize(wanted_);
+        desc = source->GetDesc();
+        desc.Format = TypedForCopy(desc.Format);
 
         for (unsigned int i = 0; i < wanted_; ++i)
         {
-            if (!alloc(device, beforeDesc_, beforeShots_[i]) || !alloc(device, afterDesc_, afterShots_[i]))
+            if (!alloc(device, desc, shots[i]))
                 return false;
         }
 
@@ -174,21 +202,8 @@ class FrameCapture
     // the output happened to be one of these.
     static DXGI_FORMAT TypedForCopy(DXGI_FORMAT f)
     {
-        switch (f)
-        {
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-            return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
-            return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-            return DXGI_FORMAT_R10G10B10A2_UNORM;
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-            return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-            return DXGI_FORMAT_B8G8R8A8_UNORM;
-        default:
-            return f;
-        }
+        // One list of typed copy formats for every capture, depth buffers included.
+        return static_cast<DXGI_FORMAT>(ext::nr::replay::CopyFormatFor(f));
     }
 
     static bool alloc(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc, Shot& shot)
@@ -341,5 +356,6 @@ class FrameCapture
     unsigned int captured_ = 0;
     bool active_ = false;
     bool ready_ = false;
+    bool beforeTaken_ = false; // the "before" of the frame being recorded was copied, its "after" is awaited
 };
 } // namespace capture

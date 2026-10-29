@@ -51,6 +51,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] PlateDiagnostics", // developer probes (log only) of the output stream and the UI draws
     "[HudLess] PlateOverlay", // developer outline of the probe's suspected nameplate rectangles
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
+    "[DlssNr] ReplayCapture", // developer key: the capture triggers write a full replay set of the pass
     "[NgxRelease] SkipReleaseSleep", // kill switch of the release-path sleep skip
     "[FramePacing] Trace", // diagnostic switch of the frame-pacing CPU trace
     "[FramePacing] GpuTimers", // diagnostic switch of the frame-pacing GPU stage timers

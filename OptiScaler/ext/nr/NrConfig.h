@@ -108,6 +108,10 @@ struct NrConfig
     CustomOptional<Scaler> scalingDownscaler { Scaler::Lanczos3 };
     // Write one set of matched before/after frames per session after the capture delay (180 frames). SEAMS 3.4: real key, default false keeps the oracle behaviour (no capture).
     CustomOptional<bool> autoCapture { false };
+    // Developer key, no menu control. Makes every capture trigger (AutoCapture, the trigger file) write a replay set instead of the
+    // before/after frames: two consecutive frames with every compute dispatch of the pass, its constants and the contents of every
+    // resource it reads and writes, to a replay-<time> folder beside OptiScaler. Costs GPU copies and memory only while capturing.
+    CustomOptional<bool> replayCapture { false };
     // Look for the exposure the game computed but never handed to the upscaler (developer override, no menu control).
     CustomOptional<bool> scanExposure { false };
     // 0 the paper white slider, 1 the exposure the game hands the upscaler, 2 scanned exposure.

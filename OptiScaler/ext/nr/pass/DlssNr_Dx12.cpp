@@ -24,6 +24,7 @@
 
 
 #include "ext/nr/diag/DlssNr_Capture.h"
+#include "ext/nr/diag/NrReplayCapture.h"
 #include "ext/nr/exposure/DlssNr_ExposureScan.h"
 
 #include "ext/nr/pass/DlssNr_Dx12.h"
@@ -46,6 +47,7 @@
 #include <gpu_time/GpuTime_Dx12.h>
 
 #include <chrono>
+#include <ctime>
 #include <mutex>
 #include <atomic>
 #include <format>
@@ -390,6 +392,13 @@ std::optional<double> g_lastGpuTime;
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
 
+// The replay recorder ([DlssNr] ReplayCapture): every compute dispatch of the pass, with its constants and the contents of
+// what it reads and writes. Idle (and free) unless a capture was asked for.
+ext::nr::replay::Recorder g_replay;
+
+// The game's exposure texture: its state is not ours to assume, so the recorder never copies it.
+ID3D12Resource* g_replayForeign = nullptr;
+
 // One capture happens on its own each session, so there is always a fresh sample without anyone having
 // to remember to ask. Started after the scene has had a moment to settle: the first frames after a
 // feature is built carry its reset, and are not representative of anything.
@@ -409,12 +418,20 @@ void ClearCaptureDirectory()
     std::error_code ec;
     const auto dir = Util::DllPath().remove_filename() / "dlssnr-capture";
 
+    // Replay sets are kept: they are large, and the blessed images of a set live inside it.
     if (std::filesystem::exists(dir, ec))
     {
-        std::filesystem::remove_all(dir, ec);
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+        {
+            const auto name = entry.path().filename().string();
+            if (entry.is_directory(ec) && name.rfind("replay-", 0) == 0)
+                continue;
 
-        if (ec)
-            LOG_WARN("DLSS-NR could not clear {}: {}", dir.string(), ec.message());
+            std::filesystem::remove_all(entry.path(), ec);
+
+            if (ec)
+                LOG_WARN("DLSS-NR could not clear {}: {}", entry.path().string(), ec.message());
+        }
     }
 }
 
@@ -452,6 +469,32 @@ void CheckCaptureTrigger()
         DlssNr::RequestCapture(capture::kMaxFrames);
         LOG_INFO("DLSS-NR capture requested by trigger file");
     }
+}
+
+// Writes the replay set that was just recorded, into a folder named by the time, inside the capture folder.
+void WriteReplayCapture()
+{
+    char stamp[32] = {};
+    const std::time_t now = std::time(nullptr);
+    std::tm local {};
+    localtime_s(&local, &now);
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+
+    const auto dir = Util::DllPath().remove_filename() / "dlssnr-capture" / (std::string("replay-") + stamp);
+    const auto written = g_replay.Write(dir);
+
+    if (!written.ok)
+    {
+        LOG_ERROR("DLSS-NR could not write the replay set {}: {}", dir.string(), written.error);
+        return;
+    }
+
+    LOG_INFO("DLSS-NR wrote a replay set to {}: {} dispatches, {} images ({} copies shared by content), {:.1f} MB, {} dispatches and {} boundary pictures left out",
+             written.directory, written.dispatches, written.images, written.copies,
+             (double) written.bytes / 1048576.0, written.skipped, written.boundariesSkipped);
+    if (written.skipped > 0 || written.boundariesSkipped > 0)
+        LOG_WARN("DLSS-NR replay set {} is incomplete ({} dispatches and {} boundary pictures left out): a replay of it will fail",
+                 written.directory, written.skipped, written.boundariesSkipped);
 }
 
 // The encoded mean is aimed here. Mid-grey rather than anything brighter: the model has to see both the
@@ -1235,6 +1278,11 @@ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESO
     if (from == to)
         return;
 
+    // A resource that enters or leaves a write state may have changed: a replay capture copies it again at its next read.
+    constexpr UINT writeStates = D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_COPY_DEST;
+    if (g_replay.Recording() && ((from & writeStates) != 0 || (to & writeStates) != 0))
+        g_replay.NoteWrite(res);
+
     D3D12_RESOURCE_BARRIER b {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = res;
@@ -1592,7 +1640,10 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
                                   ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline, ID3D12Resource* InDepth)
 {
     if (!_init || InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr)
+    {
+        g_replay.DispatchDropped();
         return false;
+    }
 
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
 
@@ -1607,6 +1658,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     if (!acquired)
     {
         ReportSkipOnce("descriptor slots are still owned by GPU recordings; retaining the clean frame");
+        g_replay.DispatchDropped();
         return false;
     }
     const uint32_t slot = *acquired;
@@ -1646,6 +1698,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     if (!CreateConstantsBuffer(_device, _constantBuffers[slot], constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
+        g_replay.DispatchDropped();
         return false;
     }
 
@@ -1659,7 +1712,74 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     // writes fewer pixels than its source has.
     const UINT dispatchWidth = (constants.Width + _numThreadsX - 1) / _numThreadsX;
     const UINT dispatchHeight = (constants.Height + _numThreadsY - 1) / _numThreadsY;
+
+    // Replay capture: the inputs, constants and views of this dispatch, recorded just before it.
+    bool replayOpen = false;
+    if (g_replay.Recording())
+    {
+        const void* blob = DlssNr_cso;
+        size_t blobSize = sizeof(DlssNr_cso);
+        const char* shaderId = "dlssnr";
+        if (pipeline != nullptr && pipeline == _guideMatchPipeline)
+        {
+            shaderId = "guide_match";
+            blob = DlssNr_GuideMatch_cso;
+            blobSize = sizeof(DlssNr_GuideMatch_cso);
+        }
+        else if (pipeline != nullptr && pipeline == _spatialPipeline)
+        {
+            shaderId = "spatial";
+            blob = DlssNr_Spatial_cso;
+            blobSize = sizeof(DlssNr_Spatial_cso);
+        }
+        else if (pipeline != nullptr && pipeline == _spatialGuidesPipeline)
+        {
+            shaderId = "spatial_guides";
+            blob = DlssNr_Spatial_Guides_cso;
+            blobSize = sizeof(DlssNr_Spatial_Guides_cso);
+        }
+
+        const std::string kind = ext::nr::replay::KindName(shaderId, constants.Mode);
+        ext::nr::replay::DispatchDesc replay;
+        replay.kind = kind.c_str();
+        replay.shader = shaderId;
+        replay.shaderHash = ext::nr::replay::Fnv1a64(blob, blobSize);
+        replay.groups[0] = dispatchWidth;
+        replay.groups[1] = dispatchHeight;
+        replay.constants = &constants;
+
+        // The views exactly as created above: the typed member of a typeless family, except the depth plane format.
+        for (uint32_t i = 0; i < kSrvCount; ++i)
+        {
+            auto& b = replay.bindings[replay.bindingCount++];
+            const DXGI_FORMAT format = srvs[i]->GetDesc().Format;
+            b.uav = false;
+            b.slot = i;
+            b.resource = srvs[i];
+            b.viewFormat = format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ? TranslateTypelessFormats(format) : format;
+            b.readable = srvs[i] != g_replayForeign;
+        }
+        for (uint32_t i = 0; i < kUavCount; ++i)
+        {
+            auto& b = replay.bindings[replay.bindingCount++];
+            b.uav = true;
+            b.slot = i;
+            b.resource = uavs[i];
+            b.viewFormat = TranslateTypelessFormats(uavs[i]->GetDesc().Format);
+        }
+
+        replayOpen = g_replay.BeforeDispatch(InCmdList, _device, replay);
+        if (!replayOpen)
+        {
+            g_replay.NoteWrite(uavs[0]);
+            g_replay.NoteWrite(uavs[1]);
+        }
+    }
+
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
+
+    if (replayOpen)
+        g_replay.AfterDispatch(InCmdList, _device);
 
     return true;
 }
@@ -2452,6 +2572,22 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR wrote matched before/after frames to {}", written);
     }
 
+    // Replay capture (key ReplayCapture): a finished capture is written out a few frames after its last frame, then the
+    // frame is recorded for as long as the capture runs. The frame is closed whichever way this call returns.
+    if (g_replay.ReadyToWrite(g_frames))
+        WriteReplayCapture();
+
+    g_replayForeign = (ID3D12Resource*) frame.ExposureTexture;
+    struct ReplayFrameScope
+    {
+        bool on;
+        ~ReplayFrameScope()
+        {
+            if (on)
+                g_replay.EndFrame(g_frames);
+        }
+    } replayFrame { g_replay.BeginFrame(ext::Cfg().nr.replayCapture.value_or_default()) };
+
     // Paper white, and nothing else. The frame is divided by this and encoded, and the soft knee
     // above 0.75 takes whatever is left over.
     //
@@ -2669,6 +2805,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+    // The untouched game frame, in the state the encode left it in. The "before" image of an on-demand capture is this
+    // copy; the proxy (colorCopy) is not the game's frame.
+    if (g_capture.isActive())
+        g_capture.recordBefore(cmdList, device, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    g_replay.AddBoundary(cmdList, device, "game_frame", g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     ID3D12Resource* modelInput = g_nr.colorCopy;
@@ -2704,6 +2847,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             {
                 Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                g_replay.AddBoundary(cmdList, device, "output_scaling_up", g_nr.colorSmall,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 built = true;
             }
         }
@@ -2953,6 +3098,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         finalAnswer = passOutput;
         MakeModelReadable(finalAnswer);
 
+        if (g_replay.Recording())
+            g_replay.AddBoundary(cmdList, device, ("model_answer_" + std::to_string(pass)).c_str(), finalAnswer,
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
         if (pass + 1 < effectivePasses)
         {
             if (g_nr.feedbackScratch && nr.passFeedback.value_or_default() < 1.0f)
@@ -3163,6 +3312,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            g_replay.AddBoundary(cmdList, device, "output_scaling_down", g_nr.outputNative,
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             superDownOk = true;
         }
 
@@ -3242,13 +3393,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // own.
         if (g_capture.isActive())
         {
-            g_capture.record(cmdList, device, g_nr.colorCopy,
-                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
-                             targetState);
+            g_capture.recordAfter(cmdList, device, target, targetState);
 
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
                 g_captureWriteAtFrame = g_frames + 8;
         }
+
+        g_replay.AddBoundary(cmdList, device, "final_frame", target, targetState);
     }
     else
     {
@@ -3943,10 +4094,19 @@ std::optional<double> LastGpuTime()
 void RequestCapture(unsigned int frames)
 {
     ClearCaptureDirectory();
+
+    // With ReplayCapture on, a capture is a replay set (which holds the game frame and the final frame as well).
+    if (ext::Cfg().nr.replayCapture.value_or_default())
+    {
+        if (!g_replay.Request())
+            LOG_INFO("DLSS-NR replay capture already running or waiting to be written");
+        return;
+    }
+
     g_capture.request(frames);
 }
 
-bool CaptureInProgress() { return g_capture.isActive(); }
+bool CaptureInProgress() { return g_capture.isActive() || g_replay.Requested() || g_replay.WritePending(); }
 
 ext::gpu::GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists)
 {
@@ -4237,6 +4397,7 @@ void Shutdown()
         *resource = nullptr;
     }
     g_capture.release();
+    g_replay.Release();
     g_gpuTime.reset();
     g_ngxTime.reset();
     g_lastNgxTime.reset();

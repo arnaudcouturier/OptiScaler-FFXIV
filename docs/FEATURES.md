@@ -20,6 +20,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [NR hotkeys](#nr-hotkeys) (`[DlssNr] ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`) | fork | off until a key is bound; new; unit-tested; not tried in game |
 | [NR native path](#nr-native-path-and-vit-capture) | ported from SirenBrink's fork | tested (part of NR) |
 | [NR ViT capture](#nr-native-path-and-vit-capture) | fork | diagnostic only |
+| [NR frame replay](#nr-frame-replay) (`[DlssNr] ReplayCapture`) | fork | developer tool, off by default; new; unit-tested on the software adapter; not tried in game |
 | [NR ViT reuse](#nr-native-path-and-vit-capture) (`VitEvery`) | ported from SirenBrink's fork | untested |
 | [AMD HIP pre-SR](#other-nr-paths), [Vulkan NR path](#other-nr-paths) | ported from SirenBrink's fork | untested |
 | [OptiHDR (HDR10 output)](#optihdr-hdr10-output) | ported from SirenBrink's fork | tested |
@@ -68,7 +69,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested.
 
-**Config.** `[DlssNr]` (94 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
+**Config.** `[DlssNr]` (95 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `ReplayCapture` (ini only, see [NR frame replay](#nr-frame-replay)), `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
 
 **Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off, model resolution and enlargement shortcuts in the Keybinds list.
 
@@ -109,6 +110,18 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 **Config.** `[DlssNr] VitCapture`, `VitFirstPassOnly`, `VitEvery`, `VitAllowUnverified`, `Precision`. **Menu.** Status text in the `dlss_nr` card.
 
 **Code and seams.** `ext/nr/native/`, `ext/nr/hybrid/`. The capture summariser is `tools/nr-vit-capture-summary.ps1`; profiling a new model file: [nr-vit-reuse-profile-runbook.md](nr-vit-reuse-profile-runbook.md). Seam: nr.
+
+### NR frame replay
+
+**Origin.** Fork-original.
+
+**What it does.** A developer tool for checking NR shader changes without the game. With `[DlssNr] ReplayCapture = true`, a capture trigger (the `dlssnr-capture.trigger` file or `AutoCapture`) records a replay set of the NR pass instead of the before/after frames: two consecutive frames, every compute dispatch of the pass with its constants, the views it binds and the contents of what it reads and writes, the model's answers and the untouched game frame, in `dlssnr-capture\replay-<time>\`. A test replays each dispatch on the Direct3D software adapter (WARP) with the build's own compiled shaders and compares the result bit for bit with a blessed reference made the same way. A capture shows the player's screen: keep it out of version control. The ordinary before/after capture's "before" image is now the untouched game frame (it was the encoded proxy).
+
+**Status.** New; unit-tested on the software adapter with synthetic sets; not tried in game (no real capture yet). The game's exposure texture is not recorded, so the exposure paths replay with an empty input. Dispatches outside the scene pass (the deferred pre-upscale stages, the character preview) are not recorded. Limits: the write holds the render thread for seconds (a hitch at capture time only); the recorder moves the pass's guide inputs between the shader-read and copy-source states, relying on the input-state contract the pass already relies on.
+
+**Config.** `[DlssNr] ReplayCapture` (ini only, default false). **Menu.** None. Details: [notes/nr-frame-replay.md](notes/nr-frame-replay.md).
+
+**Code and seams.** `ext/nr/diag/NrReplay*.h`, the recorder calls in `ext/nr/pass/DlssNr_Dx12.cpp`; tests `tests/ext/nr/nr_replay*`. Seam: nr (no upstream change).
 
 ### NR spatial compression profiles
 

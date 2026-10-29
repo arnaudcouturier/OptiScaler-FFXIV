@@ -15,4 +15,4 @@ If one thread is inside the `sl.dlss_g.dll` branch while another thread performs
 - No freeze at launch has been seen or reported.
 - A fix changes upstream code that every Streamline start goes through.
 
-**What a player would see:** the game freezing during start-up (before the first frame, around the Streamline log lines `Loaded plugin 'sl.dlss_g'`), with no crash dump. **What a fix would be:** not holding the plugin mutex across the DLL load, or making `CheckModulesInMemory` skip its work with a `try_lock` instead of waiting. The stress test, unchanged, hangs every time and would be the failing test for that fix.
+**What a player would see:** the game freezing during start-up, around the Streamline plugin log lines (`Loaded plugin 'sl.dlss_g'`), with no crash dump. **What a fix would be:** not holding the plugin mutex across the DLL load, or making `CheckModulesInMemory` skip its work with a `try_lock` instead of waiting. The stress test, unchanged, hangs every time and would be the failing test for that fix.
