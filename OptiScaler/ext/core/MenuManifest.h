@@ -60,7 +60,6 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] FfxivLegacyGameBuild", // persistent rollback switch of the game build handling, read once at start
     "[FFXIV] FfxivUnknownBuildHooks", // persistent switch: the game-address features on a game build the table does not know
     "[FFXIV] FfxivForceUnknownBuild", // persistent debug switch: ignore the known-build table
-    "[FFXIV] AutomaticReShadeMotionScale", // developer switch of the derived motion vector value scaling; goes once it is confirmed in game
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member

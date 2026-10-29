@@ -376,9 +376,7 @@ RemapStatus LiveDepthBackend::Remap(const RemapRequest& request, RemapOut& out)
 {
     if (_env.remap == nullptr)
         return RemapStatus::NoContext;
-    RemapRequest r = request;
-    r.scaleMotion = request.scaleMotion && (_env.scaleMotion == nullptr || _env.scaleMotion());
-    return _env.remap->Remap(r, out);
+    return _env.remap->Remap(request, out);
 }
 
 void LiveDepthBackend::ReleaseRemaps()

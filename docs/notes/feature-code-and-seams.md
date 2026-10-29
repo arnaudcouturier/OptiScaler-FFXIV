@@ -115,7 +115,7 @@ Seams: present `FrameInterval`; fg `MarkersBeforePresent`, `MarkersNextFrame`, `
 
 **Code.** `ext/reshade/ReShadeDepth*.{h,cpp}` (facade `ReShadeDepth`, evaluate engine `ReShadeDepthEval`, binder `ReShadeDepthCore`, copy pass `ReShadeDepthCopy` with `ext/reshade/shaders/depth_crop.hlsl`, G-buffer remap pass `ReShadeGBufferCopy` with `ext/reshade/shaders/gbuffer_remap.hlsl` (`ReShadeGBuffer.shaders.props`), live backend `ReShadeDepthBackend`/`ReShadeDepthRaw`, event callbacks `ReShadeDepthEvents`, late registration `ReShadeDepthLate`, pure decisions `ReShadeDepthGlue.h`, menu card `ReShadeDepthMenu`), `ext/reshade/ReShadeRegistrationState.*`.
 
-**Seams.** reshade `OnEvaluated` (one line in `NVNGX_DLSS_Dx11.cpp`). `ext::reshade::depth::OnNgxShutdown()` is called from the existing seam bodies `dx11bridge::OnNgxShutdownBegin` and `dx11bridge::BeforeReleaseFeature`. Config: `FfxivConfig::automaticReShadeDepth` with a load hook (no seam); `automaticReShadeMotionScale` is read where it is used (ini only). The ReShade events are subscribed in `ReShadeDepthEvents.cpp` (five at load, begin and finish from the `init_effect_runtime` callback); no new seam in upstream code.
+**Seams.** reshade `OnEvaluated` (one line in `NVNGX_DLSS_Dx11.cpp`). `ext::reshade::depth::OnNgxShutdown()` is called from the existing seam bodies `dx11bridge::OnNgxShutdownBegin` and `dx11bridge::BeforeReleaseFeature`. Config: `FfxivConfig::automaticReShadeDepth` with a load hook (no seam). The ReShade events are subscribed in `ReShadeDepthEvents.cpp` (five at load, begin and finish from the `init_effect_runtime` callback); no new seam in upstream code.
 
 ## Window mode
 

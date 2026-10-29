@@ -24,10 +24,6 @@ struct FfxivConfig
     CustomOptional<bool> unknownBuildHooks { false }; // [FFXIV] FfxivUnknownBuildHooks: allow the features that read game addresses on a game build the table does not know
     CustomOptional<bool> forceUnknownBuild { false }; // [FFXIV] FfxivForceUnknownBuild: debug, ignore the table so the resolver's values alone can be tried on today's exe
     CustomOptional<bool> automaticReShadeDepth { false }; // [FFXIV] AutomaticReShadeDepth: ReShade effects get a copy of the scene depth at the output size (ext/reshade/ReShadeDepth.h)
-    // [FFXIV] AutomaticReShadeMotionScale: ini only (no menu control). The motion vectors that REST hands to ReShade are realigned with the
-    // rest of the G-buffers; this multiplies their VALUES by output/render per axis as well. DERIVED (not yet confirmed in game): the switch
-    // exists to turn it off if it turns out wrong, and goes once it is confirmed. Only matters while AutomaticReShadeDepth is on.
-    CustomOptional<bool> automaticReShadeMotionScale { true };
     ffxiv::chara::CharaConfig chara; // ext/ffxiv/chara: [FFXIV] Preview* and [HDR] PreviewNRTrace
 
     void Bind(config::Binder& b);

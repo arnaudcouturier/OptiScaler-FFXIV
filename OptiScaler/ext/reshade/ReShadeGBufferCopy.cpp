@@ -115,7 +115,7 @@ ValueMultiplier MotionMultiplier(GBuffer buffer, bool scaleMotion, uint32_t outp
     ValueMultiplier m;
     if (buffer != GBuffer::MotionVectors || !scaleMotion)
         return m;
-    // DERIVED, not yet confirmed in game. Under DLSS's convention the stored vector times the scale the game reports is a displacement in
+    // DERIVED (tried in game, no problem seen). Under DLSS's convention the stored vector times the scale the game reports is a displacement in
     // RENDER pixels, so the screen-UV multiplier is that scale / render size per axis (a game that reports a scale equal to the render
     // size gets exactly 1). Without a usable reported scale (0, negative, NaN, infinite) the vectors are taken to be in render pixels or a
     // fraction of the render frame and the multiplier is output / render. A render size of 0 is not divided by (the request check

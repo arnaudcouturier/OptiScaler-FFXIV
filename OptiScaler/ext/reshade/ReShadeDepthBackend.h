@@ -148,7 +148,6 @@ struct BackendEnv
     uint64_t (*frame)() = nullptr;          // the depth-owned frame counter
     uint64_t (*primaryDevice)() = nullptr;  // the game's primary D3D11 device, 0 = unknown
     IRemapEngine* remap = nullptr;          // the D3D11 side of the G-buffer realignment (null: every G-buffer keeps the add-on's binding)
-    bool (*scaleMotion)() = nullptr;        // [FFXIV] AutomaticReShadeMotionScale; null = on. DERIVED scaling of the motion vector values
 };
 
 // Largest string the backend accepts from ReShade, and largest list it reads: bigger is a failure, never a cut.
@@ -185,8 +184,8 @@ class LiveDepthBackend final : public IBackend, public IEventHost
     bool SetUniformBool(uint64_t runtime, uint64_t variable, bool value) override;
     bool Techniques(uint64_t runtime, std::vector<EffectTechnique>& out) override;
     DefinitionState Definition(uint64_t runtime, const char* effect, const char* name, std::string& value) override;
-    // The G-buffers: forwarded to BackendEnv::remap (which does its own fault guarding), plus the log lines of the decisions. The motion
-    // scaling switch is applied here, on the way to the engine.
+    // The G-buffers: forwarded to BackendEnv::remap (which does its own fault guarding), plus the log lines of the decisions. The request
+    // goes to the engine as the core made it (the motion vector values are always scaled).
     bool DescribeView(uint64_t view, ViewDesc& out) override;
     RemapStatus Remap(const RemapRequest& request, RemapOut& out) override;
     void ReleaseRemaps() override;

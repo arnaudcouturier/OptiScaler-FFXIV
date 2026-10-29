@@ -24,8 +24,8 @@
 // Values: the copy keeps the source's values. The one exception is MotionVectors with scaleMotion: the vectors are in render pixels
 // (or a fraction of the render frame), the copy has the output size, so the first two channels are multiplied per axis by
 // reportedScale / render (the MV scale the game tells the upscaler: under DLSS's convention stored value x scale = displacement in render
-// pixels), or by output / render when the game reports none (MotionMultiplier). That scaling is DERIVED, not yet confirmed in game; it
-// is only allowed where the format can hold the scaled values (float and SNORM, ClassifyRemapFormat::valueScalable).
+// pixels), or by output / render when the game reports none (MotionMultiplier). That scaling is always on and DERIVED (tried in game, no
+// problem seen); it is only allowed where the format can hold the scaled values (float and SNORM, ClassifyRemapFormat::valueScalable).
 //
 // Lifetime: the views handed out (RemapOut) are NOT AddRef'd by the pass. The binder takes its own reference before it binds (same
 // thread, no gap), so a reference the caller took keeps a copy alive after the pass dropped its own: a new target (new output size
@@ -86,8 +86,8 @@ RemapStatus CheckRemap(const ViewDesc& source, const RemapRequest& request);
 
 // The multiplier of the first two channels. MotionVectors with scaleMotion, per axis: mvScale / render when the game reported a usable
 // scale on that axis (finite and > 0; 1920 over 1920 is exactly 1), else output / render (2.0 at 3840 over 1920, 1.5 at 3840 over 2560);
-// 1.0 for a render size of 0. Every other buffer, or scaleMotion false: exactly 1.0f (so the shader's multiply is bit exact). DERIVED, not
-// yet confirmed in game.
+// 1.0 for a render size of 0. Every other buffer, or scaleMotion false: exactly 1.0f (so the shader's multiply is bit exact). DERIVED (tried in
+// game, no problem seen).
 struct ValueMultiplier
 {
     float x = 1.0f, y = 1.0f;

@@ -47,9 +47,6 @@ void LogSlotCounter(GBuffer buffer, Counter counter, uint64_t count)
 
 uint32_t EvaluateThreadImpl();
 
-// [FFXIV] AutomaticReShadeMotionScale, read where it is used (ini only; a plain read of the config)
-bool ScaleMotionImpl() { return ext::Cfg().ffxiv.automaticReShadeMotionScale.value_or_default(); }
-
 // The immediate context the lighting hooks sit on, null when they are not installed.
 ID3D11DeviceContext* HookedContextImpl()
 {
@@ -89,7 +86,7 @@ struct Facade final : ICaptureSink
     // the D3D11 side of the G-buffer realignment: it runs on the thread of begin_effects and draws with the raw draw of the lighting hooks
     // only on the context they hooked
     LiveRemapEngine remapEngine { &ext::ffxiv::chara::DrawFullscreenTriangle, &HookedContextImpl };
-    LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl, &remapEngine, &ScaleMotionImpl } };
+    LiveDepthBackend backend { LiveRawApi(), BackendEnv { &NowMsImpl, &FrameImpl, &PrimaryDeviceImpl, &remapEngine } };
     DepthBinder binder { backend, &LogCounter };
     EventDispatcher dispatcher { binder, backend };
     ProcessHost host { binder };

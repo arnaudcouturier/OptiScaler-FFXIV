@@ -1318,7 +1318,7 @@ void FaultAtEveryRawCall()
 }
 } // namespace
 
-// ---- the G-buffer calls: forwarded to the remap engine of the environment, with the motion scaling switch applied on the way -----
+// ---- the G-buffer calls: forwarded to the remap engine of the environment, the request untouched (the motion value scaling has no switch) -----
 struct FakeEngine final : IRemapEngine
 {
     int describes = 0, remaps = 0, releases = 0;
@@ -1346,8 +1346,6 @@ struct FakeEngine final : IRemapEngine
     }
     void Release() noexcept override { ++releases; }
 };
-bool g_scaleSwitch = true;
-bool ScaleSwitch() { return g_scaleSwitch; }
 
 void GBufferCalls()
 {
@@ -1355,7 +1353,6 @@ void GBufferCalls()
     FakeEngine engine;
     BackendEnv env = Env();
     env.remap = &engine;
-    env.scaleMotion = &ScaleSwitch;
     LiveDepthBackend b(raw, env);
 
     ViewDesc d;
@@ -1372,15 +1369,17 @@ void GBufferCalls()
     rq.outputW = 1920;
     rq.outputH = 1080;
     rq.stamp = 99;
+    rq.motionScaleX = 1920.0f; // what the game reported, as the core hands it over
+    rq.motionScaleY = 1080.0f;
+    CHECK(RemapRequest {}.scaleMotion); // the default of a request, and the only default there is: the motion vector values are scaled
     RemapOut out;
     CHECK(b.Remap(rq, out) == RemapStatus::Ok && engine.remaps == 1 && out.srv == 0xC0DE && out.srvSrgb == 0xC0DF);
     CHECK(engine.last.context == 0xC7 && engine.last.buffer == GBuffer::MotionVectors && engine.last.srv == 0x10 && engine.last.srvSrgb == 0x11);
-    CHECK(engine.last.renderW == 960 && engine.last.outputH == 1080 && engine.last.stamp == 99 && engine.last.scaleMotion);
-    // the ini switch turns the value scaling off on the way to the engine; the core's request is never changed
-    g_scaleSwitch = false;
-    CHECK(b.Remap(rq, out) == RemapStatus::Ok && !engine.last.scaleMotion && rq.scaleMotion);
-    g_scaleSwitch = true;
-    rq.scaleMotion = false; // a request that did not ask for it is not turned on by the switch
+    CHECK(engine.last.renderW == 960 && engine.last.outputH == 1080 && engine.last.stamp == 99);
+    CHECK(engine.last.renderH == 540 && engine.last.outputW == 1920 && engine.last.motionScaleX == 1920.0f && engine.last.motionScaleY == 1080.0f);
+    // no switch to turn it off: a default request reaches the engine asking for the value scaling, whatever the environment holds
+    CHECK(engine.last.scaleMotion && rq.scaleMotion);
+    rq.scaleMotion = false; // a request that did not ask for it stays as it is
     CHECK(b.Remap(rq, out) == RemapStatus::Ok && !engine.last.scaleMotion);
     // a refusal of the engine is passed on as it is
     engine.answer = RemapStatus::UnsupportedFormat;
@@ -1388,12 +1387,10 @@ void GBufferCalls()
     b.ReleaseRemaps();
     CHECK(engine.releases == 1);
 
-    // no switch given: on
-    BackendEnv noSwitch = env;
-    noSwitch.scaleMotion = nullptr;
-    LiveDepthBackend c(raw, noSwitch);
+    // a second backend on the same bare environment (the facade's environment has no scaling callback either): the same, on
     rq.scaleMotion = true;
     engine.answer = RemapStatus::Ok;
+    LiveDepthBackend c(raw, env);
     CHECK(c.Remap(rq, out) == RemapStatus::Ok && engine.last.scaleMotion);
 
     // no engine: every buffer keeps the add-on's binding, nothing throws
