@@ -56,6 +56,10 @@ struct NrConfig
     CustomOptional<float> maxRatio { 2.0f };
     // How a model that worked below the frame's size is brought back: 0 classic, 1 matched residual.
     CustomOptional<uint32_t> transfer { 1 };
+    // RCAS-style sharpening of the Classic enlargement output (DirectX 12 only). Off keeps the frame as the resolve wrote it.
+    CustomOptional<bool> classicSharpen { false };
+    // Strength of the Classic sharpening, 0 (a copy) to 1 (full). Default is upstream RCAS's own default sharpness.
+    CustomOptional<float> classicSharpenStrength { 0.4f };
     // 0 off, 1 the picture the model was shown, 2 its raw answer, 3 what it changed, amplified.
     CustomOptional<uint32_t> debugView { 0 };
     // 0 off, 1 side by side, 2 a wipe.

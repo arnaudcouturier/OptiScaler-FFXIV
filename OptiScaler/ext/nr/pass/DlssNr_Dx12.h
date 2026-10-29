@@ -53,6 +53,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _guideMatchPipeline = nullptr;
     ID3D12PipelineState* _spatialPipeline = nullptr;
     ID3D12PipelineState* _spatialGuidesPipeline = nullptr;
+    // Classic-enlargement sharpen (RCAS-style): lazy, like the spatial pipelines; null until the key asks for it.
+    ID3D12PipelineState* _classicSharpenPipeline = nullptr;
+    // Set when that first creation fails: tried once per device lifetime, not retried every frame.
+    bool _classicSharpenPipelineFailed = false;
     bool DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
                          ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,
                          ID3D12Resource* target, ID3D12Resource* second);

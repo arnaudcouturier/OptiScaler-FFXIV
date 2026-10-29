@@ -48,6 +48,7 @@ template<class C, class F> void Fields(C& c, F&& f)
     NR_FIELD(ScalingDownscaler, scalingDownscaler, 0, 7);
     NR_FIELD(TransferStrength, transferStrength, 0, 2); NR_FIELD(ColourStrength, colourStrength, 0, 4);
     NR_FIELD(Transfer, transfer, 0, 1); NR_FIELD(ReversibleMode, reversibleMode, 0, 5); NR_FIELD(ApplyModel, applyModel, 0, 1);
+    NR_FIELD(ClassicSharpen, classicSharpen, 0, 1); NR_FIELD(ClassicSharpenStrength, classicSharpenStrength, 0, 1);
     NR_FIELD(MaxRatio, maxRatio, 1, 30); NR_FIELD(SkinProtection, skinProtection, 0, 1);
     NR_FIELD(SkinToneEnabled, skinToneEnabled, 0, 1); NR_FIELD(SkinDetail, skinDetail, 0, 1); NR_FIELD(SkinColour, skinColour, 0, 1);
     NR_FIELD(EnvironmentDetail, environmentDetail, 0, 1); NR_FIELD(EnvironmentColour, environmentColour, 0, 1);
@@ -114,6 +115,8 @@ inline Json Upgrade(Json j)
         if (!j.contains("FoveaFalloff")) j["FoveaFalloff"] = 400.0;
         for (const char* key : {"FoveaEdgeX", "FoveaEdgeY"}) if (!j.contains(key)) j[key] = 0.5;
         if (!j.contains("DepthAwareResolve")) j["DepthAwareResolve"] = false;
+        if (!j.contains("ClassicSharpen")) j["ClassicSharpen"] = false;
+        if (!j.contains("ClassicSharpenStrength")) j["ClassicSharpenStrength"] = 0.4;
         for (const char* key : {"WorkingScaleX", "WorkingScaleY"}) if (!j.contains(key)) j[key] = 0.0;
         if (!j.contains("VitEvery")) j["VitEvery"] = 1;
         if (!j.contains("PassFeedback")) j["PassFeedback"] = 1.0;

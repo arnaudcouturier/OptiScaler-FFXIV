@@ -34,6 +34,8 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "ColourStrength", colourStrength);
     b.Add("DlssNr", "MaxRatio", maxRatio);
     b.Add("DlssNr", "Transfer", transfer);
+    b.Add("DlssNr", "ClassicSharpen", classicSharpen);
+    b.Add("DlssNr", "ClassicSharpenStrength", classicSharpenStrength);
     b.Add("DlssNr", "DebugView", debugView);
     b.Add("DlssNr", "Compare", compare);
     b.Add("DlssNr", "CompareSplit", compareSplit);
@@ -151,5 +153,11 @@ void NrConfig::PostLoad()
         passFeedback = 1.0f;
     else
         passFeedback = std::clamp(passFeedback.value_or_default(), 0.0f, 1.0f);
+
+    // Off keeps the resolve's own output, so an uninterpretable value fails open to the upstream default strength, clamped.
+    if (!std::isfinite(classicSharpenStrength.value_or_default()))
+        classicSharpenStrength = 0.4f;
+    else
+        classicSharpenStrength = std::clamp(classicSharpenStrength.value_or_default(), 0.0f, 1.0f);
 }
 } // namespace ext

@@ -5,7 +5,7 @@
     * dlssnr.hlsl includes dlssnr_spatial_warp.hlsli (same dir) and HdrCompatibility.hlsli (ext\shaders\common).
     * dlssnr_spatial.hlsl has VK_MODE branches but no SPIR-V is generated for it (no Vulkan consumer).
     * The cbuffer Params of dlssnr.hlsl must stay identical to DlssNrConstants in pass\DlssNr_Common.h (append-only);
-      the first fields of dlssnr_guide_match.hlsl's Params are a prefix of it.
+      the first fields of dlssnr_guide_match.hlsl's and dlssnr_classic_sharpen.hlsl's Params are a prefix of it.
     * fxc prints X4000/X3571 warnings for these sources (as in the reference build); do not enable warnings-as-errors.
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
@@ -14,6 +14,10 @@
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr.hlsl">
       <Variable>DlssNr_cso</Variable>
       <Header>DlssNr_Shader.h</Header>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr_classic_sharpen.hlsl">
+      <Variable>DlssNr_ClassicSharpen_cso</Variable>
+      <Header>DlssNr_ClassicSharpen_Shader.h</Header>
     </ExtShader>
     <ExtShader Include="$(MSBuildThisFileDirectory)shaders\dlssnr_guide_match.hlsl">
       <Variable>DlssNr_GuideMatch_cso</Variable>

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ext/nr/presr/PassProfiles.h"
 #include "ext/nr/NrModelSize.h"
+#include "ext/nr/NrHotkeys.h"
 #include "ext/nr/NrSettle.h"
 #include "ext/nr/spatial/DlssNr_Spatial.h"
 #include "ext/nr/presr/PreSrModelHints.h"
@@ -54,6 +55,7 @@
 #include <algorithm>
 #include <cstring>
 // Generated at build time from ext/nr/shaders (ext/nr/nr.shaders.props) into $(IntDir)ext_gen
+#include "DlssNr_ClassicSharpen_Shader.h"
 #include "DlssNr_Shader.h"
 #include "DlssNr_GuideMatch_Shader.h"
 #include "DlssNr_Spatial_Shader.h"
@@ -246,12 +248,7 @@ struct NrState
     // raw.
     ID3D12Resource* meter = nullptr;
     ID3D12Resource* meterReadback[4] = {};
-
-    // The calibration grid: what scale the game's buffer is on, measured from the untouched copy.
-    // Its own surface and ring rather than sharing the meter's, because the two run at different
-    // sizes -- the meter fetches one texel and this reads the whole frame.
-    ID3D12Resource* calib = nullptr;
-    ID3D12Resource* calibReadback[4] = {};
+    // Left over from the removed calibration pass: never advances, still reset and reported below.
     unsigned long long calibFrames = 0;
 
     // The last few answers, so the menu can say how settled the number is. A suggestion taken during
@@ -308,10 +305,6 @@ struct NrState
     ID3D12Resource* motionClone = nullptr;
     ID3D12Resource* depthSmall = nullptr;
     ID3D12Resource* motionSmall = nullptr;
-
-    // The constant-depth probe's surface. Separate from depthClone on purpose: it is defined by
-    // never having been written, and sharing a surface with a mode that writes would destroy that.
-    ID3D12Resource* depthConstant = nullptr;
 
     unsigned int width = 0;
     unsigned int height = 0;
@@ -927,37 +920,6 @@ void PollRuntime()
 constexpr unsigned int kMeterRowBytes = kDlssNrMeterGrid * sizeof(float);
 constexpr unsigned int kMeterBytes = kMeterRowBytes * kDlssNrMeterGrid;
 
-// Records the copy of this frame's grid into whichever readback buffer is furthest from being read.
-// Same shape as the meter's copy, against the calibration surface and its own ring.
-void CopyCalibrationToReadback(ID3D12GraphicsCommandList* cmdList)
-{
-    const unsigned int slot = (unsigned int) (g_nr.calibFrames % 4);
-
-    if (g_nr.calibReadback[slot] == nullptr || g_nr.calib == nullptr)
-        return;
-
-    D3D12_TEXTURE_COPY_LOCATION srcLoc {};
-    srcLoc.pResource = g_nr.calib;
-    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    srcLoc.SubresourceIndex = 0;
-
-    D3D12_TEXTURE_COPY_LOCATION dst {};
-    dst.pResource = g_nr.calibReadback[slot];
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint.Offset = 0;
-    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_FLOAT;
-    dst.PlacedFootprint.Footprint.Width = kDlssNrMeterGrid;
-    dst.PlacedFootprint.Footprint.Height = kDlssNrMeterGrid;
-    dst.PlacedFootprint.Footprint.Depth = 1;
-    dst.PlacedFootprint.Footprint.RowPitch = kMeterRowBytes;
-
-    Barrier(cmdList, g_nr.calib, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cmdList->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
-    Barrier(cmdList, g_nr.calib, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    g_nr.calibFrames++;
-}
-
 void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
                          bool exposureBound)
 {
@@ -997,107 +959,6 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 // off a frame this pass writes is a feedback loop rather than a measurement. What is left is a
 // courier -- the game's exposure is a 1x1 texture in a resource state this pass did not set and must
 // not transition, so the shader reads it as an SRV and it rides home on a readback that exists.
-// Reads the calibration grid written four frames ago and turns it into one number.
-//
-// A high percentile of tile peaks, not the maximum: the maximum is a sun or a specular hit and would
-// normalise the whole picture into the dark. The 90th percentile is high enough to sit at the top of
-// the real range and common enough that no single highlight decides it.
-void ConsumeCalibrationReadback()
-{
-    if (g_nr.calibFrames < 4)
-        return;
-
-    const unsigned int slot = (unsigned int) (g_nr.calibFrames % 4);
-    ID3D12Resource* buffer = g_nr.calibReadback[slot];
-
-    if (buffer == nullptr)
-        return;
-
-    void* mapped = nullptr;
-    D3D12_RANGE range { 0, kMeterBytes };
-
-    if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
-        return;
-
-    const float* src = (const float*) mapped;
-
-    std::vector<float> tiles;
-    tiles.reserve(kDlssNrMeterGrid * kDlssNrMeterGrid);
-
-    for (unsigned int i = 0; i < kDlssNrMeterGrid * kDlssNrMeterGrid; ++i)
-    {
-        if (std::isfinite(src[i]) && src[i] > 1e-6f)
-            tiles.push_back(src[i]);
-    }
-
-    D3D12_RANGE nothingWritten { 0, 0 };
-    buffer->Unmap(0, &nothingWritten);
-
-    if (tiles.size() < 16)
-        return;
-
-    const size_t nth = (size_t) ((float) (tiles.size() - 1) * 0.90f);
-    std::nth_element(tiles.begin(), tiles.begin() + nth, tiles.end());
-
-    // How much of the frame carries light, measured against its own brightest tile rather than an
-    // absolute threshold -- the units here are the game's and there is no absolute scale.
-    //
-    // This is what separates "the buffer is scaled by 240" from "I am standing in a dark cave". A
-    // percentile of tile peaks is a statement about scene content; it only describes the buffer when
-    // enough of the picture is lit for the top of the range to actually appear in it.
-    float brightest = 0.0f;
-
-    for (float v : tiles)
-        brightest = std::max(brightest, v);
-
-    unsigned int lit = 0;
-
-    for (float v : tiles)
-    {
-        if (v > brightest * 0.10f)
-            ++lit;
-    }
-
-    const float litFraction = tiles.empty() ? 0.0f : (float) lit / (float) tiles.size();
-
-    // A torn readback survives isfinite and would clamp to exactly the ceiling, which since the
-    // ceiling became 2000 is a value the slider can hold -- so a garbage frame could be offered as a
-    // real answer. Reject rather than clamp.
-    if (!(tiles[nth] > 0.0f) || tiles[nth] >= 1999.0f)
-        return;
-
-    const float suggestion = std::clamp(tiles[nth], 0.25f, 1990.0f);
-
-    g_nr.calibUsable = !g_nr.calibPassthrough && litFraction > 0.20f;
-    g_nr.calibWhy = g_nr.calibPassthrough  ? "this game hands over a frame it already tone mapped, so there is nothing to normalise"
-                    : litFraction <= 0.20f ? "too little of this scene is lit to say where the top of the range is"
-                                           : "";
-
-    g_nr.calibHistory[g_nr.calibCount % NrState::kCalibHistory] = suggestion;
-    g_nr.calibCount++;
-    g_nr.calibSuggestion = suggestion;
-
-    // Confidence is the spread of recent answers, not their absolute size. A number that has held
-    // still for a second is one worth taking; one that is swinging means the scene is changing under
-    // the measurement, and no single value would serve anyway.
-    const unsigned int have = std::min<unsigned int>(g_nr.calibCount, NrState::kCalibHistory);
-
-    if (have >= 8)
-    {
-        float lo = g_nr.calibHistory[0];
-        float hi = g_nr.calibHistory[0];
-
-        for (unsigned int i = 0; i < have; ++i)
-        {
-            lo = std::min(lo, g_nr.calibHistory[i]);
-            hi = std::max(hi, g_nr.calibHistory[i]);
-        }
-
-        // A spread of 1.0x is perfect agreement and 2x or worse is none.
-        const float spread = hi / lo;
-        g_nr.calibSteadiness = std::clamp(1.0f - (spread - 1.0f), 0.0f, 1.0f);
-    }
-}
 
 void ConsumeMeterReadback()
 {
@@ -1738,7 +1599,12 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
             blob = DlssNr_Spatial_Guides_cso;
             blobSize = sizeof(DlssNr_Spatial_Guides_cso);
         }
-
+        else if (pipeline != nullptr && pipeline == _classicSharpenPipeline)
+        {
+            shaderId = "classic_sharpen";
+            blob = DlssNr_ClassicSharpen_cso;
+            blobSize = sizeof(DlssNr_ClassicSharpen_cso);
+        }
         const std::string kind = ext::nr::replay::KindName(shaderId, constants.Mode);
         ext::nr::replay::DispatchDesc replay;
         replay.kind = kind.c_str();
@@ -1811,12 +1677,14 @@ DlssNr_Dx12::~DlssNr_Dx12()
     const auto retain = [&](IUnknown* object) { if (object) retained->emplace_back(object); };
     retain(_guideMatchPipeline);
     retain(_rootSignature); retain(_pipelineState); retain(_spatialPipeline); retain(_spatialGuidesPipeline);
+    retain(_classicSharpenPipeline);
     for (auto& heap : _frameHeaps) retain(heap.GetHeapCSU());
     for (auto* buffer : _constantBuffers) retain(buffer);
     _descriptorSlots.Retire([retained] {});
     if (_guideMatchPipeline) _guideMatchPipeline->Release();
     if (_spatialPipeline) _spatialPipeline->Release();
     if (_spatialGuidesPipeline) _spatialGuidesPipeline->Release();
+    if (_classicSharpenPipeline) _classicSharpenPipeline->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -3378,6 +3246,70 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+        // Classic-only RCAS-style sharpening. The resolve above left the frame in target (through
+        // the hdrCopy copy-back where the colour has no UAV support); a 3x3 adaptive sharpen now
+        // runs over that frame into hdrCopy -- dead after the resolve, the same format as target
+        // and always UAV-capable -- and the result is copied back over target. Matched residual
+        // keeps the native frame as its base and is never sharpened, and with the key off nothing
+        // here runs, so the frame is byte-identical to the build without this step. The diagnostic
+        // views (compare, debug view, skin mask) and the clean-frame switch bypass it for the same reason.
+        const float sharpenAmount = nr.classicSharpenStrength.value_or_default();
+        // A live menu write lands past PostLoad, so the dispatch clamps again here; an uninterpretable
+        // value fails open to the default strength, the way the load-time clamp does.
+        const float sharpenStrength = std::isfinite(sharpenAmount) ? std::clamp(sharpenAmount, 0.0f, 1.0f) : 0.4f;
+        // The copy-back below addresses one plain frame: anything else fails open to the resolve output.
+        const D3D12_RESOURCE_DESC sharpenTargetDesc = target != nullptr ? target->GetDesc() : D3D12_RESOURCE_DESC {};
+        const bool classicSharpen = nr.classicSharpen.value_or_default() && sharpenStrength > 0.0f &&
+                                    DlssNr::Hotkeys::ClassicApplies(scaleX, scaleY, resolveParams.Transfer) &&
+                                    resolveParams.ApplyModel != 0 && resolveParams.CompareMode == 0 &&
+                                    resolveParams.DebugView == 0 && resolveParams.ShowSkinMask == 0 && g_nr.hdrCopy != nullptr &&
+                                    sharpenTargetDesc.MipLevels == 1 && sharpenTargetDesc.DepthOrArraySize == 1;
+        if (classicSharpen)
+        {
+            if (!_classicSharpenPipeline && !_classicSharpenPipelineFailed)
+            {
+                if (!CreateComputePipeline(_device, &_classicSharpenPipeline, DlssNr_ClassicSharpen_cso,
+                                          sizeof(DlssNr_ClassicSharpen_cso), nullptr))
+                {
+                    // Tried once per device lifetime: a persistent failure would otherwise retry every frame.
+                    _classicSharpenPipelineFailed = true;
+                    LOG_WARN("DLSS-NR Classic sharpening unavailable: pipeline creation failed, running unsharpened");
+                }
+            }
+            if (_classicSharpenPipeline != nullptr)
+            {
+                DlssNrConstants sharpen {};
+                sharpen.Mode = DlssNrMode_ClassicSharpen;
+                sharpen.Width = width;
+                sharpen.Height = height;
+                // The shader reads this slot as the sharpen amount (see the shader's header comment);
+                // clamped at the gate above (strength 0 skips the step entirely).
+                sharpen.TransferStrength = sharpenStrength;
+                const D3D12_RESOURCE_STATES sharpenTargetState = targetState;
+                TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if (DispatchPass(cmdList, sharpen, target, nullptr, nullptr, nullptr, nullptr,
+                                 g_nr.hdrCopy, nullptr, _classicSharpenPipeline))
+                {
+                    Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmdList->CopyResource(target, g_nr.hdrCopy);
+                    TransitionTarget(sharpenTargetState);
+                    Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
+                else
+                {
+                    // The dispatch was dropped (no descriptor slot): leave the frame as the resolve
+                    // wrote it, with both resources back in the states the resolve left them in.
+                    TransitionTarget(sharpenTargetState);
+                    Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
+            }
+        }
 
         MakeModelWritable(g_nr.output);
         if (g_nr.passScratch != nullptr)
@@ -4333,21 +4265,6 @@ void Shutdown()
     {
         g_nr.meter->Release();
         g_nr.meter = nullptr;
-    }
-
-    if (g_nr.calib != nullptr)
-    {
-        g_nr.calib->Release();
-        g_nr.calib = nullptr;
-    }
-
-    for (auto& r : g_nr.calibReadback)
-    {
-        if (r != nullptr)
-        {
-            r->Release();
-            r = nullptr;
-        }
     }
 
     g_nr.calibFrames = 0;

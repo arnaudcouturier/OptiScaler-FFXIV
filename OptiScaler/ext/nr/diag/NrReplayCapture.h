@@ -82,6 +82,11 @@ inline std::string KindName(const std::string& shader, uint32_t mode)
         default: return "spatial_" + std::to_string(mode);
         }
     }
+
+    // The Classic-sharpen dispatch runs its own shader (not a mode of the main one), so the
+    // shader id alone decides the kind.
+    if (shader == "classic_sharpen")
+        return "classic_sharpen";
     switch (mode)
     {
     case 0: return "encode";

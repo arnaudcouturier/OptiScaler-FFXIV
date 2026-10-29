@@ -30,7 +30,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_ZeroMotion = 11, // private reset-only NR/SR guide, never passed to residual FG
     DlssNrMode_ResizePrivateGuides = 14, // point-resample active regions; preserve source vector units
     DlssNrMode_MultipassFeedback = 13, // blend interpass edits with the preceding input
-    DlssNrMode_BoundResidual = 12 // t0: private SR carrier; t1: current render-resolution carrier
+    DlssNrMode_BoundResidual = 12, // t0: private SR carrier; t1: current render-resolution carrier
+    DlssNrMode_ClassicSharpen = 15 // RCAS-style sharpen of the Classic resolve output, over a temp copy back onto the frame
 };
 
 // A successful sample may be reused only on the immediately following frame.

@@ -43,6 +43,15 @@ inline bool TransferToggleable(float scaleX, float scaleY)
 
 // The enlargement mode after a toggle press: Classic (0) and Matched residual (1) swap; anything else is shown
 // as Classic by the menu, so it becomes Matched residual like Classic does. A greyed-out combo leaves the value alone.
+// Whether the Classic enlargement applies for these effective per-axis scales and this Transfer value:
+// anything but Matched residual reads as Classic in the menu, and the model is reduced on some axis and
+// above full on none. The Enlargement combo greys out exactly while this is false, and the runtime
+// sharpen gate reads the same rule, so the checkbox and the dispatch can never disagree.
+inline bool ClassicApplies(float scaleX, float scaleY, uint32_t transfer)
+{
+    return transfer != 1 && TransferToggleable(scaleX, scaleY);
+}
+
 inline uint32_t ToggleTransfer(uint32_t current, bool toggleable)
 {
     if (!toggleable)

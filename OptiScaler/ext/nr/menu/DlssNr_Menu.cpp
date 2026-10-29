@@ -583,6 +583,23 @@ void RenderMenu(float menuResScale)
 
             HelpMarker("Below 100% model resolution: Classic enlarges the model output; Matched residual enlarges only its changes.\nMatched residual can reduce blur and colour shifts. No effect at 100% or above, nor while an axis is above 100% (greyed out).");
 
+            // Classic-only sharpening: an RCAS-style 3x3 adaptive sharpen over the resolved frame.
+            // Greyed out unless the enlargement is Classic (and applies at all), like the combo above.
+            const bool classicApplies = DlssNr::Hotkeys::ClassicApplies(effectiveScaleX, effectiveScaleY, nr.transfer.value_or_default());
+            ImGui::BeginDisabled(!classicApplies);
+            bool sharpen = nr.classicSharpen.value_or_default();
+            if (ImGui::Checkbox("Classic sharpening", &sharpen))
+                nr.classicSharpen = sharpen;
+            ImGui::EndDisabled();
+            HelpMarker("Sharpens the Classic enlargement output after the resolve. Off by default: off leaves the frame exactly as the resolve wrote it.\nOnly sharpens while Enlargement is Classic; the matched residual keeps the native frame as its base and is never sharpened. DirectX 12 only. Applies live.");
+
+            ImGui::BeginDisabled(!classicApplies || !nr.classicSharpen.value_or_default());
+            float sharpenStrength = nr.classicSharpenStrength.value_or_default();
+            if (ImGui::SliderFloat("Classic sharpening strength", &sharpenStrength, 0.0f, 1.0f, "%.2f"))
+                nr.classicSharpenStrength = sharpenStrength;
+            ImGui::EndDisabled();
+            HelpMarker("How much of the Classic sharpening lands, 0 (a copy) to 1 (full). 0.4 is upstream RCAS's own default.\nApplies live.");
+
             // Depth-aware enlargement: needs a reduced model and the ordinary (non-spatial) path.
             const auto depthReadout = CurrentSpatialReadout();
             const bool depthSpatial = depthReadout.valid ? depthReadout.active : nr.spatialCompression.value_or_default();

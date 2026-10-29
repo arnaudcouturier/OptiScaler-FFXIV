@@ -19,6 +19,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include "DlssNr_ClassicSharpen_Shader.h"
 #include "DlssNr_GuideMatch_Shader.h"
 #include "DlssNr_Shader.h"
 #include "DlssNr_Spatial_Guides_Shader.h"
@@ -85,6 +86,8 @@ bool Lookup(const std::string& id, Blob& blob)
         blob = { DlssNr_Spatial_cso, sizeof(DlssNr_Spatial_cso) };
     else if (id == "spatial_guides")
         blob = { DlssNr_Spatial_Guides_cso, sizeof(DlssNr_Spatial_Guides_cso) };
+    else if (id == "classic_sharpen")
+        blob = { DlssNr_ClassicSharpen_cso, sizeof(DlssNr_ClassicSharpen_cso) };
     else
         return false;
     return true;
