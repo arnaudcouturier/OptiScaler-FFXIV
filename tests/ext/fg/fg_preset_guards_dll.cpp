@@ -1,5 +1,5 @@
-// MANUAL: runs the preset guards (ext/fg/dlssg/PresetGuards.h) on a real nvngx_dlssg.dll read from disk and mapped by its
-// section table. Usage: set OPTISCALER_DLSSG_DLL to the DLL and run the built exe (the recipe says how). Prints every located RVA
+// LOCAL (tools\test.ps1 -Local): runs the preset guards (ext/fg/dlssg/PresetGuards.h) on a real nvngx_dlssg.dll read from disk and mapped by its
+// section table. The recipe requires OPTISCALER_DLSSG_DLL (the DLL) and builds and runs the exe. Prints every located RVA
 // and the file's SHA-256. For the two DLLs this was developed on it also asserts the RVAs found with a decompiler (310.9.1.0
 // and 310.8.0); for any other DLL it passes when the guards locate everything and fails with the reason otherwise, so it is the
 // check to run on a new runtime before trusting the live switch on it.

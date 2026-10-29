@@ -1,4 +1,4 @@
-// E5 (manual): composition swapchain contract the CreateSwapChainForComposition hook and the wrapper rely on.
+// E5 (local, tools\test.ps1 -Local): composition swapchain contract the CreateSwapChainForComposition hook and the wrapper rely on.
 // Ported from the oracle's tests/dxgi_window_size_smoke.cpp composition half (its 0x0-to-window checks are not carried,
 // SEAMS.md section 5). Needs a desktop session (hidden popup windows, DirectComposition) and a WARP-capable machine; it
 // injects nothing and shows no UI. It does NOT exercise the hook itself (that needs OptiScaler in a running game); it
@@ -7,8 +7,6 @@
 //   - FindCompositionWindow returns the unique eligible window, and nullptr when two are eligible (never guesses);
 //   - a composition swapchain has no native HWND (IDXGISwapChain::GetHwnd fails), attaches to a DirectComposition
 //     visual and keeps FLIP_SEQUENTIAL / Flags == 0 across ResizeBuffers (why the wrapper skips the OverrideVsync rewrite).
-// Build line (from a vcvars64 prompt, repo root):
-//   cl /nologo /std:c++20 /EHsc /W4 /I OptiScaler tests\ext\present\composition_smoke.cpp d3d11.lib dxgi.lib dcomp.lib user32.lib
 #include "ext/present/CompositionWindow.h"
 
 #include <d3d11.h>

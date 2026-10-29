@@ -1,4 +1,4 @@
-// MANUAL test (tools\test.ps1 lists it, never runs it). Opt-in direct NVIDIA NGX FG resource test (args: installed nvngx.dll, official DLL directory). No game injection or DLL downloads.
+// LOCAL test (tools\test.ps1 runs it only with -Local; the recipe passes the two arguments). Opt-in direct NVIDIA NGX FG resource test (args: installed nvngx.dll, official DLL directory). No game injection or DLL downloads.
 // Reference: NVIDIA-RTX/Streamline docs/DLSS-FG Programming Guide.pdf, SDK 310.7.
 // Tests static carriers and a translating plane; not a game integration test.
 // Uses documented parameter keys, without redistributing additional SDK headers.

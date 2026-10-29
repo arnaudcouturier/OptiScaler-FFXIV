@@ -1,9 +1,6 @@
-// Runs the production SPIR-V encode/resolve on a real Vulkan device (not WARP). No game or NR DLL needed. MANUAL test
-// (tools\test.ps1 lists it, never runs it). Build the product first: dxc writes the SPIR-V to
-// OptiScaler\x64\Release\ext_gen\DlssNr_Shader_Vk.h.bin. Then, from a VS developer shell at the repo root:
-//   cl /std:c++20 /EHsc /I external/vulkan/include /I OptiScaler tests/ext/nr/nr_vulkan_shader_smoke.cpp
-//      /link OptiScaler/library/vulkan/vulkan-1.lib
-//   nr_vulkan_shader_smoke.exe OptiScaler\x64\Release\ext_gen\DlssNr_Shader_Vk.h.bin
+// Runs the production SPIR-V encode/resolve on a real Vulkan device (not WARP). No game or NR DLL needed. LOCAL test
+// (tools\test.ps1 runs it only with -Local). It needs the product build of this worktree: dxc writes the SPIR-V to
+// OptiScaler\x64\Release\ext_gen\DlssNr_Shader_Vk.h.bin, which the recipe passes as the argument.
 #include <vulkan/vulkan.h>
 #include "ext/nr/pass/DlssNr_Common.h"
 #include <array>

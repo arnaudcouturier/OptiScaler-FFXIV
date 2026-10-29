@@ -1,7 +1,7 @@
 // DLSS-G preset guards (ext/fg/dlssg/PresetGuards.h): the structural scan that finds NVIDIA's cached-settings reader and the
 // endpoint create / configuration functions in a mapped nvngx_dlssg.dll image. Here against a synthetic image whose create function
 // is a real instruction stream (positive case in the 310.9.1.0 shape and in the 310.9.16 shape, every guard broken one at a time,
-// the context-argument proof with its negative images, the provider choice). The real DLL is the manual recipe
+// the context-argument proof with its negative images, the provider choice). The real DLL is the local recipe
 // fg_preset_guards_dll (needs the DLL path in OPTISCALER_DLSSG_DLL).
 #include "fg_preset_harness.h"
 
@@ -1334,7 +1334,7 @@ void KnownHashes()
     CHECK(KnownHashLabel("FF6E90EB78B827927DFF5B4ECC6B1C870C2E9BCA29ED9F48C7D348CC9E170B82") != nullptr); // case does not matter
     CHECK(KnownHashLabel("0000000000000000000000000000000000000000000000000000000000000000") == nullptr);
     CHECK(KnownHashLabel("") == nullptr);
-    // the maintainer's build, checked in full on the real DLL (manual recipe fg_preset_guards_dll)
+    // the maintainer's build, checked in full on the real DLL (local recipe fg_preset_guards_dll)
     const char* label31016 = KnownHashLabel("8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7");
     CHECK(label31016 != nullptr && std::string(label31016).find("310.9.16") != std::string::npos);
     const char* labelStore = KnownHashLabel("cadee1aa6db3907babdc3285da2aebc4553d92b89c38ba3eae8abd8bba1bea72");

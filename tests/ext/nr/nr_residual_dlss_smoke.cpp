@@ -1,4 +1,4 @@
-// MANUAL test (tools\test.ps1 lists it, never runs it). Opt-in headless NVIDIA hardware test. Supply an installed nvngx.dll and a directory containing
+// LOCAL test (tools\test.ps1 runs it only with -Local; the recipe passes the two arguments). Opt-in headless NVIDIA hardware test. Supply an installed nvngx.dll and a directory containing
 // your own official nvngx_dlss.dll. No DLL download, game injection, or NR model evaluation.
 #define NOMINMAX
 #include <windows.h>
