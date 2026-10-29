@@ -70,10 +70,53 @@ void NativeEnd();
 void FgDispatchBegin();
 void FgDispatchEnd();
 
+// The current trace decision for the GPU stage timers below (FramePacingTrace.cpp: TraceOn without the scope).
+// Same cost as a scope when off (a few loads); announcing a change logs once, like a scope does.
+bool TraceIsOn();
+
 // dx11_with_dx12_sc.cpp, Dx11wDx12SC::Present: replaces `_real->Present(0, realFlags)` on the hidden swapchain. Times it ("hidden DX11
 // present") and, only with [FramePacing] HiddenPresentDoNotWait on, adds DXGI_PRESENT_DO_NOT_WAIT: a busy chain answers
 // DXGI_ERROR_WAS_STILL_DRAWING, which is counted and returned as S_OK (the caller's failure warning stays quiet). Every other result
 // is returned unchanged. DXGI rejecting the flag (E_INVALIDARG, DXGI_ERROR_INVALID_CALL) switches it off for the session. With the key
 // off this is exactly `swapChain->Present(0, flags)`.
 HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags);
+} // namespace ext::present
+
+class Dx11wDx12SC;
+struct ID3D11DeviceContext;
+
+namespace ext::present
+{
+
+// ---- GPU stage timers ([FramePacing] GpuTimers; body ext/present/GpuBridgeTimers.cpp, rules GpuTimerStats.h) ----
+// Key [FramePacing] GpuTimers (auto = on only together with the trace above, true = on at any log level, false = off;
+// never on outside FFXIV). With the key off (the default) every function below is a frame-counter test under one mutex.
+// With it on, sampled frames (4 of 16) record timestamp pairs inline on the existing context and copy list: no new
+// submission, no wait, and D3D11 reads only at Present with DONOTFLUSH. D3D12 slots report once the copy-queue fence
+// has passed the fence value covering their resolve. A creation failure turns that timer off with one warning.
+// Durations stay within one API (D3D11 timestamps are never subtracted from D3D12 ones).
+
+// ext::dx11bridge::PresentScope constructor (after NativeBegin): advances the 4-of-16 frame counter and publishes
+// the on/off decision for the menu rows. Destructor (first statement): DONOTFLUSH reads of the D3D11 pairs and the
+// fence-gated D3D12 slot reports. The "Bridge excl. NR" row is computed in its row function, not here (upstream
+// Interop minus NR's own time, latest values read at the same present, only while frame generation runs).
+void GpuTimersBeginFrame();
+void GpuTimersOnPresent();
+
+// The present copy-in pair: BeforeSharedCopy opens it on the bridge context, AfterSharedCopy closes it on the
+// context it was opened on.
+void GpuTimersBeginCopyIn(Dx11wDx12SC& sc);
+void GpuTimersEndCopyIn(ID3D11DeviceContext* context);
+
+// The interop copy pair on the copy list: ConvertCopySource opens it, PrepareScreenshot closes it. A failed
+// conversion closes its list without executing it, so the slot is forgotten instead of closed.
+void GpuTimersBeginInteropCopy(Dx11wDx12SC& sc, unsigned slot);
+void GpuTimersEndInteropCopy(Dx11wDx12SC& sc, unsigned slot);
+void GpuTimersCancelInteropCopy(Dx11wDx12SC& sc);
+
+// Subscribes the begin/finish-effects handlers that time ReShade's own end-of-frame pass (the fork's own
+// render_effects calls, diagnostic probe or live in-place preset pass, are left out by their call guards). Called
+// once from the ReShade add-on setup, whatever the key says: the handlers return at once unless this frame samples.
+// False = the subscription threw (the caller logs once; the effects stay untimed).
+bool InstallGpuTimerEvents();
 } // namespace ext::present

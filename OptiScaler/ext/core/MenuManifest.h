@@ -53,6 +53,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
     "[NgxRelease] SkipReleaseSleep", // kill switch of the release-path sleep skip
     "[FramePacing] Trace", // diagnostic switch of the frame-pacing CPU trace
+    "[FramePacing] GpuTimers", // diagnostic switch of the frame-pacing GPU stage timers
     "[FramePacing] HiddenPresentDoNotWait", // debug switch of the hidden DX11 present, compared with the trace
     "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
     "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias

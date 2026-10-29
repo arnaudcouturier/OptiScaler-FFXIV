@@ -70,6 +70,15 @@ struct BoundaryRelease
 };
 } // namespace
 
+namespace
+{
+thread_local bool t_inLiveEffectsCall = false;
+} // namespace
+
+bool InLiveEffectsCall() { return t_inLiveEffectsCall; }
+LiveEffectsScope::LiveEffectsScope() { t_inLiveEffectsCall = true; }
+LiveEffectsScope::~LiveEffectsScope() { t_inLiveEffectsCall = false; }
+
 Applier::Applier(probe::IBackend& backend) : _backend(backend) {}
 
 Applier::Slot* Applier::FindSlot(uint64_t runtime)
@@ -254,7 +263,13 @@ ApplyResult Applier::Apply(PresetsMode mode, bool registered, void* context, voi
             return Done(ApplyResult::Failed, "the bound render target is not the one passed to ApplyPresetsInPlace");
 
         const int64_t t0 = _backend.Qpc();
-        const probe::CallOutcome out = _backend.RenderEffects(context, runtime, b);
+        probe::CallOutcome out;
+        {
+            // The fork's own pass: ReShade fires begin/finish-effects for it, and the GPU stage timers leave
+            // alone whatever runs inside this scope instead of timing it as ReShade's end-of-frame work.
+            LiveEffectsScope liveScope;
+            out = _backend.RenderEffects(context, runtime, b);
+        }
         const int64_t t1 = _backend.Qpc();
         const int64_t freq = _backend.QpcFrequency();
         if (freq > 0)

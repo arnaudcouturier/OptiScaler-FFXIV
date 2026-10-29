@@ -116,6 +116,7 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
 {
+    ext::present::GpuTimersEndCopyIn(context); // closes the present copy-in timestamp pair
     if (game::Current().hdr != nullptr)
         ext::ffxiv::companion::AfterSharedCopy(context, target);
 

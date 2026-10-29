@@ -76,6 +76,7 @@ bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, 
 {
     auto& bridge = Access::Bridge::Ext(sc);
     bridge.screenshotSdrSource = nullptr;
+    ext::present::GpuTimersBeginInteropCopy(sc, slot); // opens the interop copy pair (closed below and in PrepareScreenshot)
     if (!Access::Bridge::HdrOutput(sc))
         return true;
 
@@ -127,7 +128,10 @@ bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, 
     }
 
     if (!copySource)
+    {
+        ext::present::GpuTimersCancelInteropCopy(sc); // the list is closed, never executed: the slot is forgotten
         return false;
+    }
 
     before = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return true;
@@ -135,6 +139,7 @@ bool ConvertCopySource(Dx11wDx12SC& sc, UINT slot, ID3D12Resource*& copySource, 
 
 void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
 {
+    ext::present::GpuTimersEndInteropCopy(sc, slot); // closes the interop copy pair before the early returns below
     auto& bridge = Access::Bridge::Ext(sc);
     auto* sdrSource = bridge.screenshotSdrSource;
     bridge.screenshotSdrSource = nullptr;
@@ -156,6 +161,7 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
 PresentScope::PresentScope()
 {
     ext::present::NativeBegin(); // PT: the whole bridge Present is one "native present" call
+    ext::present::GpuTimersBeginFrame(); // the 4-of-16 frame counter of the GPU stage timers
     if (game::Current().hudless)
         ffxiv::ui::OnPresentBegin();
     window::OnPresentBegin(); // window mode: present thread, frame generation off gate
@@ -163,6 +169,7 @@ PresentScope::PresentScope()
 
 PresentScope::~PresentScope()
 {
+    ext::present::GpuTimersOnPresent(); // D3D11 and fence-gated D3D12 timer reads, before the frame closes
     if (auto* scene = game::Current().hdr)
         scene->EndFrame();
     if (auto* hudless = game::Current().hudless)
@@ -173,6 +180,7 @@ PresentScope::~PresentScope()
 
 void BeforeSharedCopy(Dx11wDx12SC& sc)
 {
+    ext::present::GpuTimersBeginCopyIn(sc); // opens the present copy-in timestamp pair
     if (Access::Bridge::HdrOutput(sc) && game::Current().hdr)
         hdr::FfxivHdrPreview::SealFrame();
 }

@@ -116,6 +116,12 @@ hidden::Policy& HiddenPolicy()
 }
 } // namespace
 
+// The current trace decision for the GPU stage timers ([FramePacing] GpuTimers = auto means on only with the trace).
+bool TraceIsOn()
+{
+    return TraceOn();
+}
+
 PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _active(false)
 {
     if (TraceOn())

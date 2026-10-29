@@ -60,10 +60,12 @@ void DefaultsAndBinding()
     ext::FramePacingConfig cfg;
     CHECK(!cfg.trace.has_value()); // unset = auto
     CHECK(!cfg.TraceKey().has_value());
+    CHECK(!cfg.gpuTimers.has_value()); // unset = auto (on only with the trace)
+    CHECK(!cfg.GpuTimersKey().has_value());
     CHECK(!cfg.hiddenPresentDoNotWait.has_value());
-    CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false); // today's behaviour
+    CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false); // todays behaviour
 
-    // exactly these two keys are bound in [FramePacing], once each, in the process-wide config too
+    // exactly these three keys are bound in [FramePacing], once each, in the process-wide config too
     for (bool global : { false, true })
     {
         ext::config::Binder b;
@@ -71,33 +73,43 @@ void DefaultsAndBinding()
             ext::Cfg().Bind(b);
         else
             cfg.Bind(b);
-        int count = 0, trace = 0, hidden = 0;
+        int count = 0, trace = 0, timers = 0, hidden = 0;
         for (const auto& e : b.Table())
             if (std::string(e.section) == "FramePacing")
             {
                 ++count;
                 trace += std::string(e.key) == "Trace" ? 1 : 0;
+                timers += std::string(e.key) == "GpuTimers" ? 1 : 0;
                 hidden += std::string(e.key) == "HiddenPresentDoNotWait" ? 1 : 0;
             }
-        CHECK(count == 2 && trace == 1 && hidden == 1);
+        CHECK(count == 3 && trace == 1 && timers == 1 && hidden == 1);
     }
 }
 
 void LoadSaveRoundTrip()
 {
     // nothing in the ini, "auto" (the shipped template) and unknown words: both unset
-    for (const char* text : { "", "[FramePacing]\nTrace=auto\nHiddenPresentDoNotWait=auto\n", "[FramePacing]\nTrace=maybe\nHiddenPresentDoNotWait=perhaps\n" })
+    for (const char* text : { "", "[FramePacing]\nTrace=auto\nGpuTimers=auto\nHiddenPresentDoNotWait=auto\n",
+                               "[FramePacing]\nTrace=maybe\nGpuTimers=perhaps\nHiddenPresentDoNotWait=perhaps\n" })
     {
         auto cfg = LoadFresh(text);
         CHECK(!cfg.TraceKey().has_value());
+        CHECK(!cfg.GpuTimersKey().has_value());
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false);
     }
     {
-        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nHiddenPresentDoNotWait=true\n");
+        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nGpuTimers=true\nHiddenPresentDoNotWait=true\n");
         CHECK(cfg.TraceKey().has_value() && *cfg.TraceKey() == true);
+        CHECK(cfg.GpuTimersKey().has_value() && *cfg.GpuTimersKey() == true);
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == true);
         CHECK(Saved(cfg, "Trace") == "true");
+        CHECK(Saved(cfg, "GpuTimers") == "true");
         CHECK(Saved(cfg, "HiddenPresentDoNotWait") == "true");
+    }
+    {
+        auto cfg = LoadFresh("[FramePacing]\nGpuTimers=false\n");
+        CHECK(cfg.GpuTimersKey().has_value() && *cfg.GpuTimersKey() == false); // an explicit false is not "unset"
+        CHECK(Saved(cfg, "GpuTimers") == "false");
     }
     {
         auto cfg = LoadFresh("[FramePacing]\nTrace=false\n");
@@ -107,6 +119,7 @@ void LoadSaveRoundTrip()
     {
         ext::FramePacingConfig cfg;
         CHECK(Saved(cfg, "Trace") == "auto");
+        CHECK(Saved(cfg, "GpuTimers") == "auto");
         CHECK(Saved(cfg, "HiddenPresentDoNotWait") == "auto");
     }
 }
@@ -117,6 +130,7 @@ void IniFragment(const std::string& repo)
     CHECK(!ini.empty());
     CHECK(ini.find("[FramePacing]") == std::string::npos); // the packager adds the section header
     CHECK(ini.find("\nTrace=auto") != std::string::npos);
+    CHECK(ini.find("\nGpuTimers=auto") != std::string::npos);
     CHECK(ini.find("\nHiddenPresentDoNotWait=auto") != std::string::npos);
     // what the user needs to know, in words
     CHECK(ini.find("Default (auto) is false") != std::string::npos);  // the switch is off unless asked for
@@ -125,6 +139,8 @@ void IniFragment(const std::string& repo)
     CHECK(ini.find("No menu control") != std::string::npos);         // ini-only keys say so (ini_fragments rule)
     CHECK(ini.find("DXGI_PRESENT_DO_NOT_WAIT") != std::string::npos);
     CHECK(ini.find("Frame pacing trace: ") != std::string::npos);    // the line that says whether the trace is on
+    CHECK(ini.find("Frame pacing GPU [") != std::string::npos);      // the lines the timers add when they sample
+    CHECK(ini.find("Default (auto) is off unless the trace is on") != std::string::npos); // what auto means here
 }
 } // namespace
 

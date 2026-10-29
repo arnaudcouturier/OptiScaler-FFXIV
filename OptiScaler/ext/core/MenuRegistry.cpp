@@ -105,12 +105,23 @@ ExtraTimes ShaderTimeRows()
 {
     ExtraTimes times;
 
-    const auto& list = TimeRowList(); // filled during static initialisation, read-only afterwards
-    for (size_t i = 0; i < list.count; i++)
+    // The list only grows during static initialisation, but the menu reads it while the next present may still
+    // register nothing: copy it under the registry lock and call the row functions outside it, so a row that
+    // blocks (or that registers nothing ever again) cannot hold the registry.
+    std::array<TimeRow, kMaxTimeRows> rows {};
+    size_t count = 0;
     {
-        const auto ms = list.items[i].ms();
+        std::scoped_lock lock(RegistryMutex());
+        const auto& list = TimeRowList();
+        count = list.count;
+        for (size_t i = 0; i < count; i++)
+            rows[i] = list.items[i];
+    }
+    for (size_t i = 0; i < count; i++)
+    {
+        const auto ms = rows[i].ms();
         if (ms.has_value())
-            times.rows[times.count++] = { list.items[i].label, ms.value() };
+            times.rows[times.count++] = { rows[i].label, ms.value() };
     }
     return times;
 }

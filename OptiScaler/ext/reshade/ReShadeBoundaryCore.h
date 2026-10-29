@@ -18,6 +18,19 @@
 
 namespace ext::reshade::boundary
 {
+// True while this thread runs the live in-place preset pass (Applier::Apply's render_effects call below): the
+// begin/finish-effects events fired inside it belong to the fork's own pass, not to ReShade's end-of-frame work.
+// Thread-local call state like probe::InProbeCall, but separate from it: the probe ledger classifies events by
+// InProbeCall and must never see the live pass as a probe call. The GPU stage timers skip on either flag.
+bool InLiveEffectsCall();
+struct LiveEffectsScope
+{
+    LiveEffectsScope();
+    ~LiveEffectsScope();
+    LiveEffectsScope(const LiveEffectsScope&) = delete;
+    LiveEffectsScope& operator=(const LiveEffectsScope&) = delete;
+};
+
 class Applier
 {
   public:

@@ -48,6 +48,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [Character preview DLSS and spatial AA (CharaView)](#character-preview-charaview) | adapted from SirenBrink's v6.0 (same feature) | opt-in, off by default; tested (RTX 4090) on the 2026-10-18/19 builds with one preview window: spatial AA, DLSS 2x, NR, NR before DLSS; not re-checked on this release; several preview windows and the D3D12 debug layer not checked |
 | [Preview Neural Rendering](#preview-neural-rendering), including NR before DLSS | fork (different mechanism from v6.0) | opt-in, off by default; tested (RTX 4090) on the 2026-10-18/19 builds with one preview window: spatial AA, DLSS 2x, NR, NR before DLSS; not re-checked on this release; several preview windows and the D3D12 debug layer not checked |
 | [Frame pacing trace and hidden-present `DO_NOT_WAIT`](#frame-pacing-trace) | follows SirenBrink's approach, fork code | new; unit-tested, untested in game |
+| [Frame-pacing GPU stage timers](#frame-pacing-gpu-stage-timers) (`[FramePacing] GpuTimers`, menu rows and 10 s log lines) | fork | new; off unless the frame-pacing trace is on; unit-tested, not tried in game |
 | [Automatic mipmap bias, bind-time mode](#bind-time-mode-ffxiv) | follows SirenBrink's approach, fork code | on by default for FFXIV; ran in game (RTX 4090) on 2026-10-20, 21 and 23; no fps loss measured (comparison across sessions, not a same-session A/B); look not compared |
 | [Automatic mipmap bias, create-time mode](#create-time-mode) | fork | opt-in, off by default; ran in game on 2026-10-19; the bind-time mode replaced it as the default |
 | [DLSS presets L and M](#dlss-presets-l-and-m) | upstream OptiScaler; forwarding origin not determined | check recipe only |
@@ -514,9 +515,21 @@ Fail-open means today's behaviour: a mismatch of the executable, a failed hook i
 
 **Status.** new. The core, the policy, the seam body (against a fake swapchain) and the DXGI flag handling (against a real WARP swapchain) are unit-tested; nothing of it has run in game.
 
-**Config.** `[FramePacing] Trace` (default off), `HiddenPresentDoNotWait` (default off). Both are ini only. **Menu.** None.
+**Config.** `[FramePacing] Trace` (default off), `HiddenPresentDoNotWait` (default off), `GpuTimers` (`auto`, see the GPU stage timers below). All are ini only. **Menu.** None.
 
 **Code and seams.** `ext/present/` (`FramePacingCore.h`, `FramePacingTrace.cpp`, `HiddenPresentPolicy.h`). Seam: present (`PacingScope`, `HiddenPresent`, `RecordSample` and the begin/end pairs); upstream lines: 3 (`wrapped/wrapped_swapchain.cpp`, `hooks/FG_Hooks.cpp`, `with_dx12/dx11_with_dx12_sc.cpp`).
+
+### Frame-pacing GPU stage timers
+
+**Origin.** Fork code. The corrected `Bridge excl. NR` row answers a backlog item: upstream's `Interop` row in "Per shader GPU times" also counts the time of NR, which runs inside the bracketed evaluate and has its own row.
+
+**What it does.** With the timers on, 4 of every 16 frames carry timestamps: the present copy-in (D3D11, `BeforeSharedCopy` .. `AfterSharedCopy`), ReShade's own end-of-frame pass (D3D11, `begin_effects` .. `finish_effects`; the fork's own ReShade passes, the diagnostic probe and the in-place preset pass, are left out; the first ReShade runtime of a frame is timed, and a span left open from an earlier frame is closed and dropped), and the D3D12 interop copy (`ConvertCopySource` .. `PrepareScreenshot`, on the existing copy list). Every 10 s each timed stage logs `Frame pacing GPU [<stage>]: samples N, mean x ms, p95 y ms, max z ms`. `Bridge excl. NR` shows upstream `Interop` minus NR's own time (the latest values of both, clamped at 0) while frame generation is active and NR is running; it is a menu row only and has no log line. D3D11 annotations and D3D12 list markers name the timed ranges in a GPU capture while the timers run. A timer never waits on the GPU (D3D11 pairs are read only at the present with `DONOTFLUSH`; a D3D12 pair is reported once the copy queue's fence shows its work finished, and exactly once); the D3D12 readback is mapped once when the timer is created; no timer changes submission order; a creation failure turns that timer off with one warning; a new device restarts the timers; durations are never mixed across APIs. With the timers off nothing is timed and no row or log line appears; what still runs on every present is small CPU bookkeeping (a frame counter, the same trace decision the frame-pacing trace makes, and a short timer lock at the present exit and around the copy seams), and at load the built-in ReShade add-on subscribes to ReShade's begin/finish-effects events (one log line), whose handlers return at once while the timers are off.
+
+**Status.** new; unit-tested (sampling, statistics, the slot bookkeeping of the D3D12 pairs, the effects span rule, the key resolution) and pinned against the wiring; not tried in game.
+
+**Config.** `[FramePacing] GpuTimers` (`auto` = on only together with the frame-pacing trace above; `true` forces the timers on, `false` forces them off; FFXIV only; ini only). **Menu.** Four rows under "Per shader GPU times" while frame generation is active: `present copy-in`, `ReShade effects`, `interop copy`, `Bridge excl. NR`; the upstream `Interop` row is unchanged.
+
+**Code and seams.** `ext/present/GpuBridgeTimers.cpp` (capture, reads, rows) and `ext/present/GpuTimerStats.h` (the pure rules). Seams: present (`PresentScope` begin and end, `BeforeSharedCopy` / `AfterSharedCopy`, `ConvertCopySource` / `PrepareScreenshot`), the ReShade begin/finish-effects events from the built-in add-on, and a call guard around the fork's live preset pass (`ext/reshade/ReShadeBoundaryCore`). `kMaxTimeRows` (`ext/core/MenuRegistry.h`) rises from 4 to 10.
 
 ## Automatic mipmap bias
 

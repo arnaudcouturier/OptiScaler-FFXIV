@@ -107,7 +107,7 @@ struct TimeRow
     const char* label;
     std::optional<double> (*ms)();
 };
-inline constexpr size_t kMaxTimeRows = 4;
+inline constexpr size_t kMaxTimeRows = 10;
 void RegisterTimeRow(const TimeRow& row);
 
 namespace detail

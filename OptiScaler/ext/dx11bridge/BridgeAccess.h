@@ -36,6 +36,18 @@ struct ext::Access::Bridge
     static IDXGISwapChain4* FgSwapChain(Dx11wDx12SC& sc) { return sc._fgSwapChain; }
     static DXGI_FORMAT BufferFormat(const Dx11wDx12SC& sc) { return sc._bufferFormat; }
     static ID3D12Device* Dx12Device(Dx11wDx12SC& sc) { return sc._dx12Device; }
+    static ID3D11DeviceContext* Dx11Context(Dx11wDx12SC& sc) { return sc._dx11Context; }
+    static ID3D12CommandQueue* CopyQueue(Dx11wDx12SC& sc) { return sc._dx12CommandQueue; }
+
+    // Frame-pacing GPU timers (ext/present/GpuBridgeTimers.cpp): the fence the interop copy signals after each
+    // execution, and the value it signaled last for one copy list. Reads only (GetCompletedValue on the timer side,
+    // never a wait): a slot reports once the fence has passed the value that covers its resolve. The list value is
+    // 0 for an out-of-range list, which never reports (a covering value must exceed the recorded one).
+    static ID3D12Fence* CopyFence(Dx11wDx12SC& sc) { return sc._copyFence; }
+    static UINT64 CopyAllocatorFenceValue(const Dx11wDx12SC& sc, UINT slot)
+    {
+        return slot < sc._copyAllocatorFenceValues.size() ? sc._copyAllocatorFenceValues[slot] : 0;
+    }
     static ID3D12GraphicsCommandList* CopyList(Dx11wDx12SC& sc, UINT slot) { return sc._copyCommandLists[slot]; }
     static HWND Window(Dx11wDx12SC& sc) { return sc._handle; }
     static IFGFeature_Dx12* Fg(Dx11wDx12SC& sc) { return sc._fg; }

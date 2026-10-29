@@ -17,11 +17,19 @@ struct FramePacingConfig
     // Trace: auto (unset) = on only with file logging at Debug or Trace, true = on at any log level, false = off. Never on outside FFXIV.
     CustomOptional<bool, NoDefault> trace {};
 
+    // GpuTimers: auto (unset) = on only together with the trace above, true = on at any log level, false = off.
+    // Never on outside FFXIV. Default auto (= off at the normal log level, like the trace).
+    CustomOptional<bool, NoDefault> gpuTimers {};
+
     // HiddenPresentDoNotWait: the auxiliary present on the DX11 bridge's hidden swapchain gets DXGI_PRESENT_DO_NOT_WAIT and a busy
     // chain skips that present instead of blocking. Off = exactly the old call. Default false.
     CustomOptional<bool> hiddenPresentDoNotWait { false };
 
     std::optional<bool> TraceKey() const { return trace.has_value() ? std::optional<bool>(trace.value()) : std::nullopt; }
+    std::optional<bool> GpuTimersKey() const
+    {
+        return gpuTimers.has_value() ? std::optional<bool>(gpuTimers.value()) : std::nullopt;
+    }
 
     void Bind(config::Binder& b);
 };

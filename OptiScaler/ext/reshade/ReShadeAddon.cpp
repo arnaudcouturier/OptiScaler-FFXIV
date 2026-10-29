@@ -138,6 +138,22 @@ void OnReshadeLoaded(HMODULE reshadeModule)
             LOG_WARN("ReShade built-in add-on: the runtime tracking for the UI boundary threw during setup");
         }
 
+        // Frame-pacing GPU timers: the begin/finish-effects pair times ReShade end-of-frame pass. Unconditional,
+        // like the depth subscription above: the handlers return at once unless the timers sample this frame, and the
+        // fork's own render_effects calls are left out by their call guards. A failed subscription logs once and leaves
+        // the effects untimed.
+        try
+        {
+            if (ext::present::InstallGpuTimerEvents())
+                LOG_INFO("ReShade built-in add-on: subscribed to the effect begin/finish events for the GPU stage timers");
+            else
+                LOG_WARN("ReShade built-in add-on: the GPU stage timer event subscription failed (ReShade effects stay untimed)");
+        }
+        catch (...)
+        {
+            LOG_WARN("ReShade built-in add-on: the GPU stage timer event subscription threw during setup");
+        }
+
         // Window mode ([Window] Mode = probe | on): the set_fullscreen_state event. Nothing is registered with the mode off.
         if (ext::window::CurrentMode() != ext::window::Mode::Off)
         {
