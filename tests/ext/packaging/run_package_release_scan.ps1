@@ -35,6 +35,8 @@ function New-Package([string]$embedded = $version) {
     New-Filler "$dir\OptiScaler\D3D12_OptiScaler\D3D12Core.dll" 'd3d12core'
     $sections = Get-ChildItem (Join-Path $Repo 'OptiScaler\ext\ini') -Filter *.ini -File | ForEach-Object { "[$([IO.Path]::GetFileNameWithoutExtension($_.Name))]" }
     Set-Content -LiteralPath "$dir\OptiScaler.ini" -Value ($sections -join "`n") -Encoding ascii
+    # the package script writes the effective settings schema next to the ini; the release script requires it
+    Set-Content -LiteralPath "$dir\settings-schema.json" -Value '{ "format": "settings-schema-effective", "release": "", "sections": [] }' -Encoding ascii
     foreach ($n in 'DirectX_LICENSE.txt', 'RenoDX_ATTRIBUTION.txt', 'RenoDX_FFXIV_NOTICE.md', 'RenoDX_LICENSE.txt', 'ReShade_ATTRIBUTION.txt') {
         New-Item -ItemType Directory -Force -Path "$dir\Licenses" | Out-Null
         Set-Content -LiteralPath "$dir\Licenses\$n" -Value "licence text $n" -Encoding ascii

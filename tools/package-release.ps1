@@ -76,7 +76,7 @@ if ($Version -cnotmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(-rc\d+)?$') {
 }
 if (-not (Test-Path -LiteralPath $Package -PathType Container)) { Fail "Package folder not found: $Package" 2 }
 $Package = (Resolve-Path -LiteralPath $Package).Path
-foreach ($need in 'OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll') {
+foreach ($need in 'OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll', 'settings-schema.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $Package $need) -PathType Leaf)) { Fail "$need is missing in $Package (run tools\package.ps1 first)" 2 }
 }
 $tag = if ($Version.StartsWith('ffxiv-', [StringComparison]::Ordinal)) { $Version } else { "ffxiv-$Version" }
@@ -163,7 +163,7 @@ foreach ($f in (Get-ChildItem -LiteralPath $Package -Recurse -File -Force | Sort
         continue
     }
     if ($rel -ceq 'OptiScaler.dll') { $include.Add(@{ Source = $f.FullName; Dest = 'winmm.dll' }); continue }
-    if ($rel -ceq 'OptiScaler.ini' -or $rel -ceq 'nvngx.dll_dlssnr.dll') { $include.Add(@{ Source = $f.FullName; Dest = $rel }); continue }
+    if ($rel -ceq 'OptiScaler.ini' -or $rel -ceq 'nvngx.dll_dlssnr.dll' -or $rel -ceq 'settings-schema.json') { $include.Add(@{ Source = $f.FullName; Dest = $rel }); continue }
 
     $tp = $thirdParty | Where-Object { $name -match $_.Pattern } | Select-Object -First 1
     if ($tp -and $top -eq 'OptiScaler') {
@@ -264,6 +264,12 @@ foreach ($i in $include) {
     Copy-Item -LiteralPath $i.Source -Destination $dest
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'Licenses') | Out-Null
+# stamp the release tag into the staged effective schema (the -Package copy is never modified)
+$stagedSchema = Join-Path $stage 'settings-schema.json'
+$stagedSchemaJson = Get-Content -Raw -LiteralPath $stagedSchema | ConvertFrom-Json -Depth 20
+if ($stagedSchemaJson.format -ne 'settings-schema-effective') { Fail "settings-schema.json in the package is not the effective schema (run tools\package.ps1 first)" 2 }
+$stagedSchemaJson.release = $tag
+$stagedSchemaJson | ConvertTo-Json -Depth 20 | Set-Content -NoNewline -LiteralPath $stagedSchema -Encoding utf8NoBOM
 Copy-Item -LiteralPath $gpl -Destination (Join-Path $stage 'Licenses\OptiScaler-FFXIV_LICENSE_GPL-3.0.txt')
 Copy-Item -LiteralPath $attrib -Destination (Join-Path $stage 'Licenses\ATTRIBUTION.md')
 
@@ -291,6 +297,7 @@ WHAT IS IN THIS ARCHIVE
   winmm.dll                  OptiScaler-FFXIV (the game loads it by this name)
   nvngx.dll_dlssnr.dll       NR forwarder. Keep this exact name: NVIDIA's model only answers a caller whose path contains "nvngx.dll".
   OptiScaler.ini             settings; every value is "auto" (= built-in default)
+  settings-schema.json      effective settings schema (code facts + schema metadata), stamped with this release
   OptiScaler\                third-party libraries (Direct3D 12 core, FidelityFX, XeSS)
   Licenses\                  licences and notices of everything above, the fork's GPL-3.0 text and ATTRIBUTION.md
   NOTICE.txt, SHA256SUMS.txt
@@ -349,7 +356,7 @@ KNOWN LIMITS
 
 UNINSTALL
   Close the game and delete only what this archive installed, in the folder that contains ffxiv_dx11.exe:
-    winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, INSTALL.txt, NOTICE.txt, SHA256SUMS.txt, and the Licenses folder
+    winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, settings-schema.json, INSTALL.txt, NOTICE.txt, SHA256SUMS.txt, and the Licenses folder
 $uninstallSymbols    plus OptiScaler.log, if you turned LogToFile on (the game writes it next to winmm.dll)
   and these files inside the OptiScaler folder (a folder left empty by this can be removed too):
 $(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { "    $($_.Dest)" }) -join "`n")
@@ -412,6 +419,8 @@ foreach ($l in (Get-Content -LiteralPath (Join-Path $check 'SHA256SUMS.txt'))) {
 $inZip = @(Get-ChildItem -LiteralPath $check -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }).Count
 if ($inZip -ne @($sumLines).Count) { Write-Host "[release] file count mismatch: $inZip in the archive, $(@($sumLines).Count) listed" -ForegroundColor Red; $bad++ }
 Remove-Item -LiteralPath $check -Recurse -Force
+$sidecar = Join-Path $OutDir "OptiScaler-FFXIV-$Version-settings-schema.json"
+Copy-Item -LiteralPath (Join-Path $stage 'settings-schema.json') -Destination $sidecar -Force
 Remove-Item -LiteralPath $stage -Recurse -Force
 $treeAfter = Get-TreeHash $Package
 if ($treeAfter -ne $treeBefore) { Write-Host '[release] the package folder changed while packing (it must not)' -ForegroundColor Red; $bad++ }
@@ -421,6 +430,7 @@ $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvari
 Write-Host ''
 Write-Host ("[release] {0}  ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1MB))
 Write-Host "[release] sha256 $zipHash"
+Write-Host "[release] settings-schema sidecar $sidecar"
 Write-Host "[release] packed $(@($sumLines).Count) files (+ SHA256SUMS.txt)"
 if ($blocked.Count) { Write-Host '[release] NOT packed, not redistributable (listed under BRING YOUR OWN):'; $blocked | ForEach-Object { Write-Host "    $_" } }
 else { Write-Host '[release] package contained no NVIDIA / model / Streamline files (nothing had to be excluded)' }

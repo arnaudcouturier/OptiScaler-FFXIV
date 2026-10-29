@@ -1,0 +1,19 @@
+# Upstream keys the fork relies on (tools/gen-settings.ps1 alarm list).
+# One Config.h member per line: "<member> # <why the fork needs it>".
+# The generator fails (-Check exit 1) when a listed member no longer exists
+# in OptiScaler/Config.h: an early alarm at sync time, before the fork's
+# seams that read it break. Keep this list short and curated: only members
+# read directly by fork code under OptiScaler/ext (Config::Instance()->X).
+CheckForUpdate # ext/core/UpdateCheck: fork forces it off unless the player sets it
+FGEnabled # frame-generation gating read by fork seams and menus
+FGOutput # FG output selection read by fork seams (hudless, preset switch)
+FGXeFGInterpolationCount # FgConfig::PostLoad range-checks it against the provider ceiling
+FramerateLimit # dynamic MFG target and limiter sanity read it
+LowLatencyInput # FgConfig persists it under [LowLatency] (fork-owned ini persistence)
+LowLatencyOutput # FgConfig persists it under [LowLatency] (fork-owned ini persistence)
+LogLevel # frame-pacing trace auto logic reads it (on at Debug/Trace)
+LogToFile # frame-pacing trace auto logic reads it (file logging gate)
+DLSSEnabled # upscaler gating read by fork seams
+OverlayMenu # menu visibility read by fork menu seams
+MipmapBiasOverride # automatic mipmap bias yields to it
+OutputScalingDownscaler # NR supersampling documents itself as independent of it

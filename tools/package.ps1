@@ -4,10 +4,14 @@
 .DESCRIPTION
   Fragment file name (without .ini) = ini section name, e.g. ext\ini\DLSSG.ini goes into [DLSSG].
   A fragment holds only the key/comment lines (a leading "[Section]" line is tolerated and dropped).
+  Lines starting with ";@" (schema tag lines) are stripped from the shipped ini; none exist in this
+  tree, so nothing is stripped today.
   The keys are inserted at the end of the matching section (before the rule line that precedes the next
   section header); a missing section is created at the end of the file. The shipped file ends up with one
   header per section. The upstream OptiScaler.ini template is never edited in git.
   The forwarder DLL is copied next to the OptiScaler DLL if it exists in the build output.
+  The effective settings schema (code facts + tools/settings-schema.json metadata, written by
+  tools/gen-settings.ps1 -EmitEffective) is written to settings-schema.json next to OptiScaler.ini.
 #>
 [CmdletBinding()]
 param(
@@ -54,7 +58,7 @@ if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($
 foreach ($f in $frags) {
     $section = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
     $body = [System.Collections.Generic.List[string]]::new()
-    foreach ($l in ([System.IO.File]::ReadAllText($f.FullName) -split "\r?\n")) { $body.Add($l) }
+    foreach ($l in ([System.IO.File]::ReadAllText($f.FullName) -split "\r?\n")) { if ($l -notmatch '^\s*;@') { $body.Add($l) } else { Write-Host "[package] [$section] stripped a ;@ tag line" } }
     while ($body.Count -gt 0 -and $body[0].Trim() -eq "[$section]") { $body.RemoveAt(0) }
     while ($body.Count -gt 0 -and $body[$body.Count - 1].Trim() -eq '') { $body.RemoveAt($body.Count - 1) }
     if ($body.Count -eq 0) { continue }
@@ -90,3 +94,6 @@ foreach ($f in $frags) {
 }
 
 [System.IO.File]::WriteAllText($iniPath, (($lines -join $nl) + $nl), $utf8)
+# effective settings schema (code facts + tools/settings-schema.json metadata) for the release script
+& (Join-Path $root 'tools/gen-settings.ps1') -EmitEffective (Join-Path $Target 'settings-schema.json') -Check
+Write-Host "[package] settings-schema.json written"
