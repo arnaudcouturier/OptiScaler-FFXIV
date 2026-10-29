@@ -7,6 +7,7 @@
 #include "ext/core/DetourThreads.h"
 #include "ext/ffxiv/resolve/Gate.h"
 #include "ext/ffxiv/resolve/ModulePath.h"
+#include "ext/ffxiv/ui/PlatePackets.h" // ext: developer probe of the UI draws (log only)
 #include "replay/FfxivNameplateLive.h"
 #include <detours/detours.h>
 #include <filesystem>
@@ -20,9 +21,9 @@ using BindState=void(__fastcall*)(uintptr_t,uintptr_t,UINT);
 static Enqueue enqueue=nullptr;
 static BindState bindState=nullptr;
 static int __fastcall OnEnqueue(uintptr_t context,uintptr_t command)
-{Layer::EmitVisibilityCommand(command);return enqueue(context,command);}
+{Layer::EmitVisibilityCommand(command);ext::ffxiv::ui::plate::OnEnqueue(command);return enqueue(context,command);}
 static void __fastcall OnBindState(uintptr_t context,uintptr_t state,UINT instances)
-{bindState(context,state,instances);Layer::BindVisibilityCommand(context,state);}
+{bindState(context,state,instances);Layer::BindVisibilityCommand(context,state);ext::ffxiv::ui::plate::OnBindState(context,state);}
 static uintptr_t base = 0;
 static std::atomic<bool> installed {false}, requested {false};
 static std::atomic<uint64_t> captures {0}, replacements {0}, packetCount {0}, fallbacks {0};
@@ -141,8 +142,8 @@ struct VisibilityScope
     {if(requested.load() && !pending.inside)active=Layer::BeginVisibilityNative(base,renderer,bytes,pending.packets,pending.capturedAt);}
     ~VisibilityScope(){if(active)Layer::EndVisibilityNative();}
 };
-static void __fastcall OnBatch16(uintptr_t renderer, char mode) { VisibilityScope scope(renderer,2);Invoke(batch16, renderer, mode); }
-static void __fastcall OnBatch32(uintptr_t renderer, char mode) { VisibilityScope scope(renderer,4);Invoke(batch32, renderer, mode); }
+static void __fastcall OnBatch16(uintptr_t renderer, char mode) { VisibilityScope scope(renderer,2);ext::ffxiv::ui::plate::BatchScope probe(base,renderer,2);Invoke(batch16, renderer, mode); }
+static void __fastcall OnBatch32(uintptr_t renderer, char mode) { VisibilityScope scope(renderer,4);ext::ffxiv::ui::plate::BatchScope probe(base,renderer,4);Invoke(batch32, renderer, mode); }
 
 void Install()
 {

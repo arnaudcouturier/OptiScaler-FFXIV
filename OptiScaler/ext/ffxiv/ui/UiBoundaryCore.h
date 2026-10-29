@@ -364,6 +364,9 @@ class Core
     }
     uint32_t PreHookShaders() const { return _preCount; }
 
+    // The program record of the pixel shader bound now (null when none): the developer probe names draws by it.
+    ShaderRec* PixelShaderRec(ID3D11DeviceContext* c) { return ShaderOf(c); }
+
     // The render target currently bound, classified against this frame's backbuffer (also used by the snapshot code).
     RtInfo ClassifyRt(ID3D11DeviceContext* c)
     {

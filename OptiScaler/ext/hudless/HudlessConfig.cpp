@@ -48,7 +48,14 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "ShowDetectedUi", showDetectedUi);
     b.Add("HudLess", "GuardMode", guardMode);
     b.Add("HudLess", "HdrPaste", hdrPaste);
+    b.Add("HudLess", "PlateDiagnostics", plateDiagnostics);
+    b.Add("HudLess", "PlateOverlay", plateOverlay);
 }
 
-void HudlessConfig::PostLoad() { hudless::Publish(GetMode()); }
+void HudlessConfig::PostLoad()
+{
+    hudless::Publish(GetMode());
+    // The probes have their own seam bit: with the key off nothing else about the seams changes.
+    ext::SetActive(ext::F::PlateProbe, plateDiagnostics.value_or_default());
+}
 } // namespace ext

@@ -41,6 +41,10 @@ struct HudlessConfig
     // off | on. A string key, ini only. on = under HDR output the paste's HDR stage is made before the first paste image (the PQ
     // conversion path of the paste has not run in a game yet); anything else reads as off.
     CustomOptional<std::string> hdrPaste { "off" };            // HdrPaste
+    // Developer probes, log only, ini only (docs/HUDLESS.md "Developer probes"). PlateDiagnostics is the master switch of both
+    // probes; PlateOverlay only matters while it is on.
+    CustomOptional<bool> plateDiagnostics { false };           // PlateDiagnostics
+    CustomOptional<bool> plateOverlay { false };               // PlateOverlay
 
     // Values as the engine uses them: out-of-range or non-finite input is clamped / replaced, the stored text is not
     // rewritten.

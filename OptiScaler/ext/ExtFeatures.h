@@ -22,6 +22,7 @@ enum class F : uint64_t
     Dx11Bridge = 1ull << 8, // D3D11 on D3D12 bridge extensions
     Upscaler = 1ull << 9,   // upscaler-layer extensions
     Game = 1ull << 10,      // a game module is active (ext::game::Current() is not all null)
+    PlateProbe = 1ull << 11, // developer probes of the output stream and the UI draws ([HudLess] PlateDiagnostics, log only)
 };
 
 namespace detail
@@ -30,6 +31,12 @@ inline std::atomic<uint64_t> g_activeFeatures { 0 };
 }
 
 inline bool Active(F f) { return (detail::g_activeFeatures.load(std::memory_order_relaxed) & static_cast<uint64_t>(f)) != 0; }
+
+// True when either bit is set: one relaxed load and one test, the same cost as Active() (seams that serve two consumers).
+inline bool ActiveAny(F a, F b)
+{
+    return (detail::g_activeFeatures.load(std::memory_order_relaxed) & (static_cast<uint64_t>(a) | static_cast<uint64_t>(b))) != 0;
+}
 
 inline void SetActive(F f, bool on)
 {

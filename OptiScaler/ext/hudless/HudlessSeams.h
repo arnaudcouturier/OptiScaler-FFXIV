@@ -20,6 +20,10 @@ void UiFreeFrame(Dx11wDx12SC& sc, unsigned int slot, ID3D12Resource*& copySource
 void PostInteropCopy(Dx11wDx12SC& sc);
 void OnReleaseInterop(Dx11wDx12SC& sc);
 void BeforeOverlay(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue);
+// Developer probes ([HudLess] PlateDiagnostics, PlateProbe.cpp): they take no part in the engine and are reached through their own bit.
+void PlateProbePost(Dx11wDx12SC& sc);
+void PlateProbeExpected(uint32_t outputsPerFrame);
+void PlateProbeOutput(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue);
 } // namespace detail
 
 // dx11_with_dx12_sc.cpp Present, after the backbuffer was copied to the shared texture and before _WaitDx11ThenDx12
@@ -43,11 +47,18 @@ inline void UiFreeFrame(Dx11wDx12SC& sc, unsigned int slot, ID3D12Resource*& cop
 }
 
 // Present, after _WaitForInteropCopyOnPresentQueue (the FG queue has waited for the interop copy): tags HudlessColor /
-// UIColor on the FG UI command list, builds the paste image on the FG queue, counts the present.
+// UIColor on the FG UI command list, builds the paste image on the FG queue, counts the present. Also the real-frame point of the developer
+// probe: one test of both bits when both are off; the probe records first (before the engine spends its time), the engine only runs with its
+// own bit.
 inline void PostInteropCopy(Dx11wDx12SC& sc)
 {
-    if (ext::Active(ext::F::Hudless))
-        detail::PostInteropCopy(sc);
+    if (ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe))
+    {
+        if (ext::Active(ext::F::PlateProbe))
+            detail::PlateProbePost(sc);
+        if (ext::Active(ext::F::Hudless))
+            detail::PostInteropCopy(sc);
+    }
 }
 
 // _ReleaseInteropBackBuffers (resize, teardown), before the bridge drops its own copies: retires the slot ring behind
@@ -57,6 +68,14 @@ inline void OnReleaseInterop(Dx11wDx12SC& sc)
     if (ext::Active(ext::F::Hudless))
         detail::OnReleaseInterop(sc);
 }
+
+// fg AdjustDlssgOptions, after the multiplier selector and the menu interlock: how many outputs this real frame was dispatched for
+// (generated frames + 1; 0 when it is not known in advance). Only the developer probe listens.
+inline void NoteExpectedMultiplier(uint32_t outputsPerFrame)
+{
+    if (ext::Active(ext::F::PlateProbe))
+        detail::PlateProbeExpected(outputsPerFrame);
+}
 } // namespace ext::hudless
 
 namespace ext::present
@@ -64,9 +83,17 @@ namespace ext::present
 // wrapped_swapchain.cpp LocalPresent, before MenuOverlayDx::Present: general pre-overlay slot (SEAMS 5). Today's only
 // user is the HUD-less engine's UI paste, drawn over every output frame of the frame generation swapchain (real and
 // generated). `queue` is the swapchain's command queue (null for a D3D11 swapchain).
+//
+// The developer probe (PlateDiagnostics) is a second consumer of this hook: it records the output first, with its own bit, and never
+// reaches the engine; the engine only runs with its own bit. With both bits clear this is one load and one test, as before.
 inline void BeforeOverlay(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, bool isD3D11)
 {
-    if (!isD3D11 && queue != nullptr && ext::Active(ext::F::Hudless))
-        hudless::detail::BeforeOverlay(swapChain, queue);
+    if (!isD3D11 && queue != nullptr && ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe))
+    {
+        if (ext::Active(ext::F::PlateProbe))
+            hudless::detail::PlateProbeOutput(swapChain, queue);
+        if (ext::Active(ext::F::Hudless))
+            hudless::detail::BeforeOverlay(swapChain, queue);
+    }
 }
 } // namespace ext::present

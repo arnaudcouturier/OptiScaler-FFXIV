@@ -491,6 +491,21 @@ int main(int argc, char** argv)
         auto hasLine = [&](const std::string& text)
         { return hudlessIni.find("\n" + text + "\r\n") != std::string::npos || hudlessIni.find("\n" + text + "\n") != std::string::npos; };
         CHECK(hasLine("GuardMode=auto") && hasLine("HdrPaste=auto"));
+        // the two developer probes ship switched off: the key line of each is there once, and it says auto (the code default is false)
+        auto keyLines = [&](const std::string& key)
+        {
+            std::vector<std::string> found;
+            const std::string needle = "\n" + key + "=";
+            for (size_t at = hudlessIni.find(needle); at != std::string::npos; at = hudlessIni.find(needle, at + 1))
+            {
+                const size_t end = hudlessIni.find_first_of("\r\n", at + 1);
+                found.push_back(hudlessIni.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1));
+            }
+            return found;
+        };
+        CHECK(keyLines("PlateDiagnostics") == std::vector<std::string> { "PlateDiagnostics=auto" });
+        CHECK(keyLines("PlateOverlay") == std::vector<std::string> { "PlateOverlay=auto" });
+        CHECK(hasLine("PlateDiagnostics=auto") && hasLine("PlateOverlay=auto"));
         CHECK(frags.at("HudLess").at("GuardMode").find("legacy or density - Default (auto) is legacy") != std::string::npos);
         CHECK(frags.at("HudLess").at("HdrPaste").find("off or on - Default (auto) is off") != std::string::npos);
     }

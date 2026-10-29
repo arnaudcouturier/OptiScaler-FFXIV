@@ -118,6 +118,10 @@ void AdjustDlssgOptions(IFGFeature* fg, sl::DLSSGOptions& options)
         AdjustUiRecomposition(options);
 
     ApplyMenuDlssgInterlock(options);
+
+    // developer probe of the output stream: the number of outputs this frame is dispatched for (unknown when the driver decides)
+    ext::hudless::NoteExpectedMultiplier(options.mode == sl::DLSSGMode::eOn ? options.numFramesToGenerate + 1
+                                         : options.mode == sl::DLSSGMode::eOff ? 1u : 0u);
 }
 
 void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options,

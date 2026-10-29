@@ -4,12 +4,14 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/hudless/HudlessState.h"
+#include "ext/hudless/PlateProbe.h"
 
 namespace ext::ffxiv::ui
 {
 bool DiagnosticsOn() { return ext::Cfg().ui.diagnostics.value_or_default(); }
 
-bool EvaluateArmed() { return DiagnosticsOn() || ext::hudless::Wanted(); }
+// The developer probes of the UI draws need the detector's per-draw bookkeeping (ordinals, shader programs, render target classes), so they arm it.
+bool EvaluateArmed() { return DiagnosticsOn() || ext::hudless::Wanted() || ext::hudless::plate::Enabled(); }
 
 // First evaluation after the hooks exist (they are installed after the config is loaded): settles the cache, so the draw hook
 // is one byte test from here on even when no bridge Present ever refreshes it (frame generation off).

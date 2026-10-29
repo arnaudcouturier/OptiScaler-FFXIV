@@ -48,6 +48,8 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
     "[HudLess] HdrPaste", // opt-in for a GPU path no HDR user has confirmed yet: kept out of the menu until one does
     "[HudLess] GuardMode", // opt-in guard policy that has not been tried in a game: kept out of the menu until it has
+    "[HudLess] PlateDiagnostics", // developer probes (log only) of the output stream and the UI draws
+    "[HudLess] PlateOverlay", // developer outline of the probe's suspected nameplate rectangles
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
     "[NgxRelease] SkipReleaseSleep", // kill switch of the release-path sleep skip
     "[FramePacing] Trace", // diagnostic switch of the frame-pacing CPU trace

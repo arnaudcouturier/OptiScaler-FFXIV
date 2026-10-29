@@ -6,6 +6,7 @@
 #include "ext/ffxiv/catalog/FfxivCatalog.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
+#include "ext/ffxiv/ui/PlateDraws.h"
 #include "ext/ffxiv/ui/UiDiag.h"
 #include "ext/ffxiv/ui/UiSnapshot.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
@@ -199,6 +200,8 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
         }
         try
         {
+            if (ext::hudless::plate::Enabled())
+                plate::OnFrameEnd(C().Frame()); // developer probe of the UI draws: this frame's rows go to the writer
             FrameOutcome outcome = C().CompleteFrame();
             const live::FrameNote note = live::NoteOf(outcome); // before the outcome is moved into the D1 recorder
             if (DiagnosticsOn())
@@ -343,6 +346,8 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
         const int64_t start = Qpc();
         const Core::DrawResult res = core.OnDraw(context);
         const bool live = ext::hudless::Wanted();
+        if (res.counted && ext::hudless::plate::Enabled())
+            plate::OnGameDraw(context, core, res.ordinal, res.stage, res.cand.r1); // developer probe of the UI draws (log only)
         // S10 D0: the ReShade feasibility probe runs at the earliest candidate boundary (R3 moved), before that draw runs.
         // One atomic load and a failed compare unless the user armed it from its menu card. Not while the live path is on: it
         // calls render_effects itself and a second call in the same frame would apply the effects twice.

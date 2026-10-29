@@ -14,6 +14,7 @@
 #include "ext/ffxiv/lighting/FfxivResolveGate.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
+#include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 
@@ -208,26 +209,28 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
     original();
     FfxivLightingScan::After(c, id);
 }
-inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{draw(c,n,start);});}); }
+inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { ext::ffxiv::ui::plate::NoteDraw('D',n,1,start,0); Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{draw(c,n,start);});}); }
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
+    ext::ffxiv::ui::plate::NoteDraw('I',n,1,start,b); // ext: developer probe (one atomic test while PlateDiagnostics is off)
     if(c==context && !inside && companionCallbacks.interceptVisibilityIndexed &&
-       companionCallbacks.interceptVisibilityIndexed(c,n,start,b,indexed))return;
+       companionCallbacks.interceptVisibilityIndexed(c,n,start,b,indexed)){ext::ffxiv::ui::plate::OnInterceptedDraw(c);return;}
     auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{indexed(c,n,start,b);});}); };
     if (c == context && !inside && companionCallbacks.aroundIndexed)
         companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
     else normal();
 }
-inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{instanced(c,n,i,start,f);});}); }
+inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { ext::ffxiv::ui::plate::NoteDraw('N',n,i,start,0); Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{instanced(c,n,i,start,f);});}); }
 inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
 {
+    ext::ffxiv::ui::plate::NoteDraw('X',n,i,start,b);
     auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstanced,[&]{indexedInstanced(c,n,i,start,b,f);});}); };
     if (c == context && !inside && i && companionCallbacks.aroundIndexed)
         companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
     else normal();
 }
-inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{indirect(c,b,o);});}); }
-inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{indexedIndirect(c,b,o);});}); }
+inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{indirect(c,b,o);});}); }
+inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{indexedIndirect(c,b,o);});}); }
 // ext: S11 hooks the character preview layer needs besides the draws: ClearRenderTargetView, Begin, End, CreateVertexShader.
 using ClearRtv=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,const FLOAT[4]);
 using QueryCall=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
@@ -243,6 +246,7 @@ inline HRESULT STDMETHODCALLTYPE OnCreateVertexShader(ID3D11Device* d,const void
 {
     auto hr=createVs(d,code,size,link,out);
     if(SUCCEEDED(hr) && out && *out) ext::ffxiv::chara::OnVertexShaderCreated(d,*out,code,size);
+    if(SUCCEEDED(hr) && out && *out) ext::ffxiv::ui::plate::OnVertexShaderCreated(*out,code,size); // ext: developer probe (names the vertex shader of a draw)
     return hr;
 }
 inline void Install(ID3D11Device* d)
