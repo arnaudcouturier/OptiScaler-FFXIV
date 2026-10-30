@@ -5,7 +5,8 @@
                     '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_Shader.h',
                     '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_GuideMatch_Shader.h',
                     '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_Spatial_Shader.h',
-                    '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_Spatial_Guides_Shader.h')
+                    '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_Spatial_Guides_Shader.h',
+                    '{repo}/OptiScaler/x64/Release/ext_gen/DlssNr_ClassicSharpen_Shader.h')
     Sources     = @('nr_replay.cpp')
     IncludeDirs = @('{repo}/OptiScaler', '{repo}/OptiScaler/x64/Release/ext_gen')
     Libs        = @('d3d12.lib', 'dxgi.lib', 'version.lib')
