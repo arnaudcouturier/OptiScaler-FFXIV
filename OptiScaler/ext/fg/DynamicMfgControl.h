@@ -203,11 +203,13 @@ class AutoMfgController
                 SelfTestInterrupted(out, now, restart_ ? "frame generation was reactivated" : "the game paused");
             restart_ = false;
         }
-        if (externalStall_ || externalStallWatch_)
+        const bool ignoredTick = externalStall_ || externalStallWatch_;
+        if (ignoredTick)
         {
             // An NR model rebuild owns this hitch, not the game and not the last switch: the first tick restarts the
             // selector (its settle drops exactly the next two intervals) and an open watch starts over on both ticks,
-            // so the hitch is never judged as the switch re-creation stall. Neither tick feeds the stall average.
+            // so the hitch is never judged as the switch re-creation stall. Neither tick feeds the stall average, and
+            // neither tick's own interval is recorded by the watch (below).
             if (externalStall_)
             {
                 externalStall_ = false;
@@ -240,7 +242,11 @@ class AutoMfgController
             SelfTestBegin(in, out, cycleMax, hardMax);
 
         // Watch of the last switch.
-        if (w_.open && stalled_)
+        if (w_.open && ignoredTick)
+        {
+            // The rebuild's own interval: the watch already started over above and records nothing from this tick.
+        }
+        else if (w_.open && stalled_)
         {
             // The game is stalled: a change is not judged on a stalled game (late counts, a long frame and a bad status are
             // what a stall looks like). The watch starts over on every tick of it, so that the second that is judged later
