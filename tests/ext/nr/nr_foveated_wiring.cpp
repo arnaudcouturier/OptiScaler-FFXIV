@@ -169,8 +169,11 @@ int main(int argc, char** argv)
     // colour allocation), never the target allocation (`desc`): the Foveated pixel inputs are output pixels and the pass converts
     // them to the model's frame (pre-SR: the frame is smaller). Scratches and dispatches address the ACTIVE rectangle (the declared
     // size clamped to the allocation per axis); geometry and readout keep the declared size.
-    CHECK(Count(pass, "MakeGeometry(requestedSettings,frame.BeforeUpscale?width:outputW,frame.BeforeUpscale?height:outputH,outputW,outputH,scaleX,scaleY,g_nr.spatialFailed);") == 1);
-    CHECK(Count(pass, "MakeGeometry(requestedSettings,frame.BeforeUpscale?width:outputW,frame.BeforeUpscale?height:outputH,outputW,outputH,scaleX,scaleY,false);") == 1);
+    // the geometry frame is the clamped working size, never the declared output: a declared size above the allocation would otherwise size the
+    // model above the frame and make the applied identity differ every frame (a rebuild per slider step, no settle)
+    CHECK(Count(pass, "MakeGeometry(requestedSettings,width,height,outputW,outputH,scaleX,scaleY,g_nr.spatialFailed);") == 1);
+    CHECK(Count(pass, "MakeGeometry(requestedSettings,width,height,outputW,outputH,scaleX,scaleY,false);") == 1);
+    CHECK(Count(pass, "BeforeUpscale?width:outputW") == 0);
     // the scale of each axis is the per-axis key when set, otherwise the uniform one: X reads the X key, Y reads the Y key; one function
     // (shared with the menu) applies the refusal latch and the mixed above/below 100% rule to them
     CHECK(Count(pass, "constfloatscaleKeyX=nr.workingScaleX.value_or_default();") == 1);

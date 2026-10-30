@@ -2056,14 +2056,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             scaleY = std::min(scaleY, g_nr.governorOut.cap);
         }
     }
-    auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, frame.BeforeUpscale ? width : outputW, frame.BeforeUpscale ? height : outputH, outputW,
-                                                   outputH, scaleX, scaleY, g_nr.spatialFailed);
+    // The frame is the size the pass really works on (clamped to the allocation after upscaling), so the model, the scratch and the applied
+    // identity agree; the declared output size only sets the foveation's output pixels and the readout.
+    auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, outputW, outputH, scaleX, scaleY, g_nr.spatialFailed);
     if (g_nr.spatialFailed && requested.layout != g_nr.applied.layout)
     {
         // A new layout gets a fresh attempt at spatial processing.
         g_nr.spatialFailed = false;
-        requested = DlssNr::Spatial::MakeGeometry(requestedSettings, frame.BeforeUpscale ? width : outputW, frame.BeforeUpscale ? height : outputH, outputW,
-                                                  outputH, scaleX, scaleY, false);
+        requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, outputW, outputH, scaleX, scaleY, false);
     }
     // The menu readout follows what is asked for, so a slider answers at once even while the picture waits.
     g_nr.spatialReadout = { true, requested.layout.requested, requested.spatial,
