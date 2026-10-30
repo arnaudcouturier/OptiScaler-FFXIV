@@ -16,7 +16,9 @@
 #include "ext/ffxiv/diag/DrawDiag.h" // ext: developer draw diagnostic (log only, one atomic load per draw)
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
-#include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the nameplate vertex shaders (catalog group)
+#include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the nameplate vertex shaders (catalog group and the plate classifier)
+#include "ext/ffxiv/plates/PlateNative.h" // ext: native nameplate draw classifier and redirect
+#include "ext/ffxiv/plates/PlateShaderKind.h" // ext: native nameplate pixel-shader stamp
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 
@@ -158,6 +160,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         ext::hdr::FfxivSceneHdr::Tag(*out,crc);
         ext::ffxiv::chara::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
+        ext::ffxiv::plates::OnPixelShaderCreated(*out,crc); // ext: native nameplates (stamps the four nameplate variants ALWAYS: a key switched on later needs them)
         ext::ffxiv::diag::OnPixelShaderCreated(*out,code,size,crc); // ext: developer draw diagnostic (one atomic test; reflects the bytecode once per shader)
     }
     return hr;
@@ -197,6 +200,11 @@ inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) {
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
     ext::ffxiv::ui::plate::NoteDraw('I',n,1,start,b); // ext: developer probe (one atomic test while PlateDiagnostics is off)
+    // ext: native nameplates. A plate draw of a frame the plate engine hides is drawn into the plate image and not drawn
+    // here; every other draw, and every draw while the key is off, is untouched (one atomic load, then 0). `original` is
+    // the real DrawIndexed, so the redirected draw never re-enters these hooks.
+    if (c == context && !inside && ext::ffxiv::plates::InterceptIndexed(c, n, start, b, reinterpret_cast<void*>(indexed)))
+        return;
     auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{indexed(c,n,start,b);});}); };
     normal();
 }

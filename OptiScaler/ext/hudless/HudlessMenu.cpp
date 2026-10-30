@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/ExtFeatures.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/core/MenuWidgets.h"
@@ -7,6 +8,7 @@
 #include "ext/game/Game.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
+#include "ext/hudless/PlateMode.h"
 #include "ext/reshade/ReShadeBoundary.h"
 
 #include <menu/menu_common.h>
@@ -102,6 +104,59 @@ void DrawHudless(ext::menu::Ctx&)
     if (ImGui::Checkbox("Show detected UI (HUD-less)", &tint))
         cfg.showDetectedUi = tint;
     ext::menu::Tooltip("Debug: tints the pasted UI area so the mask is visible (UI-free mode).");
+
+    // Native nameplates: the game's own nameplate draws are taken into a plate-only image and drawn back over every
+    // output frame. Snapshot first, bit second: the presenting threads and the engine read the snapshot, so the bit may
+    // only say "on" once the key says so, and the menu never clears it (the engine clears it when the last hidden plate
+    // image is gone and re-reads this snapshot, so a key turned back on in that instant ends with the bit back on).
+    if (ImGui::TreeNode("Native nameplates"))
+    {
+        auto publish = [&cfg]
+        {
+            const ext::hudless::PlateSnapshot snapshot = cfg.PlateSettings();
+            ext::hudless::PublishPlateSettings(snapshot);
+            if (snapshot.interp != ext::hudless::PlateInterp::Off)
+                ext::SetActive(ext::F::Plate, true);
+        };
+
+        static constexpr const char* kInterpNames[] = { "off", "endpoint", "on" };
+        int interp = static_cast<int>(cfg.GetPlateInterp());
+        if (ImGui::Combo("Interpolate nameplates", &interp, "Off\0Endpoint\0On\0"))
+        {
+            cfg.plateInterp = std::string(kInterpNames[interp]);
+            publish();
+        }
+        ext::menu::Tooltip("The game's nameplates move once per game frame; frame generation shows that step on every output.\n"
+                           "Off: nameplates stay native (today's behaviour).\n"
+                           "Endpoint: the plate draws are taken out of the game's frame and drawn back over every output "
+                           "unchanged, which proves the whole path with no visual change.\n"
+                           "On: reserved for per-output shifting. This build has no plate tracker, so On draws exactly what "
+                           "Endpoint draws and moves nothing; the two keys below have no effect yet.\n"
+                           "Needs DLSS-G with a multiplier of 2 or more and an SDR output; any doubt keeps the plates native.");
+
+        static constexpr const char* kPhaseNames[] = { "auto", "0", "1" };
+        const int parsed = ext::hudless::ParsePlatePhase(cfg.platePhaseOffset.value_or_default());
+        int phase = parsed == ext::hudless::kPlatePhaseAuto ? 0 : parsed + 1;
+        if (ImGui::Combo("Shift order", &phase, "Auto\0Constant 0\0Constant 1\0"))
+        {
+            cfg.platePhaseOffset = std::string(kPhaseNames[phase]);
+            publish();
+        }
+        ext::menu::Tooltip("Which output of a batch shows the older plate position. Auto assumes the generated frames come "
+                           "first and the real frame last. No effect in this build (no plate tracker yet).");
+
+        int step = cfg.GetPlateStep();
+        if (ImGui::SliderInt("Largest shift (px per frame)", &step, 0, ext::HudlessConfig::kPlateStepMax))
+        {
+            cfg.plateMaxStep = step;
+            publish();
+        }
+        ext::menu::Tooltip("The biggest distance a nameplate may be moved between two outputs, in output pixels. A plate "
+                           "that moves further than this is drawn unshifted for that frame instead of jumping. "
+                           "No effect in this build (no plate tracker yet). Default 24.");
+
+        ImGui::TreePop();
+    }
 
     // [HudLess] ReShadePresets: auto | on | off; the order of the combo is the order of ext::reshade::PresetsMode.
     static constexpr const char* kPresetNames[] = { "auto", "on", "off" };

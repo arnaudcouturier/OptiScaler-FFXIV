@@ -7,6 +7,7 @@
 #include <Config.h>
 
 #include "ext/hudless/HudlessMode.h"
+#include "ext/hudless/PlateMode.h"
 
 #include <cmath>
 #include <cstdint>
@@ -26,6 +27,7 @@ struct HudlessConfig
     static constexpr float kThresholdMax = 1.0f;
     static constexpr int kDilationMax = 4;
     static constexpr float kGuardDefault = 0.60f;
+    static constexpr int kPlateStepMax = 256;
 
     // off | recomposition | ui_free. A string key: anything else reads as off.
     CustomOptional<std::string> mode { "off" }; // Mode
@@ -46,6 +48,12 @@ struct HudlessConfig
     CustomOptional<std::string> hdrPaste { "off" };            // HdrPaste
     // Developer probe, log only, ini only (docs/HUDLESS.md "Developer probes").
     CustomOptional<bool> plateDiagnostics { false };           // PlateDiagnostics
+    // Native nameplates, live: off | endpoint | on. A string key; anything else reads as off (today's behaviour).
+    CustomOptional<std::string> plateInterp { "off" };         // PlateInterp
+    // auto | 0 | 1, the constant of the per-output shift share. A string key; anything else reads as auto.
+    CustomOptional<std::string> platePhaseOffset { "auto" };   // PlatePhaseOffset
+    // Largest plate shift, in output pixels per game frame (0..256).
+    CustomOptional<int> plateMaxStep { 24 };                   // PlateMaxStep
 
     // Values as the engine uses them: out-of-range or non-finite input is clamped / replaced, the stored text is not
     // rewritten.
@@ -78,6 +86,22 @@ struct HudlessConfig
         if (!std::isfinite(v))
             return kGuardDefault;
         return v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+    }
+
+    // Native nameplates: the switch, the resolved phase constant and the step cap, clamped and fail-open.
+    hudless::PlateInterp GetPlateInterp() const { return hudless::ParsePlateInterp(plateInterp.value_or_default()); }
+    int GetPlatePhase() const
+    {
+        return hudless::ResolvePlatePhase(hudless::ParsePlatePhase(platePhaseOffset.value_or_default()));
+    }
+    int GetPlateStep() const
+    {
+        const int v = plateMaxStep.value_or_default();
+        return v < 0 ? 0 : (v > kPlateStepMax ? kPlateStepMax : v);
+    }
+    hudless::PlateSnapshot PlateSettings() const
+    {
+        return hudless::PlateSnapshot::Clamped(GetPlateInterp(), GetPlatePhase(), GetPlateStep());
     }
 
     void Bind(config::Binder& b);

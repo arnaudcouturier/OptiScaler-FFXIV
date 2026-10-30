@@ -21,7 +21,10 @@ struct SharedTexture
 
 // Creates a default-usage, single-sample D3D11 texture of `format` (a typed format) that D3D12 can sample (a shader
 // resource) and open it on `device12`. Fails (and leaves `out` empty) when the opened resource denies shader resource
-// access, which is what the mask and paste shaders need.
+// access, which is what the mask and paste shaders need. `renderTarget` also makes the texture bindable as a render
+// target, so a caller can draw into the shared memory through a D3D11 render target view instead of copying into it; it
+// then also fails when D3D12 sees the opened resource deny render target access. Off by default: the hud-less slot ring
+// copies into its textures and needs no render target flag.
 HRESULT CreateSharedTexture(ID3D11Device* device11, ID3D12Device* device12, UINT width, UINT height, DXGI_FORMAT format,
-                            SharedTexture& out);
+                            SharedTexture& out, bool renderTarget = false);
 } // namespace ext::hudless

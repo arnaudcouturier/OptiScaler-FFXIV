@@ -8,7 +8,9 @@ $jobs = @(
     @{ File = 'UiPasteProduce.hlsl'; Profile = 'cs_5_0'; Entry = 'CSMain'; Header = 'UiPasteProduce_Shader.h'; Name = 'UiPasteProduce_cso' },
     @{ File = 'UiRecomposition.hlsl'; Profile = 'cs_5_0'; Entry = 'CSMain'; Header = 'UiRecomposition_Shader.h'; Name = 'UiRecomposition_cso' },
     @{ File = 'UiPasteDraw.hlsl'; Profile = 'vs_5_0'; Entry = 'VSMain'; Header = 'UiPasteVs_Shader.h'; Name = 'UiPasteVs_cso' },
-    @{ File = 'UiPasteDraw.hlsl'; Profile = 'ps_5_0'; Entry = 'PSMain'; Header = 'UiPastePs_Shader.h'; Name = 'UiPastePs_cso' }
+    @{ File = 'UiPasteDraw.hlsl'; Profile = 'ps_5_0'; Entry = 'PSMain'; Header = 'UiPastePs_Shader.h'; Name = 'UiPastePs_cso' },
+    @{ File = 'UiPlateDraw.hlsl'; Profile = 'vs_5_0'; Entry = 'VSMain'; Header = 'UiPlateVs_Shader.h'; Name = 'UiPlateVs_cso' },
+    @{ File = 'UiPlateDraw.hlsl'; Profile = 'ps_5_0'; Entry = 'PSMain'; Header = 'UiPlatePs_Shader.h'; Name = 'UiPlatePs_cso' }
 )
 foreach ($j in $jobs) {
     $bin = Join-Path $Out ($j.Header + '.bin')

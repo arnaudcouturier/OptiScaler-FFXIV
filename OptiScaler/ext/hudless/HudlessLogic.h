@@ -636,8 +636,10 @@ struct FenceReader
 template <size_t kSlots, size_t kMaxReaders = 6> class SlotRing
 {
   public:
-    // A reader entry whose fence value has not completed after this many frames is assumed to belong to work that was
-    // never submitted (a paused frame generator drops its pending UI list) and stops pinning the slot. Counted.
+    // A reader entry whose fence value has not completed after this many frames of the caller's own clock is assumed to
+    // belong to work that was never submitted (a paused frame generator drops its pending UI list) and stops pinning the
+    // slot. The plate engine advances that clock twice per present (the present entry and the frame finish), so its 240
+    // frames are about 120 presents. Counted.
     static constexpr uint64_t kStaleFrames = 240;
 
     // Records that the queue operation signalled by (fence, value) reads `slot`. Same fence: keeps the larger value.

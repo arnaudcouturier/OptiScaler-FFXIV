@@ -6,6 +6,9 @@
 
 #include "ext/ExtFeatures.h"
 
+#include "ext/hudless/PlateSeams.h"
+#include "ext/hudless/PlateSource.h"
+
 #include <d3d12.h>
 
 class Dx11wDx12SC;
@@ -48,33 +51,50 @@ inline void UiFreeFrame(Dx11wDx12SC& sc, unsigned int slot, ID3D12Resource*& cop
 
 // Present, after _WaitForInteropCopyOnPresentQueue (the FG queue has waited for the interop copy): tags HudlessColor /
 // UIColor on the FG UI command list, builds the paste image on the FG queue, counts the present. Also the real-frame point of the developer
-// probe: one test of both bits when both are off; the probe records first (before the engine spends its time), the engine only runs with its
-// own bit.
+// probe and of the native nameplate engine: one test of the three bits when they are all off; a consumer only runs with its own bit
+// (the probe records first, before the engine spends its time).
 inline void PostInteropCopy(Dx11wDx12SC& sc)
 {
-    if (ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe))
+    if (ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe, ext::F::Plate))
     {
         if (ext::Active(ext::F::PlateProbe))
             detail::PlateProbePost(sc);
+        if (ext::Active(ext::F::Plate))
+            ext::hudless::plates::OnPost(sc);
         if (ext::Active(ext::F::Hudless))
             detail::PostInteropCopy(sc);
     }
 }
 
 // _ReleaseInteropBackBuffers (resize, teardown), before the bridge drops its own copies: retires the slot ring behind
-// its GPU fences, never blocks.
+// its GPU fences, never blocks. Also the native nameplate engine's own retirement (its slots, record and pins).
 inline void OnReleaseInterop(Dx11wDx12SC& sc)
 {
+    if (ext::Active(ext::F::Plate))
+        ext::hudless::plates::OnRelease();
     if (ext::Active(ext::F::Hudless))
         detail::OnReleaseInterop(sc);
 }
 
 // fg AdjustDlssgOptions, after the multiplier selector and the menu interlock: how many outputs this real frame was dispatched for
-// (generated frames + 1; 0 when it is not known in advance). Only the developer probe listens.
+// (generated frames + 1; 0 when it is not known in advance). The developer probe and the native nameplate engine listen.
 inline void NoteExpectedMultiplier(uint32_t outputsPerFrame)
 {
-    if (ext::Active(ext::F::PlateProbe))
-        detail::PlateProbeExpected(outputsPerFrame);
+    if (ext::ActiveAny(ext::F::PlateProbe, ext::F::Plate))
+    {
+        if (ext::Active(ext::F::Plate))
+            ext::hudless::plates::NoteMultiplier(outputsPerFrame);
+        if (ext::Active(ext::F::PlateProbe))
+            detail::PlateProbeExpected(outputsPerFrame);
+    }
+}
+
+// The bridge's present scope constructor (dx11_with_dx12_sc.cpp, its Present entry, before the backbuffer copy): the
+// frame boundary of the native nameplate engine. One relaxed load with the bit off.
+inline void OnPresentBegin()
+{
+    if (ext::Active(ext::F::Plate))
+        ext::hudless::plates::OnPresentBegin();
 }
 } // namespace ext::hudless
 
@@ -85,13 +105,16 @@ namespace ext::present
 // generated). `queue` is the swapchain's command queue (null for a D3D11 swapchain).
 //
 // The developer probe (PlateDiagnostics) is a second consumer of this hook: it records the output first, with its own bit, and never
-// reaches the engine; the engine only runs with its own bit. With both bits clear this is one load and one test, as before.
+// reaches the engine; the engine only runs with its own bit. The native nameplate engine is a third (its output pass draws the plate
+// image over every output). With all three bits clear this is one load and one test, as before.
 inline void BeforeOverlay(IDXGISwapChain* swapChain, ID3D12CommandQueue* queue, bool isD3D11)
 {
-    if (!isD3D11 && queue != nullptr && ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe))
+    if (!isD3D11 && queue != nullptr && ext::ActiveAny(ext::F::Hudless, ext::F::PlateProbe, ext::F::Plate))
     {
         if (ext::Active(ext::F::PlateProbe))
             hudless::detail::PlateProbeOutput(swapChain, queue);
+        if (ext::Active(ext::F::Plate))
+            ext::hudless::plates::OnOverlay(swapChain, queue);
         if (ext::Active(ext::F::Hudless))
             hudless::detail::BeforeOverlay(swapChain, queue);
     }

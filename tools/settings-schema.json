@@ -198,6 +198,46 @@
           "menu": { "tab": null, "card": null, "iniOnly": "developer probes (log only) of the output stream and the UI draws" },
           "description": "Developer switch, ini only: log-only probes measuring what frame generation delivers and which UI draws could be nameplates. Output goes to OptiScaler/plate-probe/<run>/. Nothing in the frame changes. Set it before the game starts.",
           "flags": [ "ffxivOnly", "diagnostic" ]
+        },
+        {
+          "key": "[HudLess] PlateInterp",
+          "section": "HudLess",
+          "name": "PlateInterp",
+          "type": "enum",
+          "values": [ "off", "endpoint", "on" ],
+          "default": "auto",
+          "defaultMeans": "off (today's behaviour)",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
+          "description": "Native nameplates: take the game's own nameplate draws out of the frame and draw them back over every output frame. off = today's behaviour; endpoint = drawn back unchanged, which proves the path and leaves the picture the same as with the key off; on = accepted for the next stage (this build has no plate tracker, so on draws exactly what endpoint draws and moves nothing). DLSS-G with a multiplier of 2 or more and SDR output only; any doubt keeps the plates native.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] PlatePhaseOffset",
+          "section": "HudLess",
+          "name": "PlatePhaseOffset",
+          "type": "enum",
+          "values": [ "auto", "0", "1" ],
+          "default": "auto",
+          "defaultMeans": "auto (1: generated frames first, the real frame last)",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
+          "description": "Advanced, for the plate tracker stage: which output of a batch shows the older plate position, as the constant of the per-output share. No effect in this build (no plate tracker yet).",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] PlateMaxStep",
+          "section": "HudLess",
+          "name": "PlateMaxStep",
+          "type": "int",
+          "min": 0,
+          "max": 256,
+          "default": "auto",
+          "defaultMeans": "24",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
+          "description": "Advanced, for the plate tracker stage: the largest distance a nameplate may be moved between two outputs, in output pixels; a plate that moves further is drawn unshifted for that frame. No effect in this build (no plate tracker yet).",
+          "flags": [ "ffxivOnly" ]
         }
       ]
     },

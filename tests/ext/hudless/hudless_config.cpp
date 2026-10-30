@@ -35,13 +35,19 @@ int main()
     // the developer probes are off by default (and the seam bit that serves them starts clear)
     assert(!defaults.plateDiagnostics.value_or_default());
     assert(!ext::Active(F::PlateProbe));
+    // native nameplates are off by default: the switch, the shift constant and the step cap
+    assert(defaults.plateInterp.value_or_default() == "off" && defaults.GetPlateInterp() == hudless::PlateInterp::Off);
+    assert(defaults.platePhaseOffset.value_or_default() == "auto" && defaults.GetPlatePhase() == 1);
+    assert(defaults.plateMaxStep.value_or_default() == 24 && defaults.GetPlateStep() == 24);
+    assert(!ext::Active(F::Plate));
 
     // Exactly the documented keys of section 11 (Diagnostics is bound by package A), in the documented order.
     config::Binder binder;
     defaults.Bind(binder);
     const std::vector<std::string> expectedKeys { "Mode",         "MaskThreshold", "MaskDilation", "PasteCleanup",
                                                   "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "GuardReleaseHolds",
-                                                  "GuardTripOnAnchorLater", "HdrPaste", "PlateDiagnostics" };
+                                                  "GuardTripOnAnchorLater", "HdrPaste", "PlateDiagnostics", "PlateInterp",
+                                                  "PlatePhaseOffset", "PlateMaxStep" };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
     {
@@ -169,6 +175,43 @@ int main()
     cfg.plateDiagnostics = false; // a CustomOptional takes the first value only, so the menu-style assignment is what switches it off
     config::Load(none);
     assert(!ext::Active(F::PlateProbe));
+
+    // Native nameplates: the three keys, their clamps, and the load-time order (snapshot first, bit second). With the key
+    // off the bit stays as it was: it is the engine's to clear, so the menu and the load never take a hidden image away.
+    {
+        CSimpleIniA plates;
+        plates.SetValue("HudLess", "PlateInterp", "Endpoint");
+        plates.SetValue("HudLess", "PlatePhaseOffset", "0");
+        plates.SetValue("HudLess", "PlateMaxStep", "1000"); // above the range: clamped
+        config::Load(plates);
+        assert(cfg.GetPlateInterp() == hudless::PlateInterp::Endpoint);
+        assert(cfg.GetPlatePhase() == 0);
+        assert(cfg.GetPlateStep() == ext::HudlessConfig::kPlateStepMax);
+        const hudless::PlateSnapshot published = hudless::CurrentPlates();
+        assert(published.interp == hudless::PlateInterp::Endpoint && published.phase == 0 &&
+               published.step == ext::HudlessConfig::kPlateStepMax);
+        assert(ext::Active(F::Plate)); // the key is on, so the load set the bit
+        CSimpleIniA saved;
+        config::Save(saved);
+        assert(std::string(saved.GetValue("HudLess", "PlateInterp", "")) == "Endpoint");
+        assert(std::string(saved.GetValue("HudLess", "PlatePhaseOffset", "")) == "0");
+        assert(std::string(saved.GetValue("HudLess", "PlateMaxStep", "")) == "1000"); // the stored text is not rewritten
+
+        // An unknown switch text is off, and a load with the key off leaves the bit alone (the engine's drain owns it).
+        cfg.plateInterp = std::string("sideways");
+        cfg.platePhaseOffset = std::string("2");
+        cfg.plateMaxStep = -5;
+        assert(cfg.GetPlateInterp() == hudless::PlateInterp::Off);
+        assert(cfg.GetPlatePhase() == 1);
+        assert(cfg.GetPlateStep() == 0);
+        CSimpleIniA off;
+        off.SetValue("HudLess", "PlateInterp", "off");
+        config::Load(off);
+        assert(cfg.GetPlateInterp() == hudless::PlateInterp::Off);
+        assert(hudless::CurrentPlates().interp == hudless::PlateInterp::Off);
+        assert(ext::Active(F::Plate));
+        ext::SetActive(F::Plate, false);
+    }
 
     // An unknown Mode string loads as off and stays off.
     CSimpleIniA bad;

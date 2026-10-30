@@ -24,6 +24,7 @@ enum class F : uint64_t
     Game = 1ull << 10,      // a game module is active (ext::game::Current() is not all null)
     PlateProbe = 1ull << 11, // developer probes of the output stream and the UI draws ([HudLess] PlateDiagnostics, log only)
     DrawDiag = 1ull << 12,  // developer draw diagnostic ([FFXIV] DrawDiagnostics, log only)
+    Plate = 1ull << 13,      // native nameplate interpolation (ffxiv/plates + hudless/UiPlates.cpp)
 };
 
 namespace detail
@@ -37,6 +38,13 @@ inline bool Active(F f) { return (detail::g_activeFeatures.load(std::memory_orde
 inline bool ActiveAny(F a, F b)
 {
     return (detail::g_activeFeatures.load(std::memory_order_relaxed) & (static_cast<uint64_t>(a) | static_cast<uint64_t>(b))) != 0;
+}
+
+// The same for three consumers (a hook that also feeds the nameplate engine).
+inline bool ActiveAny(F a, F b, F c)
+{
+    return (detail::g_activeFeatures.load(std::memory_order_relaxed) &
+            (static_cast<uint64_t>(a) | static_cast<uint64_t>(b) | static_cast<uint64_t>(c))) != 0;
 }
 
 inline void SetActive(F f, bool on)

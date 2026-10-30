@@ -164,6 +164,7 @@ PresentScope::PresentScope()
     ext::present::NativeBegin(); // PT: the whole bridge Present is one "native present" call
     ext::status::OnScopeBegin(ext::present::Phase::NativePresent); // status file base cadence (ignored phases cost nothing)
     ext::present::GpuTimersBeginFrame(); // the 4-of-16 frame counter of the GPU stage timers
+    ext::hudless::OnPresentBegin(); // the native nameplate engine's frame boundary (one atomic load with the key off)
     if (game::Current().hudless)
         ffxiv::ui::OnPresentBegin();
     window::OnPresentBegin(); // window mode: present thread, frame generation off gate

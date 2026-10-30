@@ -51,6 +51,9 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "GuardTripOnAnchorLater", guardTripOnAnchorLater);
     b.Add("HudLess", "HdrPaste", hdrPaste);
     b.Add("HudLess", "PlateDiagnostics", plateDiagnostics);
+    b.Add("HudLess", "PlateInterp", plateInterp);
+    b.Add("HudLess", "PlatePhaseOffset", platePhaseOffset);
+    b.Add("HudLess", "PlateMaxStep", plateMaxStep);
 }
 
 void HudlessConfig::PostLoad()
@@ -58,5 +61,11 @@ void HudlessConfig::PostLoad()
     hudless::Publish(GetMode());
     // The probes have their own seam bit: with the key off nothing else about the seams changes.
     ext::SetActive(ext::F::PlateProbe, plateDiagnostics.value_or_default());
+    // The native nameplate engine: the settings go first, the feature bit second. A presenting thread that sees the bit
+    // set therefore already finds the key on, and the engine's drain (which clears the bit when the last hidden image
+    // is gone and re-reads this snapshot) can never leave the key on with the bit off. The bit is never cleared here.
+    hudless::PublishPlateSettings(PlateSettings());
+    if (GetPlateInterp() != hudless::PlateInterp::Off)
+        ext::SetActive(ext::F::Plate, true);
 }
 } // namespace ext
