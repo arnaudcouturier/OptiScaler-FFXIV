@@ -4,6 +4,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/present/HiddenPresentPolicy.h"
+#include "ext/status/StatusFile.h"
 
 #include <State.h>
 
@@ -124,6 +125,10 @@ bool TraceIsOn()
 
 PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _active(false)
 {
+    // The status file output-cadence tick (only the output phase is recorded, and only while [Status] Enabled is
+    // true; otherwise this is one cheap key read). The base cadence ticks at the bridge PresentScope
+    // (ext/hdr/BridgeHdr.cpp), timed by NativeBegin/End rather than a scope.
+    ext::status::OnScopeBegin(phase);
     if (TraceOn())
     {
         _active = true;

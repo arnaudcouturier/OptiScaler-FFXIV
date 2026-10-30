@@ -381,6 +381,7 @@ UNINSTALL
   Close the game and delete only what this archive installed, in the folder that contains ffxiv_dx11.exe:
     winmm.dll, nvngx.dll_dlssnr.dll, OptiScaler.ini, settings-schema.json, INSTALL.txt, NOTICE.txt, SHA256SUMS.txt, and the Licenses folder
 $uninstallSymbols    plus OptiScaler.log, if you turned LogToFile on (the game writes it next to winmm.dll)
+    plus status.json and status.lock, if you turned [Status] Enabled on (the generic status snapshot, written next to winmm.dll)
   and these files inside the OptiScaler folder (a folder left empty by this can be removed too):
 $(($include | Where-Object { $_.Dest -like 'OptiScaler\*' } | ForEach-Object { "    $($_.Dest)" }) -join "`n")
   Do NOT delete the OptiScaler folder as a whole. Leave your own NVIDIA files alone: nvngx_dlssg.dll, the streamline folder, the

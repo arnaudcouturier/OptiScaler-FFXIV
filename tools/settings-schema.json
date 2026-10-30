@@ -2309,6 +2309,24 @@
       ]
     },
     {
+      "name": "Status",
+      "fragment": "OptiScaler/ext/ini/Status.ini",
+      "keys": [
+        {
+          "key": "[Status] Enabled",
+          "section": "Status",
+          "name": "Enabled",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "diagnostic switch of the generic status.json file beside the DLL" },
+          "description": "Writes status.json next to the DLL (the game folder): a small versioned snapshot for bug reports and tools (versions, feature states, frame-time percentiles, the last writer error). Never holds a path, drive letter, user name or character name. Written atomically by a low-priority background thread, at most once a second on a change plus every 10 s; deleted again when the game exits. Schema in docs/notes/status-json.md.",
+          "flags": [ "diagnostic" ]
+        }
+      ]
+    },
+    {
       "name": "QualityOverrides",
       "fragment": "OptiScaler/ext/ini/QualityOverrides.ini",
       "keys": [

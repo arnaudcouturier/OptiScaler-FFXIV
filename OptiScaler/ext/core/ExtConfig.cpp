@@ -203,6 +203,8 @@ void FramePacingConfig::Bind(config::Binder& b)
     b.Add("FramePacing", "HiddenPresentDoNotWait", hiddenPresentDoNotWait);
 }
 
+void StatusConfig::Bind(config::Binder& b) { b.Add("Status", "Enabled", fileEnabled); }
+
 void ExtConfig::Bind(config::Binder& b)
 {
     fg.Bind(b);
@@ -217,6 +219,7 @@ void ExtConfig::Bind(config::Binder& b)
     menuStyle.Bind(b);
     ngxRelease.Bind(b);
     framePacing.Bind(b);
+    status.Bind(b);
 }
 
 void ExtConfig::PostLoad()
