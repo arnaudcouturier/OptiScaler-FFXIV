@@ -176,7 +176,7 @@ int main(int argc, char** argv)
     in.rb = &known;
     const GateReport knownGate = Decide(in, GateSettings {});
     const std::string kAll = "sceneHdr,lighting,uiHudless,geometry,markers,mipBind,quirkIsolatesShutdown,quirkBridgedNativeDx11,catalogHealth,qualityRead,"
-                             "qualityHooks,jitterProbe,jitterSource,charaViewAccessor";
+                             "qualityHooks,jitterProbe,jitterSource,charaViewAccessor,latencyTick";
     CHECK(EnabledSet(knownGate) == kAll);
     if (EnabledSet(knownGate) != kAll)
     {
@@ -255,12 +255,13 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---- 3. the rollback key
+    // ---- 3. the rollback key: everything the key restores, except the simulation-tick lease (never part of it)
     GateInput legacyIn = in;
     legacyIn.rb = nullptr;
     GateSettings legacy;
     legacy.legacyGameBuild = true;
-    CHECK(EnabledSet(Decide(legacyIn, legacy)) == kAll);
+    CHECK(EnabledSet(Decide(legacyIn, legacy)) == Without(kAll, "latencyTick"));
+    CHECK(!Decide(legacyIn, legacy).Enabled(Feature::LatencyTick));
     legacyIn.exactKnownBuild = false;
     CHECK(EnabledSet(Decide(legacyIn, legacy)).empty());
 

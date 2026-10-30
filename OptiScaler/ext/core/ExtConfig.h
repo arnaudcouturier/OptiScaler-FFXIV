@@ -43,10 +43,21 @@
 #include "ext/upscaler/UpscalerConfig.h"
 #include "ext/window/WindowConfig.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <type_traits>
 #include <vector>
+
+namespace ext
+{
+// A live-key mirror: a callback that runs once at the end of every config load (Config::Reload), so a module whose key must be visible without a
+// per-frame ini read mirrors it there. Register at static init (the ExtConfig::updateCheckOnLoaded pattern); registering after the first load
+// takes effect from the next one. Fixed capacity, no allocation, no member on ExtConfig: the latency probe is the only user today.
+using KeysLoadedHook = void (*)();
+inline constexpr std::size_t kMaxKeysLoadedHooks = 4;
+void AddKeysLoadedHook(KeysLoadedHook hook);
+} // namespace ext
 
 namespace ext::config
 {

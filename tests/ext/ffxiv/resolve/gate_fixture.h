@@ -8,7 +8,9 @@
 #include "ext/ffxiv/resolve/Registry.h"
 #include "ext/ffxiv/resolve/Resolver.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
 
 namespace gf
@@ -110,7 +112,7 @@ inline GateReport Run(const ResolvedBuild* rb, const GateSettings& s, bool exe =
 }
 
 inline constexpr Feature kGroup2[] = { Feature::QualityRead,  Feature::QualityHooks,    Feature::JitterProbe,
-                                Feature::JitterSource, Feature::CharaViewAccessor };
+                                Feature::JitterSource, Feature::CharaViewAccessor, Feature::LatencyTick };
 
 inline bool AllGroup1(const GateReport& g, bool on)
 {
@@ -125,6 +127,18 @@ inline bool AllGroup2(const GateReport& g, bool on)
 {
     for (const Feature f : kGroup2)
     {
+        if (g.Enabled(f) != on || g.Reason(f).empty())
+            return false;
+    }
+    return true;
+}
+// The same, for the decisions where one feature is deliberately handled apart: the rollback key switches the simulation-tick lease off.
+inline bool AllGroup2But(const GateReport& g, bool on, std::initializer_list<Feature> except)
+{
+    for (const Feature f : kGroup2)
+    {
+        if (std::find(except.begin(), except.end(), f) != except.end())
+            continue;
         if (g.Enabled(f) != on || g.Reason(f).empty())
             return false;
     }

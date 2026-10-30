@@ -66,6 +66,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FramePacing] HiddenPresentDoNotWait", // debug switch of the hidden DX11 present, compared with the trace
     "[Bridge] FlushAfterSignal", // experiment switch of the D3D11 -> D3D12 hand-over: off is today's behaviour and nothing has measured the gain yet
     "[FrameGen] FsrMonotonicFrameId", // provider-internal FSR frame ID keep-alive: nothing a player compares in the menu
+    "[FramePacing] TickProbe", // developer probe of the game's simulation tick: records timing to the log, changes no frame
     "[Status] Enabled", // diagnostic switch of the generic status.json file beside the DLL
     "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
     "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias

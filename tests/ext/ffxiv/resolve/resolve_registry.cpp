@@ -38,7 +38,8 @@ std::vector<Member> ParseGameBuild(const std::string& path, bool& ok)
     const std::map<std::string, std::string> groups = { { "NativeQualityBuild", "nativeQuality" },
                                                                                                                 { "CharaViewBuild", "charaView" },
                                                         { "JitterBuild", "jitter" },
-                                                        { "JitterSourceBuild", "jitterSource" } };
+                                                        { "JitterSourceBuild", "jitterSource" },
+                                                        { "LatencyBuild", "latency" } };
     std::string group;
     for (std::string line; std::getline(in, line);)
     {
@@ -108,16 +109,20 @@ void TestProductRegistry()
     }
 
     // the three group files each add through their own function: calling one alone must not touch the seams of another
-    Registry quality, jitter;
+    Registry quality, jitter, latency;
     AddQualityAnchors(quality);
     AddJitterAnchors(jitter);
-    CHECK(quality.seams.size() + jitter.seams.size() == reg.seams.size());
-    CHECK(quality.bindings.size() + jitter.bindings.size() == reg.bindings.size());
-    // seam id prefixes keep two parallel writers from colliding: jitterSource.*, everything else belongs to quality
+    AddLatencyAnchors(latency);
+    CHECK(quality.seams.size() + jitter.seams.size() + latency.seams.size() == reg.seams.size());
+    CHECK(quality.bindings.size() + jitter.bindings.size() + latency.bindings.size() == reg.bindings.size());
+    // seam id prefixes keep two parallel writers from colliding: jitterSource.*, latency.*, everything else belongs to quality
     for (const SeamSpec& s : jitter.seams)
         CHECK(std::string_view(s.id).rfind("jitterSource.", 0) == 0);
+    for (const SeamSpec& s : latency.seams)
+        CHECK(std::string_view(s.id).rfind("latency.", 0) == 0);
     for (const SeamSpec& s : quality.seams)
-        CHECK(std::string_view(s.id).rfind("companion.", 0) != 0 && std::string_view(s.id).rfind("jitterSource.", 0) != 0);
+        CHECK(std::string_view(s.id).rfind("companion.", 0) != 0 && std::string_view(s.id).rfind("jitterSource.", 0) != 0 &&
+              std::string_view(s.id).rfind("latency.", 0) != 0);
 
     // an empty image resolves to NotFound everywhere, fills no field and never throws
     auto empty = MakeImage();
@@ -195,7 +200,7 @@ void TestFieldTable(const std::string& repo)
         rva += row.kind == FieldKind::Rva ? 1 : 0;
         guard += row.kind == FieldKind::Guard ? 1 : 0;
     }
-    CHECK(rva == 22 && guard == 11); // the companion block (6 Rva, 3 Guard) is gone
+    CHECK(rva == 24 && guard == 11); // the companion block (6 Rva, 3 Guard) is gone; latency adds two Rva (tick, instance) and no Guard
 }
 } // namespace
 

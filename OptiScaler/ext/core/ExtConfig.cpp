@@ -7,6 +7,24 @@
 #include <format>
 #include <sstream>
 
+namespace ext
+{
+namespace
+{
+// Registered at static init, read on the thread that loads the config: plain storage is enough, and it must not allocate (this can run inside the
+// first Config::Instance() call).
+KeysLoadedHook g_keysLoadedHooks[kMaxKeysLoadedHooks] {};
+std::size_t g_keysLoadedHookCount = 0;
+} // namespace
+
+void AddKeysLoadedHook(KeysLoadedHook hook)
+{
+    if (hook == nullptr || g_keysLoadedHookCount >= kMaxKeysLoadedHooks)
+        return;
+    g_keysLoadedHooks[g_keysLoadedHookCount++] = hook;
+}
+} // namespace ext
+
 namespace ext::config
 {
 namespace detail
@@ -204,6 +222,7 @@ void FramePacingConfig::Bind(config::Binder& b)
     b.Add("FramePacing", "Trace", trace);
     b.Add("FramePacing", "GpuTimers", gpuTimers);
     b.Add("FramePacing", "HiddenPresentDoNotWait", hiddenPresentDoNotWait);
+    b.Add("FramePacing", "TickProbe", tickProbe);
 }
 
 void StatusConfig::Bind(config::Binder& b) { b.Add("Status", "Enabled", fileEnabled); }
@@ -230,6 +249,12 @@ void ExtConfig::PostLoad()
 {
     if (updateCheckOnLoaded != nullptr)
         updateCheckOnLoaded();
+    // Live-key mirrors (AddKeysLoadedHook): the ini has been read, so a module that must not read its key per frame updates its copy here.
+    for (std::size_t i = 0; i < g_keysLoadedHookCount; ++i)
+    {
+        if (g_keysLoadedHooks[i] != nullptr)
+            g_keysLoadedHooks[i]();
+    }
 
     fg.PostLoad();
     nr.PostLoad();

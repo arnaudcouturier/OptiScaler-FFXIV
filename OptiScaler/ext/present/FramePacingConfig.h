@@ -25,11 +25,16 @@ struct FramePacingConfig
     // chain skips that present instead of blocking. Off = exactly the old call. Default false.
     CustomOptional<bool> hiddenPresentDoNotWait { false };
 
+    // TickProbe: lease the game's simulation tick (the Framework vtable slot, ext/latency) and record its timing to OptiScaler.log every
+    // 10 seconds. With it off nothing is installed and no line is written. Default false.
+    CustomOptional<bool> tickProbe { false };
+
     std::optional<bool> TraceKey() const { return trace.has_value() ? std::optional<bool>(trace.value()) : std::nullopt; }
     std::optional<bool> GpuTimersKey() const
     {
         return gpuTimers.has_value() ? std::optional<bool>(gpuTimers.value()) : std::nullopt;
     }
+    bool TickProbeOn() const { return tickProbe.value_or_default(); }
 
     void Bind(config::Binder& b);
 };

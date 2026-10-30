@@ -10,6 +10,7 @@
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/resolve/ResolveStartup.h"
 #include "ext/ffxiv/vfxmask/VfxMaskProbe.h"
+#include "ext/latency/TickLease.h"
 #include "ext/upscaler/MipBindHooks.h"
 #include "ext/upscaler/NgxThreadTrace.h"
 
@@ -24,6 +25,10 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
     // (the native-quality and jitter-source hooks later) and before the game selector's answer is used. Idempotent; a
     // non-FFXIV executable returns at once.
     ext::ffxiv::resolve::StartOnce();
+
+    // The simulation-tick lease ([FramePacing] TickProbe): the first install attempt, after the resolve, before the present loop. With the key off
+    // this is one key read and nothing else.
+    ext::latency::OnDeviceHooked();
 
     // Diagnostic for a code-review finding (not a fix): this seam fires on every device that reaches
     // HookToDeviceLocal, matching the oracle's own placement (D3D11_Hooks.cpp, before the "already hooked"
@@ -53,6 +58,9 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
 
 void OnD3D11Unhook()
 {
+    // The simulation-tick lease: put the old vtable pointer back, but only while the slot still holds the observer.
+    ext::latency::OnUnload();
+
     if (Current().geometry != nullptr)
         ext::upscaler::mipbind::OnUnhook();
 

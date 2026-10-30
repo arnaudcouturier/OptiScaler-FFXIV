@@ -123,6 +123,11 @@ inline constexpr FieldRow kFieldTable[] = {
     FFXIV_U32(jitterSource, JitterSourceBuild, deviceOutputSizeOffset, Offset),
     FFXIV_U32(jitterSource, JitterSourceBuild, strengthFloorBits, Constant),
     FFXIV_U32(jitterSource, JitterSourceBuild, ndcSignMaskBits, Constant),
+    FFXIV_U32(latency, LatencyBuild, tickRva, Rva),
+    FFXIV_U32(latency, LatencyBuild, frameworkInstanceRva, Rva),
+    FFXIV_U32(latency, LatencyBuild, frameCounterOffset, Offset),
+    FFXIV_U32(latency, LatencyBuild, perfCounterValueOffset, Offset),
+    FFXIV_U32(latency, LatencyBuild, perfCounterFreqOffset, Offset),
 };
 
 #undef FFXIV_U32

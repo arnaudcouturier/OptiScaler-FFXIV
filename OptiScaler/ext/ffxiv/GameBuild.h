@@ -199,6 +199,27 @@ struct JitterSourceBuild
     std::uint32_t ndcSignMaskBits = 0x80000000;   // the sign mask `xorps` applies to the NDC y (the generator output's y is negated)
 };
 
+// The game's simulation tick (ext/latency): the Framework object's Tick virtual function, the global that holds the Framework
+// instance, and the three counters inside that instance the tick updates.
+//
+// Tick is slot 4 of the Framework vtable. The function is found from its interior (the clock block and the Destroy / Free tail), never from
+// its entry bytes, because an inline hook over the entry (Dalamud) leaves the interior intact. The slot itself is leased, not the code, and the
+// install verifies `instance->vtable[4] == base + tickRva` before it writes anything.
+//
+// The three offsets are DECODED from the instruction that reads them, not pinned: the 2024 benchmark build differs from the October build by 8
+// bytes in all of them (0x16c8 / 0x16a8 / 0x16a0 against 0x16d0 / 0x16b0 / 0x16a8), so a patch that moves the Framework layout follows, within the
+// sanity range of the seam's ValueIn predicate.
+//
+// Read through the camera-free path only by the probe; a patch that moves them costs telemetry, never correctness.
+struct LatencyBuild
+{
+    std::uint32_t tickRva = 0xd1a40;              // Framework::Tick, the interior anchors' enclosing function
+    std::uint32_t frameworkInstanceRva = 0x2907928; // global pointer to the Framework object (bss tail of .data)
+    std::uint32_t frameCounterOffset = 0x16d0;    // u32 Framecounter, incremented by the first instruction of Tick
+    std::uint32_t perfCounterValueOffset = 0x16b0; // i64 last QueryPerformanceCounter value the tick subtracts from
+    std::uint32_t perfCounterFreqOffset = 0x16a8;  // i64 QueryPerformanceCounter frequency
+};
+
 struct GameBuild
 {
     std::uint32_t timeDateStamp = 0x6ad10bfd;
@@ -207,6 +228,7 @@ struct GameBuild
     CharaViewBuild charaView {};
     JitterBuild jitter {};
     JitterSourceBuild jitterSource {};
+    LatencyBuild latency {};
 };
 
 inline constexpr GameBuild kCurrentBuild {};

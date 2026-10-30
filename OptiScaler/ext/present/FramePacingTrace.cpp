@@ -3,6 +3,8 @@
 #include "ext/present/PresentSeams.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/latency/TickLease.h"
+#include "ext/latency/TickProbe.h"
 #include "ext/present/HiddenPresentPolicy.h"
 #include "ext/status/StatusFile.h"
 
@@ -129,6 +131,11 @@ PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _ac
     // true; otherwise this is one cheap key read). The base cadence ticks at the bridge PresentScope
     // (ext/hdr/BridgeHdr.cpp), timed by NativeBegin/End rather than a scope.
     ext::status::OnScopeBegin(phase);
+    // The simulation-tick probe's "sleep" event: the Reflex sleep of the frame-generation present path is the only wait on this path that the
+    // game thread does not see, so it is the number the probe compares against the next tick (ext/latency/TickProbe.h). One relaxed load when the
+    // probe is off.
+    if (phase == Phase::ReflexSleep)
+        ext::latency::OnSleepScopeBegin();
     if (TraceOn())
     {
         _active = true;
@@ -138,6 +145,8 @@ PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _ac
 
 PacingScope::~PacingScope()
 {
+    if (_phase == Phase::ReflexSleep)
+        ext::latency::OnSleepScopeEnd();
     if (!_active)
         return;
     const int64_t now = NowUs();
@@ -152,6 +161,10 @@ void RecordSample(Phase phase, uint64_t durationUs)
 
 void NativeBegin()
 {
+    // The simulation-tick lease's retry plan (one attempt every 120 presents until it is installed, refused for good or out of time) and the
+    // probe's "bridge present began" event. Both return at once with the tick feature off.
+    ext::latency::OnBridgePresent();
+    ext::latency::OnBridgePresentBegin();
     if (TraceOn())
         Tls().native.Begin(NowUs());
     else
@@ -160,6 +173,7 @@ void NativeBegin()
 
 void NativeEnd()
 {
+    ext::latency::OnBridgePresentEnd();
     if (!TraceOn())
     {
         Tls().native.Cancel();

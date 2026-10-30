@@ -11,9 +11,10 @@
 //   Group 1 = features that identify by exe name or shader CRC and read no address of the executable (scene HDR, lighting, UI / HUD-less
 //     boundary, geometry, markers, MipBind, the FFXIV quirks, the catalog health). They run on ANY ffxiv_dx11.exe.
 //   Group 2 = features that read or hook addresses of the executable (native quality, jitter probe and source, the
-//     CharaView accessor). KNOWN build: they run when the seams say so. UNKNOWN build: only with FfxivUnknownBuildHooks AND usable seams.
+//     CharaView accessor, the simulation-tick lease). KNOWN build: they run when the seams say so. UNKNOWN build: only with FfxivUnknownBuildHooks AND usable seams.
 //   FfxivLegacyGameBuild (rollback): EXACTLY the legacy rules. Exact stamp and size, the compile-time table and its old byte guards, no resolve,
-//     Group 2 only on the exact known build, Group 1 only on the exact known build too, nothing from the other two keys.
+//     Group 2 only on the exact known build, Group 1 only on the exact known build too, nothing from the other two keys. The simulation-tick lease
+//     is OFF under that key even on the exact known build: it is not part of the behaviour the key restores.
 //
 // THE ONE RULE for every hook site of all three groups (the group headers phrase it three ways):
 //   usable  iff  rb.Usable(location) && rb.Usable(shape)   on EVERY build, never UsableOrTable for a shape.
@@ -125,6 +126,10 @@ inline constexpr const char* kQualityHookSeams[] = {
 };
 inline constexpr const char* kJitterProbeSeams[] = { "camera.global", "camera.cameraOffset", "camera.jitterPointerOffset" };
 inline constexpr const char* kCharaSeams[] = { "chara.accessor", "chara.managerPointer", "chara.targetsOffset" };
+// Seams the simulation-tick lease needs: the function (found from its interior, so a foreign inline hook over the entry does not hide it) and the
+// global holding the Framework instance whose vtable slot is leased. The three counters the tick updates are NOT listed: they are telemetry only,
+// the install's own layout check covers a pair of them, and a build that moved them must not turn the boundary off.
+inline constexpr const char* kLatencySeams[] = { "latency.tick", "latency.frameworkInstance" };
 
 struct CrossPair
 {
@@ -141,14 +146,16 @@ inline constexpr CrossPair kCrossPairs[] = {
 
 // Seams that stay STRICT (plain Usable, never filled from the table) on a KNOWN build too, besides every hook site (location AND shape) of the three
 // groups. Taken from the hook-site rules of the Anchors headers: the quality display-size cache write (AnchorsQuality.h hook-site rule, managerPointer, managerContextOffset,
-// contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape, and the three
-// jitter globals, strengthFloor, ndcSignMask and the camera global of the world tie (AnchorsJitter.h). Every other seam a feature reads is accepted on a
+// contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape, the three
+// jitter globals, strengthFloor, ndcSignMask and the camera global of the world tie (AnchorsJitter.h), and the tick and the instance global of the
+// simulation-tick lease (AnchorsLatency.h): an anchor that does not resolve on the known build means the build is not behaving as the table says, and
+// the lease must not be installed from a table the executable just contradicted. Every other seam a feature reads is accepted on a
 // known build when its field was filled from the verified table. On an UNKNOWN build everything is strict.
 inline constexpr const char* kStrictOnKnownBuild[] = {
     "quality.settingsInstructions", "quality.settingsPointer",     "quality.settingsModeOffset",    "quality.managerPointer",
     "quality.managerContextOffset", "quality.contextFlagsOffset",  "quality.contextCacheOffset",    "jitterSource.settingsPointer",
     "jitterSource.rendererPointer", "jitterSource.devicePointer",  "jitterSource.strengthFloor",    "jitterSource.ndcSignMask",
-    "jitterSource.cameraGlobal",
+    "jitterSource.cameraGlobal",    "latency.tick",                "latency.frameworkInstance",
 };
 
 namespace gate_detail
@@ -398,6 +405,16 @@ inline Checks CharaChecks(const ResolvedBuild& rb, const Registry& reg)
         c.Seam(id);
     return c;
 }
+
+inline Checks LatencyChecks(const ResolvedBuild& rb)
+{
+    Checks c(rb);
+    // The two required seams. Deliberately not BoundSeams(reg, "latency"): the three counter offsets stay optional, and on a known build a table-filled
+    // value is accepted here like for any other seam that is not a hook site - the live slot identity check at install is what protects the write.
+    for (const char* id : kLatencySeams)
+        c.Seam(id);
+    return c;
+}
 } // namespace gate_detail
 
 // Every seam id that a feature's gate requires to be usable (explicit lists plus the registry-derived bound seams): what the tests iterate to
@@ -439,6 +456,9 @@ inline std::vector<std::string> RequiredSeams(Feature f, const Registry& reg)
         AddSeams(out, kCharaSeams);
         for (const std::string& id : BoundSeams(reg, "charaView"))
             AddUnique(out, id);
+        break;
+    case Feature::LatencyTick:
+        AddSeams(out, kLatencySeams);
         break;
     default:
         break;
@@ -513,6 +533,12 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
         {
             Decision& d = r.features[i];
             const Feature f = static_cast<Feature>(i);
+            // The simulation-tick lease is not part of the behaviour this key restores: off, on the exact known build too.
+            if (f == Feature::LatencyTick)
+            {
+                SetOff(d, "FfxivLegacyGameBuild: the simulation-tick lease stays off, it is not part of the behaviour this key restores");
+                continue;
+            }
             if (in.exactKnownBuild)
                 SetOn(d, IsGroup2(f) ? "FfxivLegacyGameBuild: the exact known build; the old byte guards and the compile-time table decide"
                                      : "FfxivLegacyGameBuild: the exact known build (as before)");
@@ -571,12 +597,23 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
     const Checks probe = JitterProbeChecks(*rb, reg);
     const Checks source = JitterSourceChecks(*rb, reg);
     const Checks chara = CharaChecks(*rb, reg);
+    const Checks latency = LatencyChecks(*rb);
     auto put = [&](Feature f, const Checks& c) { c.Ok() ? SetOn(r.At(f), c.Reason()) : SetOff(r.At(f), c.Reason()); };
     put(Feature::QualityRead, quality);
     put(Feature::QualityHooks, qualityHooks);
     put(Feature::JitterProbe, probe);
     put(Feature::JitterSource, source);
     put(Feature::CharaViewAccessor, chara);
+    put(Feature::LatencyTick, latency);
+    // The lease's telemetry offsets: each bit says its own seam is usable (or table-filled on the known build), so the install may read it. A clear
+    // bit is a value that describes no known layout: skipped, never read, and never a reason to refuse the lease (they are not required seams).
+    r.latencyOffsetsResolved = 0;
+    if (rb->UsableOrTable("latency.frameCounterOffset"))
+        r.latencyOffsetsResolved |= kLatencyFrameCounterResolved;
+    if (rb->UsableOrTable("latency.perfCounterValueOffset"))
+        r.latencyOffsetsResolved |= kLatencyPerfValueResolved;
+    if (rb->UsableOrTable("latency.perfCounterFreqOffset"))
+        r.latencyOffsetsResolved |= kLatencyPerfFreqResolved;
 
     // ---- the cross-group consistency checks: a mismatch turns off the features of both sides
     //   KNOWN build: a mismatch of two usable sides (a side that is not usable is not compared, as before: the table is verified offline).

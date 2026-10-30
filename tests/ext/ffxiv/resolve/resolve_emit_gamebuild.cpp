@@ -261,6 +261,8 @@ const char* TypeOfGroup(const std::string& group)
         return "CharaViewBuild";
     if (group == "jitter")
         return "JitterBuild";
+    if (group == "latency")
+        return "LatencyBuild";
     return "JitterSourceBuild";
 }
 

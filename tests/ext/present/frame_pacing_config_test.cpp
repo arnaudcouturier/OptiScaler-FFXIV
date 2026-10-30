@@ -64,8 +64,10 @@ void DefaultsAndBinding()
     CHECK(!cfg.GpuTimersKey().has_value());
     CHECK(!cfg.hiddenPresentDoNotWait.has_value());
     CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false); // todays behaviour
+    CHECK(!cfg.tickProbe.has_value()); // unset = auto
+    CHECK(!cfg.TickProbeOn());         // the tick probe is not installed with a default ini
 
-    // exactly these three keys are bound in [FramePacing], once each, in the process-wide config too
+    // exactly these four keys are bound in [FramePacing], once each, in the process-wide config too
     for (bool global : { false, true })
     {
         ext::config::Binder b;
@@ -73,7 +75,7 @@ void DefaultsAndBinding()
             ext::Cfg().Bind(b);
         else
             cfg.Bind(b);
-        int count = 0, trace = 0, timers = 0, hidden = 0;
+        int count = 0, trace = 0, timers = 0, hidden = 0, tick = 0;
         for (const auto& e : b.Table())
             if (std::string(e.section) == "FramePacing")
             {
@@ -81,30 +83,34 @@ void DefaultsAndBinding()
                 trace += std::string(e.key) == "Trace" ? 1 : 0;
                 timers += std::string(e.key) == "GpuTimers" ? 1 : 0;
                 hidden += std::string(e.key) == "HiddenPresentDoNotWait" ? 1 : 0;
+                tick += std::string(e.key) == "TickProbe" ? 1 : 0;
             }
-        CHECK(count == 3 && trace == 1 && timers == 1 && hidden == 1);
+        CHECK(count == 4 && trace == 1 && timers == 1 && hidden == 1 && tick == 1);
     }
 }
 
 void LoadSaveRoundTrip()
 {
     // nothing in the ini, "auto" (the shipped template) and unknown words: both unset
-    for (const char* text : { "", "[FramePacing]\nTrace=auto\nGpuTimers=auto\nHiddenPresentDoNotWait=auto\n",
-                               "[FramePacing]\nTrace=maybe\nGpuTimers=perhaps\nHiddenPresentDoNotWait=perhaps\n" })
+    for (const char* text : { "", "[FramePacing]\nTrace=auto\nGpuTimers=auto\nHiddenPresentDoNotWait=auto\nTickProbe=auto\n",
+                               "[FramePacing]\nTrace=maybe\nGpuTimers=perhaps\nHiddenPresentDoNotWait=perhaps\nTickProbe=perhaps\n" })
     {
         auto cfg = LoadFresh(text);
         CHECK(!cfg.TraceKey().has_value());
         CHECK(!cfg.GpuTimersKey().has_value());
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false);
+        CHECK(!cfg.TickProbeOn());
     }
     {
-        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nGpuTimers=true\nHiddenPresentDoNotWait=true\n");
+        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nGpuTimers=true\nHiddenPresentDoNotWait=true\nTickProbe=true\n");
         CHECK(cfg.TraceKey().has_value() && *cfg.TraceKey() == true);
         CHECK(cfg.GpuTimersKey().has_value() && *cfg.GpuTimersKey() == true);
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == true);
+        CHECK(cfg.TickProbeOn());
         CHECK(Saved(cfg, "Trace") == "true");
         CHECK(Saved(cfg, "GpuTimers") == "true");
         CHECK(Saved(cfg, "HiddenPresentDoNotWait") == "true");
+        CHECK(Saved(cfg, "TickProbe") == "true");
     }
     {
         auto cfg = LoadFresh("[FramePacing]\nGpuTimers=false\n");
@@ -142,6 +148,22 @@ void IniFragment(const std::string& repo)
     CHECK(ini.find("Frame pacing GPU [") != std::string::npos);      // the lines the timers add when they sample
     CHECK(ini.find("Default (auto) is off unless the trace is on") != std::string::npos); // what auto means here
 }
+
+// The live-key mirrors (ext/AddKeysLoadedHook): a module that must not read its key per frame refreshes it at the end of every config load. The
+// simulation-tick probe is the only user today; the rule belongs to the config, so it is tested here.
+int g_keysLoadedCalls = 0;
+void CountKeysLoaded() { ++g_keysLoadedCalls; }
+
+void KeysLoadedHooks()
+{
+    ext::AddKeysLoadedHook(&CountKeysLoaded);
+    const int before = g_keysLoadedCalls;
+    ext::Cfg().PostLoad();
+    CHECK(g_keysLoadedCalls == before + 1);
+    ext::AddKeysLoadedHook(nullptr); // ignored, not a crash
+    ext::Cfg().PostLoad();
+    CHECK(g_keysLoadedCalls == before + 2);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -150,6 +172,7 @@ int main(int argc, char** argv)
     DefaultsAndBinding();
     LoadSaveRoundTrip();
     IniFragment(repo);
+    KeysLoadedHooks();
     if (g_failed != 0)
     {
         std::printf("frame_pacing_config: %d check(s) failed\n", g_failed);

@@ -86,7 +86,10 @@ void TestGroup1AndModes()
     // the rollback key: exactly the legacy rules (exact build: everything on and the old guards decide; any other build: nothing runs)
     {
         const GateReport exact = Run(nullptr, Settings(true), true, true);
-        CHECK(exact.legacy && exact.known && AllGroup1(exact, true) && AllGroup2(exact, true));
+        // the simulation-tick lease is the one feature the rollback key switches off even on the exact build: it is not part of the behaviour the
+        // key restores, and the key must not be able to turn on something that was never in it.
+        CHECK(exact.legacy && exact.known && AllGroup1(exact, true) && AllGroup2But(exact, true, { Feature::LatencyTick }));
+        CHECK(!exact.Enabled(Feature::LatencyTick) && Contains(exact.Reason(Feature::LatencyTick), "FfxivLegacyGameBuild"));
         const GateReport other = Run(nullptr, Settings(true), true, false);
         CHECK(other.legacy && !other.known && AllGroup1(other, false) && AllGroup2(other, false));
         // the other two keys are ignored under the rollback key
@@ -96,7 +99,7 @@ void TestGroup1AndModes()
         ResolvedBuild broken = AllFound(true);
         for (SeamResult& s : broken.seams)
             s.status = SeamStatus::Conflict;
-        CHECK(AllGroup2(Run(&broken, Settings(true), true, true), true));
+        CHECK(AllGroup2But(Run(&broken, Settings(true), true, true), true, { Feature::LatencyTick }));
         // and a perfect one cannot turn an unknown build on
         const ResolvedBuild perfect = AllFound(false);
         CHECK(AllGroup2(Run(&perfect, Settings(true, true), true, false), false));
@@ -228,7 +231,7 @@ const std::set<std::string>& StrictOnKnownLiteral()
         for (const char* id : { "quality.settingsInstructions", "quality.settingsPointer", "quality.settingsModeOffset", "quality.managerPointer",
                                 "quality.managerContextOffset", "quality.contextFlagsOffset", "quality.contextCacheOffset", "jitterSource.settingsPointer",
                                 "jitterSource.rendererPointer", "jitterSource.devicePointer", "jitterSource.strengthFloor", "jitterSource.ndcSignMask",
-                                "jitterSource.cameraGlobal" })
+                                "jitterSource.cameraGlobal", "latency.tick", "latency.frameworkInstance" })
             v.insert(id);
         return v;
     }();
@@ -249,7 +252,7 @@ std::vector<std::string> PlainFoundOnly(Feature f, bool knownBuild)
 void TestEveryRequiredSeam()
 {
     std::size_t total = 0;
-    CHECK(StrictOnKnownLiteral().size() == 32);
+    CHECK(StrictOnKnownLiteral().size() == 34);
     for (const Feature f : kGroup2)
     {
         const std::vector<std::string> seams = RequiredSeams(f, Reg());
@@ -298,7 +301,8 @@ void TestEveryRequiredSeam()
     CHECK(RequiredSeams(Feature::JitterSource, Reg()).size() == 25);
 
     CHECK(RequiredSeams(Feature::CharaViewAccessor, Reg()).size() == 3);
-    CHECK(total == 56);
+    CHECK(RequiredSeams(Feature::LatencyTick, Reg()).size() == 2);
+    CHECK(total == 58);
 }
 
 // a seam of one feature's list does not switch off an unrelated feature (the groups are independent)
@@ -360,6 +364,9 @@ void TestRequiredSeamListsAreLiteral()
         source.insert(std::string("jitterSource.") + id);
     CHECK(set(RequiredSeams(Feature::JitterSource, Reg())) == source);
     CHECK(set(RequiredSeams(Feature::CharaViewAccessor, Reg())) == std::set<std::string>({ "chara.accessor", "chara.managerPointer", "chara.targetsOffset" }));
+    // the tick lease needs the function and the instance global; the three counter offsets are optional on purpose (a build that moved them costs
+    // telemetry, not the boundary), so they are deliberately absent from the required list.
+    CHECK(set(RequiredSeams(Feature::LatencyTick, Reg())) == std::set<std::string>({ "latency.tick", "latency.frameworkInstance" }));
 }
 
 void TestOneRuleForEverySite()
@@ -726,8 +733,8 @@ void TestLogBlock()
     CHECK(lines[0].text ==
           "[ffxiv-gate] build stamp=0x6ad10bfd size=0x381f000 known=yes forced_unknown=no legacy=no unknown_build_hooks=off exe=ffxiv_dx11.exe resolve_ms=1.500");
     CHECK(lines[0].level == LogLevel::Info);
-    // bounded: head + group1 + 5 features + 4 checks (+ the not-self-healing line on an unknown build)
-    CHECK(lines.size() == 1 + 1 + 5 + 4);
+    // bounded: head + group1 + 6 features + 4 checks (+ the not-self-healing line on an unknown build)
+    CHECK(lines.size() == 1 + 1 + 6 + 4);
     for (const GateLine& l : lines)
     {
         CHECK(l.text.rfind("[ffxiv-gate] ", 0) == 0 && l.text.find('\n') == std::string::npos);
@@ -739,7 +746,7 @@ void TestLogBlock()
     const ResolvedBuild unknown = AllFound(false);
     const GateReport u = Run(&unknown, Settings());
     const auto ul = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 2.0, "ffxiv_dx11.exe");
-    CHECK(ul.size() == 1 + 1 + 5 + 4 + 1);
+    CHECK(ul.size() == 1 + 1 + 6 + 4 + 1);
     CHECK(ul[0].text.find("known=no") != std::string::npos && ul[0].text.find("unknown_build_hooks=off") != std::string::npos);
     CHECK(ul[2].level == LogLevel::Warn && Contains(ul[2].text, "feature qualityRead OFF"));
     CHECK(ul.back().level == LogLevel::Warn && Contains(ul.back().text, "not self-healing"));
@@ -761,7 +768,7 @@ void TestLogBlock()
     // the legacy block names the key and has no not-self-healing line
     const GateReport leg = Run(nullptr, Settings(true), true, true);
     const auto ll = FormatGateBlock(leg, nullptr, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-    CHECK(Contains(ll[0].text, "legacy=yes") && ll.size() == 1 + 1 + 5 + 0);
+    CHECK(Contains(ll[0].text, "legacy=yes") && ll.size() == 1 + 1 + 6 + 0);
 }
 
 // ---- The known build's table fill, the quality cache offset -------------------------------------------------------------
@@ -790,7 +797,7 @@ void TestGateBlockSixStates()
         const ResolvedBuild known = AllFound(true);
         const GateReport k = Run(&known, def);
         const auto lines = FormatGateBlock(k, &known, Reg(), 0x6ad10bfd, 0x381f000, 1.5, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 5 + 4);
+        CHECK(lines.size() == 1 + 1 + 6 + 4);
         for (const GateLine& l : lines)
             CHECK(l.level == LogLevel::Info);
         CHECK(!hasLine(lines, "falling back") && !hasLine(lines, "not self-healing"));
@@ -800,7 +807,7 @@ void TestGateBlockSixStates()
         const ResolvedBuild unknown = AllFound(false);
         const GateReport u = Run(&unknown, def);
         const auto lines = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 2.0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 5 + 4 + 1);
+        CHECK(lines.size() == 1 + 1 + 6 + 4 + 1);
         CHECK(lines.back().level == LogLevel::Warn && Contains(lines.back().text, "not self-healing"));
         CHECK(Contains(lines.back().text, "UNKNOWN build") && lines.back().text.find("known build, table verified offline") == std::string::npos);
     }
@@ -812,7 +819,7 @@ void TestGateBlockSixStates()
         const GateReport g = Run(&exception, def, true, true);
         REQUIRE(g.legacyFallback && g.known);
         const auto lines = FormatGateBlock(g, &exception, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 1 + 5 + 1);
+        CHECK(lines.size() == 1 + 1 + 1 + 6 + 1);
         CHECK(lines[1].level == LogLevel::Warn &&
               Contains(lines[1].text, "resolver infrastructure failure on the exact known build (resolver exception: bad_alloc)") &&
               Contains(lines[1].text, "falling back to the legacy decision"));
@@ -828,21 +835,21 @@ void TestGateBlockSixStates()
         const GateReport g = Run(&known, Settings(false, false, true), true, true);
         CHECK(g.known && !g.legacyFallback);
         const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 5 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+        CHECK(lines.size() == 1 + 1 + 6 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
     }
     // the rollback key on the exact build: no not-self-healing line even with a resolve result in hand
     {
         const ResolvedBuild known = AllFound(true);
         const GateReport g = Run(nullptr, Settings(true), true, true);
         const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 5 + 0 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
     }
     // no resolve ran on an unknown build: fail open, no not-self-healing line without a result
     {
         const GateReport g = Run(nullptr, def, true, false);
         CHECK(!g.known && !g.legacyFallback);
         const auto lines = FormatGateBlock(g, nullptr, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 5 + 0 && !hasLine(lines, "not self-healing"));
+        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing"));
     }
 }
 
@@ -965,7 +972,7 @@ void TestInfrastructureFailureFallsBack()
         CHECK(!forced.legacyFallback && AllGroup2(forced, false));
         // the rollback key is the legacy branch itself, not a fallback
         const GateReport leg = Run(nullptr, Settings(true), true, true);
-        CHECK(leg.legacy && !leg.legacyFallback && AllGroup2(leg, true));
+        CHECK(leg.legacy && !leg.legacyFallback && AllGroup2But(leg, true, { Feature::LatencyTick }));
         // not the game: nothing
         CHECK(AllGroup1(Run(nullptr, def, false, true), false) && AllGroup2(Run(nullptr, def, false, true), false));
     }
@@ -1007,7 +1014,7 @@ void TestInfrastructureFailureFallsBack()
             CHECK(Contains(l.text, "falling back") && Contains(l.text, "image"));
         }
     }
-    CHECK(warnings == 1 && lines.size() == 1 + 1 + 1 + 5);
+    CHECK(warnings == 1 && lines.size() == 1 + 1 + 1 + 6);
 
     // the REAL resolver: an unreadable live image (every read fails) and a throwing reader, on the table's build and on another one
     auto known = jt::MakeJitterImage();
@@ -1188,7 +1195,7 @@ void TestRegistryFacts()
     std::memcpy(&f, &bits, sizeof(f));
     CHECK(f == 0.001f);
     // the product registry the gate was written against
-    CHECK(Reg().seams.size() == 53 && Reg().bindings.size() == 51);
+    CHECK(Reg().seams.size() == 58 && Reg().bindings.size() == 56);
     std::printf("registry: %zu seams, %zu bindings\n", Reg().seams.size(), Reg().bindings.size());
 }
 
@@ -1222,8 +1229,18 @@ void TestActiveBuild()
 }
 } // namespace
 
+// The feature names the log and the tests print: a renamed feature would make every other line about it wrong, so the literal strings are pinned.
+void TestFeatureNames()
+{
+    CHECK(std::string(FeatureName(Feature::LatencyTick)) == "latencyTick");
+    CHECK(std::string(FeatureName(Feature::CharaViewAccessor)) == "charaViewAccessor");
+    CHECK(std::string(FeatureName(Feature::QualityRead)) == "qualityRead");
+    CHECK(std::string(FeatureName(Feature::Count)) == "unknown");
+}
+
 int main()
 {
+    TestFeatureNames();
     TestExeName();
     TestGroup1AndModes();
     TestFailOpen();

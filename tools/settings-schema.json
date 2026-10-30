@@ -1700,6 +1700,18 @@
           "menu": { "tab": null, "card": null, "iniOnly": "debug switch of the hidden DX11 present, compared with the trace" },
           "description": "The auxiliary present on the hidden swapchain gets DXGI_PRESENT_DO_NOT_WAIT and a busy chain skips that present instead of blocking. Off = exactly the old call.",
           "flags": [ "ffxivOnly", "diagnostic" ]
+        },
+        {
+          "key": "[FramePacing] TickProbe",
+          "section": "FramePacing",
+          "name": "TickProbe",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "measurement switch of the simulation-tick probe, no gameplay effect" },
+          "description": "Simulation tick probe. Leases the game's own tick function once and timestamps every tick, bridge present and Reflex sleep on the thread that ran it; one log line every 10 seconds reports the tick period and body, the frame age, the queue wait, the slack and the sleep-to-tick distance, the threads, and the share of presents whose frame number found its tick. Ticks and presents are numbered by the game's own frame counter, so a frame age and queue wait are reported only when that counter resolved and advanced by exactly one per tick. Off = nothing is installed, nothing is read. FFXIV only.",
+          "flags": [ "ffxivOnly", "diagnostic" ]
         }
       ]
     },

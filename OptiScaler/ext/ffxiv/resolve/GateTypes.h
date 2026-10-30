@@ -32,6 +32,7 @@ enum class Feature : std::uint8_t
     JitterProbe,     // read-only camera jitter object probe (and the correction that rides on it)
     JitterSource,    // the two Detours of the source-level jitter fix
     CharaViewAccessor,
+    LatencyTick,     // the vtable-slot lease of the game's simulation tick (the probe; nothing else depends on it)
     Count
 };
 
@@ -72,6 +73,8 @@ inline const char* FeatureName(Feature f)
         return "jitterSource";
     case Feature::CharaViewAccessor:
         return "charaViewAccessor";
+    case Feature::LatencyTick:
+        return "latencyTick";
     case Feature::Count:
         break;
     }
@@ -83,6 +86,15 @@ struct Decision
     bool enabled = false;
     std::string reason; // always set: why it is on or off (bounded: the first failures, never a dump of every seam)
 };
+
+// Which of the simulation-tick lease's telemetry offsets resolved (GateReport::latencyOffsetsResolved). Each bit says the seam named after it is
+// usable (or, on the known build, filled from the table), so its value may be read; a clear bit means the value is not a measurement of this
+// executable and the probe must not read it. The offsets are NOT required seams: none of them can turn the feature off.
+inline constexpr std::uint8_t kLatencyFrameCounterResolved = 1u;
+inline constexpr std::uint8_t kLatencyPerfValueResolved = 2u;
+inline constexpr std::uint8_t kLatencyPerfFreqResolved = 4u;
+inline constexpr std::uint8_t kLatencyAllOffsetsResolved =
+    kLatencyFrameCounterResolved | kLatencyPerfValueResolved | kLatencyPerfFreqResolved;
 
 // One runtime consistency check between two groups that each derived the same game global (a group may not name another group's seams, so
 // the gate compares them). Compared only when both sides are usable; a mismatch turns off the features on both sides.
@@ -108,6 +120,8 @@ struct GateReport
     std::string fallbackWhy {};
     std::array<Decision, kFeatureCount> features {};
     std::vector<CrossCheckResult> crossChecks {};
+    // Which latency telemetry offsets resolved (the bits above). 0 when no resolve ran: the lease then installs without reading any of them.
+    std::uint8_t latencyOffsetsResolved = 0;
 
     bool Enabled(Feature f) const { return features[static_cast<std::size_t>(f)].enabled; }
     const std::string& Reason(Feature f) const { return features[static_cast<std::size_t>(f)].reason; }

@@ -299,7 +299,8 @@ void TestNotTheGameAndRollback()
         f.settings = Settings(true);
         f.Run();
         CHECK(f.resolveCalls == 0 && f.registryCalls == 0 && f.logCalls == 1 && f.publishCalls == 1);
-        CHECK(f.publishedGate.legacy && f.publishedGate.known && !f.publishedGate.legacyFallback && AllGroup1(f.publishedGate, true) && AllGroup2(f.publishedGate, true));
+        CHECK(f.publishedGate.legacy && f.publishedGate.known && !f.publishedGate.legacyFallback && AllGroup1(f.publishedGate, true) &&
+              AllGroup2But(f.publishedGate, true, { Feature::LatencyTick }));
         CHECK(SameBuild(f.published, kCurrentBuild));
         CHECK(f.logRb == nullptr && f.logStamp == kCurrentBuild.timeDateStamp && f.logSize == kCurrentBuild.sizeOfImage && f.logExe == "ffxiv_dx11.exe");
         CHECK(f.logRegistry != nullptr && f.logRegistry != &Reg()); // the empty registry, not the product one
@@ -344,7 +345,7 @@ void TestRenamedExecutable()
         f.Run();
         CHECK(f.resolveCalls == 0 && f.registryCalls == 0 && f.publishCalls == 1);
         CHECK(f.publishedGate.legacy && f.publishedGate.known && !f.publishedGate.legacyFallback);
-        CHECK(AllGroup1(f.publishedGate, true) && AllGroup2(f.publishedGate, true));
+        CHECK(AllGroup1(f.publishedGate, true) && AllGroup2But(f.publishedGate, true, { Feature::LatencyTick }));
         CHECK(SameBuild(f.published, kCurrentBuild));
         const GateInput in = MakeGateInput(std::wstring_view(renamedPath), true);
         CHECK(DecideGroup1(Feature::Lighting, in.exeIsFfxiv, in.exactKnownBuild, Settings(true)).enabled);
