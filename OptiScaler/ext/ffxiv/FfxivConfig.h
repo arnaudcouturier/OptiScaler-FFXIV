@@ -26,6 +26,9 @@ struct FfxivConfig
     // so it is read once at start; anything but `capture` reads as off, which is today's behaviour.
     CustomOptional<std::string> drawDiagnostics { "off" };     // [FFXIV] DrawDiagnostics
     CustomOptional<int32_t> drawDiagnosticsFrames { 3 };       // [FFXIV] DrawDiagnosticsFrames: how many frames one capture writes (1..16)
+    // Developer probe, ini only: a constant half-screen mask handed to the upscaler's mask input, to see whether the backend reads
+    // one at all. off | left | right, anything else reads as off (ext/ffxiv/vfxmask).
+    CustomOptional<std::string> vfxMaskProbe { "off" }; // [FFXIV] VfxMaskProbe
     ffxiv::chara::CharaConfig chara; // ext/ffxiv/chara: [FFXIV] Preview* and [HDR] PreviewNRTrace
 
     void Bind(config::Binder& b);
@@ -38,12 +41,18 @@ struct FfxivConfig
     // The developer draw diagnostic's key (ext/ffxiv/diag): arms one capture. Same pointer pattern and same reason.
     static inline BoolHook drawDiagnosticsOnLoaded = nullptr;
 
+    // Same for the VFX mask probe (ext/ffxiv/vfxmask/VfxMaskProbe.cpp): the text of [FFXIV] VfxMaskProbe, parsed there.
+    using TextHook = void (*)(const char* text);
+    static inline TextHook vfxMaskProbeOnLoaded = nullptr;
+
     void PostLoad()
     {
         if (automaticReShadeDepthOnLoaded != nullptr)
             automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());
         if (drawDiagnosticsOnLoaded != nullptr)
             drawDiagnosticsOnLoaded(drawDiagnostics.value_or_default() == "capture");
+        if (vfxMaskProbeOnLoaded != nullptr)
+            vfxMaskProbeOnLoaded(vfxMaskProbe.value_or_default().c_str());
     }
 };
 } // namespace ext

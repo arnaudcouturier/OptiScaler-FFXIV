@@ -9,6 +9,7 @@
 #include "ext/ffxiv/diag/DrawDiag.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/resolve/ResolveStartup.h"
+#include "ext/ffxiv/vfxmask/VfxMaskProbe.h"
 #include "ext/upscaler/MipBindHooks.h"
 #include "ext/upscaler/NgxThreadTrace.h"
 
@@ -84,6 +85,11 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 
     // Bind-time mip bias: the target follows the sizes of this evaluate (no-op unless the sampler hooks are attached).
     ext::upscaler::mipbind::OnEvaluate(context, parameters);
+
+    // VFX mask gate probe ([FFXIV] VfxMaskProbe, off by default): ext/ffxiv/vfxmask/VfxMaskProbe.h. One relaxed load while the
+    // key is off; with it on, this evaluate's mask input is filled with a constant half-screen mask.
+    if (ext::ffxiv::vfxmask::Armed())
+        ext::ffxiv::vfxmask::OnUpscaleBoundary(context, color, parameters);
 }
 
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)

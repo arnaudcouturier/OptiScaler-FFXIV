@@ -2162,6 +2162,19 @@
           "menu": { "tab": null, "card": null, "iniOnly": "developer draw diagnostic: how many frames one capture writes" },
           "description": "Developer switch, ini only: how many complete frames one capture writes. Frames with fewer than 32 draws (loading screens) are skipped. 1 to 16; anything else is clamped.",
           "flags": [ "ffxivOnly", "diagnostic" ]
+        },
+        {
+          "key": "[FFXIV] VfxMaskProbe",
+          "section": "FFXIV",
+          "name": "VfxMaskProbe",
+          "type": "enum",
+          "values": [ "off", "left", "right" ],
+          "default": "auto",
+          "defaultMeans": "off (today's behaviour)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "a developer probe of the upscaler's mask input, not a player setting" },
+          "description": "Developer probe, ini only: put a constant R8_UNORM mask the size of the picture into the upscaler's mask input, one half full and one half empty. left or right picks the masked half. Comparing two screenshots of the same still scene with it off and on shows whether the backend reads a mask at all: the unmasked half is the noise floor. Anything else reads as off, and nothing is written at all on a frame the probe cannot build a mask for.",
+          "flags": [ "ffxivOnly", "diagnostic" ]
         }
       ]
     },

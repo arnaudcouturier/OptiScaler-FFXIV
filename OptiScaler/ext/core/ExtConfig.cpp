@@ -166,6 +166,7 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "AutomaticReShadeDepth", automaticReShadeDepth);
     b.Add("FFXIV", "DrawDiagnostics", drawDiagnostics);
     b.Add("FFXIV", "DrawDiagnosticsFrames", drawDiagnosticsFrames);
+    b.Add("FFXIV", "VfxMaskProbe", vfxMaskProbe);
     chara.Bind(b);
 }
 
