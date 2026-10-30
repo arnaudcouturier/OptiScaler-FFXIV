@@ -889,12 +889,12 @@ void FrameGenerationMultiplier()
     CHECK(gen.StepTimes().empty()); // 60 displayed holds the target
     CHECK(gen.log.back().avg >= 58.0 && gen.log.back().avg <= 62.0);
 
-    World waiting; // generating but the count not observed yet: the tier is kept, the reason said
+    World waiting; // generating but the count not observed yet: inside the bounded wait the tier is kept, the reason said
     waiting.fgFeature = true;
     waiting.fgActive = true;
     waiting.multiplier = 0.0;
     waiting.rate = 51.0;
-    waiting.Run(20000);
+    waiting.Run(kWaitingCountMs - 8);
     CHECK(waiting.StepTimes().empty());
     CHECK(waiting.log.back().reason == Reason::WaitingForCount);
 
@@ -1015,6 +1015,7 @@ void ConstantsAndStatus()
     CHECK(kProbeJudgeMs == 2000 && kDiscardMs == 1000 && kSeedMs == 500);
     CHECK(kSmoothTauMs == 1000.0 && kSpikeClip == 3.0 && kMaxSampleMs == 250.0);
     CHECK(kFgStaleTicks == 4 && kPassGapMs == 1000);
+    CHECK(kWaitingCountMs == 2000);
     CHECK(ReasonText(Reason::Off) == std::string("off"));
     CHECK(kKeepRegressMs == 30000);
     CHECK(ReasonText(Reason::WaitingForCount) == std::string("waiting for the frame-generation count"));
@@ -1147,6 +1148,83 @@ void GapFirstTickTransient()
     w.Run(30000);
     CHECK(w.StepTimes().empty()); // never stepped on the stale average
     CHECK(w.log.back().avg >= 69.0 && w.log.back().avg <= 71.0); // reseeded on the live rate
+}
+
+// A feature can report itself active with no observed count for as long as it likes. The governor waits 2 s for the count and
+// then regulates on the present rate with the multiplier read as 1, saying so in the status line; the alternative is a tier
+// frozen at whatever it was when the count stopped advancing.
+void WaitingForCountIsBounded()
+{
+    World w;
+    w.fgFeature = true;
+    w.fgActive = true; // active, and the count never arrives
+    w.multiplier = 0.0;
+    w.rate = 51.0; // the present rate alone is below the target
+    w.Run(kWaitingCountMs - 8); // ticks up to 1984 ms
+    const Output still = w.Step(); // 1992 ms: still inside the wait
+    CHECK(!still.countAssumed && still.reason == Reason::WaitingForCount);
+    const Output bounded = w.Step(); // 2000 ms: the bound
+    CHECK(bounded.countAssumed && bounded.reason != Reason::WaitingForCount); // regulating from the bound on
+    CHECK(w.log.back().t == kWaitingCountMs);
+    CHECK(bounded.measuredFps == 0.0); // the transition reseeds: no step on the frozen rate
+    w.Run(20000);
+    CHECK(!w.StepTimes().empty()); // the present rate steps the tier down as usual
+    CHECK(w.StepTimes()[0] >= kWaitingCountMs + kDiscardMs + kSeedMs + kStepDownDwellMs); // a full discard, seed and dwell
+    CHECK(w.StepTimes()[0] <= kWaitingCountMs + kDiscardMs + kSeedMs + kStepDownDwellMs + 24);
+    CHECK(w.log.back().avg >= 50.0 && w.log.back().avg <= 52.0); // read at 1x, not at 0 or x2
+
+    // a reduced tier holds through the change of convention: the frozen timers never step, and the rate holds the target
+    World held;
+    held.rate = 51.0;
+    held.Run(5000); // one step down to 90
+    CHECK(held.log.back().tierPct == 90);
+    const std::vector<uint64_t> before = held.StepTimes();
+    held.fgFeature = true;
+    held.fgActive = true;
+    held.multiplier = 0.0;
+    held.rate = 60.0;
+    const uint64_t since = held.t;
+    held.Run(kWaitingCountMs + 4000);
+    CHECK(held.StepTimes() == before);
+    CHECK(held.log.back().tierPct == 90);
+    const Tick* after = held.AtOrAfter(since + kWaitingCountMs);
+    CHECK(after != nullptr && after->reason != Reason::WaitingForCount);
+
+    // the count arriving and leaving again starts a fresh wait, not an immediate one
+    World back;
+    back.fgFeature = true;
+    back.fgActive = true;
+    back.multiplier = 0.0;
+    back.rate = 60.0;
+    back.Run(kWaitingCountMs + 1000);
+    CHECK(back.log.back().reason != Reason::WaitingForCount); // assumed
+    back.multiplier = 2.0; // the count arrives
+    back.Run(600);
+    back.multiplier = 0.0; // and leaves again
+    back.Run(kWaitingCountMs - 100);
+    CHECK(back.log.back().reason == Reason::WaitingForCount);
+    back.Run(200);
+    CHECK(back.log.back().reason != Reason::WaitingForCount);
+    // a real stand-down (AutoMFG here) starts from the wait again as well
+    back.autoMfg = true;
+    back.Run(500);
+    back.autoMfg = false;
+    back.Run(kWaitingCountMs - 100);
+    CHECK(back.log.back().reason == Reason::WaitingForCount);
+    back.Run(200);
+    CHECK(back.log.back().reason != Reason::WaitingForCount);
+
+    // the status line says the multiplier was read as 1, and a line without it stays as it was
+    Output out;
+    out.reason = Reason::Holding;
+    out.tierPct = 90;
+    out.targetFps = 60.0;
+    out.measuredFps = 51.0;
+    out.countAssumed = true;
+    const std::string line = StatusLine(out);
+    CHECK(line.find("90%") != std::string::npos && line.find("count") != std::string::npos);
+    out.countAssumed = false;
+    CHECK(StatusLine(out) == "Governor: 90% (target 60 fps, measured 51 fps)");
 }
 
 // Freshness is exact: three missed counter ticks are fine, the fourth reads stale.
@@ -1339,6 +1417,7 @@ int main()
     TransitionWindowInMs();
     SmoothingClipSeedAndPause();
     FrameGenerationMultiplier();
+    WaitingForCountIsBounded();
     ProbeOwnsTheVerdict();
     ProbeFromFullTier();
     KeepThenRegressDoublesFromPreKeepDwell();

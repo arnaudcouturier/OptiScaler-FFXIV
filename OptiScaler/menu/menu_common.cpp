@@ -8728,7 +8728,7 @@ void MenuCommon::RenderCustomTabSettings(RenderMenuContext& ctx)
             ImGui::EndTable();
 
         if (changed)
-            config->CustomTabCards = newPinned;
+            config->CustomTabCards = ext::menu::WithHiddenFfxivPins(newPinned, pinned, ext::menu::FfxivTabVisible(ctx)); // ext: the pin list keeps the FFXIV cards this game cannot list
     }
 }
 

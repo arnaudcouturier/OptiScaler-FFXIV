@@ -4,7 +4,7 @@ How the fork finds the game's code addresses after a game patch, what it does wh
 
 ## What it is
 
-Some FFXIV features read the game's memory or hook its functions at addresses inside `ffxiv_dx11.exe`: the native quality selection and the DLAA gate, the jitter probe and the jitter source fix, the nameplate native hooks, and the character preview lookup. A game patch moves those addresses. Before the pattern search, the fork knew the addresses of one build (`ext/ffxiv/GameBuild.h`, `kCurrentBuild`) and switched every FFXIV feature off on any other executable.
+Some FFXIV features read the game's memory or hook its functions at addresses inside `ffxiv_dx11.exe`: the native quality selection and the DLAA gate, the jitter probe and the jitter source fix, and the character preview lookup. A game patch moves those addresses. Before the pattern search, the fork knew the addresses of one build (`ext/ffxiv/GameBuild.h`, `kCurrentBuild`) and switched every FFXIV feature off on any other executable.
 
 Now the fork looks for each address in the running executable by instruction patterns, once per game start. If the executable is the build in the table, the table is used and the search only cross-checks it. If it is a new build, the search result is used, for the features that need addresses, only when you ask for it (`FfxivUnknownBuildHooks`) and only for the features whose addresses were all found. A feature whose code was rewritten in the patch goes off by itself with its reason in the log. The others keep running.
 

@@ -62,6 +62,10 @@ inline constexpr unsigned kFgStaleTicks = 4;
 // Longer than this between two pass ticks is a pause (focus loss, bridge suspended, loading): the AutoMFG
 // kGapMs rule. No step is ever decided on timers that sat through one.
 inline constexpr uint64_t kPassGapMs = 1000;
+// A feature that reports itself active without an observed count is waited for this long at most. The selected output can keep
+// its feature object active while it generates nothing, so a longer wait would leave the tier frozen at whatever it was when the
+// count stopped advancing; past it the present rate is the whole signal and the multiplier is read as 1.
+inline constexpr uint64_t kWaitingCountMs = 2000;
 // A down step this soon after a keep is the probe failing late: the sag the 2 s judge missed (a boost clock fading,
 // a GPU warming up over several seconds, a heavier scene). The window is three times the base up dwell, so a sag that
 // takes up to ~25 s to show (plus the 3 s down dwell) is still caught; a wrongly doubled dwell only delays the next
@@ -84,8 +88,9 @@ enum class Reason : uint8_t
     Spatial,        // spatial compression is on: the governor only steps the ordinary path
     NoTarget,       // no target: neither GovernorTargetFps nor a limit/refresh to take it from
     NoSignal,       // no (or stale) frame-time signal on this path
-    WaitingForCount, // a feature is actively generating but its count is not observed yet (selected but idle
-                     // reads as off: with nothing generated the displayed rate is the present rate)
+    WaitingForCount, // a feature reports itself active but its count is not observed yet; after kWaitingCountMs the
+                     // present rate is used instead (selected but idle reads as off: with nothing generated the
+                     // displayed rate is the present rate)
     UnsupportedFg,  // a non-DLSS-G frame-generation output is active: no count reader here
 };
 
@@ -141,6 +146,7 @@ struct Output
     double targetFps = 0.0;    // the target this tick decided against
     uint64_t upDwellMs = kUpDwellBaseMs; // the up dwell in force (grows on failed probes and keep-then-regress
                                        // steps, resets on a kept probe or a ceiling change)
+    bool countAssumed = false; // the frame-generation count never arrived: the multiplier was read as 1
     Reason reason = Reason::Off;
 };
 
@@ -164,16 +170,26 @@ inline std::string StatusLine(const Output& out)
     case Reason::AtFloor: why = "at the 50% floor"; break;
     default: break; // Full, Holding, BelowTarget, AboveTarget: the numbers speak
     }
-    char text[192] = {};
+    // The count note rides after everything else: the reason already names the stand-down, and this one applies while the
+    // governor is regulating normally.
+    std::string note = why != nullptr ? why : "";
+    if (out.countAssumed)
+    {
+        if (!note.empty())
+            note += "; ";
+        note += "frame-generation count not observed, the present rate is used";
+    }
+    const char* tail = note.empty() ? "" : "; ";
+    char text[256] = {};
     if (out.tierPct > 0)
         std::snprintf(text, sizeof text, "Governor: %d%% (target %.0f fps, measured %.0f fps)%s%s", out.tierPct,
-                      out.targetFps, out.measuredFps, why != nullptr ? "; " : "", why != nullptr ? why : "");
+                      out.targetFps, out.measuredFps, tail, note.c_str());
     else if (out.measuredFps > 0.0)
         std::snprintf(text, sizeof text, "Governor: full resolution (target %.0f fps, measured %.0f fps)%s%s",
-                      out.targetFps, out.measuredFps, why != nullptr ? "; " : "", why != nullptr ? why : "");
+                      out.targetFps, out.measuredFps, tail, note.c_str());
     else
-        std::snprintf(text, sizeof text, "Governor: full resolution (target %.0f fps)%s%s", out.targetFps,
-                      why != nullptr ? "; " : "", why != nullptr ? why : "");
+        std::snprintf(text, sizeof text, "Governor: full resolution (target %.0f fps)%s%s", out.targetFps, tail,
+                      note.c_str());
     return text;
 }
 
@@ -227,10 +243,36 @@ class Governor
             Freeze(in.nowMs, Reason::UnsupportedFg);
             return Finish(out, in.nowMs);
         }
-        if (in.fgActive && !(in.multiplier > 0.0))
+        // A feature that reports itself active without a count is waited for, but not forever (kWaitingCountMs): the selected
+        // output can keep its feature object active while it generates nothing, and freezing the tier there would leave the
+        // picture reduced indefinitely. Past the bound the present rate is the whole signal, with the multiplier read as 1.
+        const bool countMissing = in.fgActive && !(in.multiplier > 0.0);
+        if (!countMissing)
         {
-            Freeze(in.nowMs, Reason::WaitingForCount);
-            return Finish(out, in.nowMs);
+            if (countAssumed_)
+            {
+                // The count came back: the rate changes by the multiplier, which is a transition like an applied size.
+                countAssumed_ = false;
+                StartDiscard(in.nowMs);
+                reason_ = tier_ < 0 ? Reason::Full : Reason::Holding;
+            }
+            waitingSince_ = kUnset;
+        }
+        else
+        {
+            if (waitingSince_ == kUnset || in.nowMs < waitingSince_)
+                waitingSince_ = in.nowMs;
+            if (!countAssumed_ && in.nowMs - waitingSince_ >= kWaitingCountMs)
+            {
+                countAssumed_ = true;
+                StartDiscard(in.nowMs);
+                reason_ = tier_ < 0 ? Reason::Full : Reason::Holding;
+            }
+            if (!countAssumed_)
+            {
+                Freeze(in.nowMs, Reason::WaitingForCount);
+                return Finish(out, in.nowMs);
+            }
         }
         if (!(in.targetFps > 0.0))
         {
@@ -294,7 +336,7 @@ class Governor
             discardUntil_ = kUnset;
             BeginSeed(in.nowMs);
         }
-        const double rate = (in.fgActive ? in.multiplier : 1.0) * 1000.0 / interval;
+        const double rate = (in.fgActive && !countAssumed_ ? in.multiplier : 1.0) * 1000.0 / interval;
         if (seeding_)
         {
             SeedSample(rate);
@@ -454,6 +496,8 @@ class Governor
         fgFrameSeen_ = 0;
         haveFgFrame_ = false;
         fgStaleTicks_ = 0;
+        waitingSince_ = kUnset;
+        countAssumed_ = false;
         reason_ = Reason::Off;
     }
 
@@ -509,6 +553,8 @@ class Governor
         keptFrom_ = kUpDwellBaseMs;
         dwellStart_ = kUnset;
         belowSince_ = aboveSince_ = kUnset;
+        waitingSince_ = kUnset; // a new start waits for the count again
+        countAssumed_ = false;
         lastTick_ = now;
         StartDiscard(now);
         reason_ = reason;
@@ -615,6 +661,7 @@ class Governor
         out.tierPct = tier_ < 0 ? 0 : (int) std::lround(kTiers[tier_] * 100.0f);
         out.measuredFps = avg_;
         out.reason = reason_;
+        out.countAssumed = countAssumed_;
         out.upDwellMs = upDwellMs_;
         lastTick_ = now;
         return out;
@@ -645,6 +692,8 @@ class Governor
     uint64_t fgFrameSeen_ = 0;  // the last present counter seen while a feature owns presents
     bool haveFgFrame_ = false;  // a counter value was adopted (re-adopted whenever the feature returns)
     unsigned fgStaleTicks_ = 0; // consecutive ticks without the counter advancing
+    uint64_t waitingSince_ = kUnset; // the first tick of an active feature without a count
+    bool countAssumed_ = false;      // the wait ran out: regulate on the present rate until the count arrives
     Reason reason_ = Reason::Off;
 };
 } // namespace DlssNr::Governor

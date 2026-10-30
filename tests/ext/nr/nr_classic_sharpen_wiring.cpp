@@ -86,10 +86,13 @@ void TestRuntimeGate(const std::string& repo)
     // a live menu write lands past the load-time clamp, so the dispatch clamps again; uninterpretable fails open
     CHECK(Has(pass, "const float sharpenAmount = nr.classicSharpenStrength.value_or_default();"));
     CHECK(Count(pass, "const float sharpenStrength = std::isfinite(sharpenAmount) ? std::clamp(sharpenAmount, 0.0f, 1.0f) : 0.4f;") == 1);
-    // the skip rule: the key, a non-zero strength, the shared Classic rule on the pass's effective scales and
-    // the resolve's own Transfer, a model that applies, no diagnostic view, and a plain single-mip frame target
+    // the skip rule: the key, a non-zero strength, the shared sharpen rule on the geometry the resolve actually ran (the
+    // applied working size, not the requested one the settle may still be holding off), the resolve's own Transfer and the
+    // spatial state, a model that applies, no diagnostic view, and a plain single-mip frame target
     CHECK(Has(pass, "const bool classicSharpen = nr.classicSharpen.value_or_default() && sharpenStrength > 0.0f &&"));
-    CHECK(Has(pass, "DlssNr::Hotkeys::ClassicApplies(scaleX, scaleY, resolveParams.Transfer) &&"));
+    CHECK(Has(pass, "DlssNr::Hotkeys::ClassicSharpens(geometry.workScaleX, geometry.workScaleY, resolveParams.Transfer, spatial) &&"));
+    // ... never on the requested scales: those already carry the next tier while the old size still renders
+    CHECK(Count(pass, "ClassicSharpens(scaleX, scaleY,") == 0);
     CHECK(Has(pass, "resolveParams.ApplyModel != 0 && resolveParams.CompareMode == 0 &&"));
     CHECK(Has(pass, "resolveParams.DebugView == 0 && resolveParams.ShowSkinMask == 0 && g_nr.hdrCopy != nullptr &&"));
     CHECK(Has(pass, "sharpenTargetDesc.MipLevels == 1 && sharpenTargetDesc.DepthOrArraySize == 1;"));
@@ -98,7 +101,8 @@ void TestRuntimeGate(const std::string& repo)
     CHECK(InOrder(pass, { "const bool classicSharpen =", "if (classicSharpen)",
                           "TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);",
                           "Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE," }));
-    // the spatial path forces Matched residual before the gate, so it never sharpens
+    // the spatial path forces Matched residual before the gate, so it never sharpens; the shared rule also takes the
+    // spatial state itself, so the gate says so even without that write
     CHECK(Count(pass, "resolveParams.Transfer = 1; resolveParams.SpatialResidual = resolveWarp.residual;") == 1);
 }
 
@@ -166,10 +170,15 @@ void TestReplayAndShaderWiring(const std::string& repo)
 void TestMenu(const std::string& repo)
 {
     const std::string menu = Read(repo + "/OptiScaler/ext/nr/menu/DlssNr_Menu.cpp");
-    // the controls grey by the same shared rule the runtime gate reads, on the menu's shown scales
-    CHECK(Has(menu, "const bool classicApplies = DlssNr::Hotkeys::ClassicApplies(effectiveScaleX, effectiveScaleY, nr.transfer.value_or_default());"));
+    // the controls grey by the same shared rule the runtime gate reads, on the menu's shown scales and on the spatial
+    // state of the frame being processed (one readout for the sharpening and the depth-aware control)
+    CHECK(Count(menu, "const bool depthSpatial = depthReadout.valid ? depthReadout.active : nr.spatialCompression.value_or_default();") == 1);
+    CHECK(Has(menu, "const bool classicApplies = DlssNr::Hotkeys::ClassicSharpens(effectiveScaleX, effectiveScaleY, nr.transfer.value_or_default(), depthSpatial);"));
+    CHECK(InOrder(menu, { "const bool depthSpatial =", "const bool classicApplies = DlssNr::Hotkeys::ClassicSharpens(" }));
     CHECK(Count(menu, "ImGui::BeginDisabled(!classicApplies);") == 1);
     CHECK(Has(menu, "ImGui::BeginDisabled(!classicApplies || !nr.classicSharpen.value_or_default());"));
+    // ... and the menu says why the controls are grey while spatial compression composes as matched residual
+    CHECK(Has(menu, "if (depthSpatial)\n                ImGui::TextDisabled(\"Spatial compression composes as matched residual: Classic sharpening does not run.\");"));
     CHECK(Has(menu, "ImGui::Checkbox(\"Classic sharpening\""));
     CHECK(Has(menu, "if (ImGui::Checkbox(\"Classic sharpening\", &sharpen))"));
     CHECK(Has(menu, "nr.classicSharpen = sharpen;"));

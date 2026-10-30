@@ -11,6 +11,7 @@
 // menu files stay at the agreed number.
 //
 // Each rule is also run against a deliberately broken model and must complain: that is the mutation check of the rule.
+#include "ext/core/CustomTabPins.h"
 #include "ext/core/MenuLayout.h"
 #include "ext/core/MenuManifest.h"
 #include "menu_scan.h"
@@ -320,8 +321,9 @@ Violations Check(const Model& m)
 }
 
 // `// ext:` markers of the upstream menu files: 14 + 1 at the fork's base, plus the draw-once loop (2 lines), the
-// FFXIV tab row (1 line) and the Custom Tab picker skip (1 line). More means the menu got a new seam: update the catalog and this number together.
-constexpr size_t kExtMarkersMenuCommonCpp = 18;
+// FFXIV tab row (1 line), the Custom Tab picker skip (1 line) and the Custom Tab pin save (1 line). More means the menu
+// got a new seam: update the catalog and this number together.
+constexpr size_t kExtMarkersMenuCommonCpp = 19;
 constexpr size_t kExtMarkersMenuCommonH = 1;
 
 Violations Budget(const std::string& cppRaw, const std::string& hRaw)
@@ -389,6 +391,42 @@ void Report(const char* what, const Violations& v)
 {
     for (const auto& s : v)
         std::printf("  %s: %s\n", what, s.c_str());
+}
+
+// ---- the Custom Tab pin list a save outside FFXIV writes --------------------------------------------------------------
+// The picker rebuilds `[Menu] CustomTabCards` from the boxes it lists, and outside the FFXIV build match the FFXIV-tab cards
+// are not listed. Their pins stay all the same: the ini is copied between games, and the Custom Tab of a copy that does show
+// these cards keeps them. A pin that names no live card is never carried, so a retired id does not accumulate.
+void CustomTabPins()
+{
+    using ext::menu::Pinned;
+    using ext::menu::WithHiddenFfxivPins;
+
+    const std::string previous = "dlss_nr,ffxiv_jitter,upscaler,ffxiv_hdr";
+    const std::string rebuilt = "dlss_nr,upscaler";
+    // outside FFXIV: the FFXIV cards the picker could not list keep their pins, in their own entries
+    const std::string kept = WithHiddenFfxivPins(rebuilt, previous, false);
+    CHECK(Pinned(kept, "dlss_nr") && Pinned(kept, "upscaler"));
+    CHECK(Pinned(kept, "ffxiv_jitter") && Pinned(kept, "ffxiv_hdr"));
+    // ... and only the FFXIV-only cards of the manifest: an unknown or retired id is carried by nothing
+    CHECK(!Pinned(kept, "ffxiv_companion") && !Pinned(kept, "never_shipped"));
+    // a card that was not pinned stays unpinned, and a card this game does list is never carried: its absence from the
+    // rebuild means the box was unticked
+    CHECK(!Pinned(kept, "ffxiv_advanced"));
+    CHECK(!Pinned(WithHiddenFfxivPins(rebuilt, "forced_quality,ffxiv_jitter", false), "forced_quality"));
+    // on the FFXIV build match every card is listed, so the rebuild is the whole answer
+    CHECK(WithHiddenFfxivPins(rebuilt, previous, true) == rebuilt);
+    // no duplicates (the rebuilt list already holds it), and a dropped id is not smuggled back
+    // no duplicates: a pin the rebuild already holds appears once, and a missing one is appended after it
+    CHECK(WithHiddenFfxivPins("dlss_nr,ffxiv_jitter", "dlss_nr,ffxiv_jitter,ffxiv_advanced", false) == "dlss_nr,ffxiv_jitter,ffxiv_advanced");
+    CHECK(WithHiddenFfxivPins("", "", false).empty());
+    // a pin is a whole entry, never a substring of a longer id
+    CHECK(Pinned("dlss_nr", "dlss_nr") && !Pinned("dlss_nr_x", "dlss_nr"));
+    CHECK(!Pinned("x,dlss_nr", "dlss_nrx") && !Pinned("", "dlss_nr"));
+    CHECK(!Pinned("xdlss_nr", "dlss_nr") && !Pinned("dlss_nr_y", "dlss_nr"));
+    // every FFXIV-only card of the manifest is carried, so a card added to that list cannot be dropped silently
+    for (const char* id : manifest::kFfxivOnlyIds)
+        CHECK(Pinned(WithHiddenFfxivPins("upscaler", id, false), id));
 }
 
 // ---- a stale Custom Tab pin is ignored, never a crash ------------------------------------------------------------------
@@ -705,6 +743,7 @@ int main(int argc, char** argv)
     std::string cppRaw, hRaw;
     const Model real = Build(repo, cppRaw, hRaw);
     RealMenu(real, cppRaw, hRaw);
+    CustomTabPins();
     ScannerUnits();
     Broken(real);
 

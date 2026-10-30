@@ -575,7 +575,7 @@
           "defaultMeans": "false",
           "applies": "live",
           "menu": { "tab": "Upscaling", "card": "dlss_nr", "cardTitle": "DLSS Neural Rendering" },
-          "description": "Frame-rate governor (experimental): steps the model resolution over 100/90/80/70/60/50% to hold the target frame rate. A run-time cap only: Model resolution stays the ceiling and is never written. Steps down after 3 s below 95% of the target; probes one tier up after 10 s at or above 97% of the target and keeps the probe only if the rate holds 97% of the target over the next 2 s. Stands down while AutoMFG, a per-axis model size or spatial compression is on.",
+          "description": "Frame-rate governor (experimental): steps the model resolution over 100/90/80/70/60/50% to hold the target frame rate. A run-time cap only: Model resolution stays the ceiling and is never written. Steps down after 3 s below 95% of the target; probes one tier up after 10 s at or above 97% of the target and keeps the probe only if the rate holds 97% of the target over the next 2 s. Stands down while AutoMFG, a per-axis model size or spatial compression is on. A frame-generation feature that reports itself active without an observed count is waited for 2 s at most; past that the present rate is used and the status line says so.",
           "flags": [ "experimental" ]
         },
         {

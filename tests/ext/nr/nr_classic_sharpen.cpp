@@ -1,6 +1,7 @@
-// The Classic-enlargement sharpening rules: when the sharpen step may run, what it costs by default,
-// and how its replay kind and saved presets behave. The runtime gate in the Direct3D 12 pass reads the
-// same shared rule the menu greys the controls by, so the checkbox and the dispatch cannot disagree.
+// The Classic-enlargement sharpening rules: when the sharpen step may run (the Classic enlargement, and never while
+// spatial compression composes as matched residual), what it costs by default, and how its replay kind and saved presets
+// behave. The runtime gate in the Direct3D 12 pass reads the same shared rule the menu greys the controls by, so the
+// checkbox and the dispatch cannot disagree.
 #include "ext/nr/NrHotkeys.h"
 #include "ext/nr/NrConfig.h"
 #include "ext/nr/diag/NrReplayCapture.h"
@@ -23,6 +24,7 @@ void Check(bool ok, const char* what, int line)
 #define CHECK(x) Check((x), #x, __LINE__)
 
 using DlssNr::Hotkeys::ClassicApplies;
+using DlssNr::Hotkeys::ClassicSharpens;
 using DlssNr::Hotkeys::TransferToggleable;
 using ext::nr::replay::KindName;
 
@@ -64,6 +66,25 @@ void SharpenThresholdMatchesTheMenu()
     for (const auto& s : scales)
         for (uint32_t transfer = 0; transfer <= 3; ++transfer)
             CHECK(ClassicApplies(s[0], s[1], transfer) == (transfer != 1 && TransferToggleable(s[0], s[1])));
+}
+
+// Spatial compression always composes as Matched residual (the resolve forces Transfer to 1 for it), so the sharpen step
+// cannot run there however the enlargement combo reads. The menu greys its controls with this rule and the dispatch gate
+// reads it, so a live checkbox never promises a sharpen the pass skips.
+void SharpenNeverRunsUnderSpatial()
+{
+    CHECK(!ClassicSharpens(0.5f, 0.5f, 0, true));
+    CHECK(!ClassicSharpens(0.5f, 0.5f, 2, true));
+    CHECK(!ClassicSharpens(1.0f, 0.5f, 0, true));
+    // the spatial flag is the only extra condition: every other case is the Classic-applies rule
+    const float scales[][2] = { { 0.25f, 0.25f }, { 0.5f, 1.0f }, { 1.0f, 1.0f }, { 0.999f, 1.0f },
+                                { 0.998f, 1.0f }, { 1.5f, 0.5f }, { 2.0f, 2.0f }, { 0.8f, 1.2f } };
+    for (const auto& s : scales)
+        for (uint32_t transfer = 0; transfer <= 3; ++transfer)
+        {
+            CHECK(ClassicSharpens(s[0], s[1], transfer, false) == ClassicApplies(s[0], s[1], transfer));
+            CHECK(!ClassicSharpens(s[0], s[1], transfer, true));
+        }
 }
 
 void SharpenKindNameComesFromTheShader()
@@ -150,6 +171,7 @@ int main()
     SharpenAppliesOnlyToClassic();
     SharpenAppliesOnlyWhileReduced();
     SharpenThresholdMatchesTheMenu();
+    SharpenNeverRunsUnderSpatial();
     SharpenKindNameComesFromTheShader();
     SharpenDefaultsKeepTodayBehaviour();
     SharpenPresetsRoundTrip();
@@ -159,6 +181,6 @@ int main()
         std::printf("%d check(s) failed\n", failures);
         return 1;
     }
-    std::puts("PASS: Classic sharpening rules (shared Classic-applies rule, replay kind, defaults, preset round trip and range checks)");
+    std::puts("PASS: Classic sharpening rules (shared Classic-applies and sharpen rules, replay kind, defaults, preset round trip and range checks)");
     return 0;
 }

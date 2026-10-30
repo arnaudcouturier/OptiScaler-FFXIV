@@ -1,8 +1,8 @@
 #pragma once
-// Input-layout tags for the game's nameplate vertex shaders, read by the
-// native plate probe (ext/ffxiv/ui/PlateDraws.cpp PositionOfBoundLayout).
-// Moved from the removed replacement layer: tagging layouts here keeps the
-// native probe working now that no replacement pass consumes the tags.
+// Input-layout tags for the game's nameplate vertex shaders. Writing a tag is also what counts these layouts for the shader
+// catalog: every created layout is counted as seen, and the three vertex shaders this file recognises are reported as the
+// nameplate group (ext/ffxiv/catalog, by bytecode CRC). Nothing reads the tag payload back: the layout table and the bytecode
+// copy stay written for a future consumer, and no consumer in this tree resolves a layout through them.
 #include <d3d11.h>
 
 #include <array>

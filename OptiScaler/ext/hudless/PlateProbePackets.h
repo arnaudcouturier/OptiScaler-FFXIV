@@ -3,7 +3,11 @@
 // vertices lie. Pure data and arithmetic: no I/O, no D3D, no clock (the caller passes the time in milliseconds), no game memory (the caller
 // passes bytes it has read). tests/ext/hudless builds this header standalone.
 //
-// How the pieces fit (the runtime is ext/ffxiv/ui/PlatePackets.cpp):
+// No product code includes it: the packet capture that fed it went with the plate overlay, so the probe writes no packet columns
+// today. The helpers stay as a tested pure routine for a source that presents the game's packets again; the draw side
+// (ext/ffxiv/ui/PlateDraws.h) reads no packet data.
+//
+// How the pieces fit (a packet-side runtime would drive them in this order):
 //   batch call   the game submits a list of packets {queue key, header*}; each header names a run of vertices in the renderer's CPU vertex
 //                allocation. ParseHeader + MakeRange turn the list into PacketRanges (vertex numbers), RangeSet finds the packet of a vertex.
 //   enqueue      every draw command of the batch passes through the game's enqueue function. Its index list says which vertices the draw

@@ -101,7 +101,7 @@ void OnReshadeLoaded(HMODULE reshadeModule)
 
     NoteRegistration(result.status); // the same way the late registration records it: one place writes the state
 
-    // The one log line (docs/HUDLESS.md section 16 / BRIEF-s10-d0): nothing else happens with diagnostics off.
+    // The one log line (docs/HUDLESS.md section 16): nothing else happens with diagnostics off.
     if (result.status == RegisterStatus::Ok)
     {
         LOG_INFO("ReShade built-in add-on: registered (API {})", kApiVersion);

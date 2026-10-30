@@ -1,5 +1,5 @@
 // The "FFXIV" tab: one row in upstream's tabs[] array, third in the bar, shown only on the FFXIV build match, and the
-// nine FFXIV-gated cards registered for it. The menu is ImGui glue and cannot run offline, so this reads the sources
+// eight FFXIV-gated cards registered for it. The menu is ImGui glue and cannot run offline, so this reads the sources
 // (comments stripped, string literals kept; see menu_scan.h).
 #include "menu_scan.h"
 
@@ -105,10 +105,13 @@ void Cards(const std::string& repo)
 // The Custom Tab picker lists every pinnable box; the FFXIV-tab cards are skipped unless the game is FFXIV, through
 // the same predicate that hides the tab (a renamed build still reads the same: the rule never names the file name,
 // only the tab label the fork's own cards register under). A dropped skip lists the FFXIV cards in every game again.
+// The pins of the skipped rows are saved all the same, through the pure rule the manifest test drives (CustomTabPins).
 void Picker(const std::string& repo)
 {
-    const std::string code = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/menu/menu_common.cpp"));
-    CHECK(Count(Squash(code), "strcmp(box.tab,\"FFXIV\")==0&&!ext::menu::FfxivTabVisible(ctx)") == 1);
+    const std::string code = Squash(menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/menu/menu_common.cpp")));
+    CHECK(Count(code, "strcmp(box.tab,\"FFXIV\")==0&&!ext::menu::FfxivTabVisible(ctx)") == 1);
+    // ... and the save carries the pins this game cannot list, through the one rule that knows which ids those are
+    CHECK(Count(code, "if(changed)config->CustomTabCards=ext::menu::WithHiddenFfxivPins(newPinned,pinned,ext::menu::FfxivTabVisible(ctx));") == 1);
 }
 } // namespace
 

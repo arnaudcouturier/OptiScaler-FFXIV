@@ -168,7 +168,7 @@ int main(int argc, char** argv)
     // The output size the geometry is built for is the declared output (`outputW`/`outputH`: the Out parameters, else the
     // colour allocation), never the target allocation (`desc`): the Foveated pixel inputs are output pixels and the pass converts
     // them to the model's frame (pre-SR: the frame is smaller). Scratches and dispatches address the ACTIVE rectangle (the declared
-    // size clamped to the allocation per axis); geometry and readout keep the declared size.
+    // size clamped to the allocation per axis), and only the readout keeps the declared size.
     // the geometry frame is the clamped working size, never the declared output: a declared size above the allocation would otherwise size the
     // model above the frame and make the applied identity differ every frame (a rebuild per slider step, no settle)
     CHECK(Count(pass, "MakeGeometry(requestedSettings,width,height,outputW,outputH,scaleX,scaleY,g_nr.spatialFailed);") == 1);
@@ -380,13 +380,13 @@ int main(int argc, char** argv)
     CHECK(Count(menu, "Ifthemodelrefusesasizethatdiffersperaxis,thepassworksatModelresolutiononbothaxesuntilascalesettingchanges.") == 1);
 
     // ---- the declared output size, the ACTIVE clamp, and the readout clear --------------------------------------------------
-    // The geometry is built for the declared output (the Out parameters, else the target allocation: zero means "no
-    // declaration"), never the allocation alone: the Foveated pixel inputs are output pixels on both placements.
+    // The geometry is built on the ACTIVE rectangle (the clamped working size), and the declared output reaches it only as
+    // the output the Foveated pixel inputs are written against (see the geometry comment above), never the allocation alone.
     CHECK(Count(pass, "constunsignedintoutputW=frame.OutputWidth!=0?frame.OutputWidth:(unsignedint)desc.Width;") == 1);
     CHECK(Count(pass, "constunsignedintoutputH=frame.OutputHeight!=0?frame.OutputHeight:(unsignedint)desc.Height;") == 1);
     // Post-upscale the ACTIVE rectangle is the declared size clamped to the allocation per axis (a mismatched
-    // CopyResource is illegal): scratches, dispatches and copies address it, while MakeGeometry and the readout keep
-    // the declared size. An unclamped side would write past the smaller allocation; a max would overshoot the other way.
+    // CopyResource is illegal): scratches, dispatches and copies address it, the geometry is built on it, and only the
+    // readout keeps the declared size. An unclamped side would write past the smaller allocation; a max would overshoot the other way.
     CHECK(Count(pass, "DlssNr::ColorExtent{std::min(outputW,(unsignedint)desc.Width),std::min(outputH,(unsignedint)desc.Height)}") == 1);
     // The copy-back uses the whole-resource copy only when the sides agree, else the clamped-rectangle region copy.
     CHECK(Count(pass, "if(desc.Width==width&&desc.Height==height)cmdList->CopyResource(target,g_nr.hdrCopy);elseDlssNr::CopyActiveColor(cmdList,target,g_nr.hdrCopy,DlssNr::ColorExtent{width,height});") == 2);

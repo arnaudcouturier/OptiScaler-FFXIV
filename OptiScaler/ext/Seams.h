@@ -5,6 +5,7 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/bridge/BridgeSeams.h"
+#include "ext/core/CustomTabPins.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"

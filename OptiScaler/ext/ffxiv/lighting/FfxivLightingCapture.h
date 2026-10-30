@@ -15,7 +15,7 @@
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
-#include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the native plate probe
+#include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the nameplate vertex shaders (catalog group)
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 
@@ -25,8 +25,8 @@
 namespace ext::ffxiv::lighting::FfxivLightingCapture
 {
 using Microsoft::WRL::ComPtr;
-// Input-layout tags for the native plate probe live beside the probe itself
-// (ext/ffxiv/ui/PlateLayoutTag.h) and are written directly, with no plugin callback.
+// Input-layout tags for the nameplate vertex shaders live with the catalog consumers
+// (ext/ffxiv/ui/PlateLayoutTag.h) and are written directly, with no callback.
 
 struct Shader { const char* name; UINT bytes, crc; std::array<unsigned char,16> checksum; };
 inline constexpr std::array<Shader,9> shaders {{

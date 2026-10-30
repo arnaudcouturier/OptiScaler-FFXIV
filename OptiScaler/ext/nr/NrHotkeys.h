@@ -41,17 +41,24 @@ inline bool TransferToggleable(float scaleX, float scaleY)
     return !aboveFull && (scaleX < 0.999f || scaleY < 0.999f);
 }
 
-// The enlargement mode after a toggle press: Classic (0) and Matched residual (1) swap; anything else is shown
-// as Classic by the menu, so it becomes Matched residual like Classic does. A greyed-out combo leaves the value alone.
-// Whether the Classic enlargement applies for these effective per-axis scales and this Transfer value:
-// anything but Matched residual reads as Classic in the menu, and the model is reduced on some axis and
-// above full on none. The Enlargement combo greys out exactly while this is false, and the runtime
-// sharpen gate reads the same rule, so the checkbox and the dispatch can never disagree.
+// Whether the Classic enlargement applies for these effective per-axis scales and this Transfer value: anything but Matched
+// residual reads as Classic in the menu, and the model is reduced on some axis and above full on none.
 inline bool ClassicApplies(float scaleX, float scaleY, uint32_t transfer)
 {
     return transfer != 1 && TransferToggleable(scaleX, scaleY);
 }
 
+// Whether the Classic sharpening step can run at all for these effective per-axis scales, this Transfer value and this
+// spatial state: sharpening rides on the Classic enlargement, and the spatial profiles always compose as Matched residual
+// (the resolve forces Transfer to 1 for them), so they never sharpen. The menu greys the sharpening controls with this and
+// the dispatch gate reads it, so a live checkbox never promises a sharpen the pass skips.
+inline bool ClassicSharpens(float scaleX, float scaleY, uint32_t transfer, bool spatial)
+{
+    return !spatial && ClassicApplies(scaleX, scaleY, transfer);
+}
+
+// The enlargement mode after a toggle press: Classic (0) and Matched residual (1) swap; anything else is shown
+// as Classic by the menu, so it becomes Matched residual like Classic does. A greyed-out combo leaves the value alone.
 inline uint32_t ToggleTransfer(uint32_t current, bool toggleable)
 {
     if (!toggleable)

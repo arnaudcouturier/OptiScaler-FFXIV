@@ -1788,7 +1788,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
     // The upscaler's declared output size (the OutWidth/OutHeight parameters, else the output texture): what the model answer is
-    // resolved onto. The pixel sizes the spatial profiles are written against must follow it, not the target allocation. Post-upscale the ACTIVE rectangle below is that declared size clamped to the allocation per axis (a mismatched CopyResource is illegal in D3D12): every scratch, dispatch and copy addresses the clamped rectangle, while MakeGeometry and the readout keep the declared size; a copy-back whose sides then differ copies the clamped rectangle, never a mismatched CopyResource.
+    // resolved onto. The pixel sizes the spatial profiles are written against must follow it, not the target allocation. Post-upscale the ACTIVE rectangle below is that declared size clamped to the allocation per axis (a mismatched CopyResource is illegal in D3D12): every scratch, dispatch and copy addresses the clamped rectangle, and the geometry is built on it as the frame size, so the model and its scratch agree. Only the menu readout keeps the declared size (and the Foveated pixel settings are output pixels, converted to the frame every tick); a copy-back whose sides then differ copies the clamped rectangle, never a mismatched CopyResource.
     const unsigned int outputW = frame.OutputWidth != 0 ? frame.OutputWidth : (unsigned int) desc.Width;
     const unsigned int outputH = frame.OutputHeight != 0 ? frame.OutputHeight : (unsigned int) desc.Height;
     const auto active = frame.BeforeUpscale
@@ -3400,8 +3400,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const float sharpenStrength = std::isfinite(sharpenAmount) ? std::clamp(sharpenAmount, 0.0f, 1.0f) : 0.4f;
         // The copy-back below addresses one plain frame: anything else fails open to the resolve output.
         const D3D12_RESOURCE_DESC sharpenTargetDesc = target != nullptr ? target->GetDesc() : D3D12_RESOURCE_DESC {};
+        // The enlargement the sharpen belongs to is the one the resolve just ran: the applied geometry, which keeps the old
+        // size for the settle window, not the requested scales that already carry the next step.
         const bool classicSharpen = nr.classicSharpen.value_or_default() && sharpenStrength > 0.0f &&
-                                    DlssNr::Hotkeys::ClassicApplies(scaleX, scaleY, resolveParams.Transfer) &&
+                                    DlssNr::Hotkeys::ClassicSharpens(geometry.workScaleX, geometry.workScaleY, resolveParams.Transfer, spatial) &&
                                     resolveParams.ApplyModel != 0 && resolveParams.CompareMode == 0 &&
                                     resolveParams.DebugView == 0 && resolveParams.ShowSkinMask == 0 && g_nr.hdrCopy != nullptr &&
                                     sharpenTargetDesc.MipLevels == 1 && sharpenTargetDesc.DepthOrArraySize == 1;

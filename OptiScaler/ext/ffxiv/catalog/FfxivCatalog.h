@@ -8,7 +8,7 @@
 // Where each call runs:
 //   OnPixelShaderCreated  every DXBC pixel shader the creation hook sees, whether or not the HUD-less detector is armed (the same always-run
 //                         place as the boundary stamp; NOT the D1 registry, which runs only while armed). Lock free, allocation free, no log.
-//   OnNameplateVertexShader / OnLayoutSeen   CreateInputLayout tagging of the nameplate probe (PlateLayoutTag.h, written by the lighting hooks).
+//   OnNameplateVertexShader / OnLayoutSeen   CreateInputLayout tagging of the nameplate vertex shaders (PlateLayoutTag.h, written by the lighting hooks).
 //   OnPresent             bridge Present entry (ui::OnPresentBegin, BEFORE its Armed() test: default-ini sessions have to get the catalog line too).
 //   UiBoundaryUsable      UiBoundaryProvider::Take() / LastReason(), on every frame, never latched.
 
