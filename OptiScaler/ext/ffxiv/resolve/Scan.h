@@ -1,7 +1,7 @@
 #pragma once
 // The matcher: a chunked, bounds-safe scan of the image sections for one or many masked patterns in a single pass.
 //
-// Rules (brief P1): scan only the sections of the requested class (Code = executable sections for code anchors), never read past a
+// Rules: scan only the sections of the requested class (Code = executable sections for code anchors), never read past a
 // section's end (the old scanner\scanner.cpp FindPattern reads one byte past VirtualSize), chunk the reads (1 MiB windows that overlap
 // by pattern length - 1, so a match that straddles a window border is found exactly once), keep at most kMaxScanHits raw matches per
 // request and flag the overflow. Counting "exactly one" is the resolver's job; this layer reports raw matches in ascending RVA order.

@@ -308,9 +308,9 @@ Violations Check(const Model& m)
     return v;
 }
 
-// `// ext:` markers of the upstream menu files: 14 + 1 at the fork's base, plus the draw-once loop (2 lines) and the
-// FFXIV tab row (1 line). More means the menu got a new seam: update the catalog and this number together.
-constexpr size_t kExtMarkersMenuCommonCpp = 17;
+// `// ext:` markers of the upstream menu files: 14 + 1 at the fork's base, plus the draw-once loop (2 lines), the
+// FFXIV tab row (1 line) and the Custom Tab picker skip (1 line). More means the menu got a new seam: update the catalog and this number together.
+constexpr size_t kExtMarkersMenuCommonCpp = 18;
 constexpr size_t kExtMarkersMenuCommonH = 1;
 
 Violations Budget(const std::string& cppRaw, const std::string& hRaw)

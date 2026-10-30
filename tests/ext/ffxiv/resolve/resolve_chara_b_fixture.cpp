@@ -1,7 +1,7 @@
 // CharaView as the first full seam of the resolver, proven on committed bytes only (no executable):
 //   * the registry's pattern is the pattern of CharaViewBuild (GameBuild.h) byte for byte and mask for mask,
 //   * on a dense image with the layout of the CURRENT build the resolver finds the same accessor and manager RVAs as the table and as
-//     the existing CharaTable scan (CharaTable.h ResolveFromImage, which P2 migrates later),
+//     the existing CharaTable scan (CharaTable.h ResolveFromImage, until that seam exists),
 //   * on a dense image with the layout of the PREVIOUS build (B, bytes read from the B file before it was removed)
 //     the same pattern finds B's accessor 0x26ab40 and decodes B's manager pointer 0x28f9490,
 //   * the fixture rules: only "B-read" rows are evidence, maskB placeholders are never planted, derived rows are refused.
@@ -51,7 +51,7 @@ void TestSpecEqualsTable()
         accessor = std::string_view(s.id) == "chara.accessor" ? &s : accessor;
     REQUIRE(accessor != nullptr && accessor->anchors.size() == 1);
 
-    // The pattern text pinned on its own, independent of CharaViewBuild (P3 removes that table: this literal is then the only pin of the
+    // The pattern text pinned on its own, independent of CharaViewBuild (a later cleanup removes that table: this literal is then the only pin of the
     // CharaView pattern, and over-wildcarding or a changed fixed byte passes every other gate: unique hit, margin floor, decode right)
     CHECK(accessor->anchors[0].pattern == "48 8B 05 ?? ?? ?? ?? 8B CA 48 8B 84 C8 C8 02 00 00 C3");
     CHECK(accessor->anchors[0].minMargin == 3 && accessor->anchors[0].searchIn == SearchIn::Code && accessor->anchors[0].expectedHits == 1);

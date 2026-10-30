@@ -86,7 +86,7 @@ bool EqualsBlob(const A& guard, const Blob& blob, std::uint32_t rva)
     return ToHex(std::vector<std::uint8_t>(guard.begin(), guard.end())) == SliceHex(blob, rva, guard.size());
 }
 
-// The P3 rule of the header: a Detour site is usable only when its LOCATION seam and its SHAPE seam are both usable (UsableOrTable: on a known
+// The hook-site rule of the header: a Detour site is usable only when its LOCATION seam and its SHAPE seam are both usable (UsableOrTable: on a known
 // build the location may be filled from the table, the shape never is: it is failClosed).
 bool SiteUsable(const ResolvedBuild& rb, const char* location, const char* shape) { return rb.UsableOrTable(location) && rb.UsableOrTable(shape); }
 
@@ -104,7 +104,7 @@ void TestCurrentBuild()
     LogCapture log;
     const ResolvedBuild withTable = Resolve(*img, &table, &log);
     CHECK(withTable.knownBuild && withTable.registryErrors.empty());
-    CHECK(withTable.seams.size() == 28); // 24 location / helper / offset seams + the four shape seams (P2bfix review #2)
+    CHECK(withTable.seams.size() == 28); // 24 location / helper / offset seams + the four shape seams (the two-tier design)
     for (const SeamResult& s : withTable.seams)
     {
         if (s.status != SeamStatus::Found)
@@ -268,7 +268,7 @@ void TestBatchRoleConfusion()
     CHECK(Get(rb, "companion.batch32").status == SeamStatus::Found && Get(rb, "companion.batch32").rva == kBatch32Rva);
 }
 
-// P2bfix review #6 (B1) and the inverted dispatcher (B3/B4). The 16-bit function has a second caller, the tail-call stub at 0x63b730 (jmp batch16);
+// The inverted dispatcher and the 16-bit function's second caller. The 16-bit function has a second caller, the tail-call stub at 0x63b730 (jmp batch16);
 // the 32-bit one has no second caller (its je rel32 cannot be decoded: Rel32 reads E8/E9 only, RipDisp32 demands a RIP ModRM byte).
 void TestBatchInvertedDispatcher()
 {
@@ -359,7 +359,7 @@ void TestDecoysRemoved()
     // decoy 3: the bindState snippets (flag 39 at 0x22d758, context A 19 at 0x22d7d8, context B 26 at 0x22d8b4)
     Plant(*img, 0x1002000, SliceHex(kBindState, 0x22d758, 39));
     Plant(*img, 0x1002100, SliceHex(kBindState, 0x22d7d8, 19));
-    Plant(*img, 0x1002200, SliceHex(kBindState, 0x22d8b4, 49)); // P2bfix review #3: loadBeforeStateCall is the full 49-byte contextCall text
+    Plant(*img, 0x1002200, SliceHex(kBindState, 0x22d8b4, 49)); // loadBeforeStateCall is the full 49-byte contextCall text
     // the enqueue tail copy, 0x1004000 is far beyond enqueue + 0x200
     Plant(*img, 0x1004000, SliceHex(kEnqueue, 0x240c23, 19));
     // a copy of the tail-call stub whose jmp points into .rdata (the je keeps its target): TargetIn(Code) is what removes it
@@ -486,8 +486,8 @@ void TestNameplateSingleSite()
 
 // ValueIn on an Offset anchor: batch16's `mov rax,[rcx+LIST]` displacement is changed to 0x100000 (outside the range). The decoy value is
 // dropped by ValueIn (without it the two anchors would disagree: Conflict). The pinned head of the batch function fails too (the strict
-// anchor has the old displacement fixed), so the function falls back to its two caller anchors (the dispatcher call and, since P2bfix review #6,
-// the tail-call stub): plain Found, two independent anchors; batch32 (one caller anchor) would be FoundSingleAnchor in the same situation.
+// anchor has the old displacement fixed), so the function falls back to its two caller anchors (the dispatcher call and the tail-call stub),
+// giving plain Found, two independent anchors; batch32 (one caller anchor) would be FoundSingleAnchor in the same situation.
 void TestValueInOnOffsets()
 {
     auto img = MakeRealImage();
@@ -521,7 +521,7 @@ void TestValueInOnLayoutTable()
     CHECK(t.status == SeamStatus::FoundSingleAnchor && t.rva == 0x217c760);
 }
 
-// P2bfix review #5: the healed values must stay inside the consumer's containers. Exact bounds, one byte changed in ONE copy of the anchor:
+// The healed values must stay inside the consumer's containers. Exact bounds, one byte changed in ONE copy of the anchor:
 //   batchFormatOffset    the consumer reads 4 bytes of a 64-byte header: max 0x3c (0x3d would read past the array)
 //   batchExtensionOffset the consumer reads 2 bytes of the same header: max 0x3e
 //   entryPointerOffset   the consumer indexes entry[1] of a {key, pointer} pair (CompanionPackets.h Substitute): exactly 8
@@ -696,8 +696,8 @@ void TestPrologueAloneIsNotAnAnchor()
 }
 
 // SAFETY: on an unknown build a bound Guard field holds the LIVE bytes at the resolved site, so the anchors are the only check. One changed
-// prologue byte of enqueue (0x48 -> 0x49): the strict entry anchor fails, the tail anchor and the caller anchor (P2bfix review #1) still give the
-// entry, so the LOCATION is plain Found; the Guard field is bound to the SHAPE seam (P2bfix review #2), whose single strict anchor fails: the
+// prologue byte of enqueue (0x48 -> 0x49): the strict entry anchor fails, the tail anchor and the caller anchor still give the
+// entry, so the LOCATION is plain Found; the Guard field is bound to the SHAPE seam, whose single strict anchor fails: the
 // field stays ZERO, so the hook's live-bytes-against-guard compare refuses. Before the shape seam the field carried the changed byte (the hook
 // compared it with itself). On a known build the table's 16 bytes are NOT put back either (failClosed): the shape is not usable there.
 void TestChangedPrologueByte()
@@ -735,7 +735,7 @@ void TestEnqueueTailMoved()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
-// P2bfix review #1: enqueue is a LEAF (no .pdata) whose head and tail anchors shift together, so only the caller-side anchor (callerEpilogue: the
+// enqueue is a LEAF (no .pdata) whose head and tail anchors shift together, so only the caller-side anchor (callerEpilogue: the
 // call target IS the entry) pins the entry address. Scenarios E1..E7: the real function bytes with one edit each, planted
 // where the real function is (the caller keeps calling 0x240b80). Whatever the edit, the seam is never USABLE at an address that is not the
 // entry: Conflict (inert, no field) or a value equal to the entry.
@@ -838,7 +838,7 @@ void TestEnqueueEntryScenarios()
 
     // RESIDUAL, pinned: the caller site is the only anchor that does not move with the function. If the wrapper itself was recompiled (callerEpilogue
     // finds nothing) AND a prefix appears before the head, the head and the tail agree at entry+5: a silent plain Found, and the shape (the head
-    // verified at that address) matches too. Only the anchor count tells it apart from the real thing: hits 2 instead of 3. The header's P3 rule:
+    // verified at that address) matches too. Only the anchor count tells it apart from the real thing: hits 2 instead of 3. The header's hook-site rule:
     // hook enqueue on an unknown build only when the callerEpilogue AnchorResult is Unique (the hits sum, 2 here instead of 3, is only an
     // observation, not the rule). If this scenario ever becomes a Conflict or
     // not usable, update this block on purpose.
@@ -859,7 +859,7 @@ void TestEnqueueEntryScenarios()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
-// P2bfix review #2: LOCATION and SHAPE seams (the design of P2c). The Guard fields are bound to the SHAPE seams (one strict anchor, verified at
+// LOCATION and SHAPE seams (the two-tier design). The Guard fields are bound to the SHAPE seams (one strict anchor, verified at
 // the location seam's address, failClosed), the Rva fields to the location seams. A Detour site is usable only when both are.
 // ---------------------------------------------------------------------------------------------------------------------------------------
 struct Site
@@ -917,7 +917,7 @@ void TestShapeSeams()
                 CHECK(AllZero(rb.build.companion.enqueueInstructions));
             else if (std::string(s.shape) == "companion.bindStateShape")
                 CHECK(AllZero(rb.build.companion.bindStateInstructions));
-            else // batch32Shape: no field of its own (the table keeps ONE batch guard, bound to batch16Shape): P3 gates on the seam
+            else // batch32Shape: no field of its own (the table keeps ONE batch guard, bound to batch16Shape): the gate tests the seam
                 CHECK(!rb.Usable("companion.batch32Shape") && !AllZero(rb.build.companion.batchInstructions));
             // the Rva field of the location is filled as before (a known build: the same value)
             if (std::string(s.shape) == "companion.enqueueShape")
@@ -976,11 +976,11 @@ void TestShapeRoutes()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
-// P2bfix review #3: nativeContextOffset is dereferenced as a COM pointer (CompanionLayer.cpp: Stamp calls GetType / SetPrivateData). Anchor A
+// nativeContextOffset is dereferenced as a COM pointer (CompanionLayer.cpp: Stamp calls GetType / SetPrivateData). Anchor A
 // (loadBeforeVirtualCall) proves the object has a vtable whose slot 35 (+0x118) is loaded; anchor B (loadBeforeStateCall) is now the full
 // 49-byte text up to `call [rax+0x98]` (vtable slot 19 = IASetIndexBuffer, r8d 0x2a / 0x39 = R32_UINT / R16_UINT), the proof that the object is a
-// D3D11 context. A changed slot makes B refuse; A alone leaves a usable FoundSingleAnchor (P3: prefer plain Found, the header says so); both
-// refusing leaves the seam NotFound (an unresolved Offset seam keeps the table default on an unknown build: P3 must gate bindState on Usable).
+// D3D11 context. A changed slot makes B refuse; A alone leaves a usable FoundSingleAnchor (prefer plain Found, the header says so); both
+// refusing leaves the seam NotFound (an unresolved Offset seam keeps the table default on an unknown build: bindState needs Usable).
 // ---------------------------------------------------------------------------------------------------------------------------------------
 void TestNativeContextVtableSlot()
 {
@@ -1027,7 +1027,7 @@ void TestNativeContextVtableSlot()
         CHECK(status(rb, "loadBeforeVirtualCall") == AnchorOutcome::Zero && status(rb, "loadBeforeStateCall") == AnchorOutcome::Unique);
         CHECK(Get(rb, "companion.nativeContextOffset").status == SeamStatus::FoundSingleAnchor);
     }
-    // both refuse: NotFound, no value (the field would keep the table default: P3 gates bindState on Usable("companion.nativeContextOffset"))
+    // both refuse: NotFound, no value (the field would keep the table default: bindState needs Usable("companion.nativeContextOffset"))
     {
         auto img = MakeRealImage();
         REQUIRE(img != nullptr);

@@ -7,7 +7,7 @@
 // derived from the C bytes ("derived-from-C", "derived-from-B-RVAs") are refused by PlantBRow: a pattern written from C passes on them
 // by construction, so they prove nothing about B.
 //
-// Rows are per group so that the P2 writers do not share a file: old_build_b_quality.h (CharaView, written in P1), and the writers add
+// Rows are per group so that the groups do not share a file: old_build_b_quality.h (CharaView) came first, and each group adds
 // old_build_b_companion.h / old_build_b_jitter.h next to their own tests.
 //
 // The B section table: the start VAs and the .text size are recorded; the other virtual sizes are NOT, so each is chosen to fit before the

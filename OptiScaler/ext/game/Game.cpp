@@ -84,6 +84,7 @@ const Game& SelectGame()
                      "no executable address are on; the ones that do follow the [ffxiv-gate] lines",
                      nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
         // The upstream FG backbuffer quirk keys on the exe name only, so it stays active on a build the table does not know, while every game-module seam that reads executable addresses is off. That mismatch is silent upstream: say it once here, where the name-recognised unknown build is already logged.
+        // Kept, not gated: the quirk only calls GetBuffer/Release on the game's own DXGI swapchain and reads no game address, so a patch that moves code cannot change what it does. One Release drops only the reference GetBuffer took; the drain loop would also take references the engine holds, which is why the quirk exists. Engine backbuffer ownership is not a build property, so the quirk stays needed on an unknown build.
         if (!exactBuild && (State::Instance().gameQuirks & GameQuirk::ReleaseBackbufferOnce))
             LOG_WARN("ReleaseBackbufferOnce quirk is active by exe name on a game build the resolver does not know: the FG backbuffer is still released once while the address-reading seams stay off");
         return true;

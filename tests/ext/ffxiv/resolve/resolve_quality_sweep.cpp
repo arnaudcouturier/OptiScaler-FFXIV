@@ -1,4 +1,4 @@
-// P2a (MEDIUM-2 of the independent review): what the quality anchors pin and what they mask, derived from the registry itself and checked against
+// What the quality anchors pin and what they mask, derived from the registry itself and checked against
 // the committed bytes of build C (no executable needed).
 //
 // Why this test exists. resolve_quality_pins compares every pattern with an independent copy of its text. A future editor who loosens a pattern

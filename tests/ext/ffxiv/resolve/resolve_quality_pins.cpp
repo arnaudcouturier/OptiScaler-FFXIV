@@ -1,4 +1,4 @@
-// P2a: the quality group's registry, pinned and resolved over committed bytes (no executable needed).
+// The quality group's registry, pinned and resolved over committed bytes (no executable needed).
 //   * every anchor of every seam is pinned as text: pattern, decode, valueFrom, guard site, predicates, margin (CHANGES 21 of the frozen types:
 //     over-wildcarding passes every other gate, so the literal text is the only thing that holds the fixed bytes in place); the pinned pattern
 //     texts live in resolve_quality_data.h as copies independent of AnchorsQuality.h and of GameBuild.h;
@@ -48,7 +48,7 @@ const std::vector<ExpectSeam>& Expected()
             { "storedByManagerCtor", kPinManagerCtor, "", 0, T, 0, kRip, 7, 3, 7, 0, false, 3, "TargetIn:Code" } },
           0x352350 },
         // the SHAPE seams (CodeSite, ONE guard anchor each, the strict entry pattern verified at the location seam's address): the Guard fields
-        // are bound to them, so a shape that does not match leaves the Guard field ZERO (see the P3 CONTRACT in AnchorsQuality.h)
+        // are bound to them, so a shape that does not match leaves the Guard field ZERO (see the hook-site rule in AnchorsQuality.h)
         { "quality.querySizeShape", SeamKind::CodeSite, { { "shape", kPinQuerySizeEntry, "quality.querySize", 0, M, 0, kNone, 0, 0, 0, 0, false, 3, "" } },
           0x352350, true },
         { "quality.rendererUpdate", SeamKind::Function,

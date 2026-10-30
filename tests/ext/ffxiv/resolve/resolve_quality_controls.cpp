@@ -1,4 +1,4 @@
-// P2a: the controls of the quality group, all over committed bytes (no executable):
+// The controls of the quality group, all over committed bytes (no executable):
 //   1. every predicate removes its PLANTED decoy (most anchors are unique on the real executable without any predicate, so an exe-only test
 //      cannot show a dropped predicate): TargetIn(Bss), SameFunctionAs and ValueIn, for scan anchors (a decoy copy is planted in the image) and
 //      for guard anchors (the site itself is made to violate the predicate); the same image resolves differently once the predicate is removed;
@@ -843,7 +843,7 @@ void TestOffsetsFollowTheCode()
         SetByte(*img, kS1 + 13, 0x50);
         const ResolvedBuild rb = ResolveImage(*img, reg);
         CHECK(Get(rb, "quality.settingsModeOffset").status == SeamStatus::Conflict && !rb.Usable("quality.settingsModeOffset"));
-        CHECK(Get(rb, "quality.settingsInstructions").status == SeamStatus::Found); // the block itself matches (the offset is masked): P3 must gate on the offset seams too
+        CHECK(Get(rb, "quality.settingsInstructions").status == SeamStatus::Found); // the block itself matches (the offset is masked): the gate must check the offset seams too
     }
     // a single-anchor offset (the selector) follows the one site that carries it
     {

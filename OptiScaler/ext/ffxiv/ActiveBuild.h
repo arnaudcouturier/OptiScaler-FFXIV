@@ -4,7 +4,7 @@
 // Header-only and constant-initialised (one atomic pointer), so any translation unit and any test can include it; nothing here reads the
 // game. The startup (ext/ffxiv/resolve/ResolveStartup.cpp, called once from the first device hook) resolves the executable, decides, and
 // publishes. Until then:
-//   * ActiveBuild() is the compile-time table (kCurrentBuild), exactly what every consumer read before P3 (and what the unit tests of the
+//   * ActiveBuild() is the compile-time table (kCurrentBuild), exactly what every consumer read before the resolver (and what the unit tests of the
 //     consumers see: they never run the startup);
 //   * ActiveGate() is the "not started" report: every feature OFF (fail open), so a consumer that is reached before the startup refuses and
 //     answers "not ready" instead of latching a wrong answer. A consumer must therefore ask the gate on every call (or cache only a TRUE
@@ -16,7 +16,7 @@
 //     ZERO, and the gate refuses the feature that reads it). On an unknown build it holds the resolved values; every Rva/Guard field of a seam that
 //     did not resolve is ZERO, offsets keep the table defaults (logged as not self-healing).
 //   * legacy mode ([FFXIV] FfxivLegacyGameBuild): ActiveBuild() stays the compile-time table and the gate says "Group 2 iff the exact known
-//     build", i.e. exactly the pre-P3 path.
+//     build", i.e. exactly the legacy path.
 
 // relative includes: the companion test recipes put only their own folders on the include path
 #include "GameBuild.h"

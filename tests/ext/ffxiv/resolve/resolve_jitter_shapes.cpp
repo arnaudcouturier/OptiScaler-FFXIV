@@ -1,5 +1,5 @@
-// The strict shapes of the jitter-source group (P2c fix, review findings 2, 3 and 9), on committed bytes only:
-//   1. the hook-site registry: kJitterHookSites (AnchorsJitter.h) is DATA that P3 iterates; here it is checked structurally against the registry
+// The strict shapes of the jitter-source group, on committed bytes only:
+//   1. the hook-site registry: kJitterHookSites (AnchorsJitter.h) is DATA that the shape check iterates; here it is checked structurally against the registry
 //      and against the literal facts of resolve_jitter_shape_data.h: every shape seam has ONE guard anchor hanging from the Rva-bound location
 //      seam, the values are equal, failClosed is set, the location is bound to an Rva field and the shape to the Guard field, no Guard is bound
 //      to a location seam, and the seams with no GameBuild field are exactly the gate list;
@@ -150,7 +150,7 @@ void TestHookSiteRegistry()
     }
     CHECK(globals.size() == 3 && sizeof(kJitterGlobals) / sizeof(kJitterGlobals[0]) == 3);
 
-    // the seams with NO GameBuild field are exactly the gate list (P3 gates on them until fields exist)
+    // the seams with NO GameBuild field are exactly the gate list (the gate checks them until fields exist)
     std::set<std::string> unbound, gate;
     for (const SeamSpec& s : reg.seams)
     {

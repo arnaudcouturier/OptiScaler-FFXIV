@@ -1,5 +1,5 @@
 #pragma once
-// Shared helpers of the jitter-source (P2c) tests: the build-C layout image with the group's committed bytes, small readers and the
+// Shared helpers of the jitter-source tests: the build-C layout image with the group's committed bytes, small readers and the
 // pattern helpers the decoy tests use. Header only, tests include it next to old_build_b_jitter.h.
 #include "old_build_b_jitter.h"
 

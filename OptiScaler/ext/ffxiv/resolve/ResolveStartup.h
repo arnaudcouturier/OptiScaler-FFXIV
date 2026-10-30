@@ -1,5 +1,5 @@
 #pragma once
-// The one call site of the pattern-search resolver in the product (replaces the compile-check placeholder of P1/P2).
+// The one call site of the pattern-search resolver in the product (replaces the old compile-check placeholder).
 //
 // StartOnce(): resolve the main module ONCE, decide which features may run, log one block, publish ActiveBuild() / ActiveGate()
 // (ext/ffxiv/ActiveBuild.h). Idempotent and thread-safe (the first caller works, later callers wait and return).

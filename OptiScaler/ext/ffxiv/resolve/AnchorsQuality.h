@@ -1,5 +1,5 @@
 #pragma once
-// Anchors of P2 group 1: native quality, the CharaView accessor and the camera global.
+// Anchors for native quality, the CharaView accessor and the camera global.
 //
 // OWNER: the quality seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 // It must NOT edit: ResolveTypes.h, ImageView.h, DenseImage.h, LiveImage.h, Pattern.h, Scan.h, Unwind.h, Resolver.h, ResolveLog.h,
@@ -12,7 +12,7 @@
 //   nativeQuality.settingsMode/Quality/Dlaa/SelectorOffset, managerContext/contextFlags/contextCache/deviceCallbacks/rendererSceneSizeOffset
 //   charaView.accessorRva / managerPointerRva / targetsOffset
 //   jitter.cameraGlobalRva / cameraOffset / jitterPointerOffset
-// NOT bound (no instruction of this group carries them; P3 logs them as "not self-healing"): nativeQuality.settingsRendererOffset (0x47),
+// NOT bound (no instruction of this group carries them; the resolver logs them as "not self-healing"): nativeQuality.settingsRendererOffset (0x47),
 // settingsAdditionalOffset (0x49) (the hooks only use them to size a snapshot), charaView.transparentOffset / depthOffset0 / depthOffset1 /
 // entryResourceOffset / entryWidthOffset / entryHeightOffset (read by CharaTable.h, no anchor instruction carries them), jitter.jitterX/Y /
 // ndcX/Y / counterOffset (the layout of the 20-byte jitter object, written by the generator, not by an instruction of this group).
@@ -56,7 +56,7 @@
 //     tests/ext/ffxiv/resolve/resolve_quality_sweep.cpp (set equality): masking one more byte of a pattern fails that test until somebody
 //     writes down why it is free. The same test flips every fixed byte once.
 //
-// P3 CONTRACT (the consumer is FfxivNativeQualityHooks.h):
+// Hook-site rule (the consumer is FfxivNativeQualityHooks.h):
 //   1. A Detour site (querySize, rendererUpdate) and the DIRECT CALL of resizeCallbacks (FfxivNativeQualityHooks.h dispatchResizeCallbacks) are
 //      usable only when BOTH the location seam and the shape seam are usable: `rb.UsableOrTable(location) && rb.UsableOrTable(shape)` (that is
 //      Usable on an unknown build; on a known build the location may have fallen back to the table, a failClosed shape never does). Gate on the
@@ -84,7 +84,7 @@ namespace ext::ffxiv::resolve
 {
 inline void AddQualityAnchors(Registry& r)
 {
-    // ---- CharaView accessor (the first full seam; CharaTable.h still does its own scan until P2 migrates it) ----
+    // ---- CharaView accessor (the first full seam; CharaTable.h still does its own scan until that seam exists) ----
     //
     //   mov rax,[rip+disp32] ; mov ecx,edx ; mov rax,[rax+rcx*8+0x2c8] ; ret      18 bytes, a leaf function (no .pdata entry)
     //
@@ -116,7 +116,7 @@ inline void AddQualityAnchors(Registry& r)
     r.bindings.push_back({ "charaView.managerPointerRva", "chara.managerPointer", 0 });
 
     // The offset of the render-target table inside the manager object: the `+0x2c8` of the accessor's last load. PINNED, NOT SELF-HEALING:
-    // the accessor's own scan (above, frozen by the P1 test) keeps these four bytes fixed, so this guard cannot disagree with it; it reads
+    // the accessor's own scan (above, whose pattern a test pins) keeps these four bytes fixed, so this guard cannot disagree with it; it reads
     // the value as a decoded field so the table field is bound and compared on the golden test. Own pattern text (offset masked).
     // The other CharaView offsets (transparent / depth / entry layout) are read by CharaTable.h only: no anchor instruction carries them.
     {

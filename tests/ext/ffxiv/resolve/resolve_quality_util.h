@@ -1,8 +1,8 @@
 #pragma once
-// Shared helpers of the quality-group resolver tests (P2a): the registry of the group alone, a dense image with the layout of build C, the
+// Shared helpers of the quality-group resolver tests: the registry of the group alone, a dense image with the layout of build C, the
 // recorded bytes of every site planted into it, and the .pdata entries that the EnclosingFunction / SameFunctionAs anchors need.
 //
-// Why the group's own registry and not BuildRegistry(): the three P2 groups are merged later, and a test of this group must neither depend on
+// Why the group's own registry and not BuildRegistry(): the three anchor groups are merged later, and a test of this group must neither depend on
 // the other groups' seams nor change when they are added.
 #include "old_build_b_quality.h"
 #include "resolve_quality_data.h"
@@ -64,7 +64,7 @@ inline std::uint32_t RvaOf(const GameBuild& b, const char* key)
     return *p;
 }
 
-// The P3 rule for a hooked function (AnchorsQuality.h, P3 CONTRACT): usable only when BOTH its location seam and its shape seam are usable. The
+// The hook-site rule for a hooked function (AnchorsQuality.h): usable only when BOTH its location seam and its shape seam are usable. The
 // same call on both builds: on an unknown build UsableOrTable is Usable, on a known build a location seam that fell back to the table counts
 // and a failClosed shape seam never falls back (its Guard stays zero, so the hooks' own byte compare refuses).
 inline bool HookSiteUsable(const ResolvedBuild& rb, const char* location, const char* shape)

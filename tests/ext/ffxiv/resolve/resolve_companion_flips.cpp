@@ -1,4 +1,4 @@
-// P2bfix review #4: the over-masking blind spot. The behavioural tests prove hits, decoys and decodes; the pinned text proves the text; neither
+// The over-masking blind spot. The behavioural tests prove hits, decoys and decodes; the pinned text proves the text; neither
 // proves that a byte the consumer relies on is still FIXED when a pattern and its pin are edited together (a "lockstep" over-mask keeps exactly
 // one hit and a margin on the real executable). Two literal tables close it, both frozen: kMaskMap was generated ONCE from today's patterns and
 // each masked range classified against the executable (capstone: the instruction operand it belongs to), so it no longer moves with the registry;

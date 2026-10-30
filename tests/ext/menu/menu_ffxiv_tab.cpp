@@ -1,5 +1,5 @@
 // The "FFXIV" tab: one row in upstream's tabs[] array, third in the bar, shown only on the FFXIV build match, and the
-// eight FFXIV-gated cards registered for it. The menu is ImGui glue and cannot run offline, so this reads the sources
+// nine FFXIV-gated cards registered for it. The menu is ImGui glue and cannot run offline, so this reads the sources
 // (comments stripped, string literals kept; see menu_scan.h).
 #include "menu_scan.h"
 
@@ -102,6 +102,14 @@ void Cards(const std::string& repo)
             ++inTab;
     CHECK(inTab == ffxivCards.size());
 }
+// The Custom Tab picker lists every pinnable box; the FFXIV-tab cards are skipped unless the game is FFXIV, through
+// the same predicate that hides the tab (a renamed build still reads the same: the rule never names the file name,
+// only the tab label the fork's own cards register under). A dropped skip lists the FFXIV cards in every game again.
+void Picker(const std::string& repo)
+{
+    const std::string code = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/menu/menu_common.cpp"));
+    CHECK(Count(Squash(code), "strcmp(box.tab,\"FFXIV\")==0&&!ext::menu::FfxivTabVisible(ctx)") == 1);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -111,6 +119,7 @@ int main(int argc, char** argv)
     TabRow(repo);
     Predicate(repo);
     Cards(repo);
+    Picker(repo);
 
     if (failures)
     {

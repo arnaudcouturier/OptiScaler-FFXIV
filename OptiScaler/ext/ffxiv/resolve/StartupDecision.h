@@ -16,9 +16,9 @@
 // What is published as the build (PublishedBuild):
 //   * the resolved build (ResolvedBuild::build) after a resolve that worked: on the known build it equals the table row by row, on an unknown build it
 //     holds the resolved values with every unresolved Rva / Guard field ZERO;
-//   * the compile-time table for the rollback key, for a process that is not the game (as before P3) and for the exact known build whose resolver
+//   * the compile-time table for the rollback key, for a process that is not the game (as in the previous release) and for the exact known build whose resolver
 //     failed (the legacy fallback: the old byte guards decide);
-//   * ZeroedBuild() when the resolver failed on any other build (F6): the table's Rvas must never be read as if they described an unknown executable.
+//   * ZeroedBuild() when the resolver failed on any other build: the table's Rvas must never be read as if they described an unknown executable.
 
 #include "FieldTable.h"
 #include "Gate.h"
@@ -74,13 +74,13 @@ inline GameBuild PublishedBuild(const GateInput& in, const GateReport& gate)
     // byte guards)
     if (gate.legacy || gate.legacyFallback)
         return kCurrentBuild;
-    // the startup itself threw on any other build: nothing is known, so no table address may look like one (F6)
+    // the startup itself threw on any other build: nothing is known, so no table address may look like one
     if (!in.resolverFailure.empty())
         return ZeroedBuild();
     // a process that is not the game: nothing runs there (as before)
     if (!in.exeIsFfxiv)
         return kCurrentBuild;
-    // the resolver failed on any other build (F6)
+    // the resolver failed on any other build
     if (in.rb == nullptr || !ResolverInfrastructureFailure(in.rb).empty())
         return ZeroedBuild();
     return in.rb->build;

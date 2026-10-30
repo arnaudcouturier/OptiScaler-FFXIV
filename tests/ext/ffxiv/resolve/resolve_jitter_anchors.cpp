@@ -1,4 +1,4 @@
-// The jitter-source group (P2c) on committed bytes only (no executable):
+// The jitter-source group on committed bytes only (no executable):
 //   1. the pins: every anchor of the group (pattern text, decode, predicates, margins, kinds) as string literals, independent of GameBuild.h,
 //      and the bindings / mustDiffer entries,
 //   2. the build-C layout image with the recorded blocks: every seam Found, the values equal the table, the entry text equals the table text,
@@ -466,7 +466,7 @@ void TestSafetyGap()
         const std::string block = f.block;
         bool refused;
         if (block.rfind("seam:", 0) == 0)
-            refused = !rb.Usable(block.substr(5)); // no Guard field holds these: the seam itself must be unusable (P3 gates on it)
+            refused = !rb.Usable(block.substr(5)); // no Guard field holds these: the seam itself must be unusable (the gate checks it)
         else
         {
             // the block column is ASSERTED: the hooks refuse through the block of the site the byte belongs to, and it is the SHAPE seam of that site
@@ -524,7 +524,7 @@ void TestSafetyGap()
 // But the hooks read memory THROUGH the three globals and VerifyAnchors does not look at them: with ONE moved displacement the real VerifyAnchors
 // still PASSES for the settings and the renderer global (the field is zero, ReadInputs would read base + 0, the PE header, as a pointer); only the
 // device global is caught, indirectly (deviceSize is tied to it with TargetIs). This test RECORDS that result for every global (so a change of
-// VerifyAnchors in P3 shows up here) and applies the gate the header of AnchorsJitter.h requires from P3: a zero Rva of any of the three refuses.
+// VerifyAnchors shows up here) and applies the gate the header of AnchorsJitter.h requires: a zero Rva of any of the three refuses.
 // Core files are not changed by this group.
 bool GateRefusesZeroGlobal(const ResolvedBuild& rb)
 {
@@ -578,7 +578,7 @@ void TestMovedDisplacementIsAConflict()
         // the record: the real VerifyAnchors over the resolved build
         const auto r = ext::ffxiv::jitter::source::VerifyAnchors(ReaderOf(*img), rb.build.jitterSource, kBase);
         if (r.ok != c.verifyAnchorsAlone)
-            std::printf("FAIL: %s: VerifyAnchors alone %s, the record says %s (P3 changed it? update this row and the header gate)\n", c.what,
+            std::printf("FAIL: %s: VerifyAnchors alone %s, the record says %s (changed? update this row and the header gate)\n", c.what,
                         r.ok ? "passes" : "refuses", c.verifyAnchorsAlone ? "passes" : "refuses");
         CHECK(r.ok == c.verifyAnchorsAlone);
         std::printf("    moved displacement: %-38s %-30s Conflict, Rva 0, VerifyAnchors alone: %s\n", c.what, c.seam, r.ok ? "PASSES (hooks would install)" : "refuses");

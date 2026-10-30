@@ -1,4 +1,4 @@
-// P2a: the quality anchors against the PREVIOUS build (B, stamp 0x6ac3dc96), using only rows recorded from the B file (confidence "B-read").
+// The quality anchors against the PREVIOUS build (B, stamp 0x6ac3dc96), using only rows recorded from the B file (confidence "B-read").
 //   * the settings block was recorded in full (37 bytes): the anchor and everything derived from it resolve on a B image, to B's addresses
 //     (block 0x374347, settings global 0x28f9470) and to B's offsets;
 //   * the three function anchors (querySize, rendererUpdate, resizeCallbacks) are LONGER than the recorded prefixes: they are tested for prefix

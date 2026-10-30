@@ -18,13 +18,13 @@
 #include <mutex>
 #include <string>
 
-// The product call site of the pattern-search resolver (replaces ResolveCompile.cpp of P1/P2). The contract of ResolveOnce (ResolveCache.h):
+// The product call site of the pattern-search resolver (replaces the old ResolveCompile.cpp). The contract of ResolveOnce (ResolveCache.h):
 // once, before the fork installs any Detour over the executable, not under the loader lock, from one thread, never again.
 //
 // WHEN: StartOnce() is called at the top of ext::game::OnD3D11DeviceHooked, the first moment the fork is given the game's D3D11 device. The
 // log of every session (builds\game-logs-*) shows that moment about 8 s after the DLL loaded and before the first Present (about 9.5 s): the
 // game's startup thread creating its device, not DllMain (no loader lock) and not a frame-loop thread (no frame exists yet; a one-time pause of
-// about 100 to 300 ms in Release, measured in the P1 and P2 golden tests, lands in the loading phase). Everything the fork installs before it
+// about 100 to 300 ms in Release, measured in the golden tests, lands in the loading phase). Everything the fork installs before it
 // patches D3D11 vtables or system DLL functions, never the executable's code; the Detours over the executable (companion::Install, a few lines
 // below the call in Seams.cpp, and the native-quality / jitter-source hooks, installed lazily by the upscaler's per-evaluate path) all come
 // after it. It is not called from the game selector (Game.cpp): Group 1 must not depend on the resolver, and the legacy path must never

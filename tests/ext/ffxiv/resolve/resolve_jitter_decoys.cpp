@@ -1,4 +1,4 @@
-// The jitter-source group (P2c): every predicate removes its PLANTED decoy (most anchors are unique on the real image even without a predicate,
+// The jitter-source group: every predicate removes its PLANTED decoy (most anchors are unique on the real image even without a predicate,
 // so a dropped predicate is invisible there: here a decoy is planted in the committed layout), the Offset / constant ranges (ValueIn,
 // ValueEquals) are exact, a foreign hook over a Function entry reads EntryPatched (and what that does to the fields and to the dependents),
 // the two Detoured functions can never resolve to the same address, and the device reader's two byte-identical template copies behave as

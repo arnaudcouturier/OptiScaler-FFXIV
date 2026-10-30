@@ -22,7 +22,7 @@
 // ResolveImage never throws for a bad image or registry; an exception from the image reader (bad_alloc, a throwing test reader) propagates
 // to the caller (ResolveCache turns it into a cached failure).
 //
-// WHEN TO CALL (the product, P3): once, before the fork installs any Detours, and not under the loader lock: the scan reads a 35 MB code
+// WHEN TO CALL (the product): once, before the fork installs any Detours, and not under the loader lock: the scan reads a 35 MB code
 // section and takes a few milliseconds to tens of milliseconds. ResolveCache.h wraps this in "resolve once, cache, never re-scan".
 
 #include "FieldTable.h"

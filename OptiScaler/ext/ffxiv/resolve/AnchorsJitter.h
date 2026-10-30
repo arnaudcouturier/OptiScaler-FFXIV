@@ -1,5 +1,5 @@
 #pragma once
-// Anchors of P2 group 3: the source-level jitter fix (generator, camera getter, producer call, camera head, phases, strength, device
+// Anchors for the source-level jitter fix (generator, camera getter, producer call, camera head, phases, strength, device
 // size), the globals those blocks load and the struct offsets / constants their instructions carry. Seam ids are `jitterSource.*`.
 //
 // OWNER: the jitter seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
@@ -10,7 +10,7 @@
 // producer) and a Detour on the camera getter (observe only, ONLY for the call at producerReturnRva). Nothing else is written to the game.
 //
 // ---- TWO TIERS PER HOOKED BLOCK (the safety design) -------------------------------------------------------------------------------
-// On an UNKNOWN build a bound Guard field is filled with the LIVE bytes read at the resolved site, so once P3 replaces the kCurrentBuild
+// On an UNKNOWN build a bound Guard field is filled with the LIVE bytes read at the resolved site, so once the resolver replaces the kCurrentBuild
 // reads the hooks' byte guard (VerifyAnchors) compares live bytes with themselves and checks nothing. The anchors are then the ONLY
 // verification, so every block has
 //   * a LOCATION seam (`generator`, `cameraGetter`, `cameraHead`, `producerCall`, `phases`, `strength`, `deviceSize`): found by loose
@@ -27,8 +27,8 @@
 //     pattern (generator 16 of 306 bytes, strength 157 of 204, producerCall 13 of 111): the hooks would install over code that differs from
 //     the audited file. With failClosed a shape that does not match is never filled, on any build (resolve_jitter_known: the review's PoC
 //     rows and every fixed byte of every shape, on a known build).
-// P3 CONTRACT: a hook site is usable only when BOTH its location seam and its shape seam are `Usable` (on EVERY build: a shape is never
-// filled from the table, so UsableOrTable adds nothing for it and must not be used for the sites below); P3 must keep the compare of the
+// Hook-site rule: a hook site is usable only when BOTH its location seam and its shape seam are `Usable` (on EVERY build: a shape is never
+// filled from the table, so UsableOrTable adds nothing for it and must not be used for the sites below); the gate must keep the compare of the
 // live bytes against the resolved Guard field (VerifyAnchors). Also required: the three globals (`settingsPointer`, `rendererPointer`,
 // `devicePointer`: the hooks read memory through them and VerifyAnchors does not look at them; on an unknown build a Conflict leaves the
 // field zero, on a known build it is filled from the table: see the gate below), and the
@@ -93,7 +93,7 @@
 
 namespace ext::ffxiv::resolve
 {
-// ---- THE HOOK SITES AS DATA (P3 iterates these; resolve_jitter_shapes checks them against the registry) --------------------------------
+// ---- THE HOOK SITES AS DATA (the shape check iterates these; resolve_jitter_shapes checks them against the registry) -----------------------
 // One row per block VerifyAnchors compares (same order). `location` is the seam the Rva field is bound to, `shape` the seam the Guard field
 // is bound to (the same seam for deviceSize, whose only anchor is its strict 20 bytes). For every row with location != shape: the shape seam is a
 // CodeSite with exactly ONE anchor, a guard at the location seam (shape value == location value), and carries failClosed.
@@ -127,10 +127,10 @@ inline constexpr JitterGlobal kJitterGlobals[] = {
     { "jitterSource.devicePointer", "jitterSource.devicePointerRva" },
 };
 
-// The seams that have NO GameBuild field (nothing the hooks read is filled by them): P3 must gate on the seam itself (`Usable`) until fields exist.
+// The seams that have NO GameBuild field (nothing the hooks read is filled by them): the gate must require the seam itself (`Usable`) until fields exist.
 inline constexpr const char* kJitterGateSeams[] = { "jitterSource.strengthFloor", "jitterSource.ndcSignMask", "jitterSource.cameraGlobal" };
 
-// ---- THE GATE P3 MUST APPLY (everything the resolver cannot enforce by itself; each line has a test) ------------------------------------
+// ---- THE GATE TO APPLY (everything the resolver cannot enforce by itself; each line has a test) ---------------------------------------------
 //  1. for every kJitterHookSites row: rb.Usable(location) && rb.Usable(shape), on EVERY build (known or unknown). A shape is never filled
 //     from the table (failClosed), so UsableOrTable is not the question for these seams.
 //  2. for every kJitterGlobals row: rb.Usable(seam) on EVERY build; the required MINIMUM is a non-zero Rva field. A global whose derivations
@@ -146,7 +146,7 @@ inline constexpr const char* kJitterGateSeams[] = { "jitterSource.strengthFloor"
 //     forms, and has the known-build row.)
 //  3. for every kJitterGateSeams row: rb.Usable(seam) (no field exists yet: strengthFloor, ndcSignMask, cameraGlobal).
 //  4. then VerifyAnchors over the live bytes (the Guard compare).
-// Core files are NOT changed by the P2c group: this is P3 work.
+// None of this changes the core files: the gate applies these rules.
 //
 inline void AddJitterAnchors(Registry& r)
 {
@@ -388,7 +388,7 @@ inline void AddJitterAnchors(Registry& r)
     // The camera global the producer loads (the first instruction of kProducerShape): the same global as jitter.cameraGlobalRva, which
     // AnchorsQuality.h owns. Decoded here under this group's own id (no seam of another group is named) so that the world tie of the hooks is
     // complete: the producer calls the getter with [camera global + 0x3028], the shape pins the 0x3028, this seam says WHICH global. No
-    // GameBuild field is bound (the quality writer owns it); P3 and the merged golden compare the two values. One anchor: the producer is the
+    // GameBuild field is bound (the quality writer owns it); the gate and the merged golden test compare the two values. One anchor: the producer is the
     // only block of this group that loads the camera global.
     r.seams.push_back({ "jitterSource.cameraGlobal",
                         SeamKind::Global,

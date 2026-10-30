@@ -96,7 +96,7 @@ void TestProductRegistry()
         std::printf("registry error: %s\n", e.c_str());
     CHECK(errors.empty());
 
-    // CharaView is registered (P1's worked example); the companion and jitter skeletons register nothing until their P2 writers fill them
+    // CharaView is registered (the first worked example); the companion and jitter skeletons register nothing until their anchors are written
     CHECK(std::any_of(reg.seams.begin(), reg.seams.end(), [](const SeamSpec& s) { return std::string_view(s.id) == "chara.accessor"; }));
 
     // every seam id is "group.name", every anchor has a name and a parseable pattern (ValidateRegistry parsed them; this pins the style)

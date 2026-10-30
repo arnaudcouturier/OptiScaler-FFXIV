@@ -2,7 +2,7 @@
 // The path of the running executable, read without the MAX_PATH cut. Pure: the Win32 call is a parameter, no <windows.h>.
 //
 // GetModuleFileNameW into a 260 wide-character buffer truncates a long install path and returns the buffer size. The pre-fix startup read that as
-// "this is not ffxiv_dx11.exe" and switched the whole game module off for a player whose install path has 260 characters or more (the pre-P3 selector
+// "this is not ffxiv_dx11.exe" and switched the whole game module off for a player whose install path has 260 characters or more (the legacy selector
 // matched the PE stamp and size and never read the path). ReadModulePath grows the buffer until the path fits, up to the 32768 characters a
 // Windows path can have.
 

@@ -1,7 +1,7 @@
 // The gate (ext/ffxiv/resolve/Gate.h) on synthetic ResolvedBuilds and on real ResolveImage results. Always on, no executable needed.
 //
 // One test (or more) per rule of the gate checklist:
-//   * the exe-name check and the Group 1 rule (any ffxiv_dx11.exe), the rollback key (exactly the pre-P3 rules), the unknown-build key;
+//   * the exe-name check and the Group 1 rule (any ffxiv_dx11.exe), the rollback key (exactly the legacy rules), the unknown-build key;
 //   * ONE RULE for every hook site: Usable(location) && Usable(shape) on every build, never UsableOrTable for a shape (including a REAL
 //     ResolveImage run where a table-filled location still yields an unusable shape);
 //   * quality: the `entry` anchor, plain Found for contextCacheOffset, every bound seam, the snapshot bound;
@@ -83,7 +83,7 @@ void TestGroup1AndModes()
         CHECK(!DecideGroup1(Feature::Lighting, true, false, Settings(true)).enabled);
         CHECK(DecideGroup1(Feature::Lighting, true, true, Settings(true)).enabled);
     }
-    // the rollback key: exactly the pre-P3 rules (exact build: everything on and the old guards decide; any other build: nothing runs)
+    // the rollback key: exactly the legacy rules (exact build: everything on and the old guards decide; any other build: nothing runs)
     {
         const GateReport exact = Run(nullptr, Settings(true), true, true);
         CHECK(exact.legacy && exact.known && AllGroup1(exact, true) && AllGroup2(exact, true));
@@ -213,8 +213,8 @@ std::vector<Site> AllSites()
 }
 
 // The seams that stay STRICT (plain Usable, never filled from the table) on a KNOWN build too, as a LITERAL set (a list read from Gate.h would follow
-// a mutation of it, the P3 lesson): every hook site, location AND shape (13 pairs plus the jitter deviceSize that is its own shape), and these, from
-// the contract text of the three Anchors headers: the quality write path (AnchorsQuality.h item 2: managerPointer, managerContextOffset,
+// a mutation of it, so the set is written out): every hook site, location AND shape (13 pairs plus the jitter deviceSize that is its own shape), and these, from
+// the hook-site rules of the three Anchors headers: the quality write path (AnchorsQuality.h item 2: managerPointer, managerContextOffset,
 // contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape (item 3), the three
 // jitter globals, strengthFloor, ndcSignMask and the camera global (AnchorsJitter.h). Every other seam a feature reads is table-fillable on a known
 // build: a foreign hook over a helper function must not turn a feature off when the verified table value is at hand.
@@ -240,7 +240,7 @@ const std::set<std::string>& StrictOnKnownLiteral()
 }
 
 // Seams a feature needs as PLAIN Found (one anchor does not pin them): quality.contextCacheOffset on every build except where a KNOWN build
-// takes it single-anchor through a weak dependency (F1b, tested separately); companion.nativeContextOffset on an unknown build only.
+// takes it single-anchor through a weak dependency (tested separately); companion.nativeContextOffset on an unknown build only.
 std::vector<std::string> PlainFoundOnly(Feature f, bool knownBuild)
 {
     std::vector<std::string> v;
@@ -266,7 +266,7 @@ void TestEveryRequiredSeam()
             CHECK(Run(&baseline, Settings(false, true)).Enabled(f));
             for (const std::string& id : seams)
             {
-                // table fill is accepted on a KNOWN build, for the seams no contract names (F1a); everything else is strict
+                // table fill is accepted on a KNOWN build, for the seams no hook-site rule names; everything else is strict
                 const bool tableFillable = known && StrictOnKnownLiteral().count(id) == 0;
                 // an unusable status refuses the feature, also when a known build filled the field from the table, except for a table-fillable seam
                 for (const SeamStatus st : { SeamStatus::NotFound, SeamStatus::Ambiguous, SeamStatus::Conflict, SeamStatus::EntryPatched })
@@ -296,7 +296,7 @@ void TestEveryRequiredSeam()
             }
         }
     }
-    // the lists follow the registry: a pinned size per feature (a P2 change that binds one more field changes it deliberately)
+    // the lists follow the registry: a pinned size per feature (a resolver change that binds one more field changes it deliberately)
     CHECK(RequiredSeams(Feature::QualityRead, Reg()).size() == 6);
     CHECK(RequiredSeams(Feature::QualityHooks, Reg()).size() == 19);
     CHECK(RequiredSeams(Feature::JitterProbe, Reg()).size() == 3);
@@ -619,7 +619,7 @@ void TestCompanionRules()
         ResolvedBuild kn = AllFound(true);
         SetStatus(kn, "companion.nativeContextOffset", SeamStatus::FoundSingleAnchor);
         CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-        // F1a: no contract names it for a known build, whose table value is verified offline: table-filled it stays usable; not filled, refused
+        // No hook-site rule names it for a known build, whose table value is verified offline: table-filled it stays usable; not filled, refused
         SetStatus(kn, "companion.nativeContextOffset", SeamStatus::NotFound, true);
         CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
         SetStatus(kn, "companion.nativeContextOffset", SeamStatus::NotFound, false);
@@ -673,7 +673,7 @@ void TestCharaRules()
         const GateReport g = Run(&rb, Settings(false, true));
         CHECK(!g.Enabled(Feature::CharaViewAccessor) && Contains(g.Reason(Feature::CharaViewAccessor), "chara.managerPointer"));
         CHECK(g.Enabled(Feature::QualityHooks));
-        // table-filled on a known build (F1a: no contract names it, the cross-check compares only usable sides): the accessor stays on
+        // table-filled on a known build (no hook-site rule names it, the cross-check compares only usable sides): the accessor stays on
         ResolvedBuild filled = AllFound(known);
         SetStatus(filled, "chara.managerPointer", SeamStatus::NotFound, known);
         CHECK(Run(&filled, Settings(false, true)).Enabled(Feature::CharaViewAccessor) == known);
@@ -1031,7 +1031,7 @@ void TestHelperHookOnKnownBuild()
     }
 }
 
-// The contract text of AnchorsQuality.h item 2 allows it: quality.contextCacheOffset on a KNOWN build may be
+// The hook-site rule of AnchorsQuality.h item 2 allows it: quality.contextCacheOffset on a KNOWN build may be
 // FoundSingleAnchor through a weak dependency (a foreign hook over quality.cacheCompare 0x374f10; the +0x150/+0x154 pair is verified offline for that
 // exact exe); on an unknown build it stays plain Found. A table-filled value never allows the write.
 void TestContextCacheOffsetRule()
@@ -1274,7 +1274,7 @@ void TestUnhealedSiblingsOfAMovedMember()
     CHECK((healed == std::vector<std::string> { "companion.batchFormatOffset", "companion.batchExtensionOffset" }));
     CHECK((unhealed == std::vector<std::string> { "companion.batchKindOffset", "companion.batchWrapperOffset", "companion.batchCountOffset",
                                                   "companion.batchVerticesOffset" }));
-    // every healed member has a seam, every unhealed one has none (what the P2 reports list)
+    // every healed member has a seam, every unhealed one has none (the split the offset group reports)
     for (const std::string& k : healed)
     {
         bool bound = false;

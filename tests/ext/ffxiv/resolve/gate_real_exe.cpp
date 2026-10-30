@@ -8,9 +8,9 @@
 //      cross-group checks compare and agree, Group 2 is OFF with the key off and enables exactly the set of the known path with the key on, and the
 //      resolved build equals the table field by field (Rva, Guard and Offset rows).
 //   3. LEGACY: the rollback key enables the same set on the exact build and nothing on an unknown one.
-//   4. Third-party hooks over helper functions the fork never touches (F1a: a 14-byte FF25 over companion.indexBufferMap; F1b: a 5-byte E9
+//   4. Third-party hooks over helper functions the fork never touches (a 14-byte FF25 over companion.indexBufferMap; a 5-byte E9
 //      over quality.cacheCompare; a hook over camera.getter), each on the known build and on the forced-unknown path; a resolver INFRASTRUCTURE failure
-//      on the real image (an unreadable window, an unreadable image) falls back to the legacy decision (F3); and the whole startup (RunStartup, a fake
+//      on the real image (an unreadable window, an unreadable image) falls back to the legacy decision; and the whole startup (RunStartup, a fake
 //      environment around the REAL resolver) publishes the table row by row on the known build and after the fallback.
 // Also printed: the resolve time of the unoptimised test build.
 //
@@ -291,7 +291,7 @@ int main(int argc, char** argv)
         return ResolveImage(*image, registry, o);
     };
 
-    // F1a: a third party hooks companion.indexBufferMap (FF25). Its four index-buffer Offset seams cannot be found, the resolver fills them from the
+    // A third party hooks companion.indexBufferMap (FF25). Its four index-buffer Offset seams cannot be found, the resolver fills them from the
     // table; the known build keeps the native companion (the table value is verified offline), the forced-unknown path (no table) refuses it.
     WithBytes(img, indexMap, ff25,
               [&]
@@ -320,7 +320,7 @@ int main(int argc, char** argv)
                   const GateReport gu = Decide(unknownIn, forcedOn);
                   CHECK(EnabledSet(gu) == Without(kAll, "companionNative") && Contains(gu.Reason(Feature::CompanionNative), "indexBuffer"));
               });
-    // F1b: a 5-byte E9 over quality.cacheCompare: contextCacheOffset becomes a single anchor through a weak dependency
+    // A 5-byte E9 over quality.cacheCompare: contextCacheOffset becomes a single anchor through a weak dependency
     WithBytes(img, cacheCompare, e9,
               [&]
               {

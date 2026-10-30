@@ -1,6 +1,6 @@
 // The golden test over the real executable (analysis\patch-20261016\ffxiv_dx11.exe, build C, 52 MB, never committed).
 //
-// A loop over the product registry (BuildRegistry()): every seam a P2 writer registers is resolved here too and compared, so this test
+// A loop over the product registry (BuildRegistry()): every seam the anchor groups register is resolved here too and compared, so this test
 // grows without being edited. For every bound GameBuild field the value the resolver finds on the executable must equal the table:
 // RVAs, globals, derived offsets and the guard bytes (read from the file at the resolved RVA). Also measured and printed: the whole
 // resolve time on the full 52 MB image, and the offline uniqueness margin of every scanned anchor.
@@ -205,7 +205,7 @@ int main(int argc, char** argv)
 
     std::printf("margin waived (minMargin 0, the predicates are the disambiguator): %zu anchor%s\n", waived, waived == 1 ? "" : "s");
     const auto unbound = UnboundFields(registry);
-    std::printf("%zu GameBuild Rva/Guard fields are not bound to a seam yet (P2 shrinks this list, P3 must not read them from a resolved build)\n",
+    std::printf("%zu GameBuild Rva/Guard fields are not bound to a seam yet (seam work shrinks this list; the gate must not read them from a resolved build)\n",
                 unbound.size());
     return TEST_RESULT("resolve_golden_exe");
 }

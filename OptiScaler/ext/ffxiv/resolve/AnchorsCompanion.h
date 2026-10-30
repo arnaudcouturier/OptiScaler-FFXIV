@@ -1,5 +1,5 @@
 #pragma once
-// Anchors of P2 group 2: the companion / nameplate native hooks (seam ids companion.*).
+// Anchors for the companion / nameplate native hooks (seam ids companion.*).
 //
 // OWNER: the companion seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 // Every anchor below was written AFTER reading its consumer: ext\ffxiv\companion\CompanionNative.cpp (the four Detours and the queue chain),
@@ -8,7 +8,7 @@
 // cannot pin is listed in the "not self-healing" list at the end of this file.
 //
 // ---- TWO TIERS PER DETOUR SITE (the two-tier shape follows the design of AnchorsJitter.h) --------------------------------------------------
-// On an UNKNOWN build a bound Guard field is filled with the LIVE bytes read at the resolved site, so once P3 replaces the kCurrentBuild reads
+// On an UNKNOWN build a bound Guard field is filled with the LIVE bytes read at the resolved site, so once the resolver replaces the kCurrentBuild reads
 // the hooks' byte guard (Install()) compares live bytes with themselves and checks nothing: the anchors are then the ONLY verification. Every
 // Detour site (batch16, batch32, enqueue, bindState) therefore has
 //   * a LOCATION seam (`batch16`, `batch32`, `enqueue`, `bindState`): found by two or three independent anchors (the strict head among them,
@@ -19,14 +19,14 @@
 //     two a failing piece next to a passing one would read FoundSingleAnchor (usable) and fill the Guard with live bytes. When the strict
 //     pattern does not match the shape seam is NotFound, its Guard field stays ZERO (on a KNOWN build too: failClosed, the table's 16-byte guard
 //     is only a prefix of the strict pattern) and the hooks' compare of the live bytes against zero refuses to install.
-// P3 CONTRACT for the companion group: a Detour site is usable ONLY when BOTH its location seam and its shape seam are usable (on a known build
+// Hook-site rule for the companion group: a Detour site is usable ONLY when BOTH its location seam and its shape seam are usable (on a known build
 // ResolvedBuild::UsableOrTable on both: the location may be filled from the table, the shape never is). There is NO table fallback for a shape.
-// batch16 and batch32 are two sites: test batch32Shape directly (batchInstructions is the batch16 guard only). P3 must keep the compare of the
+// batch16 and batch32 are two sites: test batch32Shape directly (batchInstructions is the batch16 guard only). The gate must keep the compare of the
 // live bytes against the resolved Guard field. Also: bindState must not be hooked on an unknown build unless `Usable("companion.nativeContextOffset")`
 // (an unresolved Offset seam leaves the table default, and nativeContextOffset is dereferenced as a COM pointer, CompanionLayer.cpp), and prefer a
 // plain Found (both anchors) for it: only anchor `loadBeforeStateCall` pins the vtable call that proves the object is a D3D11 context.
 // enqueue is a leaf: only anchor `callerEpilogue` (a real call target) pins its ENTRY address, the head and the tail shift together. On an unknown
-// build P3 should hook enqueue only when that anchor's AnchorResult (SeamResult::anchors, name "callerEpilogue") is Unique, NOT on the sum
+// build the gate should hook enqueue only when that anchor's AnchorResult (SeamResult::anchors, name "callerEpilogue") is Unique, NOT on the sum
 // SeamResult::hits (an Unique head plus a two-candidate tail also sums to 3); without it a new first statement before the head would be
 // a silent plain Found at entry+k (the shape seam verifies the head at that address, which matches).
 //
@@ -265,7 +265,7 @@ inline void AddCompanionAnchors(Registry& r)
         r.seams.push_back(shapeSeam("batch16Shape", "companion.batch16", Batch16Entry()));
         r.seams.push_back(shapeSeam("batch32Shape", "companion.batch32", Batch32Entry()));
         // One Guard field for both sites (the table keeps one array: both functions start with the same 16 bytes). It is read at batch16, through
-        // the shape seam; batch32Shape has no field, P3 tests it directly.
+        // the shape seam; batch32Shape has no field, the gate tests it directly.
         r.bindings.push_back({ "companion.batchInstructions", "companion.batch16Shape", 0 });
     }
 
@@ -482,7 +482,7 @@ inline void AddCompanionAnchors(Registry& r)
 
     // ======================================================================================================================================
     // NOT SELF-HEALING (no instruction of this group carries them, or no unique carrier with a proven role was found; they keep the table value
-    // on an unknown build and P3 logs them): queue block layout (queueHeadOffset 0x50, queueRemainingOffset 0x68, queueBlocksOffset 0x6c,
+    // on an unknown build and the resolver logs them): queue block layout (queueHeadOffset 0x50, queueRemainingOffset 0x68, queueBlocksOffset 0x6c,
     // queueStridesOffset 0x34, queueNextBlockOffset 0x3f0: 440 functions use a +0x3f0 field, none was tied to this queue), batch header
     // (batchKindOffset 0x00 is a displacement-less read, fixed in the list-entry pattern; batchWrapperOffset 0x10 and batchCountOffset 0x20 /
     // batchVerticesOffset 0x28 are carried by `mov r8,[r12+0x10]` and `lea r9,[r12+0x20]` in the batch functions but the roles of those fields
@@ -499,13 +499,13 @@ inline void AddCompanionAnchors(Registry& r)
     //     healing of the 8 + 5 offsets those patterns serve.
     //   * foreign hooks: only E9 / EB / FF 25 over an entry read as EntryPatched on the location seams. Every other shape (mov rax,imm64 ; jmp rax,
     //     push ; ret, a leading int3) reads as NotFound or as a usable location, but the SHAPE seam of each Detour site refuses any foreign byte of
-    //     the strict prologue, so the Guard stays zero and the site is not usable (P3 rule above). indexBufferMap is a helper with no hook.
+    //     the strict prologue, so the Guard stays zero and the site is not usable (hook-site rule above). indexBufferMap is a helper with no hook.
     //   * layout lookup: `lea rcx,[rip+X]` (rcx = the image base) is masked and not provable by the bytes, and its two vertex displacements
     //     ([r13+rax*8+0x504], [r13+0x570]) are masked and never compared with the BatchVertexSlot decode (flips test class L). If the table RVA
     //     were wrong the consumer rejects it (slot / stride checks): availability only. `content` (72 bytes in .rdata) is the real pin.
     //   * pseudo-evidence: moduleStatePointerOffset / stateQueuePointerOffset decode a byte the pointer patterns fix (always 8: ValueIn cannot
     //     reject, they stay Found when the pointer seam is NotFound); drawStateFlagOffset has no consumer in ext\; the two indexBufferCpuStartOffset
-    //     anchors are two reads of one pattern. Count them as constants in P3's "healed" tally.
+    //     anchors are two reads of one pattern. Count them as constants in the "healed" tally.
     //   * the batch header offsets heal one by one (format, extension) while kind, wrapper, count and vertices keep table values: if the header was
     //     reshuffled the siblings are stale (the consumer's Supported() rejects most such headers). The gate treats the header group
     //     all-or-nothing (kOffsetGroups in Gate.h).

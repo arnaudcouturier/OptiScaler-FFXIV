@@ -12,7 +12,7 @@
 //     boundary, geometry, markers, MipBind, the FFXIV quirks, the catalog health). They run on ANY ffxiv_dx11.exe.
 //   Group 2 = features that read or hook addresses of the executable (native quality, jitter probe and source, companion native hooks, the
 //     CharaView accessor). KNOWN build: they run when the seams say so. UNKNOWN build: only with FfxivUnknownBuildHooks AND usable seams.
-//   FfxivLegacyGameBuild (rollback): EXACTLY the pre-P3 rules. Exact stamp and size, the compile-time table and its old byte guards, no resolve,
+//   FfxivLegacyGameBuild (rollback): EXACTLY the legacy rules. Exact stamp and size, the compile-time table and its old byte guards, no resolve,
 //     Group 2 only on the exact known build, Group 1 only on the exact known build too, nothing from the other two keys.
 //
 // THE ONE RULE for every hook site of all three groups (the group headers phrase it three ways):
@@ -33,7 +33,7 @@
 // an Error line from the startup after a startup exception. An unknown build stays off, and so does FfxivForceUnknownBuild (it asked for the resolver's
 // values).
 //
-// The exact build is identified by its PE stamp and size, whatever the file is called (the pre-P3 selector matched stamp and size only, and so does the
+// The exact build is identified by its PE stamp and size, whatever the file is called (the legacy selector matched stamp and size only, and so does the
 // rollback key); the name ffxiv_dx11.exe only decides on a build the table does not know (MakeGateInputT, StartupDecision.h). The companion Install(),
 // the frame pacing trace and the automatic ReShade depth still check the name, as before. The consumers still need
 // ActiveStarted() (the first device hook) before any hook, DLAA read or CharaView works; the companion header bounds are an extra refusal that the old
@@ -87,7 +87,7 @@ inline bool IsFfxivExeName(std::wstring_view name) { return IsFfxivExeNameT<wcha
 
 struct GateSettings
 {
-    bool legacyGameBuild = false;   // [FFXIV] FfxivLegacyGameBuild   (rollback: exactly the pre-P3 behaviour)
+    bool legacyGameBuild = false;   // [FFXIV] FfxivLegacyGameBuild   (rollback: exactly the legacy behaviour)
     bool unknownBuildHooks = false; // [FFXIV] FfxivUnknownBuildHooks (Group 2 on an unknown build)
     bool forceUnknownBuild = false; // [FFXIV] FfxivForceUnknownBuild (debug: the resolver ran WITHOUT the table; the build counts as unknown)
 };
@@ -148,7 +148,7 @@ inline constexpr CrossPair kCrossPairs[] = {
 };
 
 // Seams that stay STRICT (plain Usable, never filled from the table) on a KNOWN build too, besides every hook site (location AND shape) of the three
-// groups. Taken from the contract text of the Anchors headers: the quality display-size cache write (AnchorsQuality.h contract, managerPointer, managerContextOffset,
+// groups. Taken from the hook-site rules of the Anchors headers: the quality display-size cache write (AnchorsQuality.h hook-site rule, managerPointer, managerContextOffset,
 // contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape, and the three
 // jitter globals, strengthFloor, ndcSignMask and the camera global of the world tie (AnchorsJitter.h). Every other seam a feature reads is accepted on a
 // known build when its field was filled from the verified table. On an UNKNOWN build everything is strict.
@@ -217,7 +217,7 @@ inline void AddUnique(std::vector<std::string>& v, const std::string& id)
 
 // Every seam a binding of `group` (a FieldTable group: "nativeQuality", "companion", "charaView", "jitter", "jitterSource") fills a field from:
 // the Rva, the Guard and the Offset fields alike. Deduplicated, registry order. This is how "every bound seam of the group must be usable"
-// follows the registry instead of a hand-copied list: a P2 change that binds one more field shows up here (and in a test that pins the count).
+// follows the registry instead of a hand-copied list: a resolver change that binds one more field shows up here (and in a test that pins the count).
 inline std::vector<std::string> BoundSeams(const Registry& reg, std::string_view group)
 {
     std::vector<std::string> out;
@@ -271,7 +271,7 @@ class Checks
             _faults.push_back(SeamFault(_rb, id));
     }
     // A seam a feature reads that is not a hook site: usable; on a KNOWN build also when its field was filled from the verified table (never for
-    // EntryPatched, never for a seam a contract names: kStrictOnKnownBuild). On an unknown build the table-fill flag is ignored.
+    // EntryPatched, never for a seam a hook-site rule names: kStrictOnKnownBuild). On an unknown build the table-fill flag is ignored.
     void Seam(const std::string& id)
     {
         ++_checked;
@@ -600,7 +600,7 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
         return r;
     }
 
-    // ---- the rollback key: exactly the pre-P3 rules
+    // ---- the rollback key: exactly the legacy rules
     if (s.legacyGameBuild)
     {
         r.known = in.exactKnownBuild;

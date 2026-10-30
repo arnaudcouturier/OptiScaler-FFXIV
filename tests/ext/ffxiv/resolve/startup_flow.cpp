@@ -336,7 +336,7 @@ void TestRenamedExecutable()
         const GateInput in = MakeGateInput(std::wstring_view(renamedPath), true);
         CHECK(DecideGroup1(Feature::Lighting, in.exeIsFfxiv, in.exactKnownBuild, Settings()).enabled);
     }
-    // the rollback key, the exact stamp and size: exactly the pre-P3 path: nothing opened or scanned, the table published, everything on
+    // the rollback key, the exact stamp and size: exactly the legacy path: nothing opened or scanned, the table published, everything on
     {
         Fake f;
         f.path = renamedPath;

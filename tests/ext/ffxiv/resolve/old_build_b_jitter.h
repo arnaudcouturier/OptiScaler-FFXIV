@@ -1,5 +1,5 @@
 #pragma once
-// Recorded bytes for the jitter-source group (P2c).
+// Recorded bytes for the jitter-source group.
 //
 //   C rows ("C-exe"): bytes read from the build-C executable (analysis/patch-20261016/ffxiv_dx11.exe, stamp 0x6ad10bfd) at the RVA shown. They are the
 //   committed evidence of the always-on tests (the real executable is never committed). The camera update, the producer region and the generator are

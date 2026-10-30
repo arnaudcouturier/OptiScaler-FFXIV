@@ -8690,6 +8690,10 @@ void MenuCommon::RenderCustomTabSettings(RenderMenuContext& ctx)
             if (!box.pinnable)
                 continue;
 
+            // ext: the fork's FFXIV-only cards sit under the FFXIV tab, which is hidden unless the game is FFXIV
+            if (strcmp(box.tab, "FFXIV") == 0 && !ext::menu::FfxivTabVisible(ctx))
+                continue;
+
             if (lastTab == nullptr || strcmp(lastTab, box.tab) != 0)
             {
                 if (tableOpen)

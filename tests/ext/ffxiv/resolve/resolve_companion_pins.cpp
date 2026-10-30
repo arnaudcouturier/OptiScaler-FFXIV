@@ -1,7 +1,7 @@
 // The companion registry pinned as text, independently of GameBuild.h: the exact pattern text, section class,
 // hit counts, value rule, decode, entry flag, margin, predicates and guard of EVERY anchor of AddCompanionAnchors, and every binding and
 // mustDiffer group. Over-wildcarding passes every other gate (the margin is a floor, a unique hit and a right value do not see a mask that is
-// too wide), a changed fixed byte passes if the table still agrees: this literal table is what stops both. P3 removes the old arrays of
+// too wide), a changed fixed byte passes if the table still agrees: this literal table is what stops both. A later cleanup removes the old arrays of
 // GameBuild.h; these lines then stay the only pin of the patterns.
 //
 // A change of an anchor means editing a line here on purpose. The file also runs with the argument --dump to print the lines for pasting.
@@ -306,7 +306,7 @@ void TestBoundFields()
     }
 }
 
-// P2bfix review #2: the two-tier design as structure, independent of the pinned text above. Every Detour site has a LOCATION seam (Rva fields) and
+// The two-tier design as structure, independent of the pinned text above. Every Detour site has a LOCATION seam (Rva fields) and
 // a SHAPE seam (CodeSite, failClosed, ONE guard anchor verified at the location's address, the strict anchor text of the location seam); the Guard
 // fields are bound to the shape seams, never to a location seam; failClosed is set on exactly these four seams.
 void TestShapeDesign()
