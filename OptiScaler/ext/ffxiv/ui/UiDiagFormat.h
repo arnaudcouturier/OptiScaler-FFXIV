@@ -576,6 +576,140 @@ struct ByteBudget
 
 inline constexpr const char* kTruncatedLine = "# TRUNCATED: byte budget of this file reached, later records were dropped\n";
 
+// ---- ui-census.txt -------------------------------------------------------------------------------------------------
+
+// The HUD draw census: how much of the drawn HUD can the HDR transmittance mask cover? Every draw into the swapchain backbuffer at
+// or after the UI boundary (R1b) falls in exactly one class. "Tagged" = the pixel shader is in the UI set (stage kUiStage).
+enum class CensusClass : uint8_t
+{
+    TaggedStandard,     // UI shader, a blend the mask replays, a 2D texture to read: the mask covers it
+    TaggedRefusedBlend, // UI shader, a blend state the mask refuses (additive, other equation, partial write mask, alpha to coverage)
+    TaggedNoTexture,    // UI shader, replayable blend, but no single-sample 2D texture at t0..t7: the mask skips it
+    UnknownShader,      // created before the hook: stage and tag cannot be told
+    UntaggedOpaque,     // not a UI shader: never in the mask. By blend equation: opaque (blend off, or ADD with a ZERO destination)
+    UntaggedAlpha,      //   ADD of SRC_ALPHA or ONE over INV_SRC_ALPHA
+    UntaggedAdditive,   //   ADD with a ONE destination (glows)
+    UntaggedOther,      //   anything else
+    Count
+};
+inline constexpr size_t kCensusClasses = static_cast<size_t>(CensusClass::Count);
+
+// blendKind: 0 opaque, 1 alpha (standard or premultiplied), 2 additive, 3 other (= ext::hdr::uiblend::Kind, asserted where it is used).
+inline CensusClass ClassifyCensus(uint8_t stage, uint8_t blendKind, bool blendRefused, bool hasTexture)
+{
+    if (stage == kStageUnknown)
+        return CensusClass::UnknownShader;
+    if (stage == kUiStage)
+    {
+        if (blendRefused)
+            return CensusClass::TaggedRefusedBlend;
+        return hasTexture ? CensusClass::TaggedStandard : CensusClass::TaggedNoTexture;
+    }
+    switch (blendKind)
+    {
+    case 0: return CensusClass::UntaggedOpaque;
+    case 1: return CensusClass::UntaggedAlpha;
+    case 2: return CensusClass::UntaggedAdditive;
+    default: return CensusClass::UntaggedOther;
+    }
+}
+
+inline const char* CensusClassName(CensusClass c)
+{
+    switch (c)
+    {
+    case CensusClass::TaggedStandard: return "tagged_standard_blend";
+    case CensusClass::TaggedRefusedBlend: return "tagged_refused_blend";
+    case CensusClass::TaggedNoTexture: return "tagged_no_texture";
+    case CensusClass::UnknownShader: return "unknown_shader";
+    case CensusClass::UntaggedOpaque: return "untagged_opaque";
+    case CensusClass::UntaggedAlpha: return "untagged_alpha";
+    case CensusClass::UntaggedAdditive: return "untagged_additive";
+    default: return "untagged_other";
+    }
+}
+
+struct CensusTally
+{
+    uint64_t n[kCensusClasses] {};
+    uint64_t taggedAdditive = 0; // of TaggedRefusedBlend, those whose blend is additive
+
+    void Add(CensusClass c, bool additive)
+    {
+        ++n[static_cast<size_t>(c)];
+        if (c == CensusClass::TaggedRefusedBlend && additive)
+            ++taggedAdditive;
+    }
+    void Merge(const CensusTally& o)
+    {
+        for (size_t i = 0; i < kCensusClasses; ++i)
+            n[i] += o.n[i];
+        taggedAdditive += o.taggedAdditive;
+    }
+    uint64_t Total() const
+    {
+        uint64_t t = 0;
+        for (uint64_t v : n)
+            t += v;
+        return t;
+    }
+    uint64_t Of(CensusClass c) const { return n[static_cast<size_t>(c)]; }
+};
+
+struct CensusTotals
+{
+    uint64_t frames = 0;                // frames counted (the first armed frame is not)
+    uint64_t framesWithBoundary = 0;    // ... that had an R1b
+    uint64_t framesSceneNoBoundary = 0; // ... that had a scene stage but no R1b (menus and loading screens have neither)
+    uint64_t presentDraws = 0;          // draws issued inside the bridge Present (ReShade, Dalamud, HDR/NR/Companion work)
+    uint64_t presentBackbufferDraws = 0; // ... of those, into the backbuffer
+    CensusTally tally;                  // draws into the backbuffer after the boundary, over the frames that had one
+};
+
+inline std::string CensusText(const char* runId, uint64_t frame, const CensusTotals& t)
+{
+    char b[256];
+    std::string out = std::string("# S10 D1 ui-census.txt, format ") + std::to_string(kFormatVersion) + ". Rewritten every 600 frames.\n";
+    out +=
+        "# Question: how much of the drawn HUD can the HDR transmittance mask (FfxivHdrPreview) cover?\n"
+        "# Counted: draws into the swapchain backbuffer at or after the UI boundary R1b (the first UI-tagged draw into the backbuffer after the\n"
+        "# last scene stage), over the frames that have one. The first armed frame is not counted. Classes are exclusive and sum to total:\n"
+        "#   tagged_standard_blend  UI shader (stage 6) + blend the mask replays (opaque, or ADD of SRC_ALPHA/ONE over INV_SRC_ALPHA, RGB write\n"
+        "#                          mask, no alpha to coverage) + a 2D texture bound: the mask covers it\n"
+        "#   tagged_refused_blend   UI shader + a blend the mask refuses (additive, other equation, partial write mask, alpha to coverage);\n"
+        "#                          tagged_additive is how many of these are additive\n"
+        "#   tagged_no_texture      UI shader + replayable blend, but no single-sample 2D texture at t0..t7: the mask skips it\n"
+        "#   untagged_*             pixel shader outside the UI set: never in the mask; split by blend (opaque, alpha, additive, other)\n"
+        "#   unknown_shader         created before the hook: cannot be classified\n"
+        "# Not predicted here (the HDR side counts them as 'HDR UI mask:' log lines): target below 640x360, predication, several render targets.\n"
+        "# present_*: draws issued inside the bridge Present (ReShade, Dalamud, HDR/NR/Companion work): never in the mask.\n";
+    std::snprintf(b, sizeof b, "run=%s frame=%llu\n", runId, static_cast<unsigned long long>(frame));
+    out += b;
+    std::snprintf(b, sizeof b, "frames=%llu with_boundary=%llu scene_but_no_boundary=%llu\n", static_cast<unsigned long long>(t.frames),
+                  static_cast<unsigned long long>(t.framesWithBoundary), static_cast<unsigned long long>(t.framesSceneNoBoundary));
+    out += b;
+    const uint64_t total = t.tally.Total();
+    std::snprintf(b, sizeof b, "draws_after_boundary total=%llu mean_per_boundary_frame=%.1f\n", static_cast<unsigned long long>(total),
+                  t.framesWithBoundary ? double(total) / double(t.framesWithBoundary) : 0.0);
+    out += b;
+    for (size_t i = 0; i < kCensusClasses; ++i)
+    {
+        const CensusClass c = static_cast<CensusClass>(i);
+        std::snprintf(b, sizeof b, "%-22s %10llu  %5.1f%%\n", CensusClassName(c), static_cast<unsigned long long>(t.tally.n[i]),
+                      total ? 100.0 * double(t.tally.n[i]) / double(total) : 0.0);
+        out += b;
+    }
+    std::snprintf(b, sizeof b, "tagged_additive         %10llu  (subset of tagged_refused_blend)\n", static_cast<unsigned long long>(t.tally.taggedAdditive));
+    out += b;
+    std::snprintf(b, sizeof b, "mask_coverable_share_pct=%.1f   # tagged_standard_blend / total\n",
+                  total ? 100.0 * double(t.tally.Of(CensusClass::TaggedStandard)) / double(total) : 0.0);
+    out += b;
+    std::snprintf(b, sizeof b, "present_draws=%llu present_draws_into_backbuffer=%llu\n", static_cast<unsigned long long>(t.presentDraws),
+                  static_cast<unsigned long long>(t.presentBackbufferDraws));
+    out += b;
+    return out;
+}
+
 // ---- snapshot raw container ----------------------------------------------------------------------------------------
 
 // "UIDS" raw snapshot: 32-byte little-endian header, then `height` rows of `rowPitch` bytes. Used when the pixel format

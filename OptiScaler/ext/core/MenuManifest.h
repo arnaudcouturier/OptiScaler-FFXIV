@@ -77,6 +77,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] DrawDiagnostics", // developer draw diagnostic: log only, one capture of a few frames; the shader names need it on at start
     "[FFXIV] DrawDiagnosticsFrames", // developer draw diagnostic: how many frames one capture writes
     "[FFXIV] VfxMaskProbe", // developer probe: a constant half-screen mask in the upscaler's mask input, to see whether a backend reads it at all
+    "[HDR] LegacyComposition", // experimental rollback of the scene HDR composition: kept out of the menu until confirmed in a game
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member

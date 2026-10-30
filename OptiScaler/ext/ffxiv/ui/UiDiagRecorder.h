@@ -8,6 +8,7 @@
 //                flushed at 32 KB, every 300 frames and at frame 120; byte budget 24 MiB then a TRUNCATED marker
 //   cost.txt     rewritten at frames 60, 300 and every 600
 //   rt.txt       rewritten with cost.txt
+//   ui-census.txt rewritten with cost.txt: the HUD draw census (which share of the draws after the boundary the HDR mask can cover)
 //   shaders.csv  rewritten at frames 120, 600 and every 1800 (at most 20000 rows)
 //   probe.txt    appended through AppendProbe(), byte budget 1 MiB then a TRUNCATED marker
 
@@ -62,6 +63,8 @@ class Recorder
                      "frames.txt   first 600 frames, then every 100th, plus anomaly frames: ordered tagged draws and the R1 / R2 / R3 candidates\n"
                      "cost.txt     draws per frame and cost of the draw hook, per 600 frame window\n"
                      "rt.txt       render target at each candidate vs the swapchain backbuffer; other contexts seen\n"
+                     "ui-census.txt HUD draw census: draws into the backbuffer after the boundary by class (tagged + replayable blend, tagged + refused\n"
+                     "             blend, tagged without texture, untagged by blend, unknown), i.e. how much of the HUD the HDR transmittance mask can cover\n"
                      "snap-*       menu button 'Save UI diagnostics snapshot': boundary capture(s) + backbuffer at Present entry of the same frame\n\n"
                      "R1 = first UI-tagged draw after the last scene/post stage; R2 = first draw into the backbuffer after the last stage-5\n"
                      "(fullscreen gamma) draw; r2any = same without the render-target condition; R3 = the earlier of R1 and R2.\n"
@@ -134,6 +137,7 @@ class Recorder
         {
             _sink.Rewrite("cost.txt", CostText(core, contexts));
             _sink.Rewrite("rt.txt", RtText(core, contexts));
+            _sink.Rewrite("ui-census.txt", dfmt::CensusText(_opt.runId.c_str(), core.Frame(), core.Census()));
         }
         if (frame == 120 || frame == 600 || frame % 1800 == 0)
             _sink.Rewrite("shaders.csv", ShadersText(core));

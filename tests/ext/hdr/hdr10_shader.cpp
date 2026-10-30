@@ -205,5 +205,44 @@ int main()try{
   c->Unmap(read.Get(),0);
  }
  puts("PASS: almost opaque preview bounds background HDR by native transmittance; no foreground colour gain from extreme world highlights");
+ // The continuous composition (80-byte constants, flag set) keeps the captured world, maps opaque interface with its
+ // own expansion, and keeps the interface expansion out of world pixels: the same frame through the legacy 64-byte
+ // constants is the reference.
+ struct K80{unsigned w,h;float paper,peak,expand,contrast,saturation,vibrance;unsigned scene=0,reshadeHighlights=0,pad[2]{};float rect[4]{0,0,1,1};unsigned continuous=0;float uiExpansion=.5f;unsigned padA=0,padB=0;}k80{260,1,203,1100,.5f,1,1,0};static_assert(sizeof(K80)==80,"the shader cbuffer is 20 dwords");
+ D3D11_BUFFER_DESC bd80{};bd80.ByteWidth=sizeof(k80);bd80.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ComPtr<ID3D11Buffer>cb80;check(d->CreateBuffer(&bd80,nullptr,&cb80));
+ for(int x=0;x<260;++x)for(int channel=0;channel<3;++channel){pixels[x*4+channel]=1.f;referencePixels[x*4+channel]=1.f;scenePixels[x*4+channel]=3.f;}
+ for(int channel=0;channel<3;++channel)pixels[64*4+channel]=.25f;
+ for(int channel=0;channel<3;++channel)pixels[65*4+channel]=.25f;
+ for(int channel=0;channel<3;++channel)referencePixels[64*4+channel]=.25f;
+ for(int x=0;x<260;++x)maskPixels[x*4]=maskPixels[x*4+3]=x==0?0.f:1.f;
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);
+ c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);
+ c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ c->UpdateSubresource(mask.Get(),0,nullptr,maskPixels.data(),260*16,0);
+ k.scene=1;k.expand=.5f;k.reshadeHighlights=0;k.pad[0]=0;k.pad[1]=1;
+ k80.scene=1;k80.continuous=1;k80.uiExpansion=.5f;k80.pad[0]=0;k80.pad[1]=1;
+ auto run80=[](ID3D11DeviceContext* ctx,ComPtr<ID3D11UnorderedAccessView>& uav,ComPtr<ID3D11Texture2D>& dst,ComPtr<ID3D11Texture2D>& read){ctx->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);ctx->Dispatch(33,1,1);ID3D11UnorderedAccessView* nullU=nullptr;ctx->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);ctx->CopyResource(read.Get(),dst.Get());D3D11_MAPPED_SUBRESOURCE mm{};check(ctx->Map(read.Get(),0,D3D11_MAP_READ,0,&mm));std::vector<unsigned> words(((unsigned*)mm.pData),((unsigned*)mm.pData)+260);ctx->Unmap(read.Get(),0);return words;};
+ c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);c->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+ const auto legacyWords=run80(c.Get(),uav,dst,read);
+ c->UpdateSubresource(cb80.Get(),0,nullptr,&k80,0,0);c->CSSetConstantBuffers(0,1,cb80.GetAddressOf());
+ const auto lawWords=run80(c.Get(),uav,dst,read);
+ double legacyN1=decode(legacyWords[1]&1023),lawN1=decode(lawWords[1]&1023);
+ expect(fabs(lawN1-legacyN1)<=.015*legacyN1+.5); // untouched world pixels keep the scene gain
+ double legacyN0=decode(legacyWords[0]&1023),lawN0=decode(lawWords[0]&1023);
+ expect(fabs(lawN0-legacyN0)<=.02*legacyN0+.5); // opaque tagged interface keeps the interface curve
+ double legacyN64=decode(legacyWords[64]&1023),lawN64=decode(lawWords[64]&1023);
+ expect(fabs(lawN64-legacyN64)<=.02*legacyN64+.5); // dim world pixels keep the scene gain
+ double legacyN65=decode(legacyWords[65]&1023),lawN65=decode(lawWords[65]&1023);
+ expect(fabs(legacyN65-203*pow((.25+.055)/1.055,2.4))<.5); // the legacy path holds untagged shadows at SDR
+ expect(fabs(lawN65-203*pow((.25+.055)/1.055,2.4)*pow(3.,2.2))<=.02*115.6+.5); // the continuous path dims them with the world gain
+ printf("PASS: continuous composition keeps world %.1f, opaque interface %.1f and dim world %.1f nits; shadows over bright world dim with its gain (%.1f)\n",decode(lawWords[1]&1023),decode(lawWords[0]&1023),decode(lawWords[64]&1023),decode(lawWords[65]&1023));
+ k80.uiExpansion=1.f;c->UpdateSubresource(cb80.Get(),0,nullptr,&k80,0,0);c->CSSetConstantBuffers(0,1,cb80.GetAddressOf());
+ const auto fullUi=run80(c.Get(),uav,dst,read);
+ expect(fullUi[1]==lawWords[1] && fullUi[64]==lawWords[64] && fullUi[65]==lawWords[65]); // the interface expansion never moves world pixels
+ expect(decode(fullUi[0]&1023)>decode(lawWords[0]&1023)*1.2 && decode(fullUi[0]&1023)<=1100); // opaque interface follows its own expansion
+ k80.uiExpansion=0.f;c->UpdateSubresource(cb80.Get(),0,nullptr,&k80,0,0);c->CSSetConstantBuffers(0,1,cb80.GetAddressOf());
+ const auto flatUi=run80(c.Get(),uav,dst,read);
+ expect(fabs(decode(flatUi[0]&1023)-203)<5 && flatUi[1]==lawWords[1]); // zero interface expansion holds the interface at paper white
+ puts("PASS: interface expansion overrides highlight expansion for tagged interface only; world pixels are bit-identical");
  return 0;
 }catch(const std::exception&e){puts(e.what());return 1;}

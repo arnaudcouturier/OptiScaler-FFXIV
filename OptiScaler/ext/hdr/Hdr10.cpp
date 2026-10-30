@@ -5,6 +5,7 @@
 #include "ext/game/Game.h"
 #include "ext/gpu/GpuLifetime.h"
 #include "ext/hdr/Hdr10.h"
+#include "ext/hdr/HdrConstants.h"
 #include "ext/hdr/screenshot/HdrScreenshot.h"
 
 #include <Config.h>
@@ -39,7 +40,8 @@ struct Packet {
 };
 struct Pool {
  std::mutex mutex; gpu::GpuLifetime lifetime; std::vector<std::unique_ptr<Packet>> packets;
- int loggedReShadeHighlights=-1;
+ int loggedReShadeHighlights=-1, loggedContinuous=-1;
+ float loggedUiExpansion=-2;
  float loggedPaper=-1, loggedPeak=-1, loggedExpansion=-1, loggedContrast=-1, loggedSaturation=-1, loggedVibrance=-2;
 };
 Pool& P(){static auto* p=new Pool;return *p;}
@@ -64,7 +66,7 @@ bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h){
  D3D12_DESCRIPTOR_RANGE ranges[2]{};
  ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0}; ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,4};
  D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[0].DescriptorTable={2,ranges};
- params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].Constants={0,0,16};
+ params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].Constants={0,0,20};
  D3D12_ROOT_SIGNATURE_DESC rd{2,params,0,nullptr,D3D12_ROOT_SIGNATURE_FLAG_NONE};ComPtr<ID3DBlob> blob,error;
  if(FAILED(D3D12SerializeRootSignature(&rd,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error)))return false;
  if(FAILED(d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&p.root))))return false;
@@ -144,33 +146,39 @@ ID3D12Resource* Convert(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resourc
   d->CreateShaderResourceView(resource,&srv,cpu);
  }
  cpu.ptr+=stride;D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=DXGI_FORMAT_R10G10B10A2_UNORM;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;d->CreateUnorderedAccessView(p.image.Get(),nullptr,&uav,cpu);
- auto&cfg=ext::Cfg().hdr;struct Constants{UINT w,h;float paper,peak,expansion,contrast,saturation,vibrance;UINT scene,reshadeHighlights,pad[2];float rect[4];} k{p.width,p.height};
- auto finite=[](float v,float fallback){return std::isfinite(v)?v:fallback;};
- k.peak=std::clamp(finite(cfg.peak.value_or_default(),1100.f),400.f,4000.f);k.paper=std::clamp(finite(cfg.paper.value_or_default(),203.f),80.f,std::min(400.f,k.peak));k.expansion=std::clamp(finite(cfg.expansion.value_or_default(),.5f),0.f,1.f);
- const bool sceneRequested=cfg.mode.value_or_default()==1;
- k.scene=sceneRequested && p.scene.hdr && p.scene.reference;
- k.reshadeHighlights=cfg.reshadeHighlights.value_or_default()?1u:0u;
- k.pad[0]=p.scene.referenceSrgb?1u:0u;
- k.pad[1]=p.scene.previewMask?1u:0u;
- std::copy(p.scene.rect.begin(),p.scene.rect.end(),k.rect);
- if(sceneRequested){if(!k.scene)k.expansion=0;Message(k.scene?"Scene HDR active: RenoDX FP16 scene + HDR-mapped UI; 10-bit PQ output":"Scene HDR waiting for verified scene: paper-white SDR fallback");}
+ auto&cfg=ext::Cfg().hdr;HdrConstantSource cs;
+ cs.paper=cfg.paper.value_or_default();cs.peak=cfg.peak.value_or_default();cs.expansion=cfg.expansion.value_or_default();
+ cs.contrast=cfg.contrast.value_or_default();cs.saturation=cfg.saturation.value_or_default();cs.vibrance=cfg.vibrance.value_or_default();
+ cs.legacyComposition=cfg.legacyComposition.value_or_default();
+ {const std::optional<float> ui=cfg.uiExpansion; // one snapshot: the menu thread's Reset can clear it between two reads
+  const auto resolved=ResolveUiExpansion(ui,cs.expansion);cs.uiExpansionSet=resolved.first;cs.uiExpansion=resolved.second;}
+ cs.sceneRequested=cfg.mode.value_or_default()==1;
+ cs.sceneAvailable=bool(p.scene.hdr)&&bool(p.scene.reference);
+ cs.reshadeHighlights=cfg.reshadeHighlights.value_or_default();
+ cs.referenceSrgb=p.scene.referenceSrgb;cs.hasPreviewMask=bool(p.scene.previewMask);
+ std::copy(p.scene.rect.begin(),p.scene.rect.end(),cs.rect);
+ cs.width=p.width;cs.height=p.height;
+ HdrConstants k=BuildHdrConstants(cs);
+ if(cs.sceneRequested){Message(k.scene?"Scene HDR active: RenoDX FP16 scene + HDR-mapped UI; 10-bit PQ output":"Scene HDR waiting for verified scene: paper-white SDR fallback");}
  else Message("HDR10 active: SDR expansion; game HUD shares the same curve");
- k.contrast=std::clamp(finite(cfg.contrast.value_or_default(),1.f),.5f,1.5f);
- k.saturation=std::clamp(finite(cfg.saturation.value_or_default(),1.f),0.f,2.f);
- k.vibrance=std::clamp(finite(cfg.vibrance.value_or_default(),0.f),-1.f,1.f);
  if(pool.loggedPaper!=k.paper || pool.loggedPeak!=k.peak || pool.loggedExpansion!=k.expansion || pool.loggedContrast!=k.contrast || pool.loggedSaturation!=k.saturation || pool.loggedVibrance!=k.vibrance || pool.loggedReShadeHighlights!=int(k.reshadeHighlights)){
   LOG_INFO("HDR10 conversion: paper white {} nits, peak {} nits, expansion {}, contrast {}, saturation {}, vibrance {}, SDR white maps to {} nits, ReShade highlight preservation {}",
            k.paper,k.peak,k.expansion,k.contrast,k.saturation,k.vibrance,k.paper+(k.peak-k.paper)*k.expansion,k.reshadeHighlights!=0);
   pool.loggedPaper=k.paper;pool.loggedPeak=k.peak;pool.loggedExpansion=k.expansion;pool.loggedContrast=k.contrast;pool.loggedSaturation=k.saturation;pool.loggedVibrance=k.vibrance;pool.loggedReShadeHighlights=int(k.reshadeHighlights);
  }
+ if(pool.loggedContinuous!=int(k.continuous) || pool.loggedUiExpansion!=k.uiExpansion){
+  LOG_INFO("HDR10 composition: {}, UI expansion {}",k.continuous?"continuous":"legacy two-rule",
+           cs.uiExpansionSet?std::to_string(k.uiExpansion):"follows HighlightExpansion ("+std::to_string(k.uiExpansion)+")");
+  pool.loggedContinuous=int(k.continuous);pool.loggedUiExpansion=k.uiExpansion;
+ }
  pool.lifetime.Record(c);p.recorded=true;p.done=pool.lifetime.ReuseProbe(c);if(p.scene.retire)p.scene.retire(p.done);
  if(k.scene){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
- if(k.scene && k.pad[1])Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+ if(NeedsPreviewMaskBarrier(k))Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  Barrier(c,src,state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,p.image.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
- ID3D12DescriptorHeap* heaps[]={p.heap.Get()};c->SetDescriptorHeaps(1,heaps);c->SetComputeRootSignature(p.root.Get());c->SetPipelineState(p.pso.Get());c->SetComputeRootDescriptorTable(0,p.heap->GetGPUDescriptorHandleForHeapStart());c->SetComputeRoot32BitConstants(1,16,&k,0);c->Dispatch((p.width+7)/8,(p.height+7)/8,1);
+ ID3D12DescriptorHeap* heaps[]={p.heap.Get()};c->SetDescriptorHeaps(1,heaps);c->SetComputeRootSignature(p.root.Get());c->SetPipelineState(p.pso.Get());c->SetComputeRootDescriptorTable(0,p.heap->GetGPUDescriptorHandleForHeapStart());c->SetComputeRoot32BitConstants(1,20,&k,0);c->Dispatch((p.width+7)/8,(p.height+7)/8,1);
  Barrier(c,p.image.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,src,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,state);
  if(k.scene){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);}
- if(k.scene && k.pad[1])Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+ if(NeedsPreviewMaskBarrier(k))Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
  return p.image.Get();
 }
 void NoteGameColorSpace(DXGI_COLOR_SPACE_TYPE cs){

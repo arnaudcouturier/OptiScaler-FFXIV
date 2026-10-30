@@ -6,6 +6,7 @@
 #include "ext/hdr/scene/DlssSceneInput.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 #include "ext/hdr/scene/NrSceneInput.h"
+#include "ext/ffxiv/ui/UiConfig.h"
 #include "ext/hdr/HdrScene.h"
 #include "ext/nr/NrHooks.h"
 
@@ -40,7 +41,18 @@ class FfxivProvider final : public game::ISceneHdr
     }
     bool WouldSupplyScene(UINT width, UINT height) override { return FfxivSceneHdr::WouldSupply(width, height); }
     void PublishReconstructed(SceneInput&& image) override { FfxivSceneHdr::PublishReconstructed(std::move(image)); }
-    void EndFrame() override { FfxivSceneHdr::EndFrame(); }
+    void EndFrame() override
+    {
+        FfxivSceneHdr::EndFrame();
+        const bool diagnostics = ext::ffxiv::ui::DiagnosticsOn();
+        FfxivHdrPreview::SetCensusEnabled(diagnostics);
+        if (!diagnostics)
+            return;
+        // HDR census: one line per 600 frames, only when tagged UI draws reached the mask path (HDR scene mode)
+        std::string line;
+        if (FfxivHdrPreview::TakeSummary(line))
+            LOG_INFO("{}", line);
+    }
 };
 
 bool GameHasScene() { return game::Current().hdr != nullptr; }

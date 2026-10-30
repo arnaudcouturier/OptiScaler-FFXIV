@@ -412,6 +412,32 @@
           "menu": { "tab": "FFXIV", "card": "ffxiv_hdr", "cardTitle": "FFXIV HDR10 output" },
           "description": "Mode 1: preserve measured scene highlights through ReShade's grading (experimental).",
           "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HDR] UiExpansion",
+          "section": "HDR",
+          "name": "UiExpansion",
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": "auto",
+          "defaultMeans": "auto (follows HighlightExpansion)",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "ffxiv_hdr", "cardTitle": "FFXIV HDR10 output" },
+          "description": "Mode 1 interface curve: how far above paper white the interface expands. Follows HighlightExpansion when left on auto; a number overrides it for the interface only. Read by the continuous composition only; the legacy composition keeps using HighlightExpansion.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HDR] LegacyComposition",
+          "section": "HDR",
+          "name": "LegacyComposition",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "true (the two-rule composition)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "experimental rollback of the scene HDR composition: kept out of the menu until confirmed in a game" },
+          "description": "Mode 1 composition: true keeps the two-rule composition of tagged previews and the colour band; false selects the continuous composition of world and interface light. Experimental, will become the default after in-game confirmation.",
+          "flags": [ "ffxivOnly", "experimental" ]
         }
       ]
     },

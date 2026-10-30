@@ -13,6 +13,7 @@
 
 #include "ext/ffxiv/ui/UiBoundaryRules.h"
 #include "ext/ffxiv/ui/UiDiagFormat.h"
+#include "ext/hdr/UiBlend.h"
 
 #include <d3d11.h>
 #include <windows.h>
@@ -129,6 +130,14 @@ class Core
 
     // ---- wiring ---------------------------------------------------------------------------------------------------
     void SetGameStageTag(const GUID* tag) { _gameTag = tag; }
+
+    // ---- HUD draw census (ui-census.txt) ---------------------------------------------------------------------------
+    // Diagnostics-only. The diagnostics call this once per Present; the census then runs for the draws of the next two frames, so
+    // when Diagnostics is switched off (or the build is armed by [HudLess] Mode alone) it stops by itself and a draw costs one integer
+    // comparison: no render target lookup, blend state or resource query beyond what the detector already does.
+    void KeepCensus() { _censusUntil = _frame + 2; }
+    bool CensusOn() const { return _frame < _censusUntil; }
+    const dfmt::CensusTotals& Census() const { return _censusTotals; }
     void SetBackbufferProvider(BackbufferFn fn) { _bbFn = fn; }
 
     // ---- shader creation (any thread) ----------------------------------------------------------------------------
@@ -245,7 +254,9 @@ class Core
         const bool tagged = stage >= 1 && stage <= kUiStage;
         const bool sampled = rec && (rec->draws <= 16 || (rec->draws & 15) == 0);
         RtInfo rt;
-        const bool looked = tagged || sampled || _tracker.WantsRenderTarget();
+        const bool census = CensusOn();
+        // the census needs the render target of every draw after the boundary (R1b is set => the previous draws are behind it)
+        const bool looked = tagged || sampled || _tracker.WantsRenderTarget() || (census && _tracker.R1b() != 0);
         if (looked)
         {
             rt = ClassifyRt(c);
@@ -261,6 +272,8 @@ class Core
         res.cand = _tracker.Current();
         res.r1b = _tracker.R1b();
         res.r1bChanged = _tracker.R1bChanged();
+        if (census)
+            CensusDraw(c, stage, looked ? rt : RtInfo {}, res.r1bChanged, res.r1b);
         List(ordinal, stage, looked ? rt : RtInfo {});
         return res;
     }
@@ -298,6 +311,20 @@ class Core
             d.r2any = d.ordinal == c.r2any;
             d.r3 = d.ordinal == c.r3;
         }
+
+        if (CensusOn())
+        {
+            // a frame counts when it has a boundary at its end; the tally restarts at every (re)set of R1b, so it holds the final one
+            ++_censusTotals.frames;
+            if (_tracker.R1b() != 0)
+            {
+                ++_censusTotals.framesWithBoundary;
+                _censusTotals.tally.Merge(_cen);
+            }
+            else if (_tracker.Summary().sawSceneStage)
+                ++_censusTotals.framesSceneNoBoundary;
+        }
+        _cen = {};
 
         o.hookUs = double(_hookTicks) * 1e6 / double(_freq);
         o.r1b = _tracker.R1b();
@@ -504,9 +531,75 @@ class Core
             ++rec.rtOverflow;
     }
 
+    // One draw into the backbuffer at or after the boundary: the facts the HDR mask decides on (blend, texture), then the class.
+    void CensusDraw(ID3D11DeviceContext* c, uint8_t stage, const RtInfo& rt, bool r1bChanged, uint32_t r1b)
+    {
+        if (r1bChanged)
+            _cen = {}; // the boundary was set or cleared by this draw: counting restarts at it
+        if (r1b == 0 || rt.kind != dfmt::RtKind::Backbuffer)
+            return;
+        static_assert(static_cast<int>(hdr::uiblend::Kind::Opaque) == 0 && static_cast<int>(hdr::uiblend::Kind::Alpha) == 1 &&
+                          static_cast<int>(hdr::uiblend::Kind::Additive) == 2 && static_cast<int>(hdr::uiblend::Kind::Other) == 3,
+                      "dfmt::ClassifyCensus takes the numbering of uiblend::Kind");
+        hdr::uiblend::Verdict verdict; // no blend state bound = the D3D11 default
+        ID3D11BlendState* state = nullptr;
+        FLOAT factor[4] {};
+        UINT sampleMask = 0;
+        c->OMGetBlendState(&state, factor, &sampleMask);
+        if (state)
+        {
+            D3D11_BLEND_DESC desc {};
+            state->GetDesc(&desc);
+            verdict = hdr::uiblend::Classify(&desc);
+            state->Release();
+        }
+        const bool hasTexture = stage == kUiStage && HasTexture(c);
+        const dfmt::CensusClass cls = dfmt::ClassifyCensus(stage, static_cast<uint8_t>(verdict.kind), !verdict.Replayable(), hasTexture);
+        _cen.Add(cls, verdict.kind == hdr::uiblend::Kind::Additive);
+    }
+
+    // BeforeDraw reads the opacity of a UI draw from a single-sample 2D texture among t0..t7; without one it replays nothing.
+    static bool HasTexture(ID3D11DeviceContext* c)
+    {
+        ID3D11ShaderResourceView* views[8] {};
+        c->PSGetShaderResources(0, 8, views);
+        bool found = false;
+        for (ID3D11ShaderResourceView* view : views)
+        {
+            if (!view)
+                continue;
+            if (!found)
+            {
+                ID3D11Resource* resource = nullptr;
+                view->GetResource(&resource);
+                if (resource)
+                {
+                    ID3D11Texture2D* texture = nullptr;
+                    if (SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))) && texture)
+                    {
+                        D3D11_TEXTURE2D_DESC desc {};
+                        texture->GetDesc(&desc);
+                        found = desc.SampleDesc.Count == 1;
+                        texture->Release();
+                    }
+                    resource->Release();
+                }
+            }
+            view->Release();
+        }
+        return found;
+    }
+
     void OnPresentDraw(ID3D11DeviceContext* c)
     {
         ++_presentCount;
+        if (CensusOn())
+        {
+            EnsureBackbuffer();
+            ++_censusTotals.presentDraws;
+            if (ClassifyRt(c).kind == dfmt::RtKind::Backbuffer)
+                ++_censusTotals.presentBackbufferDraws;
+        }
         if (_presentLines.size() >= dfmt::kMaxPresentDraws)
         {
             ++_presentOmitted;
@@ -671,6 +764,11 @@ class Core
     uint32_t _sceneListed = 0, _uiListed = 0, _afterAnchorListed = 0, _unknownListed = 0, _extraListed = 0;
     uint32_t _omitted = 0, _presentOmitted = 0, _presentCount = 0;
     int64_t _hookTicks = 0;
+
+    // HUD draw census (see KeepCensus): the tally of the current frame since the last (re)set of R1b, and the totals
+    uint64_t _censusUntil = 0;
+    dfmt::CensusTally _cen;
+    dfmt::CensusTotals _censusTotals;
 
     // cumulative
     Counters _cnt;

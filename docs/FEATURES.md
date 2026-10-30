@@ -227,9 +227,9 @@ All HDR code is under `OptiScaler/ext/hdr/`. The parts share one set of seams.
 
 **What it does.** `[HDR] Mode = 1` replays the game's tone-mapping stages in FP16 next to the SDR chain, so HDR output keeps the highlights the SDR path clips. The SDR chain, ReShade and the HUD are untouched. Two experimental switches feed the linear scene into NR (`NRSceneInput`) or DLSS (`DLSSSceneInput`). The scene stages are recognised by shader fingerprint, so a game patch that changes those shaders disables it; see [FFXIV-PATCH-RUNBOOK.md](FFXIV-PATCH-RUNBOOK.md).
 
-**Status.** tested (RTX 4090) for `Mode = 1`; `ReShadeHighlights`, `NRSceneInput`, `DLSSSceneInput` are experimental and untested.
+**Status.** tested (RTX 4090) for `Mode = 1`; `ReShadeHighlights`, `NRSceneInput`, `DLSSSceneInput` are experimental and untested. The continuous composition (`LegacyComposition = false`) is untested on an HDR display.
 
-**Config.** `[HDR] Mode`, `ReShadeHighlights`, `NRSceneInput`, `DLSSSceneInput`. **Menu.** The `ffxiv_hdr` card.
+**Config.** `[HDR] Mode`, `ReShadeHighlights`, `NRSceneInput`, `DLSSSceneInput`, `LegacyComposition` (ini only), `UiExpansion`. **Menu.** The `ffxiv_hdr` card.
 
 **Code and seams.** `ext/hdr/scene/`, `ext/hdr/DlssHdr.cpp`, `ext/hdr/shaders/renodx/` (licence and notice shipped as `Licenses/RenoDX_*`). Seams: hdr, dx11bridge, fg.
 

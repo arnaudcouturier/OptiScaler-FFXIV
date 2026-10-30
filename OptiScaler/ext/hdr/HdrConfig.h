@@ -37,6 +37,10 @@ struct HdrConfig
     CustomOptional<int> screenshotFormat { 0 };            // ScreenshotFormat: 0 SDR PNG, 1 HDR PNG
     // F4 (the collaborator's "Include OptiScaler menu"): HDR PNG taken after the visible menu was drawn onto the image
     CustomOptional<bool> screenshotMenu { false };         // ScreenshotMenu
+    // Scene HDR composition: true keeps the two-rule composition of tagged previews and the colour band (as before)
+    CustomOptional<bool> legacyComposition { true }; // LegacyComposition
+    // Scene HDR interface curve: unset follows HighlightExpansion, a number overrides it (continuous law only)
+    CustomOptional<float, NoDefault> uiExpansion; // UiExpansion
 
     void Bind(config::Binder& b);
     void PostLoad();               // end of config::Load: installs the NR scene hooks (once)

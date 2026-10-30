@@ -319,6 +319,7 @@ const NotCompared kNotCompared[] = {
                    "'Default (auto) is' (the ones that do are compared); the generated Pass2/Pass3 keys have no named member; "
                    "the key-binding keys (ToggleKey, ScaleUpKey, ScaleDownKey, TransferToggleKey) default to the UnboundKey constant of Config.h, outside ext" },
     { "[HDR] Screenshot", "the screenshot keys describe their default in prose (-1 = unbound, formats by name)" },
+    { "[HDR] UiExpansion", "declared without a default on purpose (CustomOptional<float, NoDefault>): unset follows HighlightExpansion" },
     { "[Mipmap] MipmapBiasAuto:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): the default depends on the game (on for FFXIV, off elsewhere) and an explicit false must survive a save" },
     { "[Mipmap] AutomaticFFXIV", "the alias of MipmapBiasAuto, declared without a default for the same reason" },
     { "[LowLatency] ", "upstream enum members (LowLatencyInput/Output) declared in Config.h, not in ext" },

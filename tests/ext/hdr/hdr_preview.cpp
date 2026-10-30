@@ -27,6 +27,7 @@ int main() try {
     ComPtr<ID3D11VertexShader> vs;check(d->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));
     check(D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,"PS","ps_5_0",0,0,&code,&error));
     ComPtr<ID3D11PixelShader> ps;check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&ps));
+    ext::hdr::FfxivHdrPreview::SetCensusEnabled(true); // the census below runs gated on, like a Diagnostics-on session
     ext::hdr::FfxivHdrPreview::Tag(ps.Get(),3865947726u);
     D3D11_TEXTURE2D_DESC td{};td.Width=64;td.Height=64;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -118,5 +119,87 @@ int main() try {
     c->Unmap(read.Get(),0);
     ext::hdr::FfxivHdrPreview::EndFrame();ext::hdr::FfxivHdrPreview::BeforeDraw(c.Get(),draw);
     expect(state.draws==before+1,"Preview coverage did not resume next frame");
-    puts("PASS: preview alpha/viewport, opaque/transparent coverage, depth/stencil safety, large/non-t0 images, binding restoration and transparent atlas coverage (D3D11 WARP)");return 0;
+    // HDR census: every tagged draw that reaches BeforeDraw is either replayed or counted under exactly ONE reason.
+    {
+        using namespace ext::hdr::FfxivHdrPreview;
+        auto& cs=state.census;
+        expect(cs.replayed==state.draws,"replayed counter differs from the number of mask draws");
+        auto skippedNow=[&]{std::array<uint64_t,kSkipCount> a{};for(unsigned i=0;i<kSkipCount;++i)a[i]=cs.skipped[i];return a;};
+        // runs one BeforeDraw in a fresh frame with the current pipeline state and checks the counters moved as `reason` says
+        // (kSkipCount = replayed)
+        auto observe=[&](unsigned reason,const char* why){
+            const auto drawsBefore=cs.draws.load();const auto replayedBefore=cs.replayed.load();const auto skippedBefore=skippedNow();
+            EndFrame();BeforeDraw(c.Get(),draw);
+            expect(cs.draws==drawsBefore+1,why);
+            expect(cs.replayed==replayedBefore+(reason==kSkipCount?1:0),why);
+            const auto after=skippedNow();
+            for(unsigned i=0;i<kSkipCount;++i)expect(after[i]==skippedBefore[i]+(i==reason?1:0),why);
+        };
+        auto makeBlend=[&](D3D11_BLEND src,D3D11_BLEND dest,D3D11_BLEND_OP op,UINT mask,bool a2c){
+            D3D11_BLEND_DESC b{};b.AlphaToCoverageEnable=a2c;auto& rt=b.RenderTarget[0];rt.BlendEnable=true;rt.SrcBlend=src;rt.DestBlend=dest;rt.BlendOp=op;
+            rt.SrcBlendAlpha=D3D11_BLEND_ONE;rt.DestBlendAlpha=D3D11_BLEND_ZERO;rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;rt.RenderTargetWriteMask=static_cast<UINT8>(mask);
+            ComPtr<ID3D11BlendState> state2;check(d->CreateBlendState(&b,&state2));return state2;
+        };
+        c->OMSetRenderTargets(1,targetRtv.GetAddressOf(),nullptr);
+        observe(kSkipCount,"standard blend must be replayed");
+        auto additive=makeBlend(D3D11_BLEND_SRC_ALPHA,D3D11_BLEND_ONE,D3D11_BLEND_OP_ADD,15,false);
+        c->OMSetBlendState(additive.Get(),nullptr,~0u);observe(static_cast<unsigned>(Skip::BlendAdditive),"additive blend not counted as additive");
+        auto coverage=makeBlend(D3D11_BLEND_SRC_ALPHA,D3D11_BLEND_INV_SRC_ALPHA,D3D11_BLEND_OP_ADD,15,true);
+        c->OMSetBlendState(coverage.Get(),nullptr,~0u);observe(static_cast<unsigned>(Skip::BlendAlphaToCoverage),"alpha to coverage not counted");
+        auto partial=makeBlend(D3D11_BLEND_SRC_ALPHA,D3D11_BLEND_INV_SRC_ALPHA,D3D11_BLEND_OP_ADD,3,false);
+        c->OMSetBlendState(partial.Get(),nullptr,~0u);observe(static_cast<unsigned>(Skip::BlendWriteMask),"partial write mask not counted");
+        auto subtract=makeBlend(D3D11_BLEND_SRC_ALPHA,D3D11_BLEND_INV_SRC_ALPHA,D3D11_BLEND_OP_SUBTRACT,15,false);
+        c->OMSetBlendState(subtract.Get(),nullptr,~0u);observe(static_cast<unsigned>(Skip::BlendOther),"other blend not counted");
+        auto premultiplied=makeBlend(D3D11_BLEND_ONE,D3D11_BLEND_INV_SRC_ALPHA,D3D11_BLEND_OP_ADD,15,false);
+        c->OMSetBlendState(premultiplied.Get(),nullptr,~0u);observe(kSkipCount,"premultiplied blend must be replayed");
+        c->OMSetBlendState(blend.Get(),nullptr,~0u);
+        // no texture to read opacity from
+        ID3D11ShaderResourceView* none[8]{};c->PSSetShaderResources(0,8,none);observe(static_cast<unsigned>(Skip::NoSource),"missing source not counted");
+        c->PSSetShaderResources(0,1,input.GetAddressOf());
+        // a pixel shader without the UI tag
+        {
+            ComPtr<ID3D11PixelShader> plain;ComPtr<ID3DBlob> plainCode,plainError;
+            check(D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,"PS","ps_5_0",0,0,&plainCode,&plainError));
+            check(d->CreatePixelShader(plainCode->GetBufferPointer(),plainCode->GetBufferSize(),nullptr,&plain));
+            c->PSSetShader(plain.Get(),nullptr,0);observe(static_cast<unsigned>(Skip::NotMarked),"untagged shader not counted");
+            c->PSSetShader(ps.Get(),nullptr,0);
+        }
+        // a target below 640x360, and two render targets
+        c->OMSetRenderTargets(1,inputRtv.GetAddressOf(),nullptr);observe(static_cast<unsigned>(Skip::TargetUnsuitable),"small target not counted");
+        {
+            D3D11_TEXTURE2D_DESC second{};target->GetDesc(&second);second.BindFlags=D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> secondTexture;ComPtr<ID3D11RenderTargetView> secondRtv;check(d->CreateTexture2D(&second,nullptr,&secondTexture));check(d->CreateRenderTargetView(secondTexture.Get(),nullptr,&secondRtv));
+            ID3D11RenderTargetView* two[2]{targetRtv.Get(),secondRtv.Get()};c->OMSetRenderTargets(2,two,nullptr);
+            observe(static_cast<unsigned>(Skip::MultipleTargets),"two render targets not counted");
+        }
+        c->OMSetRenderTargets(1,targetRtv.GetAddressOf(),nullptr);
+        // sealed frame
+        EndFrame();SealFrame();{const auto sealed=cs.skipped[static_cast<unsigned>(Skip::Sealed)].load();BeforeDraw(c.Get(),draw);expect(cs.skipped[static_cast<unsigned>(Skip::Sealed)]==sealed+1,"sealed draw not counted");}
+        EndFrame();
+        // frames and the 600-frame summary: due exactly when the frame counter crosses a multiple of 600, once, and only with draws seen
+        std::string line;
+        do {EndFrame();} while(cs.frames%kSummaryFrames!=0);
+        expect(cs.framesWithMask>0 && cs.framesWithMask<cs.frames,"frames with a mask not counted separately");
+        expect(TakeSummary(line),"summary not offered after 600 frames");
+        expect(line.rfind("HDR UI mask: ",0)==0 && line.find("blend_additive 1")!=std::string::npos && line.find("no_source 1")!=std::string::npos &&
+               line.find("multiple_targets 1")!=std::string::npos,"summary text lacks the counted reasons");
+        expect(!TakeSummary(line),"summary offered twice");
+        // Census gate: with Diagnostics off nothing is counted and no summary is offered, while the mask itself still works.
+        SetCensusEnabled(true);
+        do {EndFrame();} while(cs.frames%kSummaryFrames!=0);
+        SetCensusEnabled(false);
+        expect(!TakeSummary(line),"summary offered with the gate off: a due summary fired without Diagnostics");
+        expect(!TakeSummary(line),"summary offered twice with the gate off");
+        {
+            const auto drawsBefore=cs.draws.load(),replayedBefore=cs.replayed.load(),framesBefore=cs.frames.load();
+            auto skippedBefore=[&]{std::array<uint64_t,kSkipCount> a{};for(unsigned i=0;i<kSkipCount;++i)a[i]=cs.skipped[i];return a;}();
+            for(int i=0;i<3;++i){EndFrame();BeforeDraw(c.Get(),draw);}
+            expect(cs.draws==drawsBefore && cs.replayed==replayedBefore && cs.frames==framesBefore,"census counted with the gate off");
+            const auto skippedAfter=[&]{std::array<uint64_t,kSkipCount> a{};for(unsigned i=0;i<kSkipCount;++i)a[i]=cs.skipped[i];return a;}();
+            for(unsigned i=0;i<kSkipCount;++i)expect(skippedAfter[i]==skippedBefore[i],"skip counted with the gate off");
+            expect(bool(state.current),"mask capture stopped with the gate off");
+        }
+        SetCensusEnabled(true);
+    }
+    puts("PASS: preview alpha/viewport, opaque/transparent coverage, depth/stencil safety, large/non-t0 images, binding restoration, transparent atlas coverage and the Diagnostics-gated census (D3D11 WARP)");return 0;
 }catch(const std::exception& e){printf("FAIL: %s\n",e.what());return 1;}

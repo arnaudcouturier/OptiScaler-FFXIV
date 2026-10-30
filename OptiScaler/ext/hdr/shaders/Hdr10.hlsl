@@ -4,7 +4,7 @@ Texture2D<float4> Scene : register(t1);
 Texture2D<float4> Reference : register(t2);
 Texture2D<float4> PreviewMask : register(t3);
 RWTexture2D<float4> Target : register(u0);
-cbuffer Settings : register(b0) { uint Width; uint Height; float PaperWhite; float Peak; float Expansion; float Contrast; float Saturation; float Vibrance; uint SceneMode; uint ReShadeHighlights; uint ReferenceSrgb; uint HasPreviewMask; float4 SceneRect; };
+cbuffer Settings : register(b0) { uint Width; uint Height; float PaperWhite; float Peak; float Expansion; float Contrast; float Saturation; float Vibrance; uint SceneMode; uint ReShadeHighlights; uint ReferenceSrgb; uint HasPreviewMask; float4 SceneRect; uint ContinuousComposition; float UiExpansion; uint2 Pad; };
 float3 Linear(float3 x) { return float3(x.x <= .04045 ? x.x/12.92 : pow((x.x+.055)/1.055,2.4), x.y <= .04045 ? x.y/12.92 : pow((x.y+.055)/1.055,2.4), x.z <= .04045 ? x.z/12.92 : pow((x.z+.055)/1.055,2.4)); }
 float3 PQ(float3 nits) {
     float3 p = pow(max(nits,0)/10000.0, 2610.0/16384.0);
@@ -74,6 +74,46 @@ float3 MapScenePeak(float3 value) {
         // Native UI receives its own HDR curve, never the background's gain.
         float3 ui=rgb*(1+(Peak/PaperWhite-1)*Expansion*h);
         float3 extended;
+        if(ContinuousComposition) {
+            // One continuous composition instead of the two-rule switch below: the pixel is split into visible world
+            // (worldShare) and light the interface added (hudPart), each with its own gain, so a partly transparent
+            // pixel never jumps between two rules. Zero selects the legacy path below.
+            float3 sdrNits=Linear(saturate(s.rgb))*PaperWhite;
+            float3 worldNits=Linear(saturate(referenceEncoded))*PaperWhite;
+            float3 worldGain=max(scale,1);
+            float maskT=HasPreviewMask?saturate(PreviewMask.Load(int3(id.xy,0)).r):1;
+            float seen=min(1,min(sdrNits.r/max(worldNits.r,1e-4),min(sdrNits.g/max(worldNits.g,1e-4),sdrNits.b/max(worldNits.b,1e-4))));
+            float worldShare=min(seen,maskT);
+            float3 added=max(sdrNits-worldShare*worldNits,0);
+            float maskFade=maskT*maskT;
+            maskFade=maskFade*maskFade;
+            maskFade=maskFade*maskFade;
+            float3 gradePart=min(added,0.5*worldShare*maskFade*worldNits);
+            float3 hudPart=added-gradePart;
+            float sdrLuma=dot(sdrNits,float3(.2126,.7152,.0722));
+            float hudLuma=dot(hudPart,float3(.2126,.7152,.0722));
+            float hudShare=max(1-maskT,sdrLuma>1e-4?hudLuma/sdrLuma:0);
+            float hudColour=hudShare>1e-6?min(hudLuma/hudShare,PaperWhite):0;
+            float hudY=hudColour/PaperWhite;
+            if (hudY > 0 && hudY < 1 && Contrast != 1) {
+                // odds is non-negative under the guard; abs only keeps the compiler's negative-base warning quiet.
+                float odds=(hudY/(1-hudY)) / (.18/.82);
+                float adjustedHud=1/(1+(.82/.18)*pow(abs(odds),-Contrast));
+                hudY=adjustedHud;
+            }
+            float hc=saturate((hudY-.18)/.82); hc=hc*hc*(3-2*hc);
+            float hudGain=1+(Peak/PaperWhite-1)*UiExpansion*hc;
+            float baseLuma=dot(Linear(saturate(s.rgb)),float3(.2126,.7152,.0722));
+            float adjustedBase=baseLuma;
+            if (baseLuma > 0 && baseLuma < 1 && Contrast != 1) {
+                float odds=(baseLuma/(1-baseLuma)) / (.18/.82);
+                adjustedBase=1/(1+(.82/.18)*pow(abs(odds),-Contrast));
+            }
+            float contrastK=(baseLuma>0&&adjustedBase!=baseLuma)?adjustedBase/baseLuma:1;
+            extended=MapScenePeak(contrastK*((worldShare*worldNits+gradePart)*worldGain+hudPart*hudGain));
+            float overPeak=max(extended.r,max(extended.g,extended.b));
+            if(overPeak>Peak)extended*=Peak/overPeak;
+        } else {
         if(transmittance>0 && transmittance<1) {
             // The native SDR composite already includes the background's SDR
             // contribution. Add only that background's extra HDR energy, not
@@ -89,6 +129,7 @@ float3 MapScenePeak(float3 value) {
         } else {
             // Preserve existing world pixels and fully opaque previews exactly.
             extended=MapScenePeak(lerp(ui,rgb*max(scale,1),coverage*transmittance));
+        }
         }
         rgb=extended;
     }

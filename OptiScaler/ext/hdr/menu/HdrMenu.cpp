@@ -131,6 +131,27 @@ void DrawHdrCard(ext::menu::Ctx& ctx)
                        "In scene HDR mode, maps SDR-authored UI and changed effect pixels into HDR; captured world highlights retain their own scene brightness.\n"
                        "Applies immediately. No additional DLSS evaluation is needed.");
 
+    // The interface curve is read by the continuous composition only; the legacy composition keeps using Highlight
+    // expansion, so the row is disabled while the legacy composition is selected.
+    const bool legacyComposition = hdr.legacyComposition.value_or_default();
+    ImGui::BeginDisabled(legacyComposition);
+    float uiExpansion = hdr.uiExpansion.has_value() ? hdr.uiExpansion.value() : hdr.expansion.value_or_default();
+    if (ImGui::SliderFloat("UI highlight expansion", &uiExpansion, 0, 1, "%.2f"))
+        hdr.uiExpansion = uiExpansion;
+    ResetHdr("FfxivHDRUiExpansion", hdr.uiExpansion);
+    ImGui::EndDisabled();
+    if (hdr.uiExpansion.has_value())
+        ext::menu::Tooltip("Scene HDR mode only: how far above paper white the interface curve expands (0 = none, 1 = up to PeakNits).\n"
+                           "A number here overrides Highlight expansion for the interface; Reset returns to following it.\n"
+                           "The legacy composition ignores this and keeps using Highlight expansion. Applies immediately.");
+    else
+    {
+        const std::string follows = "Scene HDR mode only: follows Highlight expansion (now " + std::to_string(hdr.expansion.value_or_default()) + ").\n"
+                                    "Move the slider to override it for the interface; Reset returns to following it.\n"
+                                    "The legacy composition ignores this and keeps using Highlight expansion. Applies immediately.";
+        ext::menu::Tooltip(follows.c_str());
+    }
+
     float contrast = hdr.contrast.value_or_default();
     if (ImGui::SliderFloat("Contrast", &contrast, 0.5f, 1.5f, "%.2fx"))
         hdr.contrast = contrast;

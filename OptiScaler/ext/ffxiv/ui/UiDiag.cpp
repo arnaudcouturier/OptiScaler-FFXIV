@@ -419,6 +419,7 @@ void OnPresentEntry(Core& core)
     auto& s = S();
     const int64_t t0 = Qpc();
     const uint64_t frame = core.Frame();
+    core.KeepCensus(); // the HUD draw census runs only while this is called every Present (Diagnostics on)
     auto& rec = *s.recorder;
     const bool stack = frame <= 5 || frame == 600 || frame == 3600;
     const bool vtable = frame == 1 || frame == 600 || frame == 3600;

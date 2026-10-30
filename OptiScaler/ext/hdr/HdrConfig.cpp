@@ -23,6 +23,8 @@ void HdrConfig::Bind(config::Binder& b)
     b.Add("HDR", "ScreenshotFormat", screenshotFormat);
     b.Add("HDR", "ScreenshotIccOnly", screenshotIccOnly);
     b.Add("HDR", "ScreenshotMenu", screenshotMenu);
+    b.Add("HDR", "LegacyComposition", legacyComposition);
+    b.Add("HDR", "UiExpansion", uiExpansion);
 }
 
 void HdrConfig::PostLoad()
