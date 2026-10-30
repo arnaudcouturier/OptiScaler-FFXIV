@@ -11,6 +11,7 @@
 #include <set>
 #include <deque>
 #include <mutex>
+#include <atomic>
 #include <sl_dlss_g.h>
 #include <vulkan/vulkan.h>
 #include <ankerl/unordered_dense.h>
@@ -453,17 +454,19 @@ class State
 
     static UINT GetOwner()
     {
-        _lastOwner++;
-        return _lastOwner;
+        return ++_lastOwner;
     }
 
     // Moved checks here to prevent circular includes
     /// <summary>
-    /// Enables skipping of LoadLibrary checks
+    /// Enables skipping of LoadLibrary checks on the calling thread
     /// </summary>
     /// <param name="dllName">Lower case dll name without `.dll` at the end. Leave blank for skipping all dll's</param>
     static void DisableChecks(UINT owner, std::string dllName = "")
     {
+        // Every caller wraps a call that loads modules on its own thread (CreateDXGIFactory*, the FSR4 provider update,
+        // sl.interposer and the sl.* plugins), so a window belongs to that thread: a module another thread loads is still
+        // checked, hooked and counted, and the load hook no longer reads a map that another thread writes.
         // if (_skipOwner == 0 || _skipOwner < owner)
         //{
         _skipOwner = owner;
@@ -474,7 +477,7 @@ class State
 
     static void EnableChecks(UINT owner)
     {
-        _skipDllName.erase(_skipOwner);
+        _skipDllName.erase(owner);
 
         // if (_skipOwner == owner)
         //{
@@ -518,10 +521,10 @@ class State
     static bool ServeOriginal() { return _serveOriginal; }
 
   private:
-    inline static bool _skipChecks = false;
-    inline static std::map<UINT, std::string> _skipDllName;
-    inline static UINT _skipOwner = 0;
-    inline static UINT _lastOwner = 0;
+    inline static thread_local bool _skipChecks = false;
+    inline static thread_local std::map<UINT, std::string> _skipDllName;
+    inline static thread_local UINT _skipOwner = 0;
+    inline static std::atomic<UINT> _lastOwner = 0;
 
     inline static bool _serveOriginal = false;
     inline static UINT _serveOwner = 0;
