@@ -450,6 +450,23 @@ void FirstStepAndCeilings()
     CHECK(Governor::FirstStepForCeiling(0.85f) == 2);
     CHECK(Governor::FirstStepForCeiling(0.5f) == 5);
     CHECK(Governor::FirstStepForCeiling(0.49f) == -1);
+    // The scan is exclusive: a ceiling a hair above a tier still steps past that tier, never onto it (the 1e-6
+    // slack absorbs float noise, it is not a second landing spot). Both sides of the boundary are checked, so
+    // the step from the top is strictly below the user value.
+    CHECK(Governor::FirstStepForCeiling(0.9f + 1e-6f) == 2);
+    CHECK(Governor::FirstStepForCeiling(0.9f + 1e-5f) == 1); // past the slack, the tier itself is below again
+    CHECK(Governor::FirstStepForCeiling(0.8f - 1e-6f) == 3);
+    World hair;
+    hair.ceiling = 0.9f + 1e-6f;
+    hair.rate = 42.0;
+    hair.Run(12000);
+    const std::vector<uint64_t> hairSteps = hair.StepTimes();
+    CHECK(hairSteps.size() == 2);
+    if (!hairSteps.empty())
+    {
+        CHECK(hair.AtOrAfter(hairSteps[0])->tierPct == 80); // not the 90% tier it sits a hair above
+        CHECK(hair.AtOrAfter(hairSteps[0])->cap == 0.8f);
+    }
 }
 
 // Off is exactly the user value: no cap, and switching back on restarts the whole transition.
@@ -1219,6 +1236,87 @@ void NoiseAroundLines()
     CHECK(w.log.back().tierPct == 90);
 }
 
+// The clip is 3x in both directions, not "anything goes": one lone frame 20x faster than the average moves it a
+// clipped sample's worth (about +2% on a 16 ms tick), never the 20x the raw sample would; one lone frame ten
+// times slower, on a long tick where the weight is large, keeps about two thirds of the average instead of losing
+// nine tenths of it. A rebuild hitch or a lone good frame is not a slower or a faster scene. Both samples land in
+// the live average, not in the post-transition seed (which clips against its own running mean), so the first step
+// down and its 1.5 s transition are behind us before the samples are fed.
+void SpikeClipBothWays()
+{
+    World fast;
+    fast.rate = 51.0;
+    fast.Run(8000); // one step down to 90, its transition over, the average settled near 51
+    CHECK(fast.log.back().tierPct == 90);
+    const double settledFast = fast.log.back().avg;
+    CHECK(settledFast > 50.0 && settledFast < 52.0);
+    fast.hasIntervalOverride = true;
+    fast.intervalOverride = 1000.0 / (settledFast * 20.0); // a lone frame 20x faster than the average
+    fast.Step();
+    fast.hasIntervalOverride = false;
+    CHECK(fast.log.back().avg < settledFast * 1.05); // clipped to 3x: 20x would lift it by about 15%
+    CHECK(fast.log.back().avg > settledFast); // and it does count: the clip is a bound, not a drop
+    CHECK(fast.log.back().tierPct == 90);
+
+    World slow;
+    slow.rate = 51.0;
+    slow.Run(8000);
+    CHECK(slow.log.back().tierPct == 90);
+    const double settledSlow = slow.log.back().avg;
+    CHECK(settledSlow > 50.0 && settledSlow < 52.0);
+    slow.hasIntervalOverride = true;
+    slow.intervalOverride = 1000.0 / (settledSlow / 10.0); // a lone frame ten times slower: 196 ms, not a pause
+    slow.t += 900; // a long tick: the weight is about 0.6, so a clipped and an unclipped sample part far apart
+    slow.Step();
+    slow.hasIntervalOverride = false;
+    CHECK(slow.log.back().avg > settledSlow * 0.55); // clipped to a third: 0.1x would leave about 0.46
+    CHECK(slow.log.back().avg < settledSlow); // and it does count: the clip is a bound, not a drop
+    CHECK(slow.log.back().tierPct == 90); // 1 s short of the down dwell, counted from the resume below the line
+}
+
+// The unset sentinel is not a clock value. The first tick of a session happens at 0 ms, so a pause right after it
+// must still read as a pause: the timers shift past the gap and the samples after it are dropped and reseeded.
+// Reading 0 as "never ticked" loses the gap and reseeds on the pre-pause state instead.
+void ZeroBasedClockGap()
+{
+    World w;
+    w.rate = 51.0;
+    w.Step(); // the session's first tick, at 0 ms: the ceiling is adopted and the transition window opens
+    CHECK(w.log.back().t == 0 && w.log.back().tierPct == 0);
+    w.t = 3000; // the pass does not tick for 3 s, right after that first tick
+    w.Step();
+    CHECK(w.log.back().reason == Reason::Holding); // the gap is seen: the tier holds through the transition
+    CHECK(w.log.back().tierPct == 0);
+    CHECK(w.log.back().avg == 0.0);
+    w.Run(600); // past the old transition window, inside the one the gap restarted
+    CHECK(w.log.back().avg == 0.0); // the seeded-from-pre-pause average would be live here
+    CHECK(w.log.back().cap == 0.0f);
+    CHECK(w.StepTimes().empty()); // and nothing stepped on it
+}
+
+// A pause whose first tick also takes a transient exit shifts the timers once, not twice: the gap block pins the
+// clock before the exit runs. A second shift would move the whole transition two pauses into the future.
+void GapThenTransientShiftsOnce()
+{
+    World w;
+    w.rate = 51.0;
+    w.Run(2500); // banks about a second of the first down dwell
+    CHECK(w.StepTimes().empty());
+    w.t += 5000; // the pass does not tick for 5 s
+    w.hasIntervalOverride = true;
+    w.intervalOverride = 300.0; // a paused loading screen: this tick has no frame-time signal
+    w.Step();
+    CHECK(w.log.back().reason == Reason::NoSignal); // the exit still returns its own reason
+    CHECK(w.log.back().tierPct == 0); // no step from stale timers
+    w.hasIntervalOverride = false;
+    const uint64_t resumed = w.t;
+    w.Run(6000); // one step fits in this window; a transition moved twice would not step at all
+    const std::vector<uint64_t> steps = w.StepTimes();
+    CHECK(steps.size() == 1); // reseed plus one dwell: the pause is counted once
+    if (steps.size() == 1)
+        CHECK(steps[0] - resumed >= 4400 && steps[0] - resumed <= 4700);
+}
+
 } // namespace
 
 int main()
@@ -1250,6 +1348,9 @@ int main()
     PassGapBoundary();
     PinnedAtNinetySevenPercent();
     NoiseAroundLines();
+    SpikeClipBothWays();
+    ZeroBasedClockGap();
+    GapThenTransientShiftsOnce();
     ConstantsAndStatus();
     if (failures != 0)
     {

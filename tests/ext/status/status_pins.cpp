@@ -140,7 +140,7 @@ int main(int argc, char** argv)
 
     // ---- ownership: self-lock, takeover age, access-denied, own-file guards -
     CHECK(Has(file, "else if (ownerPid == pid)"));
-    CHECK(Has(file, "(now - ownerTime) > 30"));
+    CHECK(Has(file, "(now - ownerTime) > 30;")); // the documented 30 s takeover age, not a longer one
     CHECK(Has(file, "ownerErr == ERROR_ACCESS_DENIED"));
     CHECK(Has(file, "err = { \"open\", GetLastError() };"));
     CHECK(Has(file, "if (state.seq == 0) return;"));
@@ -156,6 +156,12 @@ int main(int argc, char** argv)
     CHECK(Has(file, "code = wrote ? ERROR_WRITE_FAULT : GetLastError();"));
     CHECK(Has(file, "step = \"flush\";"));
     CHECK(Has(file, "return { false, \"move\", code };"));
+    // no partial file is ever left behind: the temp goes before either failure returns, both after a failed write or
+    // flush and after a failed replace, so a later cycle and the sweep never meet half a document.
+    CHECK(Has(file, "if (!ok) { DeleteFileW(tmpPath.c_str()); return { false, step, code }; }"));
+    CHECK(Has(file, "if (MoveFileExW(tmpPath.c_str(), finalPath.c_str(), "
+                    "MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) { code = GetLastError(); "
+                    "DeleteFileW(tmpPath.c_str());"));
     CHECK(Has(file, "status.tmp-"));
     CHECK(file.find("FlushFileBuffers(h)") < file.find("MoveFileExW")); // flushed, then renamed
     CHECK(Has(file, "\"%s %lu\"")); // detail is operation plus number, never message text

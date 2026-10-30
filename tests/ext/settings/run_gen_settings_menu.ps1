@@ -2,8 +2,8 @@
 # settings generator (tab+card or iniOnly, known card and title, ini-only
 # keys listed with the others) and every list rule (aliases point at tagged
 # keys, retired keys are gone, the not-yet-tagged list holds live gaps) is
-# broken once on a scratch copy, and -Check must refuse each broken copy
-# with exit 1 and a message naming the broken rule.
+# broken once on a scratch copy, and -Check must refuse each broken copy with
+# exit 1 and the broken rule's own message as the last thing it prints.
 param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'gen_settings_lib.ps1')
@@ -11,9 +11,8 @@ $script:failures = 0
 
 function Expect-Reject {
     param([string]$Fake, [string]$What, [string]$Message)
-    $r = Invoke-SettingsGen -Fake $Fake -Check
-    Assert-Settings ($r.Code -eq 1) "${What}: -Check exits 1" "code $($r.Code): $($r.Text)"
-    Assert-Settings ($r.Text.Contains($Message)) "${What}: names the broken rule" $r.Text
+    # The rule itself must refuse it: its message, and nothing printed after it.
+    Expect-SettingsReject $Fake $What $Message
 }
 
 function New-Case {

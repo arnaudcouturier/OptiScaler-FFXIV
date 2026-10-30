@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <type_traits>
 
@@ -45,6 +47,23 @@ using FileErrorT = typename FourthArg<decltype(&status::TakeOwnership)>::Type;
 static fs::path TestRoot;
 static HANDLE g_child = nullptr;
 static DWORD g_childPid = 0;
+static std::string SourcePath; // the production source this test builds, from the repo argument
+
+// Whitespace collapsed, so a pin survives re-indentation but not a rewritten statement.
+static std::string Squash(const std::string& text)
+{
+    std::string out;
+    for (const char c : text)
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+            out += c;
+    return out;
+}
+
+static std::string ReadFileText(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
 
 static long long UnixNow()
 {
@@ -246,6 +265,19 @@ static void CheckTakeOwnership()
     else
         std::puts("note: no access-denied pid on this machine; the branch is pinned by text");
 
+    // The takeover age comes from the lock's own stamp, not the owner's liveness: a live client that stopped
+    // refreshing its lock (crashed, hung, wedged in a dialog) is evicted after 30 s, while a stamp inside that
+    // window keeps the file away from us. Both sides are driven with a live foreign pid, so only the age decides.
+    const long long stamped = UnixNow();
+    WriteText(dir / L"status.lock", std::to_string(g_childPid) + " 9 " + std::to_string(stamped - 60));
+    err = FileErrorT{};
+    CHECK(status::TakeOwnership(wdir, own, 9, err)); // 60 s stale: taken over
+    CHECK(err.step[0] == '\0');
+    WriteText(dir / L"status.lock", std::to_string(g_childPid) + " 9 " + std::to_string(stamped - 29));
+    err = FileErrorT{};
+    CHECK(!status::TakeOwnership(wdir, own, 10, err)); // 29 s fresh: the live owner keeps it
+    CHECK(err.step[0] == '\0'); // and no error is counted for it
+
     err = FileErrorT{}; // an unwritable folder reports the step and the code
     CHECK(!status::TakeOwnership(L"Z:\\no-such-folder-w4\\sub", own, 8, err));
     CHECK(std::string(err.step) == "open" && err.code != 0);
@@ -278,6 +310,15 @@ static void CheckWriteAtomically()
     CloseHandle(held);
     CHECK(ReadText(dir / L"status.json") == "previous"); // the previous file is intact
     CHECK(!fs::exists(dir / (L"status.tmp-" + std::to_wstring(own) + L".json"), ec)); // temp cleaned up
+
+    // The same cleanup on the other failure return: a failed write or flush also deletes the temp before it
+    // returns. That return cannot be driven here without a broken disk or a full volume (a create, a move or a
+    // lock failure all fail earlier, and a healthy disk always completes a write), so the site is pinned in the
+    // source the test builds: without the delete, a failed cycle would leave status.tmp-<pid>.json behind and only
+    // the next start's sweep would find it.
+    CHECK(!SourcePath.empty());
+    const std::string source = ReadFileText(SourcePath);
+    CHECK(Squash(source).find("if(!ok){DeleteFileW(tmpPath.c_str());return{false,step,code};}") != std::string::npos);
 }
 
 // ---- sweep: only dead crash leftovers go, ours and the living stay ----
@@ -437,6 +478,21 @@ static void CheckWorkerCycle()
     status::WorkerCycle(st, nowSystem, now);
     CHECK(st.seq == 1);
     CHECK(ReadText(dir / L"status.json") == first);
+
+    // Even a cycle that is due to write (the 10 s heartbeat has passed and the state changed) leaves the file and
+    // the sequence alone while the key is off: the key is re-read every cycle, and it is the first thing the cycle
+    // asks. The same due cycle with the key back on writes, so only the key stopped it.
+    const auto dueSystem = nowSystem + std::chrono::seconds(11);
+    const auto due = now + std::chrono::seconds(11);
+    ext::g_cfg.nr.enabled.value = true;
+    status::WorkerCycle(st, dueSystem, due);
+    CHECK(st.seq == 1);
+    CHECK(ReadText(dir / L"status.json") == first);
+    ext::g_cfg.status.fileEnabled.value = true;
+    status::WorkerCycle(st, dueSystem, due);
+    CHECK(st.seq == 2); // the cycle above was due: only the disabled key held it back
+    CHECK(ReadText(dir / L"status.json") != first);
+    ext::g_cfg.nr.enabled.value = false;
 }
 
 // ---- shutdown: signal, never wait; delete only our own file ----
@@ -470,9 +526,11 @@ static void CheckShutdown()
     CHECK(!fs::exists(dir / L"status.json", ec) && !fs::exists(dir / L"status.lock", ec));
 }
 
-int main()
+int main(int argc, char** argv)
 {
     std::error_code ec;
+    if (argc > 1)
+        SourcePath = std::string(argv[1]) + "/OptiScaler/ext/status/StatusFile.cpp";
     TestRoot = fs::temp_directory_path(ec) / L"status-w4-file";
     fs::remove_all(TestRoot, ec);
     fs::create_directories(TestRoot / L"game", ec);

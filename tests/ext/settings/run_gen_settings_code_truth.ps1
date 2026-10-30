@@ -2,8 +2,9 @@
 # type and default, so a scratch copy with a removed binder, a mistyped entry,
 # a renamed default, a drifted parser set, a removed upstream key, untagged
 # code or fragment keys, a missing or renamed fragment line, or a missing alias
-# line must each fail -Check with exit 1. A schema edit followed by a plain
-# regenerate must come back green.
+# line must each fail -Check with exit 1 and the broken rule's own message as
+# the last thing it prints. A schema edit followed by a plain regenerate must
+# come back green.
 param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'gen_settings_lib.ps1')
@@ -11,9 +12,8 @@ $script:failures = 0
 
 function Expect-Reject {
     param([string]$Fake, [string]$What, [string]$Message)
-    $r = Invoke-SettingsGen -Fake $Fake -Check
-    Assert-Settings ($r.Code -eq 1) "${What}: -Check exits 1" "code $($r.Code): $($r.Text)"
-    Assert-Settings ($r.Text.Contains($Message)) "${What}: names the broken rule" $r.Text
+    # The rule itself must refuse it: its message, and nothing printed after it.
+    Expect-SettingsReject $Fake $What $Message
 }
 
 function New-Case {

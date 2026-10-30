@@ -5,5 +5,6 @@
     IncludeDirs = @('stubs', '{repo}/OptiScaler')
     Libs        = @('dxgi.lib', 'psapi.lib')
     Defines     = @('NOMINMAX')
+    Args        = @('{repo}')
     Std         = 'c++20'
 }

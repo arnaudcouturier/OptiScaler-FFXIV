@@ -1,7 +1,7 @@
 # Runner for the settings schema checks: every schema validation rule of the
 # settings generator is broken once on a scratch copy, and -Check must refuse
-# each broken copy with exit 1 and a message naming the broken rule. A clean
-# scratch copy must pass.
+# each broken copy with exit 1 and the broken rule's own message as the last
+# thing it prints. A clean scratch copy must pass.
 param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'gen_settings_lib.ps1')
@@ -9,9 +9,8 @@ $script:failures = 0
 
 function Expect-Reject {
     param([string]$Fake, [string]$What, [string]$Message)
-    $r = Invoke-SettingsGen -Fake $Fake -Check
-    Assert-Settings ($r.Code -eq 1) "${What}: -Check exits 1" "code $($r.Code): $($r.Text)"
-    Assert-Settings ($r.Text.Contains($Message)) "${What}: names the broken rule" $r.Text
+    # The rule itself must refuse it: its message, and nothing printed after it.
+    Expect-SettingsReject $Fake $What $Message
 }
 
 function New-Case {

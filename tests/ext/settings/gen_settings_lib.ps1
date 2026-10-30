@@ -58,19 +58,49 @@ function Find-SettingsSection {
     return $null
 }
 
-# Runs the copied generator. Returns an object with the exit code and the
-# combined output, so checks can assert both the verdict and the message.
+# Runs the copied generator. Returns the exit code, each stream on its own and
+# both combined: a refused rule writes its message to stderr and stops there,
+# while a run that goes on writes to stdout (a later rule, the doc comparison,
+# the pass line), so a check can tell which one spoke.
 function Invoke-SettingsGen {
     param([string]$Fake, [switch]$Check, [string]$EmitEffective = '')
     $gen = Join-Path $Fake 'tools/gen-settings.ps1'
     $a = @()
     if ($EmitEffective -ne '') { $a += '-EmitEffective'; $a += $EmitEffective }
     if ($Check) { $a += '-Check' }
-    $text = & pwsh -NoProfile -File $gen @a 2>&1 | Out-String
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Text = $text }
+    $outFile = Join-Path $Fake 'gen-stdout.txt'
+    $errFile = Join-Path $Fake 'gen-stderr.txt'
+    & pwsh -NoProfile -File $gen @a 1>$outFile 2>$errFile
+    $code = $LASTEXITCODE
+    $out = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
+    $err = if (Test-Path -LiteralPath $errFile) { [IO.File]::ReadAllText($errFile) } else { '' }
+    Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Code = $code; Out = $out; Err = $err; Text = ($out + $err) }
 }
 
 function Assert-Settings {
     param([bool]$Ok, [string]$What, [string]$Detail = '')
     if (-not $Ok) { Write-Host "FAIL: $What $Detail"; $script:failures++ }
+}
+
+# A refused rule must be the one that refused: Fail writes its message to stderr
+# as one line and exits 1 at once, so a message on stdout (a doc comparison or a
+# later rule) or a second stderr line means the run went on past the broken rule
+# and refused it for some other reason.
+function Assert-SettingsRuleRefused {
+    param($Result, [string]$What, [string]$Message)
+    Assert-Settings ($Result.Code -eq 1) "${What}: -Check exits 1" "code $($Result.Code): $($Result.Text)"
+    Assert-Settings ($Result.Out.Trim() -eq '') "${What}: the run stops at the rule (nothing on stdout)" $Result.Out
+    $lines = @($Result.Err -split "`r?`n" | Where-Object { $_ -ne '' })
+    Assert-Settings ($lines.Count -eq 1) "${What}: one failure line on stderr" ($lines -join ' / ')
+    if ($lines.Count -ge 1) {
+        Assert-Settings ($lines[0].Contains($Message)) "${What}: that line names the broken rule" $lines[0]
+    }
+}
+
+# Refuses a broken scratch copy: exit 1, the rule's own message, nothing after it.
+function Expect-SettingsReject {
+    param([string]$Fake, [string]$What, [string]$Message)
+    $r = Invoke-SettingsGen -Fake $Fake -Check
+    Assert-SettingsRuleRefused $r $What $Message
 }

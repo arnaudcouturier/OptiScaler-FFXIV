@@ -60,6 +60,7 @@ int main(int argc, char** argv)
     const std::string presets = Read(nr + "presets/NrUserPresets.h");
     const std::string schema = Read(repo + "/tools/settings-schema.json");
     const std::string bridge = Read(nr + "amd/AmdBridge.cpp");
+    const std::string gov = Read(nr + "NrGovernor.h");
     const std::string lifetime = Read(repo + "/OptiScaler/ext/gpu/GpuLifetime.h");
     const std::string control = Read(repo + "/OptiScaler/ext/fg/DynamicMfgControl.h");
     const std::string seams = Read(repo + "/OptiScaler/ext/fg/FgSeams.h");
@@ -131,6 +132,10 @@ int main(int argc, char** argv)
     const size_t gateAsk = pass.find("RetirementsComplete(g_nr.governorReleaseSeq)");
     CHECK(offBranch != std::string::npos && refresh != std::string::npos && gateAsk != std::string::npos);
     CHECK(offBranch < refresh && offBranch < gateAsk);
+    // The reset comes first in that branch: turning the key off drops the governor's own state (tier, average,
+    // dwells), so switching it back on starts a fresh transition instead of resuming the tier it held. Zeroing the
+    // published output alone would leave that state behind for the first on-tick to pick up again.
+    CHECK(Has(pass, "if(!nr.governor.value_or_default()){g_nr.governor.Reset();g_nr.governorOut=DlssNr::Governor::Output{};"));
     CHECK(Has(pass, "g_nr.governorOut=DlssNr::Governor::Output{};g_nr.governorDbgHas=false;"));
     CHECK(Count(pass, "RetirementsComplete(g_nr.governorReleaseSeq)") == 1); // asked only while on
     // the feed: one read of the current feature, live activity (not selection), the observed count
@@ -140,6 +145,17 @@ int main(int argc, char** argv)
     CHECK(Has(pass, "govIn.multiplier=govIn.fgActive&&govDlssg&&govDetected>0?(double)(govDetected+1):0.0;"));
     CHECK(Has(pass, "govIn.targetFps=ext::fg::ResolveTarget(govTargetCfg,govLimit,govRefresh);"));
     // ---- the probe: one line per build, nothing else ----------------------------------------------------------------
+    // An open probe owns the verdict: while an up step is under judgment, a rate under the down edge holds the tier
+    // and says so, so the down arm never judges a transition it did not cause. That guard is the only below-target
+    // exit ahead of the down dwell; the simulated-time test cannot reach it (the verdict always lands before the down
+    // dwell runs out), so its position in front of the down arm is pinned here.
+    CHECK(Has(gov, "reason_=Reason::BelowTarget;returnFinish(out,in.nowMs);}"));
+    CHECK(Has(gov, "if(probeOpen_){//Anopenprobeownstheverdict"));
+    {
+        const size_t guardAt = gov.find("if(probeOpen_){//Anopenprobeownstheverdict");
+        const size_t downAt = gov.find("constintnext=FirstStepForCeiling(ceiling);");
+        CHECK(guardAt != std::string::npos && downAt != std::string::npos && guardAt < downAt);
+    }
     CHECK(Count(pass, "if(nr.governorProbe.value_or_default()&&!g_nr.governorProbeLogged&&g_nr.feature!=nullptr){") == 1);
     CHECK(Count(pass, "nr.governor.value_or_default()") == 2); // off branch plus the menu readout: the probe never asks the key
     CHECK(Count(pass, "g_nr.governorProbeLogged=true;") == 1); // latched: one line per build
