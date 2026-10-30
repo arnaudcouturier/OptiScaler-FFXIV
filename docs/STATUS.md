@@ -30,6 +30,10 @@ What has been played in game and what has not, for every feature of this fork. T
 | NR model version picker (`OptiScaler\NR.<version>` folders, `[DlssNr] Runtime`, switch in the Neural Rendering card) | new; unit-tested; tested (RTX 4090) on 2026-10-23: live switch and reload from an `NR.<version>` folder work; `NR.310.8.0.0` cannot create its feature on this GPU (NR skips itself, switching back recovers); a switch between two different working models was not seen |
 | Quality change without the 500 ms pause (`[NgxRelease] SkipReleaseSleep`) | on by default; ran in game (RTX 4090) since 2026-10-20: the sleep was skipped and 0.06 to 30 ms were waited instead of 500 ms |
 | Native-quality hook install retry, frame pacing trace (`[FramePacing] Trace`, off by default), preview pause when the window loses focus | the retry: the install succeeded on its first attempt in every game log since 2026-10-22; the retry path itself (a failed first attempt) has never been seen in game. The trace and the preview pause are unit-tested and untested in game |
+| NR frame replay (`[DlssNr] ReplayCapture`: records two frames of the pass for the software-adapter replay test) | developer tool, off by default; new; unit-tested on the software adapter; not tried in game |
+| NR Classic enlargement sharpening (`[DlssNr] ClassicSharpen`, `ClassicSharpenStrength`) | off by default; new; unit-tested, not tried in game |
+| NR frame rate governor (`[DlssNr] Governor`, steps 100-50% to hold `[DlssNr] GovernorTargetFps`) | experimental, off by default; new; untested, not tried in game |
+| Status file (`[Status] Enabled`, `status.json` beside the DLL for bug reports; no paths or names) | diagnostic, off by default; new; unit-tested, not tried in game |
 | NR ViT capture (`[DlssNr] VitCapture`) | diagnostic only, off by default |
 | AMD HIP pre-SR | untested / community |
 | XeFG / XeMFG | untested / community |

@@ -56,6 +56,7 @@ The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) on OptiScaler ni
 | [Install guide](../docs/INSTALL.md) | Backup, files, NVIDIA files, settings, known limits, uninstall |
 | [What works](../docs/STATUS.md) | Every feature with what was tested and what was not |
 | [Features and settings](../docs/FEATURES.md) | Each feature, where it comes from, its `OptiScaler.ini` keys and menu card |
+| [Settings reference](../docs/SETTINGS.md) | Every `OptiScaler.ini` key, with its default, range and menu card |
 | [HUD-less frame generation](../docs/HUDLESS.md) | How it works and what was measured |
 | [After a game patch](../docs/FFXIV-PATCH-RUNBOOK.md) | Updating the fork for a new game build |
 | [Releasing](../docs/RELEASE.md) | Building, packaging and publishing an archive, and how releases are numbered |

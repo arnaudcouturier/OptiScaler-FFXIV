@@ -310,7 +310,7 @@ class Governor
         // The VRAM gate holds in every state, including the top one: it counts only the retirements the last size
         // change parked, so a hotkey or slider rebuild parks the governor too until the old size releases.
         // Intentional: the average freezes with the tier while it holds. Past the transition window a still
-        // depressed rate measures the draining backlog, not the tier, so the verdict waits for the release
+        // depressed rate measures the draining queued work, not the tier, so the verdict waits for the release
         // instead of stepping on it; fences that never resolve freeze the tier (the fail-safe).
         if (!in.texturesReleased)
         {

@@ -17,7 +17,9 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [NR pause on focus loss](#nr-pause-on-focus-loss) | follows SirenBrink's approach, fork code | experimental, off by default; new; unit-tested; the preview pause has not run in game |
 | [NR spatial compression profiles](#nr-spatial-compression-profiles) (Peripheral and Foveated, independent X and Y, NR pixel share, 500 ms settle) | Peripheral: ported (PeripheralWarp by BeliyG3); Foveated: design follows maximedgoulet/FoveatedDLSS5, fork code | experimental, off by default; new; unit-tested (maths, settle decision, layout, presets, menu pins); the shader checks pass on the D3D11 software adapter; not tried in game |
 | [NR per-axis model resolution and depth-aware enlargement](#nr-per-axis-model-resolution-and-depth-aware-enlargement) (`WorkingScaleX`/`WorkingScaleY`, `DepthAwareResolve`, NR time readout) | ideas follow xenmods/DLSSNR-Cost-Scaler, fork code | experimental, off by default; new; unit-tested and checked on the D3D11 software adapter with synthetic depth; not tried in game |
+| [NR Classic enlargement sharpening](#nr-classic-enlargement-sharpening) (`[DlssNr] ClassicSharpen`, `ClassicSharpenStrength`) | upstream OptiScaler's plain RCAS, after the RCAS-for-ReShade port of AMD FidelityFX RCAS; the shader and dispatch are fork code | off by default; new; unit-tested, not tried in game |
 | [NR hotkeys](#nr-hotkeys) (`[DlssNr] ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`) | fork | off until a key is bound; new; unit-tested; not tried in game |
+| [NR frame rate governor](#nr-frame-rate-governor) (`[DlssNr] Governor`, `GovernorTargetFps`) | fork | experimental, off by default; new; untested, not tried in game |
 | [NR native path](#nr-native-path-and-vit-capture) | ported from SirenBrink's fork | tested (part of NR) |
 | [NR ViT capture](#nr-native-path-and-vit-capture) | fork | diagnostic only |
 | [NR frame replay](#nr-frame-replay) (`[DlssNr] ReplayCapture`) | fork | developer tool, off by default; new; unit-tested on the software adapter; not tried in game |
@@ -58,6 +60,8 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [Linear-light NR mode, HDR PNG with menu (F2, F3, F4)](#linear-light-nr-mode-and-hdr-png-with-menu-f2-f3-f4) | adapted from SirenBrink's v6.0 (same features) | untested |
 | [Update check off by default](#update-check-off-by-default) (`[Hotfix] CheckForUpdate`) | upstream key; the default is the fork's | always in effect; unit-tested, not looked at in game |
 | [Menu layout](#menu-layout), card registry and manifest | fork (tabs, cards and Custom Tab are upstream) | offline tests only |
+| [Settings schema](#settings-schema) (`tools/settings-schema.json`, `docs/SETTINGS.md`) | fork | generated reference, checked by `tools/gen-settings.ps1 -Check` |
+| [Status file](#status-file) (`[Status] Enabled`, `status.json`) | fork | diagnostic, off by default; new; unit-tested, not tried in game |
 
 ## DLSS Neural Rendering (NR)
 
@@ -67,9 +71,9 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **What it does.** Runs NVIDIA's DLSS Neural Rendering model on the frame, before ordinary super resolution (pre-SR) or after it, in one to three passes with per-pass profiles. A colour pipeline maps the game's image into what the model expects and back (white point, exposure, reversible tone mapping). It includes the exposure scan (reads the game's exposure from resource creation and unordered-access views) and named user presets. It needs NVIDIA's `nvngx_dlssnr.dll`; see [INSTALL.md](INSTALL.md).
 
-**Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested.
+**Status.** tested (RTX 4090), pre-SR multipass included. Exposure scan, white point, presets, compare views and the debug view are used by the tested sessions but not tested separately. `DeferredDLSS`, `ResidualFG`, spatial compression and `WorkingScale` other than 1.0 are experimental or opt-in and untested, as is the frame rate governor.
 
-**Config.** `[DlssNr]` (95 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `ReplayCapture` (ini only, see [NR frame replay](#nr-frame-replay)), `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
+**Config.** `[DlssNr]` (100 keys): `Enabled`, `DisableOnFocusLoss`, `ToggleKey`, `ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey`, `RunBeforeSR`, `Passes`, `PassFeedback`, `Pass2*`, `Pass3*`, `Preset`, `Style`, `Intensity`, `WorkingScale`, `WorkingScaleX`, `WorkingScaleY`, `DepthAwareResolve`, `ClassicSharpen`, `ClassicSharpenStrength` (see [NR Classic enlargement sharpening](#nr-classic-enlargement-sharpening)), `Governor`, `GovernorTargetFps` (see [NR frame rate governor](#nr-frame-rate-governor)), `ReversibleMode`, `WhitePointSource`, `ScanAnchors`, `LightingHistory`, `SkinProtection`, `PreSRTrailGuard`, `SplitFrameWork`, `Compare*`, `DebugView`, `ReplayCapture` (ini only, see [NR frame replay](#nr-frame-replay)), `GovernorProbe` (ini only, see [NR frame rate governor](#nr-frame-rate-governor)), `Runtime`. `[Hotfix] RenderSizeFromWidthHeight` and `[QualityOverrides] ForcePerfQuality` belong to the [FFXIV module](#ffxiv-module).
 
 **Menu.** `dlss_nr` (tab Upscaling), plus an overlay for the compare tags and the exposure-scan lamp, a GPU-time row, and the NR on/off, model resolution and enlargement shortcuts in the Keybinds list.
 
@@ -115,9 +119,9 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Origin.** Fork-original.
 
-**What it does.** A developer tool for checking NR shader changes without the game. With `[DlssNr] ReplayCapture = true`, a capture trigger (the `dlssnr-capture.trigger` file or `AutoCapture`) records a replay set of the NR pass instead of the before/after frames: two consecutive frames, every compute dispatch of the pass with its constants, the views it binds and the contents of what it reads and writes, the model's answers and the untouched game frame, in `dlssnr-capture\replay-<time>\`. A test replays each dispatch on the Direct3D software adapter (WARP) with the build's own compiled shaders and compares the result bit for bit with a blessed reference made the same way. A capture shows the player's screen: keep it out of version control. The ordinary before/after capture's "before" image is now the untouched game frame (it was the encoded proxy).
+**What it does.** A developer tool for checking NR shader changes without the game. With `[DlssNr] ReplayCapture = true`, a capture trigger (the `dlssnr-capture.trigger` file or `AutoCapture`) records a replay set of the NR pass instead of the before/after frames: two consecutive frames, every compute dispatch of the pass with its constants, the views it binds and the contents of what it reads and writes, the model's answers and the untouched game frame, in `dlssnr-capture\replay-<time>\` (manifest format version 2, one record per line). A test replays each dispatch on the Direct3D software adapter (WARP) with the build's own compiled shaders and compares the result bit for bit with a blessed reference made the same way; an incomplete set (a skipped dispatch, a missing picture) fails before anything runs. Blessing writes the reference images and needs its confirmation (`OPTISCALER_NR_REPLAY_BLESS_OK` set to `1` next to the bless request), or the test refuses and writes nothing. A capture shows the player's screen: keep it out of version control. The ordinary before/after capture's "before" image is now the untouched game frame (it was the encoded proxy).
 
-**Status.** New; unit-tested on the software adapter with synthetic sets; not tried in game (no real capture yet). The game's exposure texture is not recorded, so the exposure paths replay with an empty input. Dispatches outside the scene pass (the deferred pre-upscale stages, the character preview) are not recorded. Limits: the write holds the render thread for seconds (a hitch at capture time only); the recorder moves the pass's guide inputs between the shader-read and copy-source states, relying on the input-state contract the pass already relies on.
+**Status.** New; unit-tested on the software adapter with synthetic sets; not tried in game (no real capture yet). The game's exposure texture is not recorded, so the exposure paths replay with an empty input. Dispatches outside the scene pass (the deferred pre-upscale stages, the character preview) are not recorded. Limits: the write holds the render thread for seconds (a hitch at capture time only); the recorder moves the pass's guide inputs (the game's depth and motion when they are used directly) between the shader-read and copy-source states, relying on the input-state contract the pass already relies on.
 
 **Config.** `[DlssNr] ReplayCapture` (ini only, default false). **Menu.** None. Details: [notes/nr-frame-replay.md](notes/nr-frame-replay.md).
 
@@ -157,17 +161,43 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 
 **Code and seams.** `ext/nr/NrModelSize.h` (per-axis scales, the mixed-axis rule, the refusal latch), `ext/nr/DepthAwareWeights.h` (depth weights, shared threshold), `ext/nr/NrReadout.h`, `ext/nr/shaders/dlssnr.hlsl`, `ext/nr/pass/DlssNr_Dx12.cpp`. No new seam.
 
+### NR Classic enlargement sharpening
+
+**Origin.** Upstream OptiScaler's plain RCAS (`shaders/rcas/precompile/rcas.hlsl`), after the RCAS-for-ReShade port of AMD FidelityFX RCAS. The sharpen shader, its dispatch and the strength plumbing are fork code; the main shader and its blob are untouched, so every existing replay set still matches.
+
+**What it does.** An optional 3x3 adaptive sharpen over the resolved frame, after the resolve. Off by default; applies only when Enlargement is Classic. With the key on, the pass reads the resolved frame, sharpens it into a scratch texture and copies the result back over the frame; with the key off nothing runs (no dispatch, no barrier, byte-identical). The matched residual is never sharpened, and spatial compression never is either. The menu checkbox and slider follow the same Classic-applies rule as the Enlargement combo (reduced on some axis and above full on none, anything but Matched residual), so a greyed control and a skipped dispatch cannot disagree. Strength 0 skips the step entirely; a strength outside 0 to 1 is clamped, and a non-finite one is read as the default. DirectX 12 only: the Vulkan path has no sharpen step.
+
+**Status.** New; unit-tested, not tried in game.
+
+**Config.** `[DlssNr] ClassicSharpen` (false), `ClassicSharpenStrength` (0.4, upstream RCAS's own default sharpness); both are saved in the NR presets. **Menu.** `dlss_nr` card, next to the Enlargement combo: "Classic sharpening" checkbox and strength slider (0 to 1), greyed out unless Classic applies.
+
+**Code and seams.** `ext/nr/shaders/dlssnr_classic_sharpen.hlsl` (its own blob, `DlssNr_ClassicSharpen_cso`), `ext/nr/NrConfig.*`, `ext/nr/NrHotkeys.h` (the shared Classic-applies rule), `ext/nr/pass/DlssNr_Dx12.cpp`, `ext/nr/presets/NrUserPresets.h`. Seam: nr (no upstream change).
+
 ### NR hotkeys
 
 **Origin.** Fork code, following the existing NR toggle key.
 
-**What it does.** Three in-game hotkeys, all unbound by default: model resolution up and down (one press steps the uniform `WorkingScale` by 5%, from 25% to 200%, to a whole percent, so the key and the Model resolution slider write the same values) and the enlargement mode toggle (Classic/Matched residual, a no-op while the Enlargement combo is greyed out). Only the uniform scale moves: per-axis keys keep overriding it, and the toast says when they do. A press of a model resolution key changes the setting once, and the pass rebuilds the model once after its 500 ms settle, exactly like after a slider change; the enlargement toggle takes effect at once, with no rebuild. A press while the Model resolution slider is being dragged is replaced by the slider value when the slider is released. Each press shows a toast with the new value.
+**What it does.** Three in-game hotkeys, all unbound by default: model resolution up and down (one press steps the uniform `WorkingScale` by 5%, from 25% to 200%, to a whole percent, so the key and the Model resolution slider write the same values) and the enlargement mode toggle (Classic/Matched residual, a no-op while the Enlargement combo is greyed out). Only the uniform scale moves: per-axis keys keep overriding it, and the toast says when they do. A press of a model resolution key changes the setting once, and the pass rebuilds the model once after its 500 ms settle, exactly like after a slider change; the enlargement toggle takes effect at once, with no rebuild. A press while the Model resolution slider is being dragged is replaced by the slider value when the slider is released. Each press shows a toast with the new value. While a slider is being dragged, the toggle reads the last committed size, so the combo and the toggle can briefly disagree until the slider is released.
 
 **Status.** New; unit-tested, not tried in game.
 
 **Config.** `[DlssNr] ScaleUpKey`, `ScaleDownKey`, `TransferToggleKey` (all unbound by default). The keys are not part of the saved NR presets. **Menu.** Three rows in the Keybinds list.
 
 **Code and seams.** `ext/nr/NrHotkeys.h` (the step and toggle rules, shared with the Enlargement combo), `ext/nr/menu/NrMenu.cpp` (the press handlers and the Keybinds rows). Seam: menu (shortcut slots 16-18).
+
+### NR frame rate governor
+
+**Origin.** Fork code, following the AutoMFG pattern (a pure decision core, applied without writing config).
+
+**What it does.** While `[DlssNr] Governor` is on, the pass steps the model resolution down and up over 100/90/80/70/60/50% to hold a target frame rate. Steps down only below 95% of the target (so an auto target pinned at the display cap holds instead of ratcheting down), and probes one tier up after 10 s at or above 97% of the target (an auto target pinned at the display cap still probes back up): the probe is kept only if the rate holds at least 97% of the target over the 2 s after the new size renders, otherwise it reverts and the next probe waits twice as long (up to 96 s). Between stepping down (below 95%) and probing up (at or above 97%) the tier holds. Never above 100%, never below 50%. Each step goes through the existing 500 ms settle and model rebuild. The governor never writes a config key: it applies its tier as a run-time cap where the pass reads its scales, so the guides and motion vectors always agree with the model size; `WorkingScale` stays the ceiling (a user at 150% steps to 100% first, a user at 85% to 80%). The displayed rate uses the detected frame-generation multiplier (the observed count plus one). The menu controls follow the capped tier: while the governor holds below the ceiling, the model resolution slider, the Enlargement combo and the Classic sharpening controls show the capped size. It stands down, running the user value and saying why in its status line, while AutoMFG is on, while a per-axis key is set, or while spatial compression is on; it holds its tier while the previous size's retired textures still wait for the GPU and freezes there if the fences never resolve. A pass pause over 1 s reseeds the average instead of stepping on stale timers. Freshness is a present counter, not a timestamp: while a frame-generation feature owns presents, a counter that stops advancing across ticks reads no-signal and holds the tier; with the governor on, a once-a-second debug line logs the interval, the multiplier and the counter advance. Selected-but-idle frame generation reads as off (the displayed rate is the present rate). Target 0 (`GovernorTargetFps`) is auto: the lower of the frame limit and the display refresh (manual values below 30 fps are raised to 30 fps). After a step, a ceiling change or an applied size change the next second of samples is dropped and the average reseeds from the following half second, so the rebuild hitch never causes a step. After any NR model rebuild AutoMFG ignores the next two frame intervals. The default-off `[DlssNr] GovernorProbe` (ini only) logs once per model build that no below-created-size evaluate exists and changes nothing.
+
+**Status.** New; untested, not tried in game.
+
+**Config.** `[DlssNr] Governor` (false), `GovernorTargetFps` (0), `GovernorProbe` (false, ini only). `Governor` and `GovernorTargetFps` are saved in the NR presets; `GovernorProbe` is not.
+
+**Menu.** `dlss_nr` card, under Model resolution: "Frame rate governor (experimental)", "Governor target FPS", and the status line.
+
+**Code and seams.** `ext/nr/NrGovernor.h` (pure decision core), `ext/nr/pass/DlssNr_Dx12.cpp` (one-place cap, tick, probe line, rebuild seam call), `ext/gpu/GpuLifetime.h` (`RetireSeq`/`RetirementsComplete`), `ext/fg/DynamicMfgControl.h` (`NoteExternalStall`), `ext/fg/FgSeams.h`, `ext/fg/DynamicMfgSeams.cpp`, `ext/nr/menu/DlssNr_Menu.cpp`, `ext/nr/menu/NrMenu.cpp` (hotkey toast latch fix).
 
 ### Other NR paths
 
@@ -654,6 +684,30 @@ The automatic bias does not engage while "MB Scale Override" is on (one warning,
 | `[FFXIV] PreviewNRLingerSeconds`, `PreviewNRLate`, `PreviewGuideCapture`, `[HDR] PreviewNRTrace` | Character preview, closed "Advanced (debug)" fold | at once |
 
 The two FFXIV-only NR options, "Scanned exposure" and "Spread alternating NR across two frames", stay in the NR card, are drawn only on the FFXIV build match and carry "(FFXIV)" in their labels.
+
+## Settings schema
+
+**Origin.** Fork code.
+
+**What it does.** `tools/settings-schema.json` tags every fork ini key (key, type, default, range or values, menu location) and `tools/gen-settings.ps1` generates `docs/SETTINGS.md` from it, so the reference cannot drift from the schema. `docs/SETTINGS.md` lists every key per section with its default, its range or values and its menu card, plus the aliases, the generated key families and the retired keys.
+
+**Status.** Generated reference: `tools/gen-settings.ps1 -Check` fails when the committed `docs/SETTINGS.md` differs from the schema, so a stale reference cannot land.
+
+**Config.** None. **Menu.** None.
+
+**Code and seams.** `tools/settings-schema.json`, `tools/gen-settings.ps1`, `docs/SETTINGS.md`. No upstream change; no new seam.
+
+## Status file
+
+**Origin.** Fork code.
+
+**What it does.** With `[Status] Enabled`, the DLL writes `status.json` beside itself (the game folder): a small versioned snapshot for bug reports and tools — format and version, fork and game versions, GPU name, runtimes found and loaded, the state of each fork feature, frame generation input and output, base and output frame-time percentiles, and the writer's own last error. It never holds a path, a drive letter, a user name or a character name: folders appear only as a closed set of labels, and every string is cleaned and capped. A below-normal background thread writes it atomically (temporary file, then replace) on a state change at most once a second plus a heartbeat every 10 s, at most 16 KB; the render path pays one key read when the key is off. With two game clients only the first to present owns the file. A game exit deletes the file and its lock; once the writer has started, the DLL stays loaded until the game exits. Schema: [notes/status-json.md](notes/status-json.md).
+
+**Status.** New; unit-tested, not tried in game.
+
+**Config.** `[Status] Enabled` (ini only, default false). **Menu.** None.
+
+**Code and seams.** `ext/status/`. Upstream: one call in the `DLL_PROCESS_DETACH` case of `dllmain.cpp` (stops the writer and removes our file at exit).
 
 ## Footprint
 
