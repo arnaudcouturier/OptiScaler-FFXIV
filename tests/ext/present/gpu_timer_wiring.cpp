@@ -303,6 +303,31 @@ int main(int argc, char** argv)
         const auto rows = Between(timers, "std::optional<double> RowCopyIn()", "struct GpuTimerRowRegistration");
         CHECK(!rows.empty() && !Has(rows, "TraceOn") && !Has(rows, "LOG_"));
     }
+    // ---- the off transition empties the published samples --------------------------------------------------------------
+    // The rows show empty while the timers are off, not the last numbers: the way off clears every stage and stores
+    // the empty sentinel into all three published samples. A missing store would keep the last number on screen.
+    {
+        const auto offSentinels = Between(timers, "if (!on)", "return;");
+        CHECK(!offSentinels.empty());
+        CHECK(Count(offSentinels, "PublishedCopyInMs().store(-1.0, std::memory_order_relaxed);") == 1);
+        CHECK(Count(offSentinels, "PublishedEffectsMs().store(-1.0, std::memory_order_relaxed);") == 1);
+        CHECK(Count(offSentinels, "PublishedInteropMs().store(-1.0, std::memory_order_relaxed);") == 1);
+    }
+    // ---- the rows read the published samples, never the lock ----------------------------------------------------------
+    // Each row loads the flag and sample published at the last Present exit; a missing sample is published as -1.0 (not
+    // zero: zero would claim the stage cost nothing) and reads as empty. No row takes the timer lock: the menu thread
+    // never waits on the present thread.
+    {
+        const auto allRows = Between(timers, "std::optional<double> RowCopyIn()", "struct GpuTimerRowRegistration");
+        CHECK(!allRows.empty() && !Has(allRows, "TimerMutex"));
+        CHECK(Count(allRows, "PublishedOn().load(std::memory_order_relaxed)") == 4); // one per row
+        CHECK(Count(allRows, "PublishedCopyInMs().load(std::memory_order_relaxed)") == 1);
+        CHECK(Count(allRows, "PublishedEffectsMs().load(std::memory_order_relaxed)") == 1);
+        CHECK(Count(allRows, "PublishedInteropMs().load(std::memory_order_relaxed)") == 1);
+        CHECK(Count(allRows, "ms < 0.0 ? std::nullopt : std::optional<double>(ms);") == 3); // one per timed row
+        CHECK(Count(timers, "value_or(-1.0), std::memory_order_relaxed);") == 3); // the on-path publishes a missing sample as empty
+    }
+
     CHECK(Has(timers, "FormatGpuLine(GpuStageName("));
 
     // ---- safety: DONOTFLUSH reads only, no flush, no wait, no map on the frame path, one warning per timer ------------

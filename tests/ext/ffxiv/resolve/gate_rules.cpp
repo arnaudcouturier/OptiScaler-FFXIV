@@ -875,6 +875,110 @@ void TestLogBlock()
 // A third party hooks a helper function the fork never touches (companion.indexBufferMap, camera.getter): the seams whose anchors sit in that
 // helper go NotFound and the resolver fills their fields from the table. On the KNOWN build the table value is verified offline and no contract names
 // those seams, so the feature stays on; the same loss on an unknown build refuses it. (The real-exe version is in gate_real_exe.)
+// ---- the log block on every gate state ----------------------------------------------------------------------------------------------------
+
+// The block keeps one shape per state: the fallback warning only where the legacy decision runs on the exact known build, the
+// not-self-healing line only where a resolve ran and the gate does not call the build known (or the fallback runs on the
+// exact known build, where it names the known build the legacy decision runs on). A dropped disjunct in that gate prints the
+// line on the wrong builds or drops it where the player needs it.
+void TestGateBlockSixStates()
+{
+    const GateSettings def = Settings();
+    auto hasLine = [](const std::vector<GateLine>& lines, const std::string& needle)
+    {
+        for (const GateLine& l : lines)
+            if (Contains(l.text, needle))
+                return true;
+        return false;
+    };
+    // ordinary known build: head, group1, 6 features, 4 checks; everything on and agreeing, no warning anywhere
+    {
+        const ResolvedBuild known = AllFound(true);
+        const GateReport k = Run(&known, def);
+        const auto lines = FormatGateBlock(k, &known, Reg(), 0x6ad10bfd, 0x381f000, 1.5, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 6 + 4);
+        for (const GateLine& l : lines)
+            CHECK(l.level == LogLevel::Info);
+        CHECK(!hasLine(lines, "falling back") && !hasLine(lines, "not self-healing"));
+    }
+    // ordinary unknown build: one more line, and it names the UNKNOWN build (a moved offset is not followed there)
+    {
+        const ResolvedBuild unknown = AllFound(false);
+        const GateReport u = Run(&unknown, def);
+        const auto lines = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 2.0, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 6 + 4 + 1);
+        CHECK(lines.back().level == LogLevel::Warn && Contains(lines.back().text, "not self-healing"));
+        CHECK(Contains(lines.back().text, "UNKNOWN build") && lines.back().text.find("known build, table verified offline") == std::string::npos);
+    }
+    // the resolver failed on the exact known build: the fallback warning plus the not-self-healing line, and that line
+    // names the KNOWN build the legacy decision runs on (the gate's verdict, not the failed result's unknown mark)
+    {
+        ResolvedBuild exception = AllFound(true);
+        exception.registryErrors.push_back("resolver exception: bad_alloc");
+        const GateReport g = Run(&exception, def, true, true);
+        REQUIRE(g.legacyFallback && g.known);
+        const auto lines = FormatGateBlock(g, &exception, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 1 + 6 + 1);
+        CHECK(lines[1].level == LogLevel::Warn &&
+              Contains(lines[1].text, "resolver infrastructure failure on the exact known build (resolver exception: bad_alloc)") &&
+              Contains(lines[1].text, "falling back to the legacy decision"));
+        for (std::size_t i = 3; i < 3 + 6; ++i)
+            CHECK(lines[i].level == LogLevel::Info && Contains(lines[i].text, "falling back to the legacy decision") &&
+                  Contains(lines[i].text, "the exact known build runs on the compile-time table"));
+        CHECK(lines.back().level == LogLevel::Warn && Contains(lines.back().text, "not self-healing"));
+        CHECK(Contains(lines.back().text, "known build, table verified offline") && !hasLine(lines, "UNKNOWN build"));
+    }
+    // the forced-unknown refusal on the exact build: Warn lines, but no not-self-healing line (the gate calls it known)
+    {
+        const ResolvedBuild known = AllFound(true);
+        const GateReport g = Run(&known, Settings(false, false, true), true, true);
+        CHECK(g.known && !g.legacyFallback);
+        const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 6 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+    }
+    // the rollback key on the exact build: no not-self-healing line even with a resolve result in hand
+    {
+        const ResolvedBuild known = AllFound(true);
+        const GateReport g = Run(nullptr, Settings(true), true, true);
+        const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+    }
+    // no resolve ran on an unknown build: fail open, no not-self-healing line without a result
+    {
+        const GateReport g = Run(nullptr, def, true, false);
+        CHECK(!g.known && !g.legacyFallback);
+        const auto lines = FormatGateBlock(g, nullptr, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
+        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing"));
+    }
+}
+
+// Group 1 names the identity it ran on: the stamp and size on the exact known build (never the file name, so a renamed
+// copy reads the same), the exe name and the shader fingerprints anywhere else. A swapped reason would name the file on
+// the build whose rule never reads it.
+void TestGroup1ReasonNamesIdentity()
+{
+    const ResolvedBuild known = AllFound(true);
+    const GateReport k = Run(&known, Settings(), true, true);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kFirstGroup2Feature); ++i)
+    {
+        CHECK(Contains(k.features[i].reason, "exact known build (PE stamp and size)") &&
+              Contains(k.features[i].reason, "identified without the exe name"));
+        CHECK(k.features[i].reason.find("ffxiv_dx11.exe") == std::string::npos);
+    }
+    const ResolvedBuild unknown = AllFound(false);
+    const GateReport u = Run(&unknown, Settings(), true, false);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kFirstGroup2Feature); ++i)
+        CHECK(Contains(u.features[i].reason, "ffxiv_dx11.exe: identified by name and shader CRC"));
+    // the single-feature entry the game selector asks gives the same answer
+    CHECK(Contains(DecideGroup1(Feature::Lighting, true, true, Settings()).reason, "identified without the exe name"));
+    CHECK(Contains(DecideGroup1(Feature::Lighting, true, false, Settings()).reason, "ffxiv_dx11.exe: identified by name and shader CRC"));
+    // the emitted block carries the reason on its group1 line
+    const auto kl = FormatGateBlock(k, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
+    CHECK(Contains(kl[1].text, "exact known build (PE stamp and size)") && kl[1].text.find("ffxiv_dx11.exe") == std::string::npos);
+    const auto ul = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 0, "ffxiv_dx11.exe");
+    CHECK(Contains(ul[1].text, "ffxiv_dx11.exe: identified by name and shader CRC"));
+}
+
 void TestHelperHookOnKnownBuild()
 {
     const char* const indexBuffer[] = { "companion.indexBufferCapacityOffset", "companion.indexBufferFlagsOffset", "companion.indexBufferCpuStartOffset",
@@ -1365,6 +1469,8 @@ int main()
     TestCrossChecks();
     TestNotSelfHealing();
     TestLogBlock();
+    TestGateBlockSixStates();
+    TestGroup1ReasonNamesIdentity();
     TestHelperHookOnKnownBuild();
     TestContextCacheOffsetRule();
     TestInfrastructureFailureFallsBack();

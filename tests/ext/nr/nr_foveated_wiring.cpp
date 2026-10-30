@@ -376,6 +376,50 @@ int main(int argc, char** argv)
     CHECK(Count(menu, "Doesnothingat100%orabove,norwhileanaxisisabove100%(greyedout),andisoffwhile") == 1);
     CHECK(Count(menu, "Ifthemodelrefusesasizethatdiffersperaxis,thepassworksatModelresolutiononbothaxesuntilascalesettingchanges.") == 1);
 
+    // ---- the declared output size, the ACTIVE clamp, and the readout clear --------------------------------------------------
+    // The geometry is built for the declared output (the Out parameters, else the target allocation: zero means "no
+    // declaration"), never the allocation alone: the Foveated pixel inputs are output pixels on both placements.
+    CHECK(Count(pass, "constunsignedintoutputW=frame.OutputWidth!=0?frame.OutputWidth:(unsignedint)desc.Width;") == 1);
+    CHECK(Count(pass, "constunsignedintoutputH=frame.OutputHeight!=0?frame.OutputHeight:(unsignedint)desc.Height;") == 1);
+    // Post-upscale the ACTIVE rectangle is the declared size clamped to the allocation per axis (a mismatched
+    // CopyResource is illegal): scratches, dispatches and copies address it, while MakeGeometry and the readout keep
+    // the declared size. An unclamped side would write past the smaller allocation; a max would overshoot the other way.
+    CHECK(Count(pass, "DlssNr::ColorExtent{std::min(outputW,(unsignedint)desc.Width),std::min(outputH,(unsignedint)desc.Height)}") == 1);
+    // The copy-back uses the whole-resource copy only when the sides agree, else the clamped-rectangle region copy.
+    CHECK(Count(pass, "if(desc.Width==width&&desc.Height==height)cmdList->CopyResource(target,g_nr.hdrCopy);elseDlssNr::CopyActiveColor(cmdList,target,g_nr.hdrCopy,DlssNr::ColorExtent{width,height});") == 2);
+    // Both clear sites (bridge suspend, the while-off path) call the one clear, and the clear keeps the last declared
+    // output size: the foveated slider ranges stay at the last declared size instead of jumping to the 3840x2160
+    // fallback while NR is off. A full clear would reset the ranges on every toggle.
+    CHECK(Count(pass, "staticvoidClearSpatialReadout(){") == 1);
+    CHECK(Count(pass, "constunsignedintkeptW=g_nr.spatialReadout.outputW,keptH=g_nr.spatialReadout.outputH;") == 1);
+    CHECK(Count(pass, "g_nr.spatialReadout={};g_nr.spatialReadout.outputW=keptW;g_nr.spatialReadout.outputH=keptH;}") == 1);
+    CHECK(Count(pass, "ClearSpatialReadout();") == 2);
+    // The refusal notice reads the committed keys, like the pass: dragging the Model resolution slider shows the
+    // pending value in the controls but must not hide the notice until the handle is let go.
+    {
+        const size_t latchWarn = menu.find("if(AnamorphicLatchHolds(refusal,");
+        CHECK(latchWarn != std::string::npos);
+        if (latchWarn != std::string::npos)
+        {
+            const std::string latchStmt = menu.substr(latchWarn, 400);
+            CHECK(latchStmt.find("pending") == std::string::npos && latchStmt.find("uniformShown") == std::string::npos);
+            const size_t shown = menu.find("constAxisScalesshownScales=DlssNr::ShownEffectiveScales(");
+            const size_t downscaler = menu.find("if(aboveFull){");
+            CHECK(shown != std::string::npos && downscaler != std::string::npos && shown < latchWarn && latchWarn < downscaler);
+        }
+    }
+    // The Vulkan NR time is read, written and reset under its own leaf lock: the reader and both teardown resets take
+    // it alone, the steady-state writer takes it range-checked inside the evaluation section, and nothing else takes
+    // the evaluation lock. A teardown reset under the big lock could deadlock against a shutdown under the evaluation's.
+    {
+        const std::string vk = Read(nr + "vk/DlssNrFeature_Vk.cpp");
+        CHECK(vk.size() > 10000);
+        CHECK(Count(vk, "std::lock_guard<std::mutex>lock(g_vkMutex);") == 1); // the evaluation section alone
+        CHECK(Count(vk, "std::lock_guard<std::mutex>time(g_vkTimeMutex);") == 4); // reader, writer, two teardown resets
+        CHECK(Count(vk, "{std::lock_guard<std::mutex>time(g_vkTimeMutex);g_vk.lastGpuTime.reset();}") == 2); // both teardowns reset, alone in their braces
+        CHECK(Count(vk, "if(ms>0.0&&ms<1000.0){std::lock_guard<std::mutex>time(g_vkTimeMutex);g_vk.lastGpuTime=ms;}") == 1);
+    }
+
     if (failures != 0)
     {
         std::printf("%d check(s) failed\n", failures);

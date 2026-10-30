@@ -1021,6 +1021,31 @@ void Threads()
 }
 } // namespace
 
+// A session holding ui5 instead of ui3 (6 of 7, but not the pinned set) is FALLBACK at the log level: the boundary
+// names the pinned set, the missing-ui3 line claims no healthy baseline, and the uncatalogued dump still runs (a 6/7
+// session missing a required shader is not a healthy one). The count rule alone would call it healthy.
+void Ui5WithoutUi3FallbackDump()
+{
+    Ledger l;
+    for (size_t i = 0; i < 7; ++i)
+        if (i != 3) // ui5 without ui3: 6 of 7, still FALLBACK (not the pinned set)
+            NoteEntry(l, Catalog::Ui, i, 1000 + uint32_t(i));
+    CHECK(!l.UiHealthy());
+    const Bytes b = Blob(30);
+    for (uint32_t i = 0; i < 40; ++i)
+        l.NotePixelShader(b.data(), b.size(), 0x63000000u + i, 10 + i);
+    Presents(l, 700);
+    const auto lines = l.Poll(40000);
+    const std::string text = Joined(lines);
+    CHECK_HAS(text, "UI boundary FALLBACK (UI 6/7, needs the pinned set: HUD-less reports NoBoundaryThisFrame until it is complete)");
+    CHECK_HAS(text, "UI #3 (ui3) crc=0x712eb335 missing");
+    for (const auto& s : lines)
+        if (s.find("UI #3 (ui3)") != std::string::npos)
+            CHECK(s.find("within the healthy baseline") == std::string::npos); // the missing required shader claims no baseline
+    CHECK_HAS(text, "near-miss: UI 6/7, required set of 6 incomplete; shaders created");
+    CHECK(CountLines(lines, "uncatalogued #") > 0); // below the pinned set still dumps
+}
+
 int main()
 {
     Fresh();
@@ -1037,6 +1062,7 @@ int main()
     NearMiss();
     DumpIsCapped();
     HealthyLaunchIsQuiet();
+    Ui5WithoutUi3FallbackDump();
     SlotCapacity();
     ReferenceLateMatch();
     ReferenceZeroUnchanged();
