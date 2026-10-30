@@ -48,6 +48,10 @@ bool PrepareSC(IFGFeature_Dx12* fg, UINT index);
 
 // D1: DLSSG_Common::QueryState, the usable maximum: max(driver ceiling, unlocked ceiling).
 int AdjustMfgMax(int driverMax);
+
+// IFGFeature::StartNewFrame: the frame count jumped by more than the two frames a re-sync expects. One line per second with a
+// count of the jumps it swallowed, instead of one line per jump (ext/fg/FrameJumpLog.h, tests/ext/fg/frame_jump_log.cpp).
+void NoteFrameCountJump(uint64_t frameCount, uint64_t lastDispatchedFrame);
 } // namespace ext::fg
 
 namespace ext::present

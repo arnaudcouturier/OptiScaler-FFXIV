@@ -17,7 +17,8 @@
 
 // Recorder core (FgRecorder.h): the bounded queue, the writer thread and the session files. Ported from
 // SirenBrink/FFXIVRender's fg_diagnostics (GPL-3.0-or-later) with smaller records (fixed small fields, no big
-// arrays), tighter rotation (16 MiB x 3 files) and a session cap (newest 5 sessions, own-pattern files only).
+// arrays), a rotation of 16 MiB x 9 files (a 25-minute play session keeps its head) and a session cap (newest 5 sessions,
+// own-pattern files only).
 //
 // Locking: emitters and the worker meet only to swap small batches under the mutex. The worker's file I/O
 // runs without the mutex, so stopping it never needs the loader lock: shutdown signals and, when the writer
@@ -38,7 +39,12 @@ constexpr size_t kQueueCap = 4096; // bounded: overflow is an explicit records_d
 // never one wake per frame (a wake per frame would flush the device once per frame).
 constexpr size_t kHighWater = kQueueCap / 2;
 constexpr uint64_t kRotateBytes = 16ull * 1024 * 1024; // each file rotates at 16 MiB ...
-constexpr int kKeepRotations = 2; // ... keeping base + .1 + .2 (48 MiB) per session
+// ... keeping base + .1 .. .8 (144 MiB) per session. Nine files hold about 40 minutes at 60 base fps with 2x frame generation (the
+// 3.4 MB/min a measured 2x session wrote), and each file holds 16 MiB plus the queue batch that crossed the limit, so the bound
+// depends on the rate the session writes. A 25-minute session keeps its beginning: the head of a recording is where a problem
+// usually starts, and the per-present output records cannot be aggregated without losing the batch / generated-frame accounting the
+// analyzer does.
+constexpr int kKeepRotations = 8;
 constexpr int kKeepSessions = 5; // at start, only the newest 5 sessions stay
 constexpr DWORD kBatchWaitMs = 100; // the writer drains about every 100 ms
 constexpr uint64_t kFlushMs = 1000; // ... and flushes at most about once a second
@@ -278,10 +284,10 @@ void AppendRecord(Out& out, const Record& r)
     out.append("\"}\n", 3);
 }
 
-// Session key of an own-pattern file: the base name without a trailing .1/.2 rotation suffix. Only the
+// Session key of an own-pattern file: the base name without a trailing .1 .. .8 rotation suffix. Only the
 // exact pattern the recorder writes is grouped: fg-rec-<8 digits>-<6 digits>-<3 digits>-<pid>.jsonl plus
-// an optional .1/.2. Backups, Explorer copies, lookalikes and other tools' logs never match, so they are
-// never grouped and never deleted.
+// an optional .1 .. .<kKeepRotations>. Backups, Explorer copies, lookalikes and other tools' logs never
+// match, so they are never grouped and never deleted.
 bool OwnFile(const std::wstring& name, std::wstring& session)
 {
     const std::wstring pre(kFilePrefix), suf(kFileSuffix);
@@ -311,8 +317,17 @@ bool OwnFile(const std::wstring& name, std::wstring& session)
         return false;
     at += suf.size();
     size_t end = at;
-    if (at + 2 <= name.size() && (name.compare(at, 2, L".1") == 0 || name.compare(at, 2, L".2") == 0))
-        end = at + 2;
+    if (at + 1 < name.size() && name[at] == L'.')
+    {
+        size_t n = at + 1;
+        unsigned number = 0;
+        while (n < name.size() && name[n] >= L'0' && name[n] <= L'9' && number <= 1000)
+            number = number * 10 + static_cast<unsigned>(name[n++] - L'0');
+        // A rotation suffix the recorder writes has no leading zero: "….jsonl.01" or "….jsonl.008" is a stray copy, not a session file,
+        // and must not become a session key that takes one of the kept slots (and is then swept with it).
+        if (n > at + 1 && number >= 1 && number <= static_cast<unsigned>(kKeepRotations) && name[at + 1] != L'0')
+            end = n;
+    }
     if (end != name.size())
         return false;
     session = name.substr(0, at);
@@ -452,23 +467,27 @@ bool WriteBatchFixed(HANDLE out, const std::vector<Record>& batch, uint64_t lost
     return flush();
 }
 
-// Rotate only this session's own files (48 MiB maximum): .1 goes to .2, the base goes to .1. Every step is
-// checked: a rotation a reader blocks fails loudly (the session stops with an error) instead of truncating
-// the base and losing 16 MiB silently. On every false return out is INVALID_HANDLE_VALUE and nothing this
-// call opened stays open, so no caller can keep a handle that another path then closes again.
+// Rotate only this session's own files (144 MiB maximum): the oldest rotation .<kKeepRotations> is dropped, then every .n goes
+// to .n + 1 (highest first) and the base goes to .1. Every step is checked: a rotation a reader blocks fails loudly (the session
+// stops with an error) instead of truncating the base and losing 16 MiB silently. On every false return out is
+// INVALID_HANDLE_VALUE and nothing this call opened stays open, so no caller can keep a handle that another path then closes again.
 bool Rotate(HANDLE& out, const std::wstring& base, uint64_t qpf, uint64_t& bytes) noexcept
 {
     try
     {
-        const std::wstring one = base + L".1", two = base + L".2";
         CloseHandle(out);
         out = INVALID_HANDLE_VALUE;
-        if (GetFileAttributesW(two.c_str()) != INVALID_FILE_ATTRIBUTES && DeleteFileW(two.c_str()) == 0)
+        const std::wstring oldest = base + L"." + std::to_wstring(kKeepRotations);
+        if (GetFileAttributesW(oldest.c_str()) != INVALID_FILE_ATTRIBUTES && DeleteFileW(oldest.c_str()) == 0)
             return false; // the oldest rotation is held open: keep the base intact and stop
-        if (GetFileAttributesW(one.c_str()) != INVALID_FILE_ATTRIBUTES &&
-            MoveFileW(one.c_str(), two.c_str()) == 0)
-            return false;
-        if (MoveFileW(base.c_str(), one.c_str()) == 0)
+        for (int n = kKeepRotations - 1; n >= 1; --n)
+        {
+            const std::wstring from = base + L"." + std::to_wstring(n);
+            const std::wstring to = base + L"." + std::to_wstring(n + 1);
+            if (GetFileAttributesW(from.c_str()) != INVALID_FILE_ATTRIBUTES && MoveFileW(from.c_str(), to.c_str()) == 0)
+                return false;
+        }
+        if (MoveFileW(base.c_str(), (base + L".1").c_str()) == 0)
             return false;
         out = CreateFileW(base.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
                           FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -810,7 +829,7 @@ void EnsureStarted(bool keyOn, const SessionInfo& info) noexcept
         QueryPerformanceFrequency(&freq);
         s.qpf = static_cast<uint64_t>(freq.QuadPart);
         // The real file path, not the directory alone: dir + folder + the
-        // stamped name + the .2 rotation suffix. Past MAX_PATH the extended
+        // stamped name + the rotation suffix. Past MAX_PATH the extended
         // prefix keeps the open working; past the extended limit it latches.
         SYSTEMTIME utc {};
         GetSystemTime(&utc);
@@ -878,6 +897,27 @@ void RearmKey() noexcept
     }
     catch (...)
     {
+    }
+}
+
+namespace
+{
+// The mark counter, like the key state: it survives a key-off/key-on of the recorder (the numbers the user saw in the log stay the
+// numbers in the file) and needs no thread, no allocation and no lock.
+std::atomic<unsigned> g_marks { 0 };
+} // namespace
+
+unsigned Mark() noexcept
+{
+    try
+    {
+        const unsigned number = g_marks.fetch_add(1, std::memory_order_relaxed) + 1;
+        Emit(kMark, 0, static_cast<int64_t>(number), 0, 0, nullptr);
+        return number;
+    }
+    catch (...)
+    {
+        return 0;
     }
 }
 

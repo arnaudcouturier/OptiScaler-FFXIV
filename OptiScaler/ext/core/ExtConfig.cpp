@@ -223,6 +223,7 @@ void FramePacingConfig::Bind(config::Binder& b)
     b.Add("FramePacing", "GpuTimers", gpuTimers);
     b.Add("FramePacing", "HiddenPresentDoNotWait", hiddenPresentDoNotWait);
     b.Add("FramePacing", "FgRecorder", fgRecorder);
+    b.Add("FramePacing", "FgRecorderMarkKey", fgRecorderMarkKey, true); // hex when positive (a key code)
     b.Add("FramePacing", "TickProbe", tickProbe);
 }
 

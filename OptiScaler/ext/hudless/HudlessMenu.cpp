@@ -8,6 +8,7 @@
 #include "ext/game/Game.h"
 #include "ext/hudless/HudlessConfig.h"
 #include "ext/hudless/HudlessEngine.h"
+#include "ext/hudless/HudlessMenuLog.h"
 #include "ext/hudless/PlateMode.h"
 #include "ext/reshade/ReShadeBoundary.h"
 
@@ -45,8 +46,25 @@ void DrawStatus(const ext::hudless::Status& status)
                                 status.coverageTripped ? " (over the guard, falling back)" : "");
         else if (status.coverageUnknown)
             ImGui::TextDisabled("Flagged UI area: unknown (no readback has completed)");
+        // The guard in force: its limit, where the release sits, and why a present falls back while it is tripped (docs/HUDLESS.md 5).
+        ImGui::TextDisabled("%s", ext::hudless::GuardStatusLine(status.guardLimit, status.coverageTripped, status.guardPolicy).c_str());
+        // The HUD's own flagged area the limit has to let through, so the user has a number to set the guard against before the
+        // warning ever fires, and a pointer to the warning itself (whose full text is next to the guard slider in the fold).
+        if (status.hudCoverage >= 0.f)
+            ImGui::TextDisabled("HUD's own flagged area: %.1f%% (low fifth of %llu readbacks)", 100.0 * status.hudCoverage,
+                                (unsigned long long) status.hudCoverageSamples);
         ImGui::TextDisabled("UI paste: %llu built, %llu drawn, %llu skipped", (unsigned long long) status.paste.produced,
                             (unsigned long long) status.paste.pasted, (unsigned long long) status.paste.skipped);
+    }
+
+    // The guard-limit warning, one short pointer line here: the numbers and what to set are in the Advanced fold, next to the guard
+    // slider the warning is about.
+    if (status.guardAdvisoryWarn)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+        ImGui::TextWrapped("The coverage guard limit cannot release over the HUD's own flagged area: Advanced, below the guard "
+                           "slider, has the numbers and the value to set.");
+        ImGui::PopStyleColor();
     }
 
     // Fallback tally, only the reasons that happened
@@ -70,7 +88,15 @@ void DrawHudless(ext::menu::Ctx&)
     auto& cfg = ext::Cfg().hudless;
     const Mode current = ext::hudless::CurrentMode();
 
-    DrawStatus(ext::hudless::GetStatus());
+    const ext::hudless::Status status = ext::hudless::GetStatus();
+    DrawStatus(status);
+
+    // One log line per slider change that settled (HudlessMenuLog.h): a session log then shows what the user set and when. The
+    // flush runs before the fold's early return, so a value that settled while the fold (or the card) was closed is written on the
+    // next frame of the card instead of waiting for the fold to be opened again.
+    static ext::hudless::HudlessSliderLogs sliderLogs;
+    for (const std::string& line : sliderLogs.Due(GetTickCount64()))
+        LOG_INFO("{}", line);
 
     static const char* kModes[] = { "Off", "Recomposition (DLSS-G recomposes the UI)", "UI-free frame generation" };
     int selected = static_cast<int>(current);
@@ -91,7 +117,6 @@ void DrawHudless(ext::menu::Ctx&)
 
     if (current == Mode::Recomposition || (selected == int(Mode::Recomposition)))
         ImGui::TextWrapped("Recomposition applies after a game restart (DLSS-G reads it when the feature is created).");
-
     // A DLSS-G render preset that takes the recomposition away (A, C): the same sentence as in the log and next to the preset selector.
     if (const auto note = ext::fg::preset::UiRecompositionMenuNote(); !note.empty())
     {
@@ -103,7 +128,9 @@ void DrawHudless(ext::menu::Ctx&)
     bool tint = cfg.showDetectedUi.value_or_default();
     if (ImGui::Checkbox("Show detected UI (HUD-less)", &tint))
         cfg.showDetectedUi = tint;
-    ext::menu::Tooltip("Debug: tints the pasted UI area so the mask is visible (UI-free mode).");
+    ext::menu::Tooltip("Debug: tints the pasted UI area so the mask is visible (UI-free mode). While the coverage guard is "
+                       "tripped the tinted pixels are the newest real frame's, and the draw replaces the output there: that region "
+                       "runs at the real frame rate instead of the generated one, with the judder the fallback already has.");
 
     // Native nameplates: the game's own nameplate draws are taken into a plate-only image and drawn back over every
     // output frame. Snapshot first, bit second: the presenting threads and the engine read the snapshot, so the bit may
@@ -178,13 +205,19 @@ void DrawHudless(ext::menu::Ctx&)
     float threshold = cfg.Threshold();
     if (ImGui::SliderFloat("Mask threshold", &threshold, ext::HudlessConfig::kThresholdMin, ext::HudlessConfig::kThresholdMax, "%.3f",
                            ImGuiSliderFlags_Logarithmic))
+    {
         cfg.maskThreshold = threshold;
+        sliderLogs.maskThreshold.Observe(cfg.Threshold(), GetTickCount64());
+    }
     ext::menu::Tooltip("Largest per-channel difference (0..1) between the final frame and the UI-free frame that still "
                        "counts as the same pixel. Default 0.008.");
 
     int dilation = static_cast<int>(cfg.Dilation());
     if (ImGui::SliderInt("Mask dilation (px)", &dilation, 0, ext::HudlessConfig::kDilationMax))
+    {
         cfg.maskDilation = dilation;
+        sliderLogs.maskDilation.Observe(static_cast<float>(cfg.Dilation()), GetTickCount64());
+    }
     ext::menu::Tooltip("Grow the detected UI area by this many pixels. Default 1.");
 
     bool cleanup = cfg.pasteCleanup.value_or_default();
@@ -199,12 +232,36 @@ void DrawHudless(ext::menu::Ctx&)
     ext::menu::Tooltip("Paste the UI of one real frame behind: steadier world-anchored UI such as nameplates, about one "
                        "base frame of extra UI latency.");
 
+    // The coverage guard is its own row of the fold, under its own heading: it is a second 0..1 slider and was mistaken for the mask
+    // threshold in a play session, and a limit below the HUD's own coverage keeps ui_free off for a whole session.
+    ImGui::Spacing();
+    ext::menu::SectionTitle("Coverage guard");
+    ImGui::TextDisabled("Separate from the Mask threshold above: this one does not change the mask, it decides when to stop using it.");
+
     float guard = cfg.CoverageLimit();
-    if (ImGui::SliderFloat("Coverage guard", &guard, 0.f, 1.f, guard <= 0.f ? "off" : "%.2f"))
+    if (ImGui::SliderFloat("Coverage guard limit", &guard, 0.f, 1.f, guard <= 0.f ? "off" : "%.2f"))
+    {
         cfg.coverageGuard = guard;
+        sliderLogs.coverageGuard.Observe(cfg.CoverageLimit(), GetTickCount64());
+    }
     ext::menu::Tooltip("Fall back to normal frame generation when more than this share of the screen is flagged as UI for "
                        "five frames in a row (full-screen fades, a preset that runs before the capture); retries after "
-                       "120 frames. 0 = off. Default 0.60.");
+                       "120 frames. 0 = off. Default 0.60 (Reset advanced restores it).\n"
+                       "The guard only comes back at or below three quarters of this value, so a limit has to stay well above "
+                       "the HUD's own flagged area (shown in the status); the warning below names a limit that releases.");
+
+    const ext::hudless::GuardAdvisory advisory =
+        ext::hudless::EvaluateGuardAdvisory(cfg.CoverageLimit(), status.hudCoverage, status.hudCoverageSamples);
+    // The guard exists in ui_free only: in the other modes the limit changes nothing, so the warning stays silent there.
+    if (status.mode == Mode::UiFree)
+    {
+        if (const std::string warning = ext::hudless::GuardAdvisoryMenuLine(advisory); !warning.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+            ImGui::TextWrapped("%s", warning.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
 
     // [DLSSG] UIRecomposition: unset = on (the engine treats an unset key as on); read when the DLSS-G feature is created.
     auto& recompositionSetting = ext::Cfg().fg.uiRecomposition;
@@ -223,7 +280,13 @@ void DrawHudless(ext::menu::Ctx&)
         cfg.pasteCleanup = true;
         cfg.steadyTiming = false;
         cfg.coverageGuard = ext::HudlessConfig::kGuardDefault;
+        // One line with the values it restored, and a drag that had not settled yet is dropped with them: the log must not show a
+        // value the Reset already replaced.
+        for (const std::string& line : sliderLogs.Reset(cfg.Threshold(), static_cast<int>(cfg.Dilation()), cfg.CoverageLimit()))
+            LOG_INFO("{}", line);
     }
+    ext::menu::Tooltip("Restore the advanced defaults above: Mask threshold 0.008, dilation 1, clean-up on, steady timing off, "
+                       "and the Coverage guard back to 0.60 (the guard is reset with them). Save Settings to keep it.");
 
     ImGui::TreePop();
 }

@@ -1,10 +1,10 @@
-// Rotation at the size limit and the 3-file session cap: each session file
-// rotates at 16 MiB (base to .1, .1 to .2, the oldest dropped), so a session
-// never holds more than base + .1 + .2. The first case drives the real Rotate
-// on fixture files (contents shift, the oldest is dropped, the fresh base
+// Rotation at the size limit and the 9-file session cap: each session file
+// rotates at 16 MiB (base to .1, .n to .n + 1, the oldest .8 dropped), so a session
+// never holds more than base + .1 .. .8 = 144 MiB. The first case drives the real Rotate
+// on fixture files (contents shift by one, the oldest is dropped, the fresh base
 // opens with the continuation line); the second writes past the real 16 MiB
 // limit through the public path and proves the rotation happened. A wrong
-// threshold, a lost rotation or a fourth file fails here.
+// threshold, a lost rotation or a tenth file fails here.
 #include "fgrec_json.h"
 
 #include "ext/fgrec/FgRecorder.cpp"
@@ -49,10 +49,15 @@ static void WriteText(const std::wstring& path, const char* text)
     CloseHandle(h);
 }
 
-static void RotateShiftsThreeFiles()
+static void RotateShiftsNineFiles()
 {
     CHECK(fg::kRotateBytes == 16ull * 1024 * 1024); // the documented limit
-    CHECK(fg::kKeepRotations == 2); // base + .1 + .2, never a fourth file
+    CHECK(fg::kKeepRotations == 8);                 // base + .1 .. .8, never a tenth file
+    // The retention has to keep the beginning of a real play session: a 21.5-minute session wrote 3.4 MB/min (measured), so 25
+    // minutes are 85 MB, and the 9 files hold 144 MiB. Aggregating out.present.* per second instead would lose the per-present
+    // batch and generated-frame accounting the analyzer reads.
+    CHECK(fg::kRotateBytes * (fg::kKeepRotations + 1) == 144ull * 1024 * 1024);
+    CHECK(fg::kRotateBytes * (fg::kKeepRotations + 1) >= 85ull * 1024 * 1024);
     const std::wstring dir = ft::FreshDir("rotate");
     const std::wstring base = dir + L"\\fg-rec-20260101-000000-7.jsonl";
     WriteText(base, "base-content\n");
@@ -67,7 +72,8 @@ static void RotateShiftsThreeFiles()
     CloseHandle(out);
     CHECK(bytes < 1024); // the fresh base only holds the continuation line
 
-    CHECK(ft::ReadBytes(base + L".2") == "one-content\n"); // .1 became .2, the oldest is gone
+    CHECK(ft::ReadBytes(base + L".3") == "two-content\n"); // .2 became .3: nothing is dropped while the files fit
+    CHECK(ft::ReadBytes(base + L".2") == "one-content\n"); // .1 became .2
     CHECK(ft::ReadBytes(base + L".1") == "base-content\n"); // the base became .1
     const std::string fresh = ft::ReadBytes(base);
     bool ok = false;
@@ -76,7 +82,7 @@ static void RotateShiftsThreeFiles()
     const ft::JsonValue* freq = ft::Find(v, "qpc_frequency");
     CHECK(freq != nullptr && freq->type == ft::JsonValue::Type::Number && freq->text == "1234");
 
-    // a second rotation keeps exactly three files with shifted contents, and the helper the worker uses
+    // a second rotation shifts everything by one more and keeps exactly the files that exist, and the helper the worker uses
     // publishes the handle it opened (the stop path then never names the closed one)
     out = CreateFileW(base.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                       FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -89,6 +95,7 @@ static void RotateShiftsThreeFiles()
         std::lock_guard<std::mutex> lock(fg::Global().mutex);
         fg::Global().out = INVALID_HANDLE_VALUE;
     }
+    CHECK(ft::ReadBytes(base + L".3") == "one-content\n"); // .1's content of the first rotation moved on
     CHECK(ft::ReadBytes(base + L".2") == "base-content\n");
     CHECK(ft::ReadBytes(base + L".1").find("continuation") != std::string::npos);
     WIN32_FIND_DATAW f {};
@@ -102,7 +109,41 @@ static void RotateShiftsThreeFiles()
         } while (FindNextFileW(h, &f) != 0);
         FindClose(h);
     }
-    CHECK(count == 3);
+    CHECK(count == 5); // the base plus four rotations (never more than kKeepRotations + 1)
+}
+
+static void RotationDropsTheOldest()
+{
+    // A full set of rotation files: the oldest (.8) is dropped, .7 takes its place and nothing above the cap is ever created,
+    // so a long session can never grow past 9 files.
+    const std::wstring dir = ft::FreshDir("oldest");
+    const std::wstring base = dir + L"\\fg-rec-20260101-000000-7.jsonl";
+    WriteText(base, "base-content\n");
+    for (int r = 1; r <= fg::kKeepRotations; ++r)
+        WriteText(base + L"." + std::to_wstring(r), ("content-" + std::to_string(r) + "\n").c_str());
+    HANDLE out = CreateFileW(base.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(out != INVALID_HANDLE_VALUE);
+    uint64_t bytes = fg::kRotateBytes + 1;
+    CHECK(fg::Rotate(out, base, 1000, bytes));
+    CloseHandle(out);
+    CHECK(ft::ReadBytes(base + L".8") == "content-7\n"); // .7 moved up
+    CHECK(ft::ReadBytes(base + L".7") == "content-6\n");
+    CHECK(ft::ReadBytes(base + L".1") == "base-content\n");
+    CHECK(GetFileAttributesW((base + L".9").c_str()) == INVALID_FILE_ATTRIBUTES); // never a tenth file
+    // Nine files in total (base + .1 .. .8)
+    WIN32_FIND_DATAW f {};
+    int count = 0;
+    HANDLE h = FindFirstFileW((dir + L"\\fg-rec-*.jsonl*").c_str(), &f);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            ++count;
+        } while (FindNextFileW(h, &f) != 0);
+        FindClose(h);
+    }
+    CHECK(count == fg::kKeepRotations + 1);
 }
 
 static void RotationAtTheLimit()
@@ -165,7 +206,10 @@ static void RotationAtTheLimit()
                 oneSize = static_cast<uint64_t>(size.QuadPart);
             }
             else if (name.size() >= 6 && name.compare(name.size() - 2, 2, L".2") == 0)
-                haveTwo = true;
+                haveTwo = true; // any second rotation:
+            else if (name.size() >= 6 && name[name.size() - 2] == L'.' && name[name.size() - 1] >= L'3' &&
+                     name[name.size() - 1] <= L'9')
+                haveTwo = true; // .3 .. .9 must not exist after a single 16 MiB rotation either
             else
                 haveBase = true;
         } while (FindNextFileW(h, &f) != 0);
@@ -177,7 +221,7 @@ static void RotationAtTheLimit()
 
 static void LockedRotationKeepsTheBaseAndNoHandle()
 {
-    // L7 coverage with the handle rule on top: the rotation target .2 is held open by a
+    // L7 coverage with the handle rule on top: a rotation file (.2) is held open by a
     // reader, so the rotation must fail instead of deleting it and truncating the base
     // (16 MiB lost with success reported), and the failure must leave no handle open and
     // none published (the stop path would otherwise write into a closed handle).
@@ -211,7 +255,8 @@ static void LockedRotationKeepsTheBaseAndNoHandle()
 
 int main()
 {
-    RotateShiftsThreeFiles();
+    RotateShiftsNineFiles();
+    RotationDropsTheOldest();
     RotationAtTheLimit();
     LockedRotationKeepsTheBaseAndNoHandle();
     if (g_failed != 0)

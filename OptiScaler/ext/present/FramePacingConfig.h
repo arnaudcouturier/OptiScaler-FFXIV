@@ -29,6 +29,11 @@ struct FramePacingConfig
     // Off = no thread, no allocation, no file. Default false.
     CustomOptional<bool> fgRecorder { false };
 
+    // FgRecorderMarkKey: virtual-key code of the recorder's one-key mark, unbound by default. A press writes a `mark` record into
+    // the session file and one log line ("user mark N"), so the user can say "now" while playing. Set from the Keybinds section.
+    // Unbound (-1) is today's behaviour: no key, nothing happens.
+    CustomOptional<int> fgRecorderMarkKey { UnboundKey }; // FgRecorderMarkKey (hex when positive, like the other key codes)
+
     // TickProbe: lease the game's simulation tick (the Framework vtable slot, ext/latency) and record its timing to OptiScaler.log every
     // 10 seconds. With it off nothing is installed and no line is written. Default false.
     CustomOptional<bool> tickProbe { false };

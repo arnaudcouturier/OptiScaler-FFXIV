@@ -5,6 +5,7 @@
 #include "ext/hudless/HudlessCore.h"
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -60,6 +61,8 @@ struct FakeHost final : IEngineHost
     GuardPolicy policy = GuardPolicy::Legacy; // [HudLess] GuardMode
     int releaseHolds = 0;                     // [HudLess] GuardReleaseHolds, 0 = off
     bool tripOnAnchorLater = false;           // [HudLess] GuardTripOnAnchorLater
+    uint64_t maskKey = 0;                     // MaskThreshold/MaskDilation as one key
+    uint64_t now = 0;                         // the clock for the guard-limit warning's settle time (0 = no clock)
     int pausedQueries = 0;
     int stages = 0;
     std::vector<std::string> log;
@@ -74,6 +77,8 @@ struct FakeHost final : IEngineHost
     GuardPolicy CoverageGuardPolicy() override { return policy; }
     int CoverageGuardReleaseHolds() override { return releaseHolds; }
     bool CoverageGuardTripOnAnchorLater() override { return tripOnAnchorLater; }
+    uint64_t MaskKey() override { return maskKey; }
+    uint64_t NowMs() override { return now; }
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
     Reason CheckCapture(const FrameImage&) override { ++calls; return check; }
     Reason StageCapture(const FrameImage&) override { ++calls; ++stages; return stage; }
@@ -2102,6 +2107,375 @@ void TestDensityAnchorLaterTrip()
     }
 }
 
+void TestGuardAdvisory()
+{
+    FakeHost host;
+    Core core(host);
+    PasteCounters paste;
+    // Clean HUD-only readbacks at 9 % with the default limit: the status carries the limit, its release level and the HUD's own
+    // flagged area; nothing warns and no line is written.
+    for (uint64_t i = 1; i <= 40; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.09f;
+        const Run r = Present(core, Mode::UiFree, paste);
+        assert(r.reason == Reason::None && r.swapped);
+    }
+    Status s = core.Snapshot();
+    assert(s.guardLimit == 0.60f);
+    assert(s.guardRelease == 0.60f * CoverageGuard::kReleaseFraction);
+    assert(s.guardPolicy == GuardPolicy::Legacy);
+    assert(s.hudCoverageSamples == 39 && std::fabs(s.hudCoverage - 0.09f) < 1e-5f); // present 1 is the guard's stale baseline
+    assert(!s.guardAdvisoryWarn);
+    for (const std::string& line : host.log)
+        assert(line.find("HudLess: coverage guard ") != 0); // the start and state lines only: no warning
+
+    // The user lowers the guard to 0.05 from the menu (the trap of the 2026-10-30 session): the release level (3.75 %) is below the
+    // HUD, so one log line is written and the warning holds however long the mode stays in the fallback.
+    host.limit = 0.05f;
+    for (uint64_t i = 41; i <= 240; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.09f;
+        Present(core, Mode::UiFree, paste);
+    }
+    auto advisoryLines = [](const std::vector<std::string>& log)
+    {
+        size_t n = 0;
+        for (const std::string& line : log)
+            if (line.rfind("HudLess: coverage guard ", 0) == 0 || line.rfind("HudLess: the coverage guard is off", 0) == 0)
+                ++n;
+        return n;
+    };
+    assert(advisoryLines(host.log) == 1);
+    s = core.Snapshot();
+    assert(s.guardAdvisoryWarn && s.coverageTripped);
+    assert(s.guardLimit == 0.05f && s.guardRelease < 0.04f);
+    // The 39 clean readbacks stay in the window; the 4 over-limit ones that led up to the trip do not (a fade is not the HUD), and
+    // every probing readback of the tripped guard does (it measures the HUD it trips on): 195 of the 200 presents added one
+    assert(s.hudCoverageSamples == 39 + 195 && std::fabs(s.hudCoverage - 0.09f) < 1e-5f);
+    auto lastAdvisory = [](const std::vector<std::string>& log)
+    {
+        std::string found;
+        for (const std::string& line : log)
+            if (line.rfind("HudLess: coverage guard ", 0) == 0 || line.rfind("HudLess: the coverage guard is off", 0) == 0)
+                found = line;
+        return found;
+    };
+    const std::string warning = lastAdvisory(host.log);
+    assert(warning.rfind("HudLess: coverage guard 5% releases only at or below 3.8%, below the HUD it must let through", 0) == 0);
+    assert(warning.find("(measured 9% as the low fifth of ") != std::string::npos);
+    assert(warning.find(" readbacks)") != std::string::npos);
+    assert(warning.find("raise the limit to 12% or more") != std::string::npos);
+    assert(warning.find("the value is not changed") != std::string::npos);
+
+    // Raising the limit above the HUD's release level clears the warning, once, and the guard releases after its clean run
+    host.limit = 0.60f;
+    for (uint64_t i = 241; i <= 320; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.09f;
+        Present(core, Mode::UiFree, paste);
+    }
+    s = core.Snapshot();
+    assert(!s.guardAdvisoryWarn && !s.coverageTripped);
+    assert(lastAdvisory(host.log) ==
+           "HudLess: coverage guard 60% can release over the HUD's flagged area again (9%): the guard warning clears");
+
+    // Lowering it again warns once more, and turning the guard off clears the warning with its own line
+    host.limit = 0.05f;
+    Present(core, Mode::UiFree, paste);
+    assert(core.Snapshot().guardAdvisoryWarn);
+    host.limit = 0.f;
+    Present(core, Mode::UiFree, paste);
+    assert(!core.Snapshot().guardAdvisoryWarn);
+    assert(lastAdvisory(host.log) == "HudLess: the coverage guard is off: the guard-limit warning clears");
+    assert(core.Snapshot().guardLimit == 0.f && core.Snapshot().guardRelease == 0.f);
+
+    // A mode change starts the warning over: the next run of the mode announces it again, and measures its own HUD coverage
+    FakeHost rerun;
+    rerun.limit = 0.05f;
+    Core again(rerun);
+    PasteCounters repeats;
+    for (uint64_t i = 1; i <= 10; ++i)
+    {
+        repeats.produced = i;
+        repeats.coverageSequence = i;
+        repeats.coverage = 0.09f;
+        Present(again, Mode::UiFree, repeats);
+    }
+    assert(again.Snapshot().guardAdvisoryWarn && advisoryLines(rerun.log) == 1);
+    Present(again, Mode::Off, {});
+    assert(again.Snapshot().hudCoverageSamples == 0); // the off present reset the measurement with the mode
+    Present(again, Mode::UiFree, repeats);
+    assert(advisoryLines(rerun.log) == 2); // the new run of the mode says it again
+    assert(again.Snapshot().hudCoverage < 0.f);
+
+    // Before the first trusted readbacks the assumed HUD level (15 %) is compared: a 0.05 limit warns from the first present
+    FakeHost fresh;
+    fresh.limit = 0.05f;
+    Core early(fresh);
+    PasteCounters none; // no readback yet
+    Present(early, Mode::UiFree, none);
+    assert(early.Snapshot().guardAdvisoryWarn);
+    assert(early.Snapshot().hudCoverage < 0.f);
+    assert(lastAdvisory(fresh.log).find("no readback measured yet, assuming 15%") != std::string::npos);
+    // ... and a limit whose release level reaches the assumed level does not
+    FakeHost fine;
+    fine.limit = 0.20f;
+    Core calm(fine);
+    Present(calm, Mode::UiFree, none);
+    assert(!calm.Snapshot().guardAdvisoryWarn);
+    for (const std::string& line : fine.log)
+        assert(line.find("HudLess: coverage guard ") != 0);
+}
+
+void TestGuardAdvisoryReleaseLevel()
+{
+    // A guard that beats the HUD area but whose release level does not: 0.05 over a 4.4 % HUD releases only at or below 3.75 %, so
+    // it trips on the HUD and can never let go. The warning has to catch that case (it compared the raw limit before).
+    FakeHost host;
+    host.limit = 0.05f;
+    Core core(host);
+    PasteCounters paste;
+    for (uint64_t i = 1; i <= 60; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.044f;
+        Present(core, Mode::UiFree, paste);
+    }
+    const Status s = core.Snapshot();
+    assert(!s.coverageTripped && s.guardAdvisoryWarn); // 0.05 > 0.044, and 0.0375 < 0.044
+    // ... and 0.10 over a 9 % HUD is the same trap one step up
+    FakeHost host9;
+    host9.limit = 0.10f;
+    Core nine(host9);
+    PasteCounters p9;
+    for (uint64_t i = 1; i <= 60; ++i)
+    {
+        p9.produced = i;
+        p9.coverageSequence = i;
+        p9.coverage = 0.09f;
+        Present(nine, Mode::UiFree, p9);
+    }
+    assert(nine.Snapshot().guardAdvisoryWarn);
+    // A limit whose release level reaches the area releases and stays quiet
+    FakeHost ok;
+    ok.limit = 0.12f;
+    Core fine(ok);
+    for (uint64_t i = 1; i <= 60; ++i)
+    {
+        p9.produced = i;
+        p9.coverageSequence = i;
+        p9.coverage = 0.09f;
+        Present(fine, Mode::UiFree, p9);
+    }
+    assert(!fine.Snapshot().coverageTripped && !fine.Snapshot().guardAdvisoryWarn);
+}
+
+void TestHudCoverageWindowFollows()
+{
+    // The estimate is a recent window of the readbacks, not a lifetime mean: a mask change starts it over, and a guard tripped on the
+    // HUD keeps measuring (the probing readbacks are the HUD), so the warning is not frozen at the level of the un-tripped past.
+    FakeHost host;
+    host.limit = 0.05f;
+    host.maskKey = 41; // MaskThreshold 0.2, say
+    Core core(host);
+    PasteCounters paste;
+    // 60 readbacks at 3 %: under the limit, so the guard does not trip, and the estimate is that 3 %
+    for (uint64_t i = 1; i <= 60; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.03f;
+        Present(core, Mode::UiFree, paste);
+    }
+    Status s = core.Snapshot();
+    assert(!s.guardAdvisoryWarn && !s.coverageTripped);
+    assert(s.hudCoverageSamples == 59 && std::fabs(s.hudCoverage - 0.03f) < 1e-6f);
+
+    // The mask goes back to its default (MaskThreshold 0.008, so the HUD measures 9 %): the window starts over, the guard trips on
+    // the HUD, and the tripped readbacks move the estimate to 9 %, which is what the warning reports
+    host.maskKey = 42;
+    for (uint64_t i = 61; i <= 400; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.09f;
+        Present(core, Mode::UiFree, paste);
+    }
+    s = core.Snapshot();
+    assert(s.guardAdvisoryWarn && s.coverageTripped);
+    assert(std::fabs(s.hudCoverage - 0.09f) < 1e-6f);
+    // The old mask's 59 readbacks are gone: the window holds the 335 probing readbacks after the trip (presents 66 to 400; the four
+    // over-limit ones before the trip are not the HUD)
+    assert(s.hudCoverageSamples == 335);
+
+    // A fade's excursion samples never reach the estimate: five over-limit readbacks trip the guard, and the low fifth stays at the
+    // HUD level even while they are in the window
+    FakeHost fade;
+    fade.limit = 0.60f;
+    Core fader(fade);
+    PasteCounters f;
+    for (uint64_t i = 1; i <= 40; ++i)
+    {
+        f.produced = i;
+        f.coverageSequence = i;
+        f.coverage = i > 30 && i <= 36 ? 0.90f : 0.09f;
+        Present(fader, Mode::UiFree, f);
+    }
+    assert(fader.Snapshot().coverageTripped);
+    assert(std::fabs(fader.Snapshot().hudCoverage - 0.09f) < 1e-6f);
+    assert(!fader.Snapshot().guardAdvisoryWarn);
+}
+
+void TestGuardAdvisorySettle()
+{
+    // A drag of the guard slider across the HUD level writes one line once the state holds for the settle time, not a pair of lines
+    // per crossing. The menu shows the state at once; only the log waits.
+    FakeHost host;
+    host.limit = 0.60f;
+    host.now = 1000;
+    Core core(host);
+    PasteCounters paste;
+    for (uint64_t i = 1; i <= 40; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = 0.09f;
+        Present(core, Mode::UiFree, paste);
+    }
+    size_t lines = 0;
+    auto count = [&lines](const std::vector<std::string>& log)
+    {
+        lines = 0;
+        for (const std::string& line : log)
+            if (line.rfind("HudLess: coverage guard ", 0) == 0 || line.rfind("HudLess: the coverage guard is off", 0) == 0)
+                ++lines;
+        return lines;
+    };
+    assert(count(host.log) == 0);
+
+    // Down to 0.05 and back up to 0.60 inside the settle time: neither state holds, so no line
+    paste.produced = 41;
+    paste.coverageSequence = 41;
+    host.limit = 0.05f;
+    host.now = 2000;
+    Present(core, Mode::UiFree, paste);
+    assert(core.Snapshot().guardAdvisoryWarn); // the menu says it at once
+    assert(count(host.log) == 0);               // the log waits
+    host.limit = 0.60f;
+    host.now = 2100;
+    Present(core, Mode::UiFree, paste);
+    assert(count(host.log) == 0);
+    // It settles at 0.05 this time: one line, once, 500 ms after the last change
+    host.limit = 0.05f;
+    host.now = 2200;
+    Present(core, Mode::UiFree, paste);
+    host.now = 2600;
+    paste.produced = 42;
+    paste.coverageSequence = 42;
+    Present(core, Mode::UiFree, paste);
+    assert(count(host.log) == 0); // 400 ms after the change
+    host.now = 2700;
+    paste.produced = 43;
+    paste.coverageSequence = 43;
+    Present(core, Mode::UiFree, paste);
+    assert(count(host.log) == 1);
+    for (uint64_t i = 44; i <= 200; ++i)
+    {
+        host.now += 16;
+        paste.produced = i;
+        paste.coverageSequence = i;
+        Present(core, Mode::UiFree, paste);
+    }
+    assert(count(host.log) == 1); // one line per settled change, never per frame
+}
+
+void TestPasteGate()
+{
+    FakeHost host;
+    Core core(host);
+    PasteCounters paste;
+    bool sawTripped = false;
+    int probing = 0;
+    for (uint64_t i = 1; i <= 40; ++i)
+    {
+        paste.produced = i;
+        paste.coverageSequence = i;
+        paste.coverage = i <= 10 ? 0.05f : 0.90f; // HUD-level first, then over the limit
+        core.BeginPresent(Mode::UiFree, paste);
+        const bool swapped = core.DecideBase();
+        // With the tint off the gate IS PasteVisible() on every present: the output behaviour is the one of today, byte for byte
+        assert(core.PasteGate(false) == core.PasteVisible());
+        if (swapped)
+            assert(core.PasteGate(true) && core.PasteGate(false));
+        if (core.Probing())
+        {
+            sawTripped = true;
+            ++probing;
+            assert(core.PasteGate(true)); // the tint opens the gate, so a diagnostic run can see the mask
+            // Past the two-present paste hold today nothing is pasted while the guard is tripped: the tint is the only way to see it
+            if (probing > Core::kLeaveHold)
+                assert(!core.PasteGate(false));
+        }
+        core.NoteTagSet(0);
+        core.EndPresent();
+    }
+    assert(sawTripped && probing > Core::kLeaveHold);
+    assert(!core.PasteGate(false) && core.PasteGate(true)); // the last present: tripped, no paste, tint on
+    // Outside ui_free the tint opens nothing either
+    core.BeginPresent(Mode::Recomposition, {});
+    assert(!core.PasteGate(false) && !core.PasteGate(true));
+
+    // With the tint on, a present whose paste ring is just invalidated opens nothing: it has no image to draw, and every output of
+    // it would count as a skipped paste (UiPaste::Paste increments that counter when PickPaste finds no image)
+    FakeHost invalidating;
+    Core ring(invalidating);
+    PasteCounters ok;
+    for (uint64_t i = 1; i <= 10; ++i)
+    {
+        ok.produced = i;
+        ok.coverageSequence = i;
+        ok.coverage = 0.05f;
+        Present(ring, Mode::UiFree, ok);
+    }
+    assert(ring.Swapped());
+    // The hold after the last swapped present keeps the ring (and with it the tint's image): Core::kLeaveHold presents
+    invalidating.source.result = TakeResult::NotThisFrame; // no boundary from here on
+    for (int i = 0; i < Core::kLeaveHold; ++i)
+    {
+        ring.BeginPresent(Mode::UiFree, ok);
+        assert(ring.PasteDecision() == PasteAction::Hold && ring.PasteGate(true) && ring.PasteGate(false));
+        ring.EndPresent();
+    }
+    // Past the hold the present invalidates the ring: it has no image to draw, so the tint opens no gate and every output of it
+    // would count as a skipped paste
+    ring.BeginPresent(Mode::UiFree, ok);
+    assert(ring.PasteDecision() == PasteAction::Invalidate);
+    assert(!ring.PasteVisible() && !ring.PasteGate(false) && !ring.PasteGate(true));
+    ring.EndPresent();
+    // A present held after a swapped one keeps the ring (PasteAction::Hold), so the tint still has an image to draw
+    FakeHost holding;
+    Core held(holding);
+    PasteCounters hp;
+    for (uint64_t i = 1; i <= 10; ++i)
+    {
+        hp.produced = i;
+        hp.coverageSequence = i;
+        hp.coverage = 0.05f;
+        Present(held, Mode::UiFree, hp);
+    }
+    holding.source.result = TakeResult::NotThisFrame;
+    held.BeginPresent(Mode::UiFree, hp);
+    assert(held.PasteDecision() == PasteAction::Hold && held.PasteGate(true) && held.PasteGate(false));
+    held.EndPresent();
+}
+
 int main()
 {
     TestOff();
@@ -2136,6 +2510,12 @@ int main()
     TestSteadyGameplayReplay();
     TestBlackScreenSummary();
     TestStateLinesPerFade();
-    std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, scene HDR priority, log lines");
+    TestGuardAdvisory();
+    TestGuardAdvisoryReleaseLevel();
+    TestHudCoverageWindowFollows();
+    TestGuardAdvisorySettle();
+    TestPasteGate();
+    std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, guard-limit advisory, paste gate, "
+              "scene HDR priority, log lines");
     return 0;
 }

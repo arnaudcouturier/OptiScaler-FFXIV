@@ -302,6 +302,10 @@ class StateTracker
     Reason _sticky = Reason::None;
 };
 
+// The default of [HudLess] CoverageGuard (HudlessConfig::kGuardDefault, repeated here because this header stays free of Config):
+// the limit a reset restores, quoted in the warning lines.
+inline constexpr float kGuardDefaultLimit = 0.60f;
+
 // ---- Mask coverage guard (docs/HUDLESS.md section 5) --------------------------------------------------------------
 // Black/white fades, and presets that change pixels before the capture, make the mask cover most of the screen. The
 // guard TRIPS after kTripFrames consecutive fresh readbacks over the limit and RELEASES after kReleaseSamples consecutive
@@ -362,6 +366,7 @@ class CoverageGuard
         _clean = 0;
         _starve = 0;
         _unknownRun = 0;
+        _samples = 0;
         _tripped = false;
         _seenSequence = 0;
         _baseSet = false;
@@ -402,6 +407,7 @@ class CoverageGuard
         _seenSequence = coverageSequence;
         _unknownRun = 0;
         _starve = 0;
+        ++_samples;
 
         if (_tripped)
         {
@@ -477,6 +483,15 @@ class CoverageGuard
 
     // True while tripped: the engine must not swap the frame generation base.
     bool Blocking() const { return _tripped; }
+    // Fresh samples the guard has counted since it was configured. A readback that is stale (the sequence it belongs to did not
+    // change) or unknown is not one, so a reader can tell "the guard counted this readback" from "the same value again".
+    int Samples() const { return _samples; }
+    // The configured limit (0 = guard off) and the release level it implies, both as a share of the screen: what the status line
+    // shows and what the warning below compares against.
+    float Limit() const { return _limit; }
+    float ReleaseLevel() const { return _release; }
+    // The policy in force: the status line words the release rule differently for the density policy.
+    GuardPolicy Policy() const { return _policy; }
     bool Unknown() const { return _limit > 0.f && _unknownRun >= kUnknownFrames; }
     int Trips() const { return _trips; }
     // Every end of a trip: the clean run, the release limit of GuardReleaseHolds, or the starvation release.
@@ -517,6 +532,7 @@ class CoverageGuard
     int _clean = 0;
     int _starve = 0;
     int _unknownRun = 0;
+    int _samples = 0;
     int _trips = 0;
     int _releases = 0;
     int _holdReleases = 0;
@@ -545,6 +561,206 @@ inline std::string DensityGuardLine(int releaseHolds, bool tripOnAnchorLater)
         line += ", and such a frame trips it at once";
     line += ")";
     return line;
+}
+
+// The UiPaste output gate of one present (the two SetPasteEnabled sites of the engine). While the guard is tripped the engine takes
+// the capture and builds the paste image but swaps no base, so nothing is pasted and the "Show detected UI" tint has nothing to
+// draw: it could never show the mask in exactly the state a diagnostic run is about (docs/HUDLESS.md section 5). With the tint on and
+// a staged capture (`tintDraws`), the gate opens and the newest completed image is drawn as the tint. On a present that only
+// invalidates the ring the tint has nothing to draw, so `tintDraws` is false there and the gate stays closed (otherwise every
+// output of that present would count as a skipped paste). With the tint off this IS PasteVisible(): the output behaviour is the same
+// byte for byte.
+constexpr bool PasteGateOpen(bool pasteVisible, bool tintDraws) { return pasteVisible || tintDraws; }
+
+// ---- Guard limit advisory (docs/HUDLESS.md section 5) ----------------------------------------------------------------------
+// A CoverageGuard whose release level sits below the HUD's own flagged area can never let the guard go again: the guard trips on
+// the HUD alone and ui_free stays off for the rest of the session (a mis-set limit did exactly that in a play session, and a
+// comparison against the raw limit missed it: 0.05 over a 4.4 % HUD releases only at or below 3.75 %). The menu warns and the log
+// writes one line per settled change of that warning; the user's value is never changed.
+//
+// The HUD's own flagged area is a recent window of readbacks, not a lifetime mean: a window follows a MaskThreshold change and the
+// state of a session, a mean follows neither. The readbacks it keeps are the ones that can be the HUD: at or below the limit while
+// the guard is not tripped (an over-limit readback is a fade or a preset on its way to tripping the guard), and every readback of a
+// tripped guard, whose probing presents measure the HUD it trips on. A fade peak cannot lift the estimate because it is the
+// window's low fifth, not its maximum.
+struct GuardAdvisory
+{
+    // Compared while no HUD coverage has been measured yet: the a-priori flagged area of a busy scene.
+    static constexpr float kAssumedHudCoverage = 0.15f;
+    // Fewer readbacks than this are not trusted as a measurement (the assumed level is used).
+    static constexpr uint64_t kMinSamples = 30;
+    // A change of the warning is logged once it has held this long: dragging the guard slider across the HUD level would
+    // otherwise write one start/clear pair per crossing.
+    static constexpr uint64_t kSettleMs = 500;
+
+    bool warn = false;     // the release level is below the HUD's own area: the guard trips on the HUD alone and stays tripped
+    float limit = 0.f;     // the configured limit, 0 = guard off
+    float release = 0.f;   // the level at or below which the guard releases (limit x 0.75)
+    float measured = -1.f; // the window's low fifth, < 0 = nothing measured yet
+    float reference = 0.f; // the measured value when it is known, kAssumedHudCoverage otherwise
+    float advice = 0.f;    // the smallest limit whose release level reaches `reference` (a value that actually releases)
+    uint64_t samples = 0;  // number of readbacks behind `measured`
+};
+
+// The HUD's own flagged area as the warning compares it: a recent window of the readbacks the caller judged to be the HUD (see
+// GuardAdvisory), kept sorted so its low percentile is O(1) and a fade peak does not move the estimate.
+class HudCoverageWindow
+{
+  public:
+    // About the last 8 s of a 60 fps session: long enough that a one-second fade is a small part of it, short enough that a
+    // changed mask or a changed scene is followed within seconds.
+    static constexpr size_t kSamples = 512;
+    // The value a fifth of the window is at or below.
+    static constexpr double kPercentile = 0.20;
+
+    void Reset()
+    {
+        _count = 0;
+        _next = 0;
+    }
+
+    void Add(float coverage)
+    {
+        if (_count == kSamples)
+        {
+            // The oldest value leaves: it is at _order[_next], and the sorted copy holds one entry per sample
+            const auto it = std::lower_bound(_sorted.begin(), _sorted.begin() + _count, _order[_next]);
+            std::move(it + 1, _sorted.begin() + _count, it);
+            --_count;
+        }
+        const auto pos = std::lower_bound(_sorted.begin(), _sorted.begin() + _count, coverage);
+        std::move_backward(pos, _sorted.begin() + _count, _sorted.begin() + _count + 1);
+        *pos = coverage;
+        _order[_next] = coverage;
+        _next = (_next + 1) % kSamples;
+        ++_count;
+    }
+
+    size_t Samples() const { return _count; }
+    // The low percentile of the window, < 0 while it is empty.
+    float Estimate() const
+    {
+        if (_count == 0)
+            return -1.f;
+        return _sorted[static_cast<size_t>(kPercentile * static_cast<double>(_count - 1))];
+    }
+
+  private:
+    std::array<float, kSamples> _sorted {}; // ascending
+    std::array<float, kSamples> _order {};  // insertion order, so the oldest value can leave the sorted copy
+    size_t _count = 0;
+    size_t _next = 0; // the slot of the oldest value once the window is full
+};
+
+// Comparisons of a release level with the HUD's flagged area work to a tenth of a thousandth of the screen (0.01 %): a product that
+// lands one float ulp under the measured area is the same number, not a trap, and the guard slider steps by 0.01, a hundred times
+// this.
+inline constexpr float kGuardLevelTolerance = 1e-4f;
+
+// The smallest limit (in the two decimals the slider shows) whose release level reaches `hudCoverage`: the value the advice has to
+// name, because a limit that only beats the HUD area itself still leaves the guard tripped. Rounded up, so the advice never lands
+// under the level it must reach.
+inline float ReleaseLimitFor(float hudCoverage)
+{
+    const double needed = static_cast<double>(hudCoverage) / static_cast<double>(CoverageGuard::kReleaseFraction);
+    const double steps = std::ceil(needed * 100.0 - 1e-6);
+    // The slider stops at 1.00: an area above three quarters of the screen has no limit that releases it (the advice text says so)
+    return steps > 100.0 ? 1.f : static_cast<float>(steps / 100.0);
+}
+
+inline GuardAdvisory EvaluateGuardAdvisory(float limit, float measured, uint64_t samples)
+{
+    GuardAdvisory out;
+    out.limit = limit;
+    out.samples = samples;
+    out.release = limit * CoverageGuard::kReleaseFraction;
+    if (samples >= GuardAdvisory::kMinSamples && measured >= 0.f)
+        out.measured = measured;
+    out.reference = out.measured >= 0.f ? out.measured : GuardAdvisory::kAssumedHudCoverage;
+    out.advice = ReleaseLimitFor(out.reference);
+    out.warn = limit > 0.f && out.release + kGuardLevelTolerance < out.reference;
+    return out;
+}
+
+// One share of the screen as the menu and the log write it: "5%", "3.8%", "60%". Two significant digits, so a limit of 0.05
+// reads 5% and its release level (0.75 x 0.05) reads 3.8%.
+inline std::string ShareText(float share)
+{
+    return std::format("{:.2g}%", 100.0 * static_cast<double>(share));
+}
+
+// The release rule of the policy in force: the legacy guard lets go at the release level, the density policy needs its clean run
+// as well, which the sentence would otherwise leave out.
+inline std::string GuardReleaseText(GuardPolicy policy, float release)
+{
+    if (policy == GuardPolicy::Density)
+        return std::format("releases after {} clean readbacks at or below {}", CoverageGuard::kDensityReleaseSamples,
+                           ShareText(release));
+    return std::format("release below {}", ShareText(release));
+}
+
+// The guard line of the HUD-less status: which limit is in force, where the release sits, and why a present falls back.
+inline std::string GuardStatusLine(float limit, bool tripped, GuardPolicy policy = GuardPolicy::Legacy)
+{
+    if (limit <= 0.f)
+        return "Coverage guard: off, no limit";
+    const float release = limit * CoverageGuard::kReleaseFraction;
+    if (tripped)
+        return std::format("over the guard limit {}, falling back; {}", ShareText(limit), GuardReleaseText(policy, release));
+    return std::format("guard limit {}, {}", ShareText(limit), GuardReleaseText(policy, release));
+}
+
+// Where the reference comes from, for both the menu line and the log line: a measured window, or the a-priori level before one
+// exists.
+inline std::string GuardReferenceText(const GuardAdvisory& advisory)
+{
+    if (advisory.measured >= 0.f)
+        return std::format("the HUD's flagged area is {} (the low fifth of the last {} readbacks while UI-free ran)",
+                           ShareText(advisory.measured), advisory.samples);
+    return "no readback has been measured yet, and a HUD alone is about " + ShareText(advisory.reference);
+}
+
+// What the user can do about it. A limit whose release level still sits below the HUD area leaves the guard tripped, so the advice
+// names the smallest value that releases; above three quarters of the screen no limit does.
+inline std::string GuardAdviceText(const GuardAdvisory& advisory)
+{
+    if (advisory.advice * CoverageGuard::kReleaseFraction + kGuardLevelTolerance < advisory.reference)
+        return "no limit releases this mask (the release level is three quarters of the limit)";
+    return std::format("raise the limit to {} or more, whose release level reaches that area", ShareText(advisory.advice));
+}
+
+// The warning line next to the Coverage guard slider (empty while the limit is fine). It says what happens, that the value is left
+// alone, and where the number came from.
+inline std::string GuardAdvisoryMenuLine(const GuardAdvisory& advisory)
+{
+    if (!advisory.warn)
+        return {};
+    return std::format("Warning: the coverage guard limit ({}) releases only at or below {}, below the HUD it must let through: {}. "
+                       "The guard trips on the HUD alone, so UI-free stays off. {}; or press Reset advanced (back to {}). Your value "
+                       "is not changed for you.",
+                       ShareText(advisory.limit), ShareText(advisory.release), GuardReferenceText(advisory),
+                       GuardAdviceText(advisory), ShareText(kGuardDefaultLimit));
+}
+
+// The one log line written when the warning starts or clears (never per frame, and only once the change has held for
+// GuardAdvisory::kSettleMs).
+inline std::string GuardAdvisoryLogLine(const GuardAdvisory& advisory)
+{
+    if (advisory.warn)
+        return std::format("HudLess: coverage guard {} releases only at or below {}, below the HUD it must let through ({}): the "
+                           "guard trips on the HUD alone, so UI-free stays off; {} (Reset advanced restores {}); the value is not "
+                           "changed",
+                           ShareText(advisory.limit), ShareText(advisory.release),
+                           advisory.measured >= 0.f
+                               ? std::format("measured {} as the low fifth of {} readbacks", ShareText(advisory.measured),
+                                             advisory.samples)
+                               : "no readback measured yet, assuming " + ShareText(advisory.reference),
+                           GuardAdviceText(advisory), ShareText(kGuardDefaultLimit));
+    if (advisory.limit <= 0.f)
+        return "HudLess: the coverage guard is off: the guard-limit warning clears";
+    return std::format("HudLess: coverage guard {} can release over the HUD's flagged area again ({}): the guard warning clears",
+                       ShareText(advisory.limit),
+                       advisory.measured >= 0.f ? ShareText(advisory.measured) : "no measurement yet");
 }
 
 // ---- The HDR stage before the paste producer (docs/HUDLESS.md section 8) -------------------------------------------------------------

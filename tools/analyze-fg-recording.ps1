@@ -60,7 +60,9 @@ function Open-Recording([string] $path, [string] $name) {
 
 if ([string]::IsNullOrWhiteSpace($Recording)) { FailUsage('usage: analyze-fg-recording.ps1 <session.jsonl> [-Output <file>]') }
 
-$files = @(("$Recording.2", "$Recording.1", $Recording) | Where-Object { Test-Path -LiteralPath $_ })
+# The recorder keeps base + .1 .. .8 (144 MiB, docs/notes/fg-recorder.md): the oldest rotation first, the base last, so the
+# head of a long session is read before the newest lines and the sequence checks stay in order.
+$files = @((8..1 | ForEach-Object { "$Recording.$_" }) + @($Recording) | Where-Object { Test-Path -LiteralPath $_ })
 if ($files.Count -eq 0) { FailUsage("recording not found: $Recording") }
 
 $providers = @{ '0' = 'none'; '1' = 'dlssg'; '2' = 'xefg'; '3' = 'fsr' }
@@ -102,6 +104,7 @@ $seconds = [ordered]@{}
 $presentEnds = New-Object System.Collections.Generic.List[object]
 $automfgLines = New-Object System.Collections.Generic.List[object]
 $rebuilds = New-Object System.Collections.Generic.List[object]
+$marks = New-Object System.Collections.Generic.List[object]
 $warnings = New-Object System.Collections.Generic.List[object]
 
 function Convert-Ticks([long] $ticks) {
@@ -183,6 +186,12 @@ foreach ($file in $files) {
             }
             'nr.rebuild' {
                 $rebuilds.Add([pscustomobject]@{ qpc = [long] $row['qpc'] })
+            }
+            'mark' {
+                # The user's "now" (one key, one record): the mark number the log line showed, and when it was.
+                $t = $null
+                if ($null -ne $sec) { $t = [long] $sec }
+                $marks.Add([pscustomobject]@{ n = [long] $row['a']; qpc = [long] $row['qpc']; t_s = $t })
             }
         }
         } catch { $parseErrors += "${name}:${lineNo}: $($_.Exception.Message)"; continue }
@@ -273,6 +282,7 @@ $result = [ordered]@{
     seconds           = $seconds
     automfg_switches  = $switches
     rebuild_hitches   = $hitches
+    marks             = $marks.ToArray()
     warnings          = $warnings
     unfinished        = $unfinished
     clean_shutdown    = $cleanShutdown

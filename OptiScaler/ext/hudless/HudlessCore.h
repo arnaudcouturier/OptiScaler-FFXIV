@@ -44,6 +44,12 @@ struct IEngineHost
     virtual bool DebugCompareOn() = 0;
     // [HudLess] CoverageGuard, 0 = off.
     virtual float CoverageLimit() = 0;
+    // [HudLess] MaskThreshold and MaskDilation as one key: the flagged area depends on both, so a changed key makes the readbacks
+    // measured so far unusable as the HUD's own area (the guard-limit warning starts its window over). 0 = the host does not say.
+    virtual uint64_t MaskKey() { return 0; }
+    // A millisecond clock for the guard-limit warning's settle time (GetTickCount64 in the engine). 0 = no clock: a change of the
+    // warning is logged at once, which is what a test or a host without a clock gets.
+    virtual uint64_t NowMs() { return 0; }
     // [HudLess] GuardMode. Asked only in ui_free; the default is today's guard.
     virtual GuardPolicy CoverageGuardPolicy() { return GuardPolicy::Legacy; }
     // [HudLess] GuardReleaseHolds (0 = off) and GuardTripOnAnchorLater, both density policy only. A host that does not answer
@@ -96,6 +102,13 @@ struct Status
     float coverage = -1.f;             // newest completed readback
     bool coverageUnknown = false;      // ui_free, no readback completed for kUnknownFrames presents
     bool coverageTripped = false;
+    // The guard in force and the HUD's own coverage: what the status line shows and what the warning next to the guard slider reads.
+    float guardLimit = 0.f;            // [HudLess] CoverageGuard as the engine uses it, 0 = off
+    float guardRelease = 0.f;          // the share at or below which a tripped guard releases (limit * 0.75)
+    GuardPolicy guardPolicy = GuardPolicy::Legacy; // the policy in force (the release sentence of the status line depends on it)
+    float hudCoverage = -1.f;          // the low fifth of the recent readbacks, < 0 = nothing measured yet
+    uint64_t hudCoverageSamples = 0;   // readbacks in that window
+    bool guardAdvisoryWarn = false;    // the release level is below the HUD's own flagged area (menu line; the log waits for it to settle)
     PasteCounters paste;
     std::string boundary;              // last Take(): "ok", "not detected", the source's reason, "no source"
 };
@@ -171,6 +184,18 @@ class Core
             const int releaseHolds = _host.CoverageGuardReleaseHolds();
             const bool tripOnAnchorLater = _host.CoverageGuardTripOnAnchorLater();
             _guard.Configure(limit, policy, releaseHolds, tripOnAnchorLater);
+            const int guardSamplesBefore = _guard.Samples();
+            const bool trippedBefore = _guard.Blocking();
+            // The readbacks measured under a different mask setting are not the HUD of the mask in force (MaskThreshold and
+            // MaskDilation both decide the flagged area): a changed key starts the window over, and until fresh readbacks arrive the
+            // warning compares the a-priori level, which is the safe direction. The first present only takes the key.
+            const uint64_t maskKey = _host.MaskKey();
+            if (!_maskKeySet || maskKey != _maskKey)
+            {
+                _maskKey = maskKey;
+                _maskKeySet = true;
+                _hudWindow.Reset();
+            }
             if (policy != _announcedPolicy ||
                 (policy == GuardPolicy::Density && (releaseHolds != _announcedHolds || tripOnAnchorLater != _announcedTrip)))
             {
@@ -193,6 +218,16 @@ class Core
 
             if (paste.coverage >= 0.f && paste.coverageSequence != 0 && paste.coverageSequence != _lastSampledSequence)
             {
+                // The HUD's own flagged area for the guard-limit warning: a recent window of the readbacks that can be the HUD. A
+                // readback over the limit while the guard is not tripped is a fade or a preset on its way to tripping the guard, so
+                // it is left out (the excursion samples of a trip never lift the estimate); the probing readbacks of a tripped guard
+                // measure the HUD it trips on and are kept, so the estimate still moves while the guard is stuck on it. A readback
+                // left over from an earlier run of the mode (the guard's stale baseline) is not a sample at all.
+                if (_guard.Samples() != guardSamplesBefore)
+                {
+                    if (trippedBefore || paste.coverage <= limit)
+                        _hudWindow.Add(paste.coverage);
+                }
                 _lastSampledSequence = paste.coverageSequence;
                 _window.coverageSum += static_cast<double>(paste.coverage);
                 ++_window.coverageSamples;
@@ -384,6 +419,27 @@ class Core
             _sinceSummary = 0;
             _anchorRun = 0; // the longest run is a figure of its own window
         }
+
+        // The guard-limit warning: one log line when it starts or clears, never per frame, and only once the new state has held for
+        // GuardAdvisory::kSettleMs (a drag of the guard slider across the HUD level would otherwise write a pair of lines per
+        // crossing). The menu shows the state at once. A host without a clock writes the line at once.
+        if (_mode == Mode::UiFree)
+        {
+            const GuardAdvisory advisory = Advisory();
+            const uint64_t now = _host.NowMs();
+            if (advisory.warn != _advisoryWarned)
+            {
+                _advisoryWarned = advisory.warn;
+                _advisorySince = now;
+            }
+            const bool settled = now == 0 || static_cast<int64_t>(now) - static_cast<int64_t>(_advisorySince) >=
+                                               static_cast<int64_t>(GuardAdvisory::kSettleMs);
+            if (settled && advisory.warn != _advisoryLogged)
+            {
+                _advisoryLogged = advisory.warn;
+                _host.Log(GuardAdvisoryLogLine(advisory));
+            }
+        }
     }
 
     // What the host sent to the frame generator in this present: bit 0 the hud-less tag, bit 1 the UI tag. Called once from the third
@@ -418,6 +474,18 @@ class Core
     // The guard is tripped and this present took a capture only to keep the guard fed: the base is not swapped.
     bool Probing() const { return _probing; }
 
+    // The UiPaste output gate (docs/HUDLESS.md 5), the value the host passes to UiPaste::SetPasteEnabled: PasteVisible(), and with
+    // the "Show detected UI" tint on also the presents that produce a paste image, so the tint can show the mask while the guard is
+    // tripped. A present that invalidates the ring (no boundary, no source, a rejected capture, scene HDR) is not opened for the
+    // tint: it has no image to draw, and UiPaste::Paste would count every output of it as a skipped paste, which is exactly the
+    // number a diagnostic run reads. With the tint off this is PasteVisible() exactly. Never open outside ui_free: PasteVisible()
+    // requires the mode and PasteDecision() is None there, so a mode that does not paste opens no gate.
+    bool PasteGate(bool tint) const
+    {
+        const bool tintDraws = tint && PasteDecision() == PasteAction::Produce;
+        return PasteGateOpen(PasteVisible(), tintDraws);
+    }
+
     // Whether the host sends the hud-less (and UI) tags of this present to the frame generator. In ui_free only a present
     // whose base really is the hud-less image does: a paste-not-ready, probing or otherwise fallen-back present sends none,
     // so the frame generator gets the same inputs as with the mode off instead of a normal base with a mismatching hud-less
@@ -444,12 +512,24 @@ class Core
         s.coverage = _paste.coverage;
         s.coverageUnknown = _guard.Unknown();
         s.coverageTripped = _guard.Blocking();
+        s.guardLimit = _guard.Limit();
+        s.guardRelease = _guard.ReleaseLevel();
+        s.guardPolicy = _guard.Policy();
+        s.hudCoverage = _hudWindow.Samples() >= GuardAdvisory::kMinSamples ? _hudWindow.Estimate() : -1.f;
+        s.hudCoverageSamples = _hudWindow.Samples();
+        s.guardAdvisoryWarn = _advisoryWarned;
         s.paste = _paste;
         s.boundary = _boundary;
         return s;
     }
 
   private:
+    // The warning state for the current limit and the readbacks collected so far.
+    GuardAdvisory Advisory() const
+    {
+        return EvaluateGuardAdvisory(_guard.Limit(), _hudWindow.Estimate(), _hudWindow.Samples());
+    }
+
     // The guard's trips and releases since the last look, into the window (a release may come with the boundary's answer, after Update)
     void NoteGuardEvents()
     {
@@ -472,6 +552,11 @@ class Core
         _lastHoldReleases = _guard.HoldReleases();
         _lastTagSet = 0;
         _anchorRun = 0;
+        // The HUD's own flagged area is measured in this run of the mode; the warning starts from it again.
+        _hudWindow.Reset();
+        _advisoryWarned = false;
+        _advisoryLogged = false;
+        _advisorySince = 0;
     }
 
     struct ImageNote
@@ -492,6 +577,13 @@ class Core
     uint64_t _captured = 0;
     uint64_t _sinceSummary = 0;
     uint64_t _lastSampledSequence = 0;
+    // The HUD's own flagged area for the guard-limit warning: a recent window of readbacks that can be the HUD (HudCoverageWindow).
+    HudCoverageWindow _hudWindow;
+    uint64_t _maskKey = 0;    // MaskKey() of the readbacks in the window
+    bool _maskKeySet = false;
+    bool _advisoryWarned = false; // the warning state the menu shows (immediate)
+    bool _advisoryLogged = false; // the state the log last carried (after its settle time)
+    uint64_t _advisorySince = 0;  // when the warning state last changed
     Mode _mode = Mode::Off;
     Mode _lastMode = Mode::Off;
     Phase _shownPhase = Phase::Off;

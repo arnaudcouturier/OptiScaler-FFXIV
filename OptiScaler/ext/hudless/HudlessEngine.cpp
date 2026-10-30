@@ -70,6 +70,9 @@ void Barrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RE
     list->ResourceBarrier(1, &barrier);
 }
 
+// The guard default the warning lines quote (HudlessLogic.h) is the config default (HudlessConfig.h): one number, checked here.
+static_assert(ext::HudlessConfig::kGuardDefault == kGuardDefaultLimit, "the quoted guard default must match the config default");
+
 Provider ProviderOf(FGOutput output)
 {
     switch (output)
@@ -115,6 +118,16 @@ class Engine final : public IEngineHost, private FenceReader
     bool HdrOutput() override { return Access::Hudless::HdrOutput(*_sc); }
     bool DebugCompareOn() override { return State::Instance().fgHudlessCompare; }
     float CoverageLimit() override { return ext::Cfg().hudless.CoverageLimit(); }
+    // The readbacks measured under another mask setting are not the HUD of the mask in force: both decimals of the threshold and
+    // the dilation go into one key (HudlessCore.h). Threshold() is finite and within kThresholdMin..kThresholdMax.
+    uint64_t MaskKey() override
+    {
+        const float threshold = ext::Cfg().hudless.Threshold();
+        return (static_cast<uint64_t>(std::llround(static_cast<double>(threshold) * 1000000.0)) << 8) |
+               static_cast<uint64_t>(ext::Cfg().hudless.Dilation() & 0xFFu);
+    }
+    // The guard-limit warning waits for its state to settle (GuardAdvisory::kSettleMs); every other line is immediate.
+    uint64_t NowMs() override { return GetTickCount64(); }
     GuardPolicy CoverageGuardPolicy() override { return ext::Cfg().hudless.GetGuardPolicy(); }
     int CoverageGuardReleaseHolds() override { return ext::Cfg().hudless.ReleaseHolds(); }
     bool CoverageGuardTripOnAnchorLater() override { return ext::Cfg().hudless.TripOnAnchorLater(); }
@@ -764,10 +777,11 @@ void Engine::Post(Dx11wDx12SC& sc)
     if (!_core.Staged() || _stagedSlot < 0)
     {
         // Exactly one of Produce / Invalidate / Hold per present: no usable pair, so stop pasting (the normal base carries
-        // its UI), but not yet in the first presents after a swapped one (Hold: the ring stays, the paste stays visible)
+        // its UI), but not yet in the first presents after a swapped one (Hold: the ring stays, the paste stays visible).
+        // The tint gate stays open on these presents too, so a diagnostic run can see the mask while the guard is tripped.
         const PasteAction action = _core.PasteDecision();
         if (action != PasteAction::None)
-            UiPaste::SetPasteEnabled(_core.PasteVisible());
+            UiPaste::SetPasteEnabled(_core.PasteGate(_tint));
         if (action == PasteAction::Invalidate)
             UiPaste::Invalidate(ReasonText(_core.PresentReason()));
         Finish();
@@ -829,7 +843,7 @@ void Engine::Post(Dx11wDx12SC& sc)
 
     const PasteAction action = _core.PasteDecision();
     if (action != PasteAction::None)
-        UiPaste::SetPasteEnabled(_core.PasteVisible());
+        UiPaste::SetPasteEnabled(_core.PasteGate(_tint));
     bool produced = true;
     if (action == PasteAction::Produce)
     {

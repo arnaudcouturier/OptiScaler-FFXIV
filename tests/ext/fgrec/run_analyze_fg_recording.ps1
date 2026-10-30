@@ -54,6 +54,7 @@ function Build-Clean {
             $lines += '{"qpc":' + ($qb + 22) + ',"tid":7,"frame":' + $i + ',"gen":0,"prov":1,"kind":"automfg","a":0,"b":0,"msg":"AutoMFG self-test: 2x -> 3x (back to the count in use before the test)"}'
         }
         if ($i -eq 50) { $lines += Row ($qb + 60) 'nr.rebuild' 1 0 0 '' $i }
+        if ($i -eq 30) { $lines += Row ($qb + 25) 'mark' 1 1 0 '' $i } # the user's "now": one mark record
     }
     $lines += End-Line
     return $lines
@@ -105,8 +106,12 @@ else {
     if ($r.Json.warnings.Count -ne 1) { Fail 'clean: want the one HRESULT warning' }
     if ($r.Json.clean_shutdown -ne $true) { Fail 'clean: not marked clean' }
     if ($r.Json.events.'fg.present.end' -ne 70) { Fail 'clean: event count off' }
-    if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 142) { Fail 'clean: sequence range off' }
+    if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 143) { Fail 'clean: sequence range off' }
     if ($r.Json.dropped_records -ne 0) { Fail 'clean: dropped not zero' }
+    if ((@($r.Json.marks)).Count -ne 1) { Fail "clean: marks $((@($r.Json.marks)).Count), want 1" }
+    elseif ($r.Json.marks[0].n -ne 1) { Fail "clean: mark number $($r.Json.marks[0].n), want 1" }
+    elseif ($r.Json.marks[0].t_s -ne 1) { Fail "clean: mark second $($r.Json.marks[0].t_s), want 1" }
+    else { Pass 'clean reports the mark with its number and its second' }
 }
 
 $cutPath = Join-Path $Out 'cut.jsonl'
@@ -116,15 +121,17 @@ if ($r.Code -ne 2) { Fail "cut: exit $($r.Code), want 2" } else { Pass 'cut exit
 if ($r.Json.clean_shutdown -ne $false) { Fail 'cut: still marked clean' }
 
 $rotBase = Join-Path $Out 'rot.jsonl'
-Write-Fixture ($rotBase + '.2') ($clean[0..40])
-Write-Fixture ($rotBase + '.1') ($clean[41..91])
-Write-Fixture $rotBase ($clean[92..($clean.Count - 1)])
+Write-Fixture ($rotBase + '.3') ($clean[0..30]) # the oldest rotation of a nine-file session
+Write-Fixture ($rotBase + '.2') ($clean[31..70])
+Write-Fixture ($rotBase + '.1') ($clean[71..111])
+Write-Fixture $rotBase ($clean[112..($clean.Count - 1)])
 $r = Invoke-Analyzer $rotBase 'rot'
 if ($r.Code -ne 0) { Fail "rotated: exit $($r.Code), want 0" } else { Pass 'rotated exits 0' }
 if ($r.Json.by_provider.dlssg.presents.count -ne 70) { Fail 'rotated: presents not 70' }
-if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 142) { Fail 'rotated: sequence range off' }
+if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 143) { Fail 'rotated: sequence range off' }
 if ($r.Json.head_rotated -ne $false) { Fail 'rotated: head_rotated must be false' }
-else { Pass 'rotated keeps a complete head' }
+else { Pass 'rotated keeps a complete head, .3 included' }
+if ((@($r.Json.marks)).Count -ne 1) { Fail 'rotated: the mark of the .3 part was not read' }
 
 $dropPath = Join-Path $Out 'dropped.jsonl'
 $withDrop = @($clean[0..99]) + '{"kind":"records_dropped","count":5}' + @($clean[100..($clean.Count - 1)])

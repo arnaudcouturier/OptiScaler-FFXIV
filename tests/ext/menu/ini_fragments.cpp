@@ -325,6 +325,7 @@ const NotCompared kNotCompared[] = {
     { "[LowLatency] ", "upstream enum members (LowLatencyInput/Output) declared in Config.h, not in ext" },
     { "[FramePacing] Trace:", "declared without a default on purpose (CustomOptional<bool, NoDefault>): unset means auto (on only with file logging at Debug or Trace), and an explicit false must survive a save" },
     { "[FramePacing] GpuTimers", "declared without a default on purpose (CustomOptional<bool, NoDefault>): unset means auto (on only together with the frame-pacing trace), and an explicit false must survive a save" },
+    { "[FramePacing] FgRecorderMarkKey", "the mark key defaults to the UnboundKey constant of Config.h, outside ext" },
     { "[Window] Mode", "the member name 'mode' is declared in several config structs (HDR, HudLess, Window) and the Window binder sits in ExtConfig.cpp, so the declaration cannot be told apart by name; it is a string key" },
 };
 

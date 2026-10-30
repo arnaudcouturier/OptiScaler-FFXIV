@@ -89,12 +89,18 @@ const Row kRows[] = {
       { "\\\"Reset\\\" in the Mipmap Bias card above are overwritten" },
       { "\\\"Reset\\\" in the card above" },
       {} },
-    // HUD-less: the debug tint says which feature it belongs to
+    // HUD-less: the debug tint says which feature it belongs to; the coverage guard has its own sub-heading (a second 0..1 slider
+    // was mistaken for the mask threshold) and its own warning line, and "Reset advanced" says it resets the guard too
     { "hudless/HudlessMenu.cpp",
       {},
       { "Checkbox(\"Show detected UI\"" },
       { { "DrawHudless", "DrawHudless", "Checkbox(\"Show detected UI (HUD-less)\", &tint)" },
-        { "DrawHudless", "DrawHudless", "SectionTitle(\"HUD-less (UI-free frame generation)\")" } } },
+        { "DrawHudless", "DrawHudless", "SectionTitle(\"HUD-less (UI-free frame generation)\")" },
+        { "DrawHudless", "DrawHudless", "SectionTitle(\"Coverage guard\")" },
+        { "DrawHudless", "DrawHudless", "Button(\"Reset advanced\")" },
+        { "DrawHudless", "DrawHudless", "and the Coverage guard back to 0.60 (the guard is reset with them)" },
+        { "DrawHudless", "DrawHudless", "GuardAdvisoryMenuLine(advisory)" },
+        { "DrawHudless", "DrawHudless", "for (const std::string& line : sliderLogs.Due(GetTickCount64()))" } } },
 };
 
 std::vector<std::string> Problems(const Row& r, const std::string& text)

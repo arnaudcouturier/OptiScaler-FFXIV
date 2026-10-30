@@ -1,10 +1,11 @@
 #pragma once
 // Frame-generation event recorder (`OptiScaler/ext/fgrec/`): a bounded queue and a writer thread producing one JSONL file per session,
 // beside the DLL in `fg-recordings\`. The recording core is ported from SirenBrink/FFXIVRender's fg_diagnostics
-// (GPL-3.0-or-later); the records are smaller here (fixed small fields, no big arrays), rotation keeps 3 files
-// per session (only the base file opens with `session.begin`; rotations open with a `continuation` line),
-// and only the newest 5 sessions are kept. No record holds a path, a user name or a machine name:
-// a module is named by file name only.
+// (GPL-3.0-or-later); the records are smaller here (fixed small fields, no big arrays), rotation keeps 9 files
+// per session (144 MiB plus the queue batch that crossed each file's limit, about 40 minutes at 60 base fps and 2x frame
+// generation, so a 25-minute session keeps its beginning; only the base file opens with `session.begin`; rotations
+// open with a `continuation` line), and only the newest 5 sessions are kept. No record holds a path, a user name or a
+// machine name: a module is named by file name only.
 //
 // Cost: with the key off a tap costs one relaxed atomic load of the cached key plus one thread-local counter
 // increment, and every 16th tap per thread adds one config re-read; there is no thread, no allocation and no
@@ -43,6 +44,12 @@ inline constexpr const char* kProviderOff = "provider.deactivating"; // msg = pr
 inline constexpr const char* kPresetSwitch = "dlssg.preset.switch";  // msg = "A -> B"
 inline constexpr const char* kModule = "provider.module";            // msg = module file name only
 inline constexpr const char* kXeFactor = "xefg.factor";              // a = from, b = to
+inline constexpr const char* kMark = "mark";                        // a = the user's mark number, see Mark()
+
+// One user mark: the recorder counts the presses of the mark key ([FramePacing] FgRecorderMarkKey) and writes a `mark` record, so
+// a session can be read at the moments the user pointed at ("now"). Returns the number the record carries, for the caller's one
+// log line; with the recorder's key off nothing is written and the count still goes up (the number is the user's, not the file's).
+unsigned Mark() noexcept;
 
 // What session.begin carries. All strings are short file content (version, names, key states): never a path.
 // moduleDir is local only: the folder is <moduleDir>\fg-recordings\, the directory itself is never emitted.

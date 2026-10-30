@@ -79,7 +79,8 @@ struct AutoRegister
 // WantsFrame / DrawOverlays (BeginMenuFrameIfNeeded / RenderMenu), ShaderTimeRows (RenderShaderTimes).
 
 // A key that toggles something: polled with the menu's own CheckShortcut, handled in the shortcut pass, with a row in
-// the Keybinds card. `slot` is the persisted Keybind id: keep it stable (NR toggle 14, HDR screenshot 15).
+// the Keybinds card. `slot` is the persisted Keybind id: keep it stable (NR toggle 14, HDR screenshot 15, NR model
+// resolution and enlargement mode 16 to 18, recorder mark 19).
 struct Shortcut
 {
     const char* name;     // row label in the Keybinds card

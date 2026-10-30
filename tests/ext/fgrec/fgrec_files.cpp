@@ -76,9 +76,9 @@ static std::vector<std::wstring> FindSessions(const std::wstring& dir)
     do
     {
         std::wstring name = f.cFileName;
-        for (int r = 1; r <= 2; ++r)
+        for (int r = 1; r <= fg::kKeepRotations; ++r)
         {
-            const std::wstring suf = r == 1 ? L".1" : L".2";
+            const std::wstring suf = L"." + std::to_wstring(r);
             if (name.size() > suf.size() && name.compare(name.size() - suf.size(), suf.size(), suf) == 0)
                 name.resize(name.size() - suf.size());
         }

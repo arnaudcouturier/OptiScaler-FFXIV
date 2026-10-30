@@ -75,6 +75,33 @@ static void SweepSkipsNonFiles(const std::string& repo)
     CHECK(core.find("FILE_ATTRIBUTE_REPARSE_POINT") != std::string::npos);
 }
 
+static void OwnNames()
+{
+    // The name parser is the sweep's whole safety: it has to accept exactly the names the recorder writes (base + .1 .. .8) and
+    // nothing else. A leading zero (".01", ".008") is a stray copy: accepting it made that file a session key, so it took one of
+    // the kept slots and was swept with a session that never wrote it.
+    std::wstring session;
+    auto own = [&session](const std::wstring& name)
+    {
+        session.clear();
+        return fg::OwnFile(name, session);
+    };
+    const std::wstring base = L"fg-rec-20260101-000000-000-100.jsonl";
+    CHECK(own(base) && session == base);
+    for (int r = 1; r <= fg::kKeepRotations; ++r)
+        CHECK(own(base + L"." + std::to_wstring(r)) && session == base);
+    CHECK(!own(base + L".0"));
+    CHECK(!own(base + L".9"));   // past the cap: not a name this recorder writes
+    CHECK(!own(base + L".10"));
+    CHECK(!own(base + L".01"));  // a leading zero is a stray copy
+    CHECK(!own(base + L".008"));
+    CHECK(!own(base + L".1."));
+    CHECK(!own(base + L".bak"));
+    CHECK(!own(L"FG-REC-20260101-000000-000-100.jsonl"));
+    CHECK(!own(L"fg-rec-20260101-000000-000-100 - Copy.jsonl"));
+    CHECK(!own(L"fg-rec-20260101-000000-000-100.jsonl.1.bak"));
+}
+
 static void SessionName(const std::wstring& dir, int i, wchar_t* base)
 {
     _snwprintf_s(base, MAX_PATH, _TRUNCATE, L"%s\\fg-rec-2026010%d-000000-000-100.jsonl", dir.c_str(), i);
@@ -95,6 +122,9 @@ static void SessionCleanup()
         {
             Touch(std::wstring(base) + L".1", "one");
             Touch(std::wstring(base) + L".2", "two");
+            // a full rotation set: .3 .. .8 belong to the session too, or a long session would leave them behind
+            for (int r = 3; r <= fg::kKeepRotations; ++r)
+                Touch(std::wstring(base) + L"." + std::to_wstring(r), "more");
         }
     }
     // decoys: foreign files that share the folder. The Explorer copy and the
@@ -126,6 +156,7 @@ static void SessionCleanup()
         {
             CHECK(Exists(std::wstring(base) + L".1"));
             CHECK(Exists(std::wstring(base) + L".2"));
+            CHECK(Exists(std::wstring(base) + L".8")); // the oldest kept rotation is a session file too
         }
     }
     // sessions 1..3 are gone with their rotations: only own-pattern names
@@ -136,6 +167,7 @@ static void SessionCleanup()
         CHECK(!Exists(base));
         CHECK(!Exists(std::wstring(base) + L".1"));
         CHECK(!Exists(std::wstring(base) + L".2"));
+        CHECK(!Exists(std::wstring(base) + L".8")); // and a removed session takes every rotation with it
     }
     // every decoy is untouched, byte for byte
     CHECK(ft::ReadBytes(dir + L"\\notes.txt") == "notes");
@@ -147,12 +179,17 @@ static void SessionCleanup()
     CHECK(ft::ReadBytes(dir + L"\\fg-rec-nosuffix") == "no suffix");
     CHECK(ft::ReadBytes(dir + L"\\random.jsonl") == "no prefix");
     CHECK(Exists(dir + L"\\fg-rec-20200101-000000-000-100.jsonl"));
+    // a stray rotation copy with a leading zero is not a session file of this recorder: it is neither counted toward the kept
+    // sessions nor swept with one
+    Touch(dir + L"\\fg-rec-20251231-000000-000-100.jsonl.01", "stray rotation copy");
+    CHECK(ft::ReadBytes(dir + L"\\fg-rec-20251231-000000-000-100.jsonl.01") == "stray rotation copy");
 }
 
 int main(int argc, char** argv)
 {
     const std::string repo = argc > 1 ? argv[1] : ".";
     SweepSkipsNonFiles(repo);
+    OwnNames();
     SessionCleanup();
     if (g_failed != 0)
     {

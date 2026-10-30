@@ -176,9 +176,9 @@ int main(int argc, char** argv)
     {
         const std::vector<int> slots = ShortcutSlots(repo + "/OptiScaler/ext");
         const std::set<int> distinct(slots.begin(), slots.end());
-        CHECK(slots.size() == 5 && distinct.size() == slots.size()); // the NR toggle and its three new keys, and the HDR screenshot
+        CHECK(slots.size() == 6 && distinct.size() == slots.size()); // the NR toggle and its three new keys, the HDR screenshot and the recorder mark
         CHECK(distinct.count(14) == 1 && distinct.count(15) == 1 && distinct.count(16) == 1 && distinct.count(17) == 1 &&
-              distinct.count(18) == 1);
+              distinct.count(18) == 1 && distinct.count(19) == 1);
         const std::string upstream = ReadRaw(repo + "/OptiScaler/menu/menu_common.cpp");
         std::set<int> upstreamSlots;
         const std::regex row(R"(Keybind\(\s*"[^"]*"\s*,\s*(\d+)\s*\))");

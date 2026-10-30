@@ -1750,7 +1750,21 @@
           "defaultMeans": "false",
           "applies": "live",
           "menu": { "tab": "Frame Gen", "card": "frame_pacing", "cardTitle": "Frame pacing" },
-          "description": "FG event recorder: one JSONL file per session in fg-recordings beside the DLL (presents with HRESULT, Reflex sleeps, AutoMFG lines, NR rebuilds, provider events). Bounded queue, rotation and session cap; off means no thread and no file.",
+          "description": "FG event recorder: one JSONL file per session in fg-recordings beside the DLL (presents with HRESULT, Reflex sleeps, AutoMFG lines, NR rebuilds, provider events). Bounded queue, rotation at 16 MiB keeping 9 files per session (144 MiB plus the one queue batch that crossed the limit, about 40 minutes at 60 base fps and 2x frame generation, so a 25-minute session keeps its beginning) and only the newest 5 sessions; off means no thread and no file.",
+          "flags": [ "diagnostic" ]
+        },
+        {
+          "key": "[FramePacing] FgRecorderMarkKey",
+          "section": "FramePacing",
+          "name": "FgRecorderMarkKey",
+          "type": "int",
+          "min": 0,
+          "max": 255,
+          "default": "auto",
+          "defaultMeans": "unbound (-1)",
+          "applies": "live",
+          "menu": { "tab": "Frame Gen", "card": "frame_pacing", "cardTitle": "Frame pacing" },
+          "description": "Virtual-key code of the recorder's one-key mark. A press writes a mark record at that moment into the session file and one log line (user mark N), so the user can say when something happened. Unbound by default; set it from the Keybinds section of the overlay; -1 leaves it unbound.",
           "flags": [ "diagnostic" ]
         },
         {

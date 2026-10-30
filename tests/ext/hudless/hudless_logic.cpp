@@ -1142,6 +1142,154 @@ void TestFormats()
     assert(ModeChangeLine(Mode::Off, Mode::UiFree) == "HudLess: mode off -> ui_free");
     assert(StateText(Phase::Off, Reason::SlotBusy) == "Off"); // the reason only shows with Fallback
 }
+void TestGuardAdvisory()
+{
+    // The warning compares the RELEASE level (0.75 x the limit), not the limit: a guard that only just beats the HUD area still
+    // never lets go, which is the trap a play session fell into (0.05 over a 4.4 % HUD releases at or below 3.75 %).
+    assert(GuardAdvisory::kAssumedHudCoverage == 0.15f);
+    assert(GuardAdvisory::kMinSamples == 30);
+    assert(GuardAdvisory::kSettleMs == 500);
+    GuardAdvisory a = EvaluateGuardAdvisory(0.05f, 0.044f, 100);
+    assert(a.warn && a.release < a.reference); // 0.05 > 0.044, but 0.0375 < 0.044
+    a = EvaluateGuardAdvisory(0.10f, 0.09f, 100);
+    assert(a.warn); // 0.10 > 0.09, but 0.075 < 0.09
+    assert(!EvaluateGuardAdvisory(0.12f, 0.09f, 100).warn); // release 0.09 = the HUD area: it releases
+    assert(EvaluateGuardAdvisory(0.11f, 0.09f, 100).warn);
+    // The tolerance is a hundredth of a slider step: a release level that lands one float ulp under the area is not a trap
+    assert(!EvaluateGuardAdvisory(0.12f, 0.12f * CoverageGuard::kReleaseFraction, 100).warn);
+    // A release level exactly at the tolerance above the area warns too (the comparison is strict: reaching it releases)
+    const float boundary = 0.12f * CoverageGuard::kReleaseFraction + kGuardLevelTolerance;
+    assert(!EvaluateGuardAdvisory(0.12f, boundary, 100).warn);
+    assert(EvaluateGuardAdvisory(0.12f, boundary + 1e-3f, 100).warn);
+
+    // Nothing measured yet: the assumed HUD level (15%) is compared, so a low limit is still caught before the first readbacks
+    a = EvaluateGuardAdvisory(0.05f, -1.f, 0);
+    assert(a.warn && a.measured < 0.f && a.reference == 0.15f && a.samples == 0);
+    a = EvaluateGuardAdvisory(0.20f, -1.f, 0);
+    assert(!a.warn && a.reference == 0.15f); // 0.20 > 0.15 and its release level 0.15 reaches it
+    a = EvaluateGuardAdvisory(0.19f, -1.f, 0);
+    assert(a.warn && a.release < a.reference); // 0.19 > 0.15 is not enough: its release level is 0.1425
+    assert(!EvaluateGuardAdvisory(0.20f, -1.f, 0).warn); // 0.20's release level is 0.15, the assumed area
+
+    // Too few samples are not a measurement: the assumed level is still used
+    a = EvaluateGuardAdvisory(0.05f, 0.09f, GuardAdvisory::kMinSamples - 1);
+    assert(a.warn && a.measured < 0.f && a.samples == GuardAdvisory::kMinSamples - 1);
+    // ... and from the first trusted sample on, the measurement decides
+    a = EvaluateGuardAdvisory(0.05f, 0.09f, GuardAdvisory::kMinSamples);
+    assert(a.warn && a.measured == 0.09f && a.reference == 0.09f && a.samples == GuardAdvisory::kMinSamples);
+    assert(!EvaluateGuardAdvisory(0.12f, 0.09f, 100).warn);
+    assert(EvaluateGuardAdvisory(0.119f, 0.09f, 100).warn);
+    // 0 = guard off: nothing can trip, so nothing warns (and a measured value does not matter)
+    assert(!EvaluateGuardAdvisory(0.f, 0.30f, 100).warn && !EvaluateGuardAdvisory(0.f, -1.f, 0).warn);
+
+    // The advice names a value that actually releases: the smallest two-decimal limit whose release level reaches the HUD area
+    assert(ReleaseLimitFor(0.09f) == 0.12f);
+    assert(ReleaseLimitFor(0.044f) == 0.06f);
+    assert(ReleaseLimitFor(0.15f) == 0.20f);
+    assert(ReleaseLimitFor(0.01f) == 0.02f);
+    assert(ReleaseLimitFor(0.09f) * CoverageGuard::kReleaseFraction + kGuardLevelTolerance >= 0.09f);
+    assert((ReleaseLimitFor(0.09f) - 0.01f) * CoverageGuard::kReleaseFraction + kGuardLevelTolerance < 0.09f); // the step below does not
+    assert(EvaluateGuardAdvisory(0.05f, 0.09f, 100).advice == ReleaseLimitFor(0.09f));
+    // The advice really releases: no warning at the value it names, one at the step below
+    assert(!EvaluateGuardAdvisory(ReleaseLimitFor(0.09f), 0.09f, 100).warn);
+    assert(EvaluateGuardAdvisory(ReleaseLimitFor(0.09f) - 0.01f, 0.09f, 100).warn);
+
+    // The share texts the brief's sentence is built from
+    assert(ShareText(0.05f) == "5%");
+    assert(ShareText(0.6f) == "60%");
+    assert(ShareText(0.05f * CoverageGuard::kReleaseFraction) == "3.8%");
+    assert(ShareText(0.09f) == "9%");
+
+    // The status line: the limit, the release level and why a present falls back. The density policy releases after its clean run,
+    // so its sentence names that instead of "release below".
+    assert(GuardStatusLine(0.05f, true) == "over the guard limit 5%, falling back; release below 3.8%");
+    assert(GuardStatusLine(0.60f, false) == "guard limit 60%, release below 45%");
+    assert(GuardStatusLine(0.05f, false) == "guard limit 5%, release below 3.8%");
+    assert(GuardStatusLine(0.f, false) == "Coverage guard: off, no limit");
+    assert(GuardStatusLine(0.05f, false, GuardPolicy::Density) ==
+           "guard limit 5%, releases after 60 clean readbacks at or below 3.8%");
+    assert(GuardStatusLine(0.05f, true, GuardPolicy::Density) ==
+           "over the guard limit 5%, falling back; releases after 60 clean readbacks at or below 3.8%");
+
+    // The menu warning names the limit, its release level, where the number came from, the value to set and that the user's value is
+    // left alone
+    const std::string menu = GuardAdvisoryMenuLine(EvaluateGuardAdvisory(0.05f, 0.09f, 120));
+    assert(menu.find("coverage guard limit (5%) releases only at or below 3.8%") != std::string::npos);
+    assert(menu.find("the HUD's flagged area is 9% (the low fifth of the last 120 readbacks while UI-free ran)") != std::string::npos);
+    assert(menu.find("raise the limit to " + ShareText(ReleaseLimitFor(0.09f)) + " or more") != std::string::npos);
+    assert(menu.find("Your value is not changed for you.") != std::string::npos);
+    assert(menu.find("Reset advanced") != std::string::npos && menu.find("60%") != std::string::npos);
+    assert(GuardAdvisoryMenuLine(EvaluateGuardAdvisory(0.60f, 0.09f, 120)).empty());
+    assert(GuardAdvisoryMenuLine(EvaluateGuardAdvisory(0.05f, -1.f, 0)).find("no readback has been measured yet") !=
+           std::string::npos);
+    // Above three quarters of the screen no limit can release, and the advice says so instead of naming one
+    const std::string hopeless = GuardAdvisoryMenuLine(EvaluateGuardAdvisory(0.05f, 0.80f, 120));
+    assert(hopeless.find("no limit releases this mask") != std::string::npos);
+
+    // The log line: one per settled change. It says the same numbers and that the value was not changed.
+    const std::string log = GuardAdvisoryLogLine(EvaluateGuardAdvisory(0.05f, 0.09f, 120));
+    assert(log.rfind("HudLess: coverage guard 5% releases only at or below 3.8%, below the HUD it must let through", 0) == 0);
+    assert(log.find("measured 9% as the low fifth of 120 readbacks") != std::string::npos);
+    assert(log.find("raise the limit to " + ShareText(ReleaseLimitFor(0.09f)) + " or more") != std::string::npos);
+    assert(log.find("the value is not changed") != std::string::npos);
+    assert(GuardAdvisoryLogLine(EvaluateGuardAdvisory(0.05f, -1.f, 0)).find("assuming 15%") != std::string::npos);
+    assert(GuardAdvisoryLogLine(EvaluateGuardAdvisory(0.60f, 0.09f, 120)) ==
+           "HudLess: coverage guard 60% can release over the HUD's flagged area again (9%): the guard warning clears");
+    assert(GuardAdvisoryLogLine(EvaluateGuardAdvisory(ReleaseLimitFor(0.09f), 0.09f, 120))
+               .find("can release over the HUD's flagged area again") != std::string::npos);
+    assert(GuardAdvisoryLogLine(EvaluateGuardAdvisory(0.f, 0.09f, 120)) ==
+           "HudLess: the coverage guard is off: the guard-limit warning clears");
+
+    // The U paste gate: with the tint off it IS PasteVisible (byte for byte today); the tint only opens it where it has an image to
+    // draw (a staged, producing present), never on one that invalidates the ring
+    assert(PasteGateOpen(false, false) == false);
+    assert(PasteGateOpen(true, false) == true);
+    assert(PasteGateOpen(false, true) == true); // the guard is tripped: only the tint is drawn
+    assert(PasteGateOpen(true, true) == true);
+}
+
+void TestHudCoverageWindow()
+{
+    // A recent window, not a lifetime mean: the oldest readback leaves, so a changed scene and a changed mask are followed
+    HudCoverageWindow window;
+    assert(window.Samples() == 0 && window.Estimate() < 0.f);
+    window.Add(0.09f);
+    assert(window.Samples() == 1 && window.Estimate() == 0.09f);
+    for (size_t i = 1; i < HudCoverageWindow::kSamples; ++i)
+        window.Add(0.09f);
+    assert(window.Samples() == HudCoverageWindow::kSamples);
+    assert(std::fabs(window.Estimate() - 0.09f) < 1e-6f);
+
+    // A fade peak is a minority of the window and does not lift the estimate
+    for (size_t i = 0; i < HudCoverageWindow::kSamples / 10; ++i)
+        window.Add(0.95f);
+    assert(std::fabs(window.Estimate() - 0.09f) < 1e-6f);
+    // ... a persistent change does, once it is more than a fifth of the window
+    for (size_t i = 0; i < HudCoverageWindow::kSamples; ++i)
+        window.Add(0.30f);
+    assert(std::fabs(window.Estimate() - 0.30f) < 1e-6f);
+
+    // The low fifth of a small window is its lowest value, and of an ordered one the value a fifth of the way in
+    HudCoverageWindow small;
+    small.Add(0.05f);
+    small.Add(0.02f);
+    small.Add(0.09f);
+    assert(small.Estimate() == 0.02f);
+    HudCoverageWindow ordered;
+    for (int i = 1; i <= 10; ++i)
+        ordered.Add(static_cast<float>(i) / 100.f);
+    assert(ordered.Estimate() == 0.02f); // kPercentile 0.20 of 10 samples is index 1
+
+    // Ties (the same value twice, a value that equals the one leaving) never lose an entry: the window keeps one per sample
+    HudCoverageWindow ties;
+    for (size_t i = 0; i < HudCoverageWindow::kSamples + 3; ++i)
+        ties.Add(0.07f);
+    assert(ties.Samples() == HudCoverageWindow::kSamples && ties.Estimate() == 0.07f);
+    // Reset empties it (a mode change, a mask change)
+    ties.Reset();
+    assert(ties.Samples() == 0 && ties.Estimate() < 0.f);
+}
+
 } // namespace
 
 int main()
@@ -1157,7 +1305,9 @@ int main()
     TestGuardEdges();
     TestSlotRing();
     TestFormats();
+    TestGuardAdvisory();
+    TestHudCoverageWindow();
     std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown, release limit, per-frame trip), "
-              "slot ring fences, log formats");
+              "guard-limit advisory and paste gate, slot ring fences, log formats");
     return 0;
 }
