@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="OptiScaler-FFXIV: upscaling, frame generation and HDR for Final Fantasy XIV" width="860">
+<img src="assets/banner.svg" alt="OptiScaler-FFXIV: DLSS Neural Rendering, upscaling, frame generation and HDR for Final Fantasy XIV" width="860">
 
 [![Release](https://img.shields.io/github/v/release/arnaudcouturier/OptiScaler-FFXIV?display_name=release&style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
 [![Downloads](https://img.shields.io/github/downloads/arnaudcouturier/OptiScaler-FFXIV/total?style=flat-square)](https://github.com/arnaudcouturier/OptiScaler-FFXIV/releases)
@@ -11,7 +11,7 @@
 
 ## What it is
 
-OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV. It provides upscaling, frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
+OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) for Final Fantasy XIV. It provides DLSS Neural Rendering, upscaling, frame generation and HDR10 output for the game, plus features written for FFXIV itself, and puts the settings in an in-game menu that opens with the Insert key. A large part of the feature code was carried over from [SirenBrink's community fork](https://github.com/SirenBrink/OptiScaler_DLSSNR_Multipass_MFG_FFXIV) (see [Credits](#credits)).
 
 ## Highlights
 
