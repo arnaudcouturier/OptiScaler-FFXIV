@@ -274,6 +274,9 @@ Applies: live = the menu change applies at once; restart = needs a game restart;
 
 - `[HDR] MenuNits`: Retired: menu HDR mapping is automatic; deleted from the ini on save.
 - `[HDR] ScreenshotHotkey`: Retired: the old fixed screenshot toggle; deleted from the ini on save.
+- `[Companion] HudReplacement`: Retired in v0.4.0: the FFXIV Companion plugin is no longer supported; ignored if present (the game draws its own nameplates).
+- `[Companion] HudInterpolation`: Retired in v0.4.0 with HudReplacement; ignored if present.
+- `[FFXIV] AutomaticReShadeMotionScale`: Retired in v0.4.0: the hidden motion-scale override of the automatic ReShade depth; ignored if present.
 
 ## Maintainer notes
 

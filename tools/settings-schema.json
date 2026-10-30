@@ -2350,6 +2350,18 @@
     {
       "key": "[HDR] ScreenshotHotkey",
       "note": "Retired: the old fixed screenshot toggle; deleted from the ini on save."
+    },
+    {
+      "key": "[Companion] HudReplacement",
+      "note": "Retired in v0.4.0: the FFXIV Companion plugin is no longer supported; ignored if present (the game draws its own nameplates)."
+    },
+    {
+      "key": "[Companion] HudInterpolation",
+      "note": "Retired in v0.4.0 with HudReplacement; ignored if present."
+    },
+    {
+      "key": "[FFXIV] AutomaticReShadeMotionScale",
+      "note": "Retired in v0.4.0: the hidden motion-scale override of the automatic ReShade depth; ignored if present."
     }
   ]
 }
