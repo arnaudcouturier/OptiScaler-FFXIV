@@ -2,9 +2,12 @@
 //
 // Per pixel p of the real frame, F = final image (with UI), H = UI-free image of the same frame:
 //   d(p)  = max(|F.r-H.r|, |F.g-H.g|, |F.b-H.b|)
-//   isUi  = any pixel in the square window of radius `radius` around p (clamped to the image) has d > threshold
+//   windowMax(p) = the largest d in the square window of radius `radius` around p (clamped to the image)
+//   isUi  = windowMax > threshold, that is: any pixel of the window has d > threshold
 // A 16x16 group loads d for its (16 + 2r)^2 tile once into group shared memory, so a pixel costs about 2.25 texture
 // reads instead of (2r+1)^2. Clamping the tile coordinates to the image gives the same answer as clamping the window.
+// The window's maximum (not just its answer for one threshold) is returned so a caller can count the same window at
+// several fixed difference levels without another texture read.
 
 #define UI_GROUP 16
 #define UI_MAX_RADIUS 4
@@ -24,7 +27,7 @@ float UiPixelDiff(int2 p, uint2 size)
 
 // Every thread of the group must call this (it contains a group barrier): do not return early before it. The barrier
 // also publishes any group shared variable the caller wrote before the call.
-bool UiWindowHasChange(uint2 groupId, uint2 localId, uint groupIndex, uint2 size, float threshold, uint radius)
+float UiWindowMaxDiff(uint2 groupId, uint2 localId, uint groupIndex, uint2 size, uint radius)
 {
     const int r = (int) min(radius, (uint) UI_MAX_RADIUS);
     const int dim = UI_GROUP + 2 * r;
@@ -36,11 +39,11 @@ bool UiWindowHasChange(uint2 groupId, uint2 localId, uint groupIndex, uint2 size
 
     GroupMemoryBarrierWithGroupSync();
 
-    bool hit = false;
+    float windowMax = 0.0;
     for (int y = 0; y <= 2 * r; ++y)
     {
         for (int x = 0; x <= 2 * r; ++x)
-            hit = hit || gUiDiff[(int) (localId.y + y) * dim + (int) localId.x + x] > threshold;
+            windowMax = max(windowMax, gUiDiff[(int) (localId.y + y) * dim + (int) localId.x + x]);
     }
-    return hit;
+    return windowMax;
 }

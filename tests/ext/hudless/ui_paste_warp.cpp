@@ -147,6 +147,40 @@ std::vector<uint8_t> ReferenceMask(const Image8& F, const Image8& H, float thres
     return ui;
 }
 
+// CPU reference of the amplitude counters (docs/HUDLESS.md section 7): pixels whose WINDOWED difference reaches `level`.
+// It mirrors the shader operation for operation, so the float comparison at a level is the shader's too.
+size_t ReferenceAmplitude(const Image8& F, const Image8& H, uint32_t radius, float level)
+{
+    const int w = int(F.width), h = int(F.height), r = int(std::min<uint32_t>(radius, 4));
+    std::vector<float> diff(size_t(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            float d = 0.0f;
+            for (int c = 0; c < 3; ++c)
+                d = std::max(d, std::abs(float(F.at(x, y)[c]) / 255.0f - float(H.at(x, y)[c]) / 255.0f));
+            diff[size_t(y) * w + x] = d;
+        }
+    size_t count = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            float windowMax = 0.0f;
+            for (int dy = -r; dy <= r; ++dy)
+                for (int dx = -r; dx <= r; ++dx)
+                    windowMax =
+                        std::max(windowMax, diff[size_t(std::clamp(y + dy, 0, h - 1)) * w + std::clamp(x + dx, 0, w - 1)]);
+            count += windowMax > level;
+        }
+    return count;
+}
+
+// A share of the picture, as the readback reports it.
+bool ShareIs(float got, size_t count, UINT pixels)
+{
+    return std::abs(got - float(count) / float(pixels)) < 1e-6f;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 
 void SafeBeforeInit(Rig& rig)
@@ -426,6 +460,158 @@ void RandomAgainstReference(Rig& rig)
         const float coverage = UiPaste::Snapshot().coverage;
         EXPECT(std::abs(coverage - float(flagged) / float(c.w * c.h)) < 1e-6f, "%ux%u coverage %f vs reference %f", c.w, c.h,
                coverage, float(flagged) / float(c.w * c.h));
+        const auto amp = UiPaste::Snapshot();
+        const size_t low = ReferenceAmplitude(final, hudless, c.dilation, 0.008f);
+        const size_t mid = ReferenceAmplitude(final, hudless, c.dilation, 0.05f);
+        const size_t high = ReferenceAmplitude(final, hudless, c.dilation, 0.2f);
+        EXPECT(ShareIs(amp.coverage008, low, c.w * c.h) && ShareIs(amp.coverage05, mid, c.w * c.h) &&
+                   ShareIs(amp.coverage2, high, c.w * c.h),
+               "%ux%u dilation %u amplitude %f/%f/%f vs reference %zu/%zu/%zu", c.w, c.h, c.dilation, amp.coverage008,
+               amp.coverage05, amp.coverage2, low, mid, high);
+        EXPECT(low >= mid && mid >= high, "the bands are nested (%zu/%zu/%zu)", low, mid, high);
+        UiPaste::Release();
+    }
+}
+
+void AmplitudeCounters(Rig& rig)
+{
+    std::printf("  amplitude counters: fixed 0.008/0.05/0.2 levels, windowed, independent of the threshold\n");
+    Bridge bridge { rig };
+    const UINT w = 40, h = 32;
+
+    // (a) an opaque block: every level reached, and the guard's own coverage is the number it always was (6x6 at dilation 1)
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        Fill(final, 10, 8, 13, 11, 200, 50, 20); // d = 140/255
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, 1));
+        const auto s = UiPaste::Snapshot();
+        EXPECT(ShareIs(s.coverage, 36, w * h), "opaque block: guard coverage %f, expected 36 pixels", s.coverage);
+        EXPECT(ShareIs(s.coverage008, 36, w * h) && ShareIs(s.coverage05, 36, w * h) && ShareIs(s.coverage2, 36, w * h),
+               "opaque block: amplitude %f/%f/%f, expected 36 pixels each", s.coverage008, s.coverage05, s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (b) the same block at 3/255: the low band only (a 0.05 or 0.2 level would report 36 here too)
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        Fill(final, 10, 8, 13, 11, 63, 60, 60); // d = 3/255 = 0.0118
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, 1));
+        const auto s = UiPaste::Snapshot();
+        EXPECT(ShareIs(s.coverage, 36, w * h) && ShareIs(s.coverage008, 36, w * h),
+               "3/255: guard %f and low band %f, expected 36 pixels each", s.coverage, s.coverage008);
+        EXPECT(s.coverage05 == 0.f && s.coverage2 == 0.f, "3/255 stays below the 0.05 and 0.2 levels (%f/%f)",
+               s.coverage05, s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (c) 26/255: low and middle band, not the top one
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        Fill(final, 10, 8, 13, 11, 86, 60, 60); // d = 26/255 = 0.102
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, 1));
+        const auto s = UiPaste::Snapshot();
+        EXPECT(ShareIs(s.coverage008, 36, w * h) && ShareIs(s.coverage05, 36, w * h),
+               "26/255: low %f and middle %f, expected 36 pixels each", s.coverage008, s.coverage05);
+        EXPECT(s.coverage2 == 0.f, "26/255 stays below the 0.2 level (%f)", s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (d) nothing differs: all three zero, and the guard too
+    {
+        Image8 scene(w, h, 90, 80, 70);
+        bridge.Backbuffer(w, h);
+        bridge.Produce(scene, scene, Params(0.008f, 2));
+        const auto s = UiPaste::Snapshot();
+        EXPECT(s.coverage == 0.f && s.coverage008 == 0.f && s.coverage05 == 0.f && s.coverage2 == 0.f,
+               "identical images: every counter zero (%f/%f/%f/%f)", s.coverage, s.coverage008, s.coverage05, s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (e) the counters follow the window, not the pixel: one 3/255 pixel counts 1, 9 and 25 times at dilation 0, 1 and 2
+    for (uint32_t d = 0; d <= 2; ++d)
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        final.at(20, 16)[0] = 63; // one pixel, 3/255
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, d));
+        const auto s = UiPaste::Snapshot();
+        const size_t expected = size_t(2 * int(std::min<uint32_t>(d, 4)) + 1) * (2 * std::min<uint32_t>(d, 4) + 1);
+        EXPECT(ShareIs(s.coverage008, expected, w * h), "dilation %u: low band %f, expected %zu pixels", d, s.coverage008,
+               expected);
+        EXPECT(s.coverage05 == 0.f && s.coverage2 == 0.f, "dilation %u: a 3/255 window never reaches 0.05 (%f/%f)", d,
+               s.coverage05, s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (f) a smooth gradient: all three bands differ, and they agree with the CPU reference
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        for (UINT y = 0; y < h; ++y)
+            for (UINT x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c)
+                    final.at(x, y)[c] = uint8_t(std::min(255, 60 + int(x * 60 / (w - 1)))); // 0..60 steps across
+        const size_t low = ReferenceAmplitude(final, hudless, 1, 0.008f);
+        const size_t mid = ReferenceAmplitude(final, hudless, 1, 0.05f);
+        const size_t high = ReferenceAmplitude(final, hudless, 1, 0.2f);
+        EXPECT(low > mid && mid > high && high > 0, "gradient: the bands grow apart (%zu/%zu/%zu)", low, mid, high);
+
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.008f, 1));
+        const auto lowThreshold = UiPaste::Snapshot();
+        EXPECT(ShareIs(lowThreshold.coverage008, low, w * h) && ShareIs(lowThreshold.coverage05, mid, w * h) &&
+                   ShareIs(lowThreshold.coverage2, high, w * h),
+               "gradient at threshold 0.008: amplitude %f/%f/%f vs reference %zu/%zu/%zu", lowThreshold.coverage008,
+               lowThreshold.coverage05, lowThreshold.coverage2, low, mid, high);
+
+        // the same pair at MaskThreshold = 0.2: the same three numbers, a much smaller guard coverage
+        bridge.Backbuffer(w, h);
+        bridge.Produce(final, hudless, Params(0.2f, 1));
+        const auto highThreshold = UiPaste::Snapshot();
+        EXPECT(highThreshold.coverage008 == lowThreshold.coverage008 && highThreshold.coverage05 == lowThreshold.coverage05 &&
+                   highThreshold.coverage2 == lowThreshold.coverage2,
+               "threshold 0.2 gives the same amplitude numbers (%f/%f/%f vs %f/%f/%f)", highThreshold.coverage008,
+               highThreshold.coverage05, highThreshold.coverage2, lowThreshold.coverage008, lowThreshold.coverage05,
+               lowThreshold.coverage2);
+        EXPECT(highThreshold.coverage < lowThreshold.coverage,
+               "the guard follows the configured threshold (%f at 0.008, %f at 0.2)", lowThreshold.coverage,
+               highThreshold.coverage);
+        UiPaste::Release();
+    }
+
+    // (g) cleanup pixels are pasted but never counted: the frame that clears a ghost has no difference of its own
+    {
+        Image8 hudless(w, h, 60, 60, 60), withUi = hudless;
+        Fill(withUi, 10, 8, 13, 11, 200, 50, 20);
+        bridge.Backbuffer(w, h);
+        bridge.Produce(withUi, hudless, Params(0.008f, 0));
+        bridge.Paste();
+        bridge.Backbuffer(w, h);
+        bridge.Produce(hudless, hudless, Params(0.008f, 0)); // the UI just closed: cleanup pixels are drawn
+        const auto out = bridge.Paste();
+        const auto s = UiPaste::Snapshot();
+        EXPECT(CountNonBg(out) == 16, "cleanup still pastes the old UI area (%zu pixels)", CountNonBg(out));
+        EXPECT(s.coverage == 0.f && s.coverage008 == 0.f && s.coverage05 == 0.f && s.coverage2 == 0.f,
+               "cleanup pixels are not counted (%f/%f/%f/%f)", s.coverage, s.coverage008, s.coverage05, s.coverage2);
+        UiPaste::Release();
+    }
+
+    // (h) the counters are zeroed before every dispatch: the same pair five times (one ring wrap) never accumulates
+    {
+        Image8 hudless(w, h, 60, 60, 60), final = hudless;
+        Fill(final, 10, 8, 13, 11, 200, 50, 20);
+        bridge.Backbuffer(w, h);
+        bool steady = true;
+        for (int i = 0; i < 5; ++i)
+        {
+            bridge.Produce(final, hudless, Params(0.008f, 0));
+            const auto s = UiPaste::Snapshot();
+            steady = steady && ShareIs(s.coverage, 16, w * h) && ShareIs(s.coverage008, 16, w * h) &&
+                     ShareIs(s.coverage05, 16, w * h) && ShareIs(s.coverage2, 16, w * h);
+        }
+        EXPECT(steady, "five identical images: every counter stays at 16 pixels");
         UiPaste::Release();
     }
 }
@@ -893,6 +1079,7 @@ try
     ThresholdAndDilation(rig);
     CleanupLevels(rig);
     RandomAgainstReference(rig);
+    AmplitudeCounters(rig);
     TypelessAndHdr(rig);
     OtherFormats(rig);
     RingAndFences(rig);

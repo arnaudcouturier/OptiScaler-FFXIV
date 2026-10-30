@@ -388,8 +388,14 @@ void TestSummary()
         }
         paste.pasted += 2;
         paste.coverage = 0.04f;
+        paste.coverage008 = 0.031f;
+        paste.coverage05 = 0.017f;
+        paste.coverage2 = 0.004f;
         if (i == 450)
+        {
             paste.coverage = 0.097f;
+            paste.coverage2 = 0.011f;
+        }
         Present(core, Mode::UiFree, paste);
     }
     paste.skipped = 6;
@@ -402,8 +408,8 @@ void TestSummary()
     assert(summary.rfind("HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
                          "NoBoundaryThisFrame 1); mask coverage avg ",
                          0) == 0);
-    assert(summary.find("max 9.7%; paste built 598 pasted 1200 skipped 0; slot waits 0; boundary: ok") !=
-           std::string::npos);
+    assert(summary.find("max 9.7%; amplitude 0.008/0.05/0.2 avg 3.1/1.7/0.4% max 3.1/1.7/1.1%; paste built 598 pasted 1200 skipped 0; "
+                        "slot waits 0; boundary: ok") != std::string::npos);
 
     // next window starts from zero: the second line counts only its own presents
     host.log.clear();
@@ -1198,6 +1204,7 @@ void TestSteadyGameplayReplay()
     assert(lines.size() == 2);
     assert(lines[1] ==
            "HudLess: mode ui_free, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage avg 12.0% max 12.0%; "
+           "amplitude 0.008/0.05/0.2 avg 0.0/0.0/0.0% max 0.0/0.0/0.0%; "
            "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped "
            "bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
@@ -1213,7 +1220,8 @@ void TestBlackScreenSummary()
     assert(lines.size() == 2);
     assert(lines[1] ==
            "HudLess: mode ui_free, state Fallback(MaskCoverage); 600 presents: 0 captured, 600 fallbacks (MaskCoverage 600); "
-           "mask coverage avg 95.0% max 95.0%; paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 "
+           "mask coverage avg 95.0% max 95.0%; amplitude 0.008/0.05/0.2 avg 0.0/0.0/0.0% max 0.0/0.0/0.0%; "
+           "paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 "
            "releases 0 (0 by release limit); swapped bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
 

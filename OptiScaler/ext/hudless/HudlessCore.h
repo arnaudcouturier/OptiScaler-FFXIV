@@ -23,6 +23,11 @@ struct PasteCounters
     uint64_t pasted = 0;
     uint64_t skipped = 0;
     float coverage = -1.f;         // newest completed readback, < 0 unknown
+    // Amplitude profile of that readback: share of the picture whose windowed per-channel difference reaches 0.008 / 0.05 /
+    // 0.2. Log only, never a decision; 0 when the host does not report them.
+    float coverage008 = 0.f;
+    float coverage05 = 0.f;
+    float coverage2 = 0.f;
     uint64_t coverageSequence = 0; // ordinal of the paste image that readback belongs to (0 = none yet)
 };
 
@@ -192,6 +197,12 @@ class Core
                 _window.coverageSum += static_cast<double>(paste.coverage);
                 ++_window.coverageSamples;
                 _window.coverageMax = std::max(_window.coverageMax, paste.coverage);
+                _window.amplitudeLowSum += static_cast<double>(paste.coverage008);
+                _window.amplitudeMidSum += static_cast<double>(paste.coverage05);
+                _window.amplitudeHighSum += static_cast<double>(paste.coverage2);
+                _window.amplitudeLowMax = std::max(_window.amplitudeLowMax, paste.coverage008);
+                _window.amplitudeMidMax = std::max(_window.amplitudeMidMax, paste.coverage05);
+                _window.amplitudeHighMax = std::max(_window.amplitudeHighMax, paste.coverage2);
                 // A swapped base whose own image measured over the limit (limit 0 = guard off: no limit to be over)
                 const ImageNote& note = _images[paste.coverageSequence % _images.size()];
                 if (limit > 0.f && paste.coverage > limit && note.ordinal == paste.coverageSequence && note.swapped)

@@ -671,7 +671,7 @@ void Engine::Pre(Dx11wDx12SC& sc)
     {
         const PasteStatus pasteStatus = UiPaste::Snapshot();
         paste = { pasteStatus.produced, pasteStatus.pasted, pasteStatus.skipped, pasteStatus.coverage,
-                  pasteStatus.coverageSequence };
+                  pasteStatus.coverage008, pasteStatus.coverage05, pasteStatus.coverage2, pasteStatus.coverageSequence };
         SyncPasteOptions();
     }
 

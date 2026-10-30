@@ -17,7 +17,7 @@ RWTexture2D<float4> UiTexture : register(u0);
 void CSMain(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID,
             uint gi : SV_GroupIndex)
 {
-    const bool changed = UiWindowHasChange(gid.xy, gtid.xy, gi, uint2(Width, Height), Threshold, Radius);
+    const bool changed = UiWindowMaxDiff(gid.xy, gtid.xy, gi, uint2(Width, Height), Radius) > Threshold;
 
     if (id.x >= Width || id.y >= Height)
         return;

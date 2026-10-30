@@ -753,6 +753,14 @@ struct WindowStats
     double coverageSum = 0.0;
     uint64_t coverageSamples = 0;
     float coverageMax = 0.f;
+    // Amplitude profile of the same samples (log only): share of the picture whose windowed per-channel difference reaches
+    // 0.008 / 0.05 / 0.2, independent of MaskThreshold (docs/HUDLESS.md section 7). coverageSamples counts them too.
+    double amplitudeLowSum = 0.0;
+    double amplitudeMidSum = 0.0;
+    double amplitudeHighSum = 0.0;
+    float amplitudeLowMax = 0.f;
+    float amplitudeMidMax = 0.f;
+    float amplitudeHighMax = 0.f;
     uint64_t slotWaits = 0; // blocking waits on the game thread (only the stub-free design has none; counted for the log)
     // Counters that only watch (they never feed a decision), at the end of the summary line
     uint32_t guardTrips = 0;     // times the coverage guard tripped in the window
@@ -795,8 +803,9 @@ inline std::string FallbackBreakdown(const WindowStats& w)
 }
 
 // HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, NoBoundaryThisFrame 1);
-// mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0
-// (0 by release limit); swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
+// mask coverage avg 4.1% max 9.7%; amplitude 0.008/0.05/0.2 avg 3.9/2.1/0.4% max 9.2/5.0/1.1%; paste built 598 pasted 1190
+// skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad frames 0; anchor-later 74 of
+// 598 frames (12.4%), longest run 31; tag changes 2
 inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const WindowStats& w, uint64_t pasteBuilt,
                                uint64_t pastePasted, uint64_t pasteSkipped, const std::string& boundary)
 {
@@ -810,9 +819,15 @@ inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const Wind
         line += std::format(" ({})", FallbackBreakdown(w));
 
     if (w.coverageSamples > 0)
-        line += std::format("; mask coverage avg {:.1f}% max {:.1f}%",
-                            100.0 * w.coverageSum / static_cast<double>(w.coverageSamples),
+    {
+        const double samples = static_cast<double>(w.coverageSamples);
+        line += std::format("; mask coverage avg {:.1f}% max {:.1f}%", 100.0 * w.coverageSum / samples,
                             100.0 * static_cast<double>(w.coverageMax));
+        line += std::format("; amplitude 0.008/0.05/0.2 avg {:.1f}/{:.1f}/{:.1f}% max {:.1f}/{:.1f}/{:.1f}%",
+                            100.0 * w.amplitudeLowSum / samples, 100.0 * w.amplitudeMidSum / samples,
+                            100.0 * w.amplitudeHighSum / samples, 100.0 * static_cast<double>(w.amplitudeLowMax),
+                            100.0 * static_cast<double>(w.amplitudeMidMax), 100.0 * static_cast<double>(w.amplitudeHighMax));
+    }
     else
         line += "; mask coverage n/a";
 

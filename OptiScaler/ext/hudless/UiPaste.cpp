@@ -44,6 +44,8 @@ using namespace detail;
 
 constexpr uint32_t kPasteRing = 32; // consumer command storage: covers 4 base frames at 8x generation
 constexpr UINT kProduceDescriptors = 6; // t0 final, t1 UI-free, t2 previous paste image, t3 HDR final, u0 image, u1 counter
+// The counter buffer (u1) and its readback: pixels flagged at the configured threshold, then the three amplitude bands.
+constexpr uint32_t kCoverageBytes = 4 * sizeof(uint32_t);
 constexpr D3D12_RESOURCE_STATES kRest = static_cast<D3D12_RESOURCE_STATES>(
     static_cast<int>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) | static_cast<int>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
@@ -69,8 +71,8 @@ struct ProduceConstants
 struct Image
 {
     ComPtr<ID3D12Resource> texture;
-    ComPtr<ID3D12Resource> counter;  // 4 bytes, UAV, rests in COPY_SOURCE
-    ComPtr<ID3D12Resource> readback; // 4 bytes, READBACK heap
+    ComPtr<ID3D12Resource> counter;  // 16 bytes: guard count + 3 amplitude bands, UAV, rests in COPY_SOURCE
+    ComPtr<ID3D12Resource> readback; // 16 bytes, READBACK heap
     ComPtr<ID3D12DescriptorHeap> heap;
     ComPtr<ID3D12CommandAllocator> allocator;
     UINT64 width = 0;
@@ -141,7 +143,7 @@ struct Core
     ComPtr<ID3D12Fence> produceFence;
     ComPtr<ID3D12Fence> pasteFence; // published by the consumer (EnsureConsumer), read by both sides under `mutex`
     uint64_t produceValue = 0;
-    ComPtr<ID3D12Resource> zero; // 4 zero bytes, copied over a slot's counter before each pass
+    ComPtr<ID3D12Resource> zero; // 16 zero bytes, copied over a slot's counters before each pass
     ComPtr<ID3D12CommandAllocator> bootstrapAllocator;
     ComPtr<ID3D12GraphicsCommandList> produceList;
     ID3D12CommandQueue* produceQueue = nullptr; // identity of the queue that signals `produceFence`
@@ -226,6 +228,9 @@ void RetireAllLocked(Core& c)
     }
     c.ring.Reset();
     c.status.coverage = -1.f;
+    c.status.coverage008 = -1.f;
+    c.status.coverage05 = -1.f;
+    c.status.coverage2 = -1.f;
     c.status.coverageSequence = 0;
     c.coverageFrame = 0;
 }
@@ -243,19 +248,26 @@ void HarvestCoverageLocked(Core& c, const Done& done)
             continue;
 
         image->coveragePending = false;
-        uint32_t flagged = 0;
+        uint32_t counts[kCoverageBytes / sizeof(uint32_t)] {};
         void* mapped = nullptr;
-        const D3D12_RANGE read { 0, sizeof(uint32_t) };
+        const D3D12_RANGE read { 0, kCoverageBytes };
         if (FAILED(image->readback->Map(0, &read, &mapped)) || mapped == nullptr)
             continue;
-        std::memcpy(&flagged, mapped, sizeof(flagged));
+        std::memcpy(counts, mapped, kCoverageBytes);
         const D3D12_RANGE none { 0, 0 };
         image->readback->Unmap(0, &none);
 
         if (slot.frame >= c.coverageFrame && image->width != 0 && image->height != 0)
         {
             const double pixels = static_cast<double>(image->width) * image->height;
-            c.status.coverage = static_cast<float>(std::min(1.0, flagged / pixels));
+            const auto share = [pixels](uint64_t flagged)
+            { return static_cast<float>(std::min(1.0, static_cast<double>(flagged) / pixels)); };
+            // counts[0]: pixels flagged at the configured threshold (the coverage guard's number).
+            // counts[1..3]: the amplitude bands, highest band only, so a level's share is its band and everything above.
+            c.status.coverage = share(counts[0]);
+            c.status.coverage008 = share(uint64_t(counts[1]) + counts[2] + counts[3]);
+            c.status.coverage05 = share(uint64_t(counts[2]) + counts[3]);
+            c.status.coverage2 = share(counts[3]);
             c.status.coverageSequence = image->ordinal;
             c.coverageFrame = slot.frame;
         }
@@ -305,6 +317,9 @@ void ParkLocked(Core& c)
     c.height = 0;
     c.wantedFormat = c.imageFormat = DXGI_FORMAT_UNKNOWN;
     c.status.coverage = -1.f;
+    c.status.coverage008 = -1.f;
+    c.status.coverage05 = -1.f;
+    c.status.coverage2 = -1.f;
     c.status.coverageSequence = 0;
     c.coverageFrame = 0;
 }
@@ -366,13 +381,13 @@ bool EnsureProducerLocked(Core& c, ID3D12Device* device)
     ComPtr<ID3D12Resource> zero;
     {
         const auto heap = HeapProps(D3D12_HEAP_TYPE_UPLOAD);
-        const auto desc = BufferDesc(sizeof(uint32_t), D3D12_RESOURCE_FLAG_NONE);
+        const auto desc = BufferDesc(kCoverageBytes, D3D12_RESOURCE_FLAG_NONE);
         hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
                                              nullptr, IID_PPV_ARGS(&zero));
         void* mapped = nullptr;
         if (SUCCEEDED(hr) && SUCCEEDED(zero->Map(0, nullptr, &mapped)) && mapped != nullptr)
         {
-            std::memset(mapped, 0, sizeof(uint32_t));
+            std::memset(mapped, 0, kCoverageBytes);
             zero->Unmap(0, nullptr);
         }
         else
@@ -428,7 +443,7 @@ std::unique_ptr<Image> CreateImage(ID3D12Device* device, UINT64 width, UINT heig
     }
     {
         const auto heap = HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-        const auto desc = BufferDesc(sizeof(uint32_t), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        const auto desc = BufferDesc(kCoverageBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                    nullptr, IID_PPV_ARGS(&image->counter))))
         {
@@ -438,7 +453,7 @@ std::unique_ptr<Image> CreateImage(ID3D12Device* device, UINT64 width, UINT heig
     }
     {
         const auto heap = HeapProps(D3D12_HEAP_TYPE_READBACK);
-        const auto desc = BufferDesc(sizeof(uint32_t), D3D12_RESOURCE_FLAG_NONE);
+        const auto desc = BufferDesc(kCoverageBytes, D3D12_RESOURCE_FLAG_NONE);
         if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
                                                    nullptr, IID_PPV_ARGS(&image->readback))))
         {
@@ -749,7 +764,7 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
             D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
             uav.Format = DXGI_FORMAT_R32_TYPELESS;
             uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            uav.Buffer.NumElements = 1;
+            uav.Buffer.NumElements = kCoverageBytes / sizeof(uint32_t); // a raw view is sized in 32-bit values
             uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
             device->CreateUnorderedAccessView(image.counter.Get(), nullptr, &uav, CpuHandle(heap, 5, inc));
         }
@@ -769,9 +784,9 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
         Transition(list, hudlessImage, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(list, image.texture.Get(), kRest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        // zero the counter
+        // zero the counters
         Transition(list, image.counter.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        list->CopyBufferRegion(image.counter.Get(), 0, c.zero.Get(), 0, sizeof(uint32_t));
+        list->CopyBufferRegion(image.counter.Get(), 0, c.zero.Get(), 0, kCoverageBytes);
         Transition(list, image.counter.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         ID3D12DescriptorHeap* heaps[] = { heap };
@@ -784,7 +799,7 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
 
         Transition(list, image.texture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kRest);
         Transition(list, image.counter.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->CopyBufferRegion(image.readback.Get(), 0, image.counter.Get(), 0, sizeof(uint32_t));
+        list->CopyBufferRegion(image.readback.Get(), 0, image.counter.Get(), 0, kCoverageBytes);
         Transition(list, hudlessImage, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
         Transition(list, finalImage, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 

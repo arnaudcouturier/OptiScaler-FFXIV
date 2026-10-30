@@ -58,6 +58,7 @@ int main()
     const PasteStatus status;
     assert(status.produced == 0 && status.pasted == 0 && status.skipped == 0);
     assert(status.coverage < 0.f); // unknown until the first readback completes
+    assert(status.coverage008 < 0.f && status.coverage05 < 0.f && status.coverage2 < 0.f); // the amplitude bands too
     assert(status.coverageSequence == 0); // no readback yet, so no paste image it belongs to
     assert(status.lastMessage[0] == '\0');
 

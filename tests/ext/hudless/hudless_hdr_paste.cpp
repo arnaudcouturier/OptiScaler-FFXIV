@@ -292,6 +292,9 @@ void TestEngineCallSite(const std::string& repo)
     assert(engine.find(Squash("!_core.Probing() || !HdrOutput() || EnsureHdrStage(index)")) == std::string::npos);
     // The readiness check is unchanged: it still ensures the stage, after the image check
     assert(engine.find(Squash("return !HdrOutput() || EnsureHdrStage(static_cast<size_t>(_stagedSlot));")) != std::string::npos);
+    // The amplitude counters of the readback travel with the coverage: they belong to the same readback, so the present
+    // hands all four to the core in one PasteCounters (docs/HUDLESS.md section 5)
+    assert(Count(engine, Squash("pasteStatus.coverage, pasteStatus.coverage008, pasteStatus.coverage05, pasteStatus.coverage2,")) == 1);
     // ProducePaste is called from nowhere else
     assert(Count(engine, "ProducePaste(sc,slot,finalImage,fg)") == 1);
     // The latch is keyed by the two facts the producer step uses (a wrong key would latch the failure with the setting off, never latch

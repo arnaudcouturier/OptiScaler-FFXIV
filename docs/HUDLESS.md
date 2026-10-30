@@ -132,12 +132,17 @@ Fallback reasons (enum + text, all counted): `ModeOff`, `NoFrameGeneration`, `Pr
 Every 600 real presents, same style as the scene-HDR line:
 
 ```
-HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
+HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; amplitude 0.008/0.05/0.2 avg 3.9/2.1/0.4% max 9.2/5.0/1.1%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
 ```
 
 Plus one line at every state change (`HudLess: state Searching -> Active`, `... -> Fallback(MaskCoverage)`).
 
-The fields after `boundary` only watch: no decision reads them. All are per window of 600 presents.
+All numbers are per window of 600 presents.
+
+- `mask coverage`: share of the picture the mask flagged at `MaskThreshold`, averaged and at its maximum over the fresh readbacks of the window (a readback only counts as a sample once). `n/a` when no readback completed (recomposition mode). This is the guard's number.
+- `amplitude 0.008/0.05/0.2`: of the same samples, the share of the picture whose windowed per-channel difference reaches each of the three fixed levels, averaged and at its maximum (section 7). They do not follow `MaskThreshold`, so two sessions or two settings can be compared; a high 0.008 share with a low 0.2 share means the flagged area is a low-amplitude difference, not a bright UI. No decision reads them.
+
+The fields after `boundary` only watch too: no decision reads them.
 
 - `guard trips` / `releases`: how often the coverage guard started and ended a trip (a release by starvation counts). The number in front of `by release limit` says how many of the releases `GuardReleaseHolds`' time limit ended.
 - `swapped bad frames`: swapped bases whose own paste image measured over `CoverageGuard`. Each image's coverage is read back about two presents after it was built; the count is made when that readback arrives, against the base state of the present that built the image. 0 with `CoverageGuard = 0`.
@@ -158,6 +163,7 @@ Per pixel `p` of the real frame, with `F` = final image, `H` = UI-free image:
 
 - difference `d(p) = max(|F.r-H.r|, |F.g-H.g|, |F.b-H.b|)`;
 - `isUi(p)` = any pixel within the square window of radius `dilation` (clamped to the image) has `d > threshold`;
+- amplitude counters: the same windowed difference is also counted at three fixed levels, `d > 0.008`, `d > 0.05` and `d > 0.2`, whatever `threshold` is. They are per channel, 0..1, on the SDR pair (`F` and `H` as the mask sees them) and they only measure: the guard, the paste and the tags still use `threshold` alone. Each pixel counts in the highest level it reaches, so the three shares the log prints are nested (a 0.2 share is part of the 0.05 share, and that one is part of the 0.008 share). They answer the question `mask coverage` alone cannot: how much of the flagged area is a low-amplitude difference (a few steps per channel, as a fade or a tiny tint gives) and how much is a bright or structured UI;
 - paste image: `isUi` -> `(F.rgb, 1.0)`; else if cleanup is on and the previous paste image had alpha > 0.75 here -> `(F.rgb, 0.5)` (clears ghosts of UI that just closed); else `(0,0,0,0)`.
 - Paste draw: full-screen triangle over the backbuffer, `discard` when alpha <= 0, output alpha 1, **no blend state** (pasted pixels overwrite).
 - Recomposition mode: `UiImage` writes `(F.rgb, 1)` or `(0,0,0,0)`, alpha strictly 0 or 1 (valid for premultiplied and straight consumers), R8G8B8A8_UNORM.

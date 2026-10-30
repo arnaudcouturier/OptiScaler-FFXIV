@@ -1073,9 +1073,16 @@ void TestFormats()
     w.coverageSum = 0.41;
     w.coverageSamples = 10;
     w.coverageMax = 0.097f;
+    w.amplitudeLowSum = 0.39;
+    w.amplitudeMidSum = 0.21;
+    w.amplitudeHighSum = 0.04;
+    w.amplitudeLowMax = 0.092f;
+    w.amplitudeMidMax = 0.050f;
+    w.amplitudeHighMax = 0.011f;
     const std::string line = SummaryLine(Mode::UiFree, Phase::Active, Reason::None, w, 598, 1190, 6, "ok");
     assert(line == "HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
-                   "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
+                   "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; amplitude 0.008/0.05/0.2 avg "
+                   "3.9/2.1/0.4% max 9.2/5.0/1.1%; paste built 598 pasted 1190 skipped 6; "
                    "slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad frames 0; "
                    "anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
 
@@ -1092,9 +1099,19 @@ void TestFormats()
     assert(counted.ends_with("slot waits 0; boundary: ok; guard trips 2 releases 1 (1 by release limit); swapped bad frames 3; "
                              "anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 5"));
     assert(counted.rfind("HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
-                         "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
+                         "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; amplitude 0.008/0.05/0.2 avg "
+                         "3.9/2.1/0.4% max 9.2/5.0/1.1%; paste built 598 pasted 1190 skipped 6; "
                          "slot waits 0; boundary: ok; ",
                          0) == 0);
+
+    // The amplitude fields follow the samples: no readback, no amplitude text either
+    WindowStats unsampled = w;
+    unsampled.coverageSamples = 0;
+    unsampled.coverageSum = 0.0;
+    assert(SummaryLine(Mode::UiFree, Phase::Active, Reason::None, unsampled, 0, 0, 0, "ok").find("amplitude") ==
+           std::string::npos);
+    assert(SummaryLine(Mode::UiFree, Phase::Active, Reason::None, unsampled, 0, 0, 0, "ok")
+               .find("; mask coverage n/a; paste built 0 pasted 0 skipped 0; ") != std::string::npos);
 
     // Ties break by first occurrence, counts first
     WindowStats b;
