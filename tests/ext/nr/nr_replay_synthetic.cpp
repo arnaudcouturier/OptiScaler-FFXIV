@@ -1087,7 +1087,82 @@ void TestBlessIsStrict(Replayer& replayer, Blobs& blobs)
         // and the real adapter is identified
         CHECK(GetWarpInfo().Valid());
     }
+    // a blessed image cut short does not read as valid: the compare names its size, it never matches silently
+    {
+        fs::remove_all(dir);
+        SetWriter w(dir);
+        BuildMini(w);
+        CHECK(Run(dir, blobs, replayer, "all").ok);
+        std::vector<uint8_t> image;
+        const fs::path ref = dir / "reference" / ReferenceFileName(0, 0, 0);
+        CHECK(ReadFile(ref, image) && image.size() > 16);
+        CHECK(WriteFile(ref, image.data(), image.size() / 2)); // a partial image write beside a fresh provenance
+        const RunReport partial = Run(dir, blobs, replayer);
+        CHECK(!partial.ok && AnyLineContains(partial, "another size"));
+    }
     fs::remove_all(dir);
+}
+
+// ---- 2b. blessing several sets writes nothing unless every set passes the checks ------------------------------------------
+// Runs no replay: the check reads manifests and provenance files only, so one bad set cannot leave the earlier sets
+// rewritten and the later ones not. The bless loop in the local replay test calls it before replaying anything.
+
+void TestBlessPrecheck()
+{
+    const WarpInfo warp { "10.0.1.0", 0x1111 };
+    const fs::path good = Temp("precheck-good"), bad = Temp("precheck-bad");
+    {
+        SetWriter w(good);
+        BuildMini(w);
+    }
+    {
+        SetWriter w(bad);
+        BuildMini(w);
+    }
+    // two good sets: nothing to complain about
+    CHECK(PrecheckSetsForBless({ good, bad }, ParseBless("all"), warp).empty());
+    // a set whose manifest was cut short: the format check names it
+    WriteText(bad / "manifest.txt", "optiscaler-nr-replay 2\nframes 2\n");
+    {
+        const std::string problem = PrecheckSetsForBless({ good, bad }, ParseBless("all"), warp);
+        CHECK(Contains(problem, "truncated") && Contains(problem, "Nothing was written"));
+    }
+    // a set that left a dispatch out: the completeness check names it
+    {
+        SetWriter w(bad);
+        BuildMini(w);
+        Manifest m = w.m;
+        m.frameInfos[0].skipped = 2;
+        WriteText(bad / "manifest.txt", WriteManifest(m));
+        const std::string problem = PrecheckSetsForBless({ good, bad }, ParseBless("probe_a"), warp);
+        CHECK(Contains(problem, "incomplete") && Contains(problem, "Nothing was written"));
+    }
+    // a blessed set that cannot be read: the provenance check names it
+    {
+        SetWriter w(bad);
+        BuildMini(w);
+        fs::create_directories(bad / "reference");
+        WriteText(bad / "reference" / "provenance.txt", "not a provenance file\n");
+        const std::string problem = PrecheckSetsForBless({ good, bad }, ParseBless("all"), warp);
+        CHECK(Contains(problem, "unreadable") && Contains(problem, "Nothing was written"));
+    }
+    // a blessed set from another adapter: refused, unless the run blesses everything
+    {
+        Provenance old;
+        old.commit = "oldcommit";
+        old.date = "2026-10-01";
+        old.warp = { "9.9.9.9", 0x9999 };
+        WriteText(bad / "reference" / "provenance.txt", WriteProvenance(old));
+        const std::string problem = PrecheckSetsForBless({ good, bad }, ParseBless("probe_a"), warp);
+        CHECK(Contains(problem, "re-bless") && Contains(problem, "Nothing was written"));
+        CHECK(PrecheckSetsForBless({ good, bad }, ParseBless("all"), warp).empty());
+    }
+    // an adapter nobody could identify: nothing may be written on it
+    CHECK(Contains(PrecheckSetsForBless({ good }, ParseBless("all"), GetWarpInfo(bad / "there-is-no-d3d10warp.dll")), "could not be identified"));
+    // and the check itself writes nothing: no reference folder appears beside either set
+    CHECK(!fs::exists(good / "reference") && !fs::exists(bad / "reference" / "f0_d0_u0.raw"));
+    fs::remove_all(good);
+    fs::remove_all(bad);
 }
 
 // ---- 3. a GPU timeout abandons the set -------------------------------------------------------------------------------------
@@ -1226,6 +1301,7 @@ int wmain(int argc, wchar_t** argv)
     TestBadSets(replayer, blobs);
     TestIncompleteSets(replayer, blobs);
     TestBlessIsStrict(replayer, blobs);
+    TestBlessPrecheck();
     TestShaderCacheAndOutputFolder(replayer, blobs);
     TestTimeoutAbandonsTheSet(blobs);
 

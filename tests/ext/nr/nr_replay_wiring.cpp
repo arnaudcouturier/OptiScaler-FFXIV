@@ -179,10 +179,12 @@ void TestWriteReportAndLocalTest(const std::string& repo)
     CHECK(gate != std::string::npos && refused != std::string::npos && usage != std::string::npos && discovery != std::string::npos);
     CHECK(gate < refused && refused < usage && usage < discovery);
     // the commit is read from the repository named on the command line, with its dirty flag
-    CHECK(Count(test, "rev-parse HEAD") == 1 && Has(test, "git -C \\\"\" + repo + \"\\\" rev-parse HEAD"));
-    CHECK(Has(test, "status --porcelain --untracked-files=no") && Has(test, "commit = GitHead(repo, dirty);"));
+    CHECK(Count(test, "rev-parse HEAD") == 1 && Has(test, "GitCommand(repo, \"rev-parse HEAD\")"));
+    CHECK(Has(test, "GitCommand(repo, \"status --porcelain\")") && !Has(test, "--untracked-files")); // untracked files count as changes
+    CHECK(Has(test, "commit = GitHead(repo, dirty);") && Has(test, "CommitOverrideProblem(override_)"));
     // the names that match nothing are refused before any write, and a banner ends a bless run
     CHECK(Has(test, "BlessKindProblems(bless, sets)") && Has(test, "BlessBanner(bless, commit, dirty)"));
+    CHECK(Has(test, "PrecheckSetsForBless(sets, bless, warp)")); // every set is checked before the first write
     CHECK(Has(recipe, "Args        = @('{env:OPTISCALER_NR_REPLAY_DIR}', '{repo}')") && Has(recipe, "OPTISCALER_NR_REPLAY_BLESS_OK=1"));
     // the replayer is only ever the software adapter, and the wait is long
     const std::string engine = Read(repo + "/OptiScaler/ext/nr/diag/NrReplayEngine.h");

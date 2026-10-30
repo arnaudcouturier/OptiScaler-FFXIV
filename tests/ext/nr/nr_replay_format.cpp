@@ -195,6 +195,20 @@ void TestRefusals()
         const ParseResult p = ParseManifest(text);
         CHECK(!p.ok && p.error.find("truncated") != std::string::npos);
     }
+    {
+        // cut short in the middle (a failed cleanup left half a manifest): refused, never read as a set
+        std::string text = Golden();
+        text.erase(100);
+        const ParseResult p = ParseManifest(text);
+        CHECK(!p.ok);
+    }
+    {
+        // cut short with no trailing newline at all
+        std::string text = Golden();
+        text.erase(text.find('\n', 30));
+        const ParseResult p = ParseManifest(text);
+        CHECK(!p.ok);
+    }
     // each required key
     for (const char* key : { " width=4 height=2 format=10", " srcRowPitch=256", " rowBytes=32", " bytes=64", " hash=0123456789abcdef", " file=images/img_0000.raw" })
     {

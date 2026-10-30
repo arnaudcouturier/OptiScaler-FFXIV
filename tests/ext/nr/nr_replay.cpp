@@ -63,16 +63,20 @@ std::string FirstLine(const std::string& command)
 }
 
 // The commit of the repository that was named on the command line (not of the folder the process happens to run in), and
-// whether it has uncommitted changes to tracked files. When git cannot say, the commit is "unknown" and the tree counts as dirty.
+// whether it has uncommitted or untracked changes (a file the tree does not track yet counts). When git cannot say,
+// the commit is "unknown" and the tree counts as dirty.
 std::string GitHead(const std::string& repo, bool& dirty)
 {
-    const std::string head = FirstLine("git -C \"" + repo + "\" rev-parse HEAD 2>nul");
+    const std::string headCmd = GitCommand(repo, "rev-parse HEAD");
+    const std::string head = headCmd.empty() ? std::string() : FirstLine(headCmd + " 2>nul");
     if (head.empty())
     {
         dirty = true;
         return "unknown";
     }
-    dirty = !FirstLine("git -C \"" + repo + "\" status --porcelain --untracked-files=no 2>nul").empty();
+    // every untracked file counts: a shader the tree does not track yet is an uncommitted change to what is blessed
+    const std::string statusCmd = GitCommand(repo, "status --porcelain");
+    dirty = statusCmd.empty() || !FirstLine(statusCmd + " 2>nul").empty();
     return head;
 }
 
@@ -197,8 +201,22 @@ int main(int argc, char** argv)
         bless = ParseBless(blessRequest);
         commit = GitHead(repo, dirty);
         const std::string override_ = Env("OPTISCALER_NR_REPLAY_COMMIT");
+        const std::string overrideProblem = CommitOverrideProblem(override_);
+        if (!overrideProblem.empty())
+        {
+            std::printf("FAIL: %s Nothing was written.\n", overrideProblem.c_str());
+            return 1;
+        }
         if (!override_.empty())
             commit = override_;
+        // every set is checked before anything is written: one bad set after a good one must not leave the earlier
+        // sets rewritten and the later ones not
+        const std::string precheck = PrecheckSetsForBless(sets, bless, warp);
+        if (!precheck.empty())
+        {
+            std::printf("FAIL: %s\n", precheck.c_str());
+            return 1;
+        }
         const std::string problem = BlessKindProblems(bless, sets);
         std::printf("BLESS MODE: this run rewrites the blessed images of %s at commit %s%s. It is not a comparison.\n", blessRequest.c_str(),
                     commit.c_str(), dirty ? " (the working tree has uncommitted changes)" : "");

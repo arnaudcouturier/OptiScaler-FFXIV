@@ -656,6 +656,37 @@ inline std::string BlessKindProblems(const BlessSpec& spec, const std::vector<st
     return "the bless request names kind(s) that no dispatch of the replayed set(s) has: " + names + ". Nothing was written.";
 }
 
+// Whether every set of a bless run may be written: each manifest loads (format), is complete, and, when a blessed set
+// already exists, its provenance loads and accepts this adapter (provenance). Writes nothing. The bless loop must not
+// start otherwise: one bad set after a good one would leave the earlier sets rewritten and the later ones not.
+inline std::string PrecheckSetsForBless(const std::vector<std::filesystem::path>& setDirs, const BlessSpec& spec, const WarpInfo& warp)
+{
+    if (!warp.Valid())
+        return "the software adapter could not be identified (" +
+               (warp.error.empty() ? std::string("no version or hash") : warp.error) + "); nothing was replayed or written";
+    for (const std::filesystem::path& dir : setDirs)
+    {
+        SetFiles set;
+        std::string error;
+        if (!LoadSet(dir, set, error))
+            return dir.string() + ": " + error + ". Nothing was written.";
+        const std::vector<std::string> problems = CheckComplete(set.manifest);
+        if (!problems.empty())
+            return dir.string() + ": the capture is incomplete: " + problems.front() + ". Nothing was written.";
+        const std::filesystem::path refDir = dir / "reference";
+        if (HasBlessedSet(refDir))
+        {
+            Provenance prov;
+            std::vector<uint8_t> text;
+            if (!ReadFile(refDir / "provenance.txt", text) || !ParseProvenance(std::string(text.begin(), text.end()), prov, error))
+                return dir.string() + ": the blessed set is unreadable: " + error + ". Nothing was written.";
+            if (!AdapterAcceptable(prov, warp, spec))
+                return dir.string() + ": " + WarpChangedMessage(prov.warp, warp) + ". Nothing was written.";
+        }
+    }
+    return {};
+}
+
 inline RunReport RunReplaySet(const RunOptions& opt, Replayer& replayer)
 {
     RunReport rep;

@@ -339,6 +339,31 @@ void TestProvenance()
     CHECK(DispatchKey(3, 4) == "3:4");
 }
 
+void TestGitCommand()
+{
+    // a path with spaces is quoted, so the repository may live in one
+    CHECK(GitCommand("C:\\a b\\c", "rev-parse HEAD") == "git -C \"C:\\a b\\c\" rev-parse HEAD");
+    // a trailing separator would escape the closing quote when the child parses its command line: it is dropped
+    CHECK(GitCommand("C:\\a b\\", "rev-parse HEAD") == "git -C \"C:\\a b\" rev-parse HEAD");
+    CHECK(GitCommand("C:\\a b/", "status --porcelain") == "git -C \"C:\\a b\" status --porcelain");
+    // a path that cannot survive the quoting gives no command: the caller then records an unknown commit and a dirty tree
+    CHECK(GitCommand("", "rev-parse HEAD").empty());
+    CHECK(GitCommand("C:\\a\"b", "rev-parse HEAD").empty());
+    CHECK(GitCommand("C:\\a\nb", "rev-parse HEAD").empty());
+    CHECK(GitCommand("C:\\100%\\c", "rev-parse HEAD").empty()); // cmd.exe would expand the percent signs
+}
+
+void TestCommitOverride()
+{
+    CHECK(CommitOverrideProblem("").empty()); // not set: the commit the repository is on is recorded
+    CHECK(CommitOverrideProblem("abc123").empty());
+    // the per-dispatch records are space-separated key=value pairs: a commit holding whitespace would be cut short there
+    const std::string problem = CommitOverrideProblem("my commit");
+    CHECK(!problem.empty() && problem.find("OPTISCALER_NR_REPLAY_COMMIT") != std::string::npos &&
+          problem.find("one word") != std::string::npos);
+    CHECK(!CommitOverrideProblem("my\tcommit").empty());
+}
+
 void TestBlessedSetOnDisk()
 {
     const fs::path dir = fs::temp_directory_path() / "optiscaler-nr-replay-blessed-test";
@@ -380,6 +405,8 @@ int main()
         RUN(TestRunMode);
         RUN(TestUnmatchedKindsAndBanner);
         RUN(TestProvenance);
+        RUN(TestGitCommand);
+        RUN(TestCommitOverride);
         RUN(TestBlessedSetOnDisk);
         RUN(TestRecordingGate);
     }

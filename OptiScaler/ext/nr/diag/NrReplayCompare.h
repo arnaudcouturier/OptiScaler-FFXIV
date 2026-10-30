@@ -543,6 +543,32 @@ inline std::string BlessBanner(const BlessSpec& spec, const std::string& commit,
     return "BLESSED " + what + " at " + OrUnknown(commit) + (dirty ? " (working tree has uncommitted changes)" : "");
 }
 
+// Running git in the repository a blessing names: `git -C <repo> <args>`. The repo path is quoted so a path with
+// spaces works. A path that cannot survive the quoting (empty, or holding a quote, a percent sign or a line break,
+// which would break out of the quoting or be expanded by the shell) gives an empty command; the caller then records
+// an unknown commit and a dirty tree. A trailing separator is dropped first: it would escape the closing quote when
+// the child parses its command line.
+inline std::string GitCommand(const std::string& repo, const std::string& args)
+{
+    if (repo.empty() || repo.find_first_of("\"%\r\n") != std::string::npos)
+        return {};
+    std::string path = repo;
+    while (path.size() > 1 && (path.back() == '\\' || path.back() == '/'))
+        path.pop_back();
+    return "git -C \"" + path + "\" " + args;
+}
+
+// The commit recorded in the provenance of a blessing is one word: the per-dispatch records are space-separated
+// key=value pairs, so a commit holding whitespace would be cut short there while the top-level record keeps it whole.
+// Empty (the variable is not set) is fine: the commit the repository is on is recorded.
+inline std::string CommitOverrideProblem(const std::string& override_)
+{
+    if (override_.empty() || override_.find_first_of(" \t\r\n") == std::string::npos)
+        return {};
+    return "OPTISCALER_NR_REPLAY_COMMIT=\"" + override_ +
+           "\" holds whitespace; the provenance records the commit as one word (leave it unset to record the commit the repository is on).";
+}
+
 // The capture side decides whether a replay set is being recorded at this moment: the key is on, a capture was asked for,
 // and fewer frames than asked for are recorded so far. Nothing is recorded, and nothing is read back, otherwise.
 inline bool ReplayRecordingWanted(bool keyEnabled, bool requested, uint32_t recorded, uint32_t wanted)
