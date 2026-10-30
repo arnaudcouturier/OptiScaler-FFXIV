@@ -505,7 +505,7 @@ bool FSRFG_Dx12::Dispatch()
     };
 
     fgConfig.onlyPresentGenerated = state.fgOnlyGenerated;
-    fgConfig.frameID = willDispatchFrame;
+    fgConfig.frameID = ext::fg::FsrFrameId(this, willDispatchFrame, fIndex); // ext: FSR's own id, +1 per dispatch
     fgConfig.swapChain = _swapChain;
 
     ffxReturnCode_t retCode = FfxApiProxy::D3D12_Configure(&_fgContext, &fgConfig.header);
@@ -564,7 +564,7 @@ bool FSRFG_Dx12::Dispatch()
         }
 
         dfgPrepare.commandList = _fgCommandList[fIndex];
-        dfgPrepare.frameID = willDispatchFrame;
+        dfgPrepare.frameID = ext::fg::FsrFrameId(this, willDispatchFrame, fIndex); // ext: the same id as the configure above
         dfgPrepare.flags = fgConfig.flags;
 
         {
@@ -698,7 +698,7 @@ ffxReturnCode_t FSRFG_Dx12::PresentCallback(ffxCallbackDescFrameGenerationPresen
     // frame 2, generated true  so (1 -> 2)
     // frame 2, generated false
 
-    auto fIndex = params->frameID % BUFFER_COUNT;
+    auto fIndex = ext::fg::FsrFrameIndex(this, params->frameID); // ext: the buffer slot of the dispatch behind this id
     auto cmdList = (ID3D12GraphicsCommandList*) params->commandList;
 
     std::lock_guard<std::mutex> callbackLock(_callbackResourceMutex);
@@ -830,7 +830,7 @@ ffxReturnCode_t FSRFG_Dx12::PresentCallback(ffxCallbackDescFrameGenerationPresen
 
 ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* params)
 {
-    const int fIndex = params->frameID % BUFFER_COUNT;
+    const int fIndex = ext::fg::FsrFrameIndex(this, params->frameID); // ext: the buffer slot of the dispatch behind this id
     auto cmdList = (ID3D12GraphicsCommandList*) params->commandList;
 
     auto& state = State::Instance();

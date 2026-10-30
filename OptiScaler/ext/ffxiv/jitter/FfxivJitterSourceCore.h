@@ -14,6 +14,10 @@
 //   ratio    = (u16 at renderer+0x700 / u16 at renderer+0x704) * float at settings+0x4c
 //   strength = (float at settings+0x78 - 0.001f) * (ratio * ratio) + 0.001f
 //   ndc      = (2 * strength * jitter) / size        (y negated)      applied pixel offset = ndc * size / 2 = strength * jitter
+// +0x700 is the render height the scene is drawn at in that frame and +0x704 is MaxRenderHeight: rendererUpdate keeps the first
+// one for the camera (it writes it from RenderHeight +0x702 or from MaxRenderHeight +0x704, block 0x2dab0d), and the ratio is the
+// render/display height ratio once MaxRenderHeight's GraphicsRezoScale cancels against settings+0x4c. Both are baked per frame,
+// so a read of them here is the same value the camera used; see GameBuild.h rendererExtentOffset for the instruction evidence.
 
 #include <algorithm>
 #include <array>
@@ -107,8 +111,8 @@ struct GeneratorInputs
     float amount = 0.0f;        // settings+0x78
     float scale = 0.0f;         // settings+0x4c
     float strengthFloor = kStrengthFloor; // the constant the strength expression subtracts and adds (GameBuild.h strengthFloorBits)
-    std::uint16_t extent0 = 0;  // renderer+0x700
-    std::uint16_t extent2 = 0;  // renderer+0x704
+    std::uint16_t extent0 = 0;  // renderer+0x700, the render height the scene is drawn at (derived by rendererUpdate)
+    std::uint16_t extent2 = 0;  // renderer+0x704, MaxRenderHeight (the field named that in the structure notes)
     std::uint32_t phases = 0;   // the phase count the game passed
     std::uint32_t renderW = 0, renderH = 0; // renderer+0x428
     std::uint32_t outW = 0, outH = 0;       // device+0x8c

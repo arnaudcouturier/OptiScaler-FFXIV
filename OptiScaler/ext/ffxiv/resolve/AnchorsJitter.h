@@ -60,7 +60,8 @@
 //                       argument edx at [rsp+0x20], rcx=rsp+0x30 (the opaque argument), rdx=rbx (x = the jitter object the world tie
 //                       compares). NOTE: `lea rcx,[rsp+0x30]` is the opaque FIRST argument; the x pointer the world tie compares is
 //                       `mov rdx,rbx`. Both are fixed.
-//   strengthShape       the generator call (E8 whose target is the generator, return address = site + 5), the extents (+0x700/+0x704),
+//   strengthShape       the generator call (E8 whose target is the generator, return address = site + 5), the render heights (+0x700,
+//                       the height the scene is drawn at, and +0x704, MaxRenderHeight),
 //                       the settings amount (+0x78) and scale (+0x4c), the whole strength expression, the doubling, the NDC division, the
 //                       y sign flip, the stores of the NDC pair at [rsp+0x38]/[rsp+0x3c] and `mov [rcx+8],rax` (the NDC pair lands at the
 //                       jitter object + 8, where the observe hook reads it). Longer than the old 157-byte guard so that the NDC store is
@@ -74,8 +75,8 @@
 // Struct offsets (settings +0x4c/+0x54/+0x78, renderer +0x428/+0x700, device +0x8c) are carried by instructions inside the shapes, which
 // keep them FIXED (the consumer reads memory at them): the Offset seams below decode them from the same instructions and check a sanity
 // range, but because the shapes pin the bytes they are NOT self-healing in practice (a moved offset refuses the hooks). The pair
-// relations the consumer assumes (extent +4, scene size w/h, device w/h) are pinned only where one instruction or one fixed pair carries
-// them (qword load of the scene size, the +0x90/+0x8c pair, the +0x700/+0x704 pair).
+// relations the consumer assumes (render height +4, scene size w/h, device w/h) are pinned only where one instruction or one fixed pair
+// carries them (qword load of the scene size, the +0x90/+0x8c pair, the +0x700/+0x704 pair).
 //
 // Not here: jitter.cameraGlobalRva / cameraOffset / jitterPointerOffset (AnchorsQuality.h owns them). The 0x3028 and 0x278 displacements
 // appear FIXED inside the patterns below (the consumer's world tie depends on them); that duplication across groups is intended.

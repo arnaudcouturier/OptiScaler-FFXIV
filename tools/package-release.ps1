@@ -362,6 +362,9 @@ KNOWN LIMITS
   * Only the settings marked "tested" in docs/STATUS.md of the project repository were played in game, on one RTX 4090. Everything else is untested.
   * HUD-less is opt-in and off by default; recomposition in SDR with DLSS-G 2x-4x was tested, HDR was not. ui_free is experimental (in one scene its
     UI mask fell back for most frames).
+  * Neural Rendering (nvngx_dlssnr.dll) needs an RTX Blackwell GPU. NVIDIA's own description of the feature gives driver 615.64 or newer; the
+    community integrations of the same model report 616.56 as the version that works, so 615.64 is the vendor's stated minimum and 616.56 the figure
+    with field reports. It runs on the D3D12 path only (Dx11Upscaler, the bridge), not on the game's own D3D11 device.
   * DLSS-G Preset A and C turn NVIDIA's UI recomposition off (Preset C also turns FG Lite on), so with them HUD-less recomposition is not requested
     (the log and the menu say so). Use preset Auto or B with recomposition.
   * Window mode ([Window] Mode=on), the automatic multiplier ([DLSSG] AutoMFG=true), "Run NR before DLSS" in the character

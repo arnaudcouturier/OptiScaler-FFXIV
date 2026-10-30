@@ -95,6 +95,26 @@ int64_t NowUs()
         .count();
 }
 
+// The CPU side of the clock calibration: ID3D12CommandQueue::GetClockCalibration reports its CPU timestamp on the
+// QueryPerformanceCounter clock, so the two can be subtracted. The frequency is read once (it never changes).
+std::uint64_t QpcTicks()
+{
+    LARGE_INTEGER v {};
+    QueryPerformanceCounter(&v);
+    return static_cast<std::uint64_t>(v.QuadPart);
+}
+
+std::uint64_t QpcFrequency()
+{
+    static const std::uint64_t frequency = []
+    {
+        LARGE_INTEGER v {};
+        QueryPerformanceFrequency(&v);
+        return static_cast<std::uint64_t>(v.QuadPart);
+    }();
+    return frequency;
+}
+
 bool TimersOn() { return IsFfxivExe() && ResolveGpuTimers(ext::Cfg().framePacing.GpuTimersKey(), TraceIsOn()); }
 
 // ---- D3D11 timestamp stage (present copy-in, ReShade effects): disjoint + start/end queries, read at Present ----
@@ -131,6 +151,11 @@ struct D3D12Copy
     ComPtr<ID3D12Fence> fence; // the bridge copy fence: completion is read, never waited on
     Dx11wDx12SC* bridge = nullptr; // the bridge of this Present (same object from the copy calls to Present exit)
     SlotBook book; // per-slot pending state: a slot reports once its resolve retired, then exactly once
+    // The GPU/CPU clock pairing of the samples (GetClockCalibration, resampled once per reporting window) and, per timer
+    // slot, the CPU read taken when that slot's pair was submitted: together they place a GPU begin stamp on the CPU clock.
+    ClockCalibration cal {};
+    std::optional<int64_t> calUs {};
+    std::array<std::uint64_t, SlotBook::kSlots> armCpuTicks {};
     bool dead = false;
     WarnLatch warn;
     bool open = false;
@@ -197,6 +222,9 @@ void DropD3D12(D3D12Copy& t)
     t.queue.Reset();
     t.fence.Reset();
     t.bridge = nullptr;
+    t.cal = {};
+    t.calUs.reset();
+    t.armCpuTicks = {};
     t.open = false;
     t.openSlot = 0;
     t.openCopySlot = 0;
@@ -385,6 +413,26 @@ bool EnsureD3D12(Dx11wDx12SC& sc, std::string& warn)
     return true;
 }
 
+// Samples the CPU and GPU timestamp counters together with one GetClockCalibration call, at most once per reporting
+// window (10 s; the pairing is stable over that time, and resampling it per frame would buy nothing). A refused or
+// invalid sample keeps the last good pairing instead of clearing it, and never warns: the stage still logs its
+// durations, only the CPU-time offset field is left out of the line.
+bool RefreshCalibration(D3D12Copy& t, int64_t nowUs)
+{
+    if (!CalibrationDue(nowUs, t.calUs))
+        return t.cal.gpuFrequency != 0;
+    t.calUs = nowUs;
+    if (!t.queue)
+        return false;
+    ClockCalibration sample;
+    sample.gpuFrequency = t.frequency;
+    sample.cpuFrequency = QpcFrequency();
+    if (FAILED(t.queue->GetClockCalibration(&sample.gpuTimestamp, &sample.cpuTimestamp)) || !CalibrationValid(sample))
+        return t.cal.gpuFrequency != 0;
+    t.cal = sample;
+    return true;
+}
+
 // DONOTFLUSH reads of one stage. A query the GPU has not reached stays pending for the next Present: no wait,
 // no flush. A disjoint window reads empty once (frequency lost) and is dropped.
 void ReadD3D11(D3D11Stage& t, int64_t nowUs)
@@ -444,11 +492,14 @@ void ReadD3D12(int64_t nowUs)
             continue;
         const unsigned q = s * 2;
         const auto ms = InteropMs(t.mapped[q], t.mapped[q + 1], t.frequency);
+        // The pair's place on the CPU clock, against the CPU read taken when its list was closed. Without a
+        // calibration this is empty and the line simply has no offset field.
+        const auto offset = CpuOffsetMs(t.cal, t.mapped[q], t.armCpuTicks[s]);
         t.book.Consume(s);
         if (!ms.has_value())
             continue;
         t.lastMs = ms;
-        t.window.Add(*ms, nowUs);
+        t.window.Add(*ms, nowUs, offset);
     }
 }
 
@@ -468,6 +519,9 @@ void ClearD3D12()
 {
     D3D12Copy& t = InteropStage();
     t.book.Clear();
+    t.cal = {}; // the pairing belongs to the device and queue that were dropped, and no offset outlives the timers
+    t.calUs.reset();
+    t.armCpuTicks = {};
     t.open = false;
     t.openSlot = 0;
     t.openCopySlot = 0;
@@ -595,16 +649,18 @@ void GpuTimersBeginInteropCopy(Dx11wDx12SC& sc, unsigned slot)
         if (list == nullptr || !EnsureD3D12(sc, warn))
             return;
         const unsigned s = static_cast<unsigned>(frame % kTimerSlots);
+        RefreshCalibration(t, nowUs); // once per reporting window; a refusal keeps the last pairing
         // Reusing a slot whose old sample finished reports it first (recycle); an unfinished one is forgotten.
         if (t.book.TryBegin(s, frame, t.fence->GetCompletedValue(),
                             Access::Bridge::CopyAllocatorFenceValue(sc, t.book.Pending(s) ? t.book.Tag(s) : slot),
                             true) == SlotBook::Verdict::Recycle)
         {
             const unsigned q = s * 2;
-            if (const auto ms = InteropMs(t.mapped[q], t.mapped[q + 1], t.frequency); ms.has_value())
+            const auto ms = InteropMs(t.mapped[q], t.mapped[q + 1], t.frequency);
+            if (ms.has_value())
             {
                 t.lastMs = ms;
-                t.window.Add(*ms, nowUs);
+                t.window.Add(*ms, nowUs, CpuOffsetMs(t.cal, t.mapped[q], t.armCpuTicks[s]));
             }
         }
         t.book.Consume(s);
@@ -645,6 +701,9 @@ void GpuTimersEndInteropCopy(Dx11wDx12SC& sc, unsigned slot)
     list->EndQuery(t.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, q + 1);
     list->ResolveQueryData(t.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, q, 2, t.readback.Get(), q * sizeof(UINT64));
     list->EndEvent();
+    // The CPU read this pair is placed against: the submission of the copy the stamps belong to, taken here so the
+    // offset never mixes two frames.
+    t.armCpuTicks[t.openSlot] = QpcTicks();
     // The fence value already covering this list: only a later value proves the resolve finished.
     t.book.Arm(t.openSlot, FrameCounter().load(std::memory_order_relaxed),
                Access::Bridge::CopyAllocatorFenceValue(sc, slot), slot);

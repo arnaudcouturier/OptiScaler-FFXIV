@@ -182,6 +182,15 @@ bool DispatchResetHistory(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t 
 // Dispatch, after the constants were accepted: commit (or invalidate) the history. Replaces DlssgPostConstants/XefgPostDispatch.
 void PostDispatch(IFGFeature_Dx12* fg, const GuideInfo& guide, uint64_t frame, bool discontinuity, Provider provider);
 
+// FSR FG frame IDs (rule: ext/fg/FsrFrameId.h, implementation FsrIdSeams.cpp). Hosts: framegen/ffx/FSRFG_Dx12.cpp only —
+// Dispatch, both frame ID writes (configure and prepare descriptor), and the two callbacks (their ID back to the buffer
+// slot). Off by default ([FrameGen] FsrMonotonicFrameId).
+// The ID to give FSR for the dispatch of `gameFrame` and buffer slot `slot`; the game's own frame ID while the key is off.
+uint64_t FsrFrameId(IFGFeature_Dx12* fg, uint64_t gameFrame, int slot);
+// The buffer slot the dispatch with `id` was recorded for; the provider's own `id % BUFFER_COUNT` when it was not recorded
+// (which is the whole behaviour while the key is off). Never negative.
+int FsrFrameIndex(IFGFeature_Dx12* fg, uint64_t id);
+
 // ReleaseObjects (DLSSG_Dx12, XeFG_Dx12): collect and retire the guide snapshots (fence refs). Unfinished copies are
 // kept through shutdown on purpose.
 void ReleaseGuides(IFGFeature_Dx12* fg);

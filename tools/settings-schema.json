@@ -1660,7 +1660,7 @@
           "defaultMeans": "auto (off unless the trace above is on)",
           "applies": "live",
           "menu": { "tab": null, "card": null, "iniOnly": "diagnostic switch of the frame-pacing GPU stage timers" },
-          "description": "GPU stage timers: sampled frames time the present copy-in, the ReShade effects and the D3D12 interop copy (true = on at any log level, false = off, auto = on only together with the trace). A timer never waits on the frame path. Add GpuTimers=true for a measurement run with Trace=true.",
+          "description": "GPU stage timers: sampled frames time the present copy-in, the ReShade effects and the D3D12 interop copy (true = on at any log level, false = off, auto = on only together with the trace). The interop line also carries a cpu offset in ms, the same samples placed on the CPU clock with the queue's own clock calibration (D3D11 has no such pairing). A timer never waits on the frame path. Add GpuTimers=true for a measurement run with Trace=true.",
           "flags": [ "ffxivOnly", "diagnostic" ]
         },
         {
@@ -2330,6 +2330,24 @@
           "applies": "live",
           "menu": { "tab": null, "card": null, "iniOnly": "a theme preference read from the ini when the menu opens" },
           "description": "Menu style. classic is OptiScaler's own look; ember keeps surfaces neutral and uses the accent colour only to mark state. Anything else reads as classic."
+        }
+      ]
+    },
+    {
+      "name": "FrameGen",
+      "fragment": "OptiScaler/ext/ini/FrameGen.ini",
+      "keys": [
+        {
+          "key": "[FrameGen] FsrMonotonicFrameId",
+          "section": "FrameGen",
+          "name": "FsrMonotonicFrameId",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false (the game's own frame ID)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "provider-internal FSR frame ID keep-alive, set in the ini only" },
+          "description": "FSR frame generation resets its interpolation history when the frame ID it is given does not rise by exactly 1, and the shared dispatch selector lets that ID jump forward on a skipped frame or fall back after a quality change. On gives FSR its own ID, rising by exactly 1 per dispatch, and hands the provider's callbacks the buffer slot of the dispatch their ID belongs to. Affects the FSR output path only; DLSS-G and XeFG are untouched either way.",
+          "flags": [ "experimental" ]
         }
       ]
     },

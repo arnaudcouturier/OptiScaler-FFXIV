@@ -4,6 +4,7 @@
 // DLSSG_Common. Later series (B5 guide matcher, D2 observed multiplier, D3 XeFG dynamic state) add their state here
 // behind out-of-line types, so this header stays free of upstream types.
 
+#include "ext/fg/FsrFrameId.h"
 #include "ext/fg/TemporalContinuity.h"
 #include "ext/gpu/Gpu.h"
 
@@ -38,6 +39,10 @@ class Dx12Ext
     // request (was DLSSG_Common::_forceConstantsReset)
     SuccessfulFrames dlssgFrames;
     bool forceConstantsReset = false;
+
+    // FSR FG frame IDs ([FrameGen] FsrMonotonicFrameId): FSR's own ID space, rising by exactly 1 per dispatch, and the buffer
+    // slot of each recorded dispatch (ext/fg/FsrIdSeams.cpp). Unused while the key is off.
+    FsrFrameIds fsrFrameIds;
 
     // D2 (DLSS-G on the Dx12 output): the latest observed output frames per real frame (tick count << 8 | multiplier,
     // 0 = none), the DLSS-G mode of the last sampled query (-1 = none) and the result/mode of the last SetOptions.

@@ -10,6 +10,13 @@
 // are read only at Present with DONOTFLUSH, D3D12 slots report only once the copy-queue fence has passed the fence
 // value that covers their resolve (never SetEventOnCompletion, never WaitForSingleObject), and durations are always
 // taken within one API (D3D11 timestamps are never subtracted from D3D12 ones).
+//
+// Clock calibration (D3D12): the interop stage samples ID3D12CommandQueue::GetClockCalibration once per reporting
+// window, which returns the GPU and the CPU (QueryPerformanceCounter) counters at the same instant. That pairing is
+// the only documented way to place a GPU timestamp on the CPU timeline, so the interop line can carry the CPU-time
+// offset of its samples (the GPU begin stamp on the CPU clock, relative to the CPU read taken when the copy was
+// submitted). D3D11 has no equivalent call: its timestamps are only usable as durations inside one disjoint window,
+// so the two D3D11 stages log no offset.
 
 #include <algorithm>
 #include <array>
@@ -58,6 +65,11 @@ struct GpuSummary
     double meanMs = 0.0;
     double p95Ms = 0.0;
     double maxMs = 0.0;
+    // The CPU-time offset of the samples that carry one: the mean of "where this sample's GPU begin stamp sits on the CPU
+    // clock, relative to the CPU read taken when the copy was submitted" in ms (negative = the GPU began first). Only the
+    // calibrated stage (D3D12) fills it; false means the line has no offset field.
+    bool hasCpuOffset = false;
+    double meanCpuOffsetMs = 0.0;
 };
 
 // One stage on the present thread. The first sample opens the window; CloseIfDue reports (at most) once per 10 s.
@@ -66,11 +78,12 @@ struct GpuSummary
 class GpuWindow
 {
   public:
-    void Add(double ms, int64_t nowUs)
+    void Add(double ms, int64_t nowUs, std::optional<double> cpuOffsetMs = std::nullopt)
     {
         if (open_ && nowUs < startUs_)
         {
             samples_.clear();
+            cpuOffsets_.clear();
             open_ = false;
         }
         if (!open_)
@@ -79,6 +92,8 @@ class GpuWindow
             startUs_ = nowUs;
         }
         samples_.push_back(ms);
+        if (cpuOffsetMs.has_value())
+            cpuOffsets_.push_back(*cpuOffsetMs);
     }
 
     // True and the summary when 10 s or more passed since the window opened (the samples added so far belong to
@@ -87,8 +102,9 @@ class GpuWindow
     {
         if (!open_ || nowUs - startUs_ < kGpuWindowUs)
             return false;
-        out = Summarize(samples_);
+        out = Summarize(samples_, cpuOffsets_);
         samples_.clear();
+        cpuOffsets_.clear();
         open_ = false;
         return true;
     }
@@ -96,13 +112,24 @@ class GpuWindow
     void Reset()
     {
         samples_.clear();
+        cpuOffsets_.clear();
         open_ = false;
     }
 
-    static GpuSummary Summarize(const std::vector<double>& v)
+    // The CPU-time offsets are a separate list: a sample whose stage could not be calibrated (no clock pairing yet, or a
+    // D3D11 stage) still counts in mean/p95/max and simply has no offset.
+    static GpuSummary Summarize(const std::vector<double>& v, const std::vector<double>& cpuOffsets = {})
     {
         GpuSummary s;
         s.samples = v.size();
+        if (!cpuOffsets.empty())
+        {
+            double sum = 0.0;
+            for (double x : cpuOffsets)
+                sum += x;
+            s.hasCpuOffset = true;
+            s.meanCpuOffsetMs = sum / static_cast<double>(cpuOffsets.size());
+        }
         if (v.empty())
             return s;
         double sum = 0.0, mx = v[0];
@@ -122,16 +149,20 @@ class GpuWindow
 
   private:
     std::vector<double> samples_;
+    std::vector<double> cpuOffsets_;
     int64_t startUs_ = 0;
     bool open_ = false;
 };
 
-// "Frame pacing GPU [<stage>]: samples N, mean x.xxx ms, p95 y.xxx ms, max z.zzz ms".
+// "Frame pacing GPU [<stage>]: samples N, mean x.xxx ms, p95 y.xxx ms, max z.zzz ms", plus ", cpu offset <s> ms" for a
+// stage whose samples were placed on the CPU clock (the sign says whether the GPU began before or after the CPU read).
 inline std::string FormatGpuLine(const char* stage, const GpuSummary& s)
 {
     char buf[256];
-    const int n = std::snprintf(buf, sizeof(buf), "Frame pacing GPU [%s]: samples %llu, mean %.3f ms, p95 %.3f ms, max %.3f ms",
-                                stage, static_cast<unsigned long long>(s.samples), s.meanMs, s.p95Ms, s.maxMs);
+    int n = std::snprintf(buf, sizeof(buf), "Frame pacing GPU [%s]: samples %llu, mean %.3f ms, p95 %.3f ms, max %.3f ms", stage,
+                          static_cast<unsigned long long>(s.samples), s.meanMs, s.p95Ms, s.maxMs);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(buf) && s.hasCpuOffset)
+        n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), ", cpu offset %+.3f ms", s.meanCpuOffsetMs);
     return std::string(buf, n > 0 ? static_cast<size_t>(n < static_cast<int>(sizeof(buf)) ? n : static_cast<int>(sizeof(buf)) - 1) : 0);
 }
 
@@ -276,6 +307,64 @@ inline bool ResolveGpuTimers(std::optional<bool> key, bool traceOn)
     if (key.has_value())
         return *key;
     return traceOn;
+}
+
+// ---- clock calibration (D3D12) -------------------------------------------------------------------------------------
+// One sample of ID3D12CommandQueue::GetClockCalibration: it "samples the CPU and GPU timestamp counters at the same
+// moment in time", which is what places a GPU timestamp on the CPU clock. The CPU side is QueryPerformanceCounter,
+// the GPU side is in ticks of the queue's GetTimestampFrequency.
+struct ClockCalibration
+{
+    std::uint64_t gpuTimestamp = 0; // the GPU counter at the sampling instant
+    std::uint64_t cpuTimestamp = 0; // the CPU (QueryPerformanceCounter) counter at the same instant
+    std::uint64_t gpuFrequency = 0; // ID3D12CommandQueue::GetTimestampFrequency, GPU ticks per second
+    std::uint64_t cpuFrequency = 0; // QueryPerformanceFrequency, CPU ticks per second
+};
+
+// A sample can convert only with both counters and both rates; anything zero is a refused sample (the caller keeps its
+// last good pairing and leaves the offset out of the line).
+inline bool CalibrationValid(const ClockCalibration& c)
+{
+    return c.gpuTimestamp != 0 && c.cpuTimestamp != 0 && c.gpuFrequency != 0 && c.cpuFrequency != 0;
+}
+
+// A new sample is due once per reporting window, and at once when there is none yet or the clock went backwards.
+inline bool CalibrationDue(std::int64_t nowUs, std::optional<std::int64_t> lastUs)
+{
+    return !lastUs.has_value() || nowUs < *lastUs || nowUs - *lastUs >= kGpuWindowUs;
+}
+
+// Milliseconds from the calibration instant to a GPU stamp, on the GPU clock (negative = the stamp is older). The
+// difference is taken in 64-bit two's complement: C++20 defines the unsigned wrap, so a stamp older than the sample
+// converts to the negative value it should be.
+inline std::optional<double> GpuStampMsSince(const ClockCalibration& c, std::uint64_t gpuStamp)
+{
+    if (!CalibrationValid(c))
+        return std::nullopt;
+    const auto delta = static_cast<std::int64_t>(gpuStamp - c.gpuTimestamp);
+    return static_cast<double>(delta) * 1000.0 / static_cast<double>(c.gpuFrequency);
+}
+
+// The same on the CPU clock. cpuStamp 0 = "no CPU read was recorded", which converts to nothing rather than to a
+// nonsense offset from boot.
+inline std::optional<double> CpuStampMsSince(const ClockCalibration& c, std::uint64_t cpuStamp)
+{
+    if (!CalibrationValid(c) || cpuStamp == 0)
+        return std::nullopt;
+    const auto delta = static_cast<std::int64_t>(cpuStamp - c.cpuTimestamp);
+    return static_cast<double>(delta) * 1000.0 / static_cast<double>(c.cpuFrequency);
+}
+
+// Where a GPU stamp sits on the CPU clock, relative to one CPU read: the CPU-time offset of the sample. Negative = the
+// GPU stamp precedes the CPU read (the usual case for work submitted earlier in the frame). nullopt without a
+// calibration or without the CPU read.
+inline std::optional<double> CpuOffsetMs(const ClockCalibration& c, std::uint64_t gpuStamp, std::uint64_t cpuStamp)
+{
+    const auto gpuMs = GpuStampMsSince(c, gpuStamp);
+    const auto cpuMs = CpuStampMsSince(c, cpuStamp);
+    if (!gpuMs.has_value() || !cpuMs.has_value())
+        return std::nullopt;
+    return *gpuMs - *cpuMs;
 }
 
 // A creation failure turns its timer off with ONE warning: the first Claim hands out the log line, later ones do not.

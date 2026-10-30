@@ -110,6 +110,11 @@ struct JitterBuild
 //
 // The camera update (RVA 0x25f690) draws with   ndc = 2 * strength * jitter / size   where
 //   strength = (float[settings+0x78] - 0.001f) * (ratio * ratio) + 0.001f,   ratio = (u16[renderer+0x700] / u16[renderer+0x704]) * float[settings+0x4c]
+// The two renderer fields of the ratio are render heights, not a width/height pair: +0x700 holds the height the scene is rendered at
+// after the last renderer update, +0x704 holds the maximum render height. rendererUpdate (0x2dab0d..0x2dab43) derives +0x700 each
+// update from RenderHeight (+0x702) or MaxRenderHeight (+0x704) and stores it back with `mov [rbx+0x700],ax`, so the ratio is
+// (render height / max render height) * GraphicsRezoScale; with MaxRenderHeight = display height * GraphicsRezoScale the scale
+// cancels and the ratio is the render/display height ratio the mip bias and the phase count also use.
 // and calls the generator (RVA 0x2ebd90: index % count + 1, outputs x - 0.5, y - 0.5) with the jitter object's two floats as outputs, the frame
 // counter, and in DLSS mode (settings byte +0x54 == 2) an unbounded phase count (mov edx, -1). The NGX packet producer (RVA 0x374050 region)
 // reads the same object through the camera getter (RVA 0x25f610), call site 0x37411d, return address 0x374122.
@@ -179,7 +184,11 @@ struct JitterSourceBuild
     std::uint32_t settingsModeOffset = 0x54;    // byte, 2 = DLSS mode
     std::uint32_t settingsAmountOffset = 0x78;  // float
     std::uint32_t rendererSceneSizeOffset = 0x428; // u32 width, u32 height of the scene (render) size
-    std::uint32_t rendererExtentOffset = 0x700;    // u16 extent0 at +0, u16 extent2 at +4
+    // u16 render height the scene is rendered at, then (4 bytes later) u16 MaxRenderHeight. The strength block reads both
+    // as one 6-byte block. The public structure notes (FFXIVClientStructs, MIT) name RenderHeight +0x702, MaxRenderHeight
+    // +0x704 and MinRenderHeight +0x706 for the same structure and leave +0x700 unnamed; it is the derived field the
+    // camera reads, so this table and not the structure field names is the source for the camera's own reads.
+    std::uint32_t rendererExtentOffset = 0x700;
     std::uint32_t deviceOutputSizeOffset = 0x8c;   // u32 output width, u32 output height
 
     // The two constants the source-fix core assumes (FfxivJitterSourceCore.h reads them from here at run time). Constants, never resolved: the

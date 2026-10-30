@@ -330,6 +330,34 @@ int main(int argc, char** argv)
 
     CHECK(Has(timers, "FormatGpuLine(GpuStageName("));
 
+    // ---- clock calibration: the D3D12 stage places its stamps on the CPU clock, once per reporting window -----------
+    // The queue's own pairing call is the only documented way to put a GPU timestamp on the CPU timeline; without it the
+    // offsets are not logged. It is sampled once per 10 s window (not per frame), a refused sample keeps the last
+    // pairing, and the CPU read a pair is measured against is taken when the copy is submitted, not when it is read.
+    {
+        CHECK(Count(timers, "GetClockCalibration(") == 1);
+        const auto refresh = Between(timers, "bool RefreshCalibration(", "void ReadD3D11(");
+        CHECK(!refresh.empty());
+        CHECK(Has(refresh, "CalibrationDue(nowUs, t.calUs)"));
+        CHECK(Has(refresh, "t.queue->GetClockCalibration(&sample.gpuTimestamp, &sample.cpuTimestamp)"));
+        CHECK(Has(refresh, "!CalibrationValid(sample)"));
+        CHECK(!Has(refresh, "LOG_")); // a refused sample is silent: the line just has no offset field
+        CHECK(Count(timers, "RefreshCalibration(t, nowUs);") == 1); // the interop Begin, once per sampled frame
+        CHECK(Has(timers, "QueryPerformanceCounter(")); // the CPU side of the pairing
+        CHECK(Count(timers, "QueryPerformanceFrequency(") == 1);
+        const auto close = Between(timers, "void GpuTimersEndInteropCopy(", "void GpuTimersCancelInteropCopy(");
+        CHECK(!close.empty());
+        CHECK(close.find("t.armCpuTicks[t.openSlot] = QpcTicks();") < close.find("t.book.Arm(")); // the submission read precedes the arm
+        CHECK(Count(timers, "CpuOffsetMs(t.cal, t.mapped[q], t.armCpuTicks[s])") == 2); // the report at Present and the recycle
+        CHECK(Count(timers, "t.window.Add(*ms, nowUs, ") == 2); // the offset rides the sample into the window
+        CHECK(Has(Between(timers, "void ReadD3D12(int64_t nowUs)", "void ClearD3D11("), "CpuOffsetMs(t.cal, t.mapped[q], t.armCpuTicks[s])"));
+        CHECK(Has(Between(timers, "void ClearD3D12()", "void GpuTimersBeginFrame()"), "t.cal = {};")); // no pairing outlives the stage
+        CHECK(Has(Between(timers, "void DropD3D12(", "bool EnsureD3D11("), "t.cal = {};"));
+        // the ini text ships the line with the field, and the pure rules live in the header the test above covers
+        CHECK(Has(ini, "cpu offset"));
+        CHECK(Has(Normalize(Read(present + "GpuTimerStats.h")), "CpuOffsetMs(const ClockCalibration& c"));
+    }
+
     // ---- safety: DONOTFLUSH reads only, no flush, no wait, no map on the frame path, one warning per timer ------------
     {
         // every GetData on the frame path carries DONOTFLUSH (a flag-0 GetData can flush the D3D11 command buffer);

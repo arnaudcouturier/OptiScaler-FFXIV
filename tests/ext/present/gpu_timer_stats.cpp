@@ -203,11 +203,146 @@ void LogLines()
     // an empty window still formats (zeros, not NaN)
     const GpuSummary e;
     CHECK(FormatGpuLine("interop copy", e) == "Frame pacing GPU [interop copy]: samples 0, mean 0.000 ms, p95 0.000 ms, max 0.000 ms");
+    // the CPU-time offset is an optional field: absent without a clock pairing, and signed when present (a negative value
+    // says the GPU began before the CPU read, which is the normal case)
+    {
+        GpuSummary o = s;
+        o.hasCpuOffset = true;
+        o.meanCpuOffsetMs = -2.1144;
+        CHECK(FormatGpuLine("interop copy", o) ==
+              "Frame pacing GPU [interop copy]: samples 42, mean 0.312 ms, p95 0.402 ms, max 0.513 ms, cpu offset -2.114 ms");
+        o.meanCpuOffsetMs = 0.0;
+        CHECK(FormatGpuLine("interop copy", o).find(", cpu offset +0.000 ms") != std::string::npos); // the sign is always written
+        o.meanCpuOffsetMs = 1.25;
+        CHECK(FormatGpuLine("interop copy", o).find(", cpu offset +1.250 ms") != std::string::npos);
+    }
     // every stage has a loggable name (the in-game proof greps them)
     for (unsigned i = 0; i < static_cast<unsigned>(GpuStage::Count); ++i)
     {
         const std::string line = FormatGpuLine(GpuStageName(static_cast<GpuStage>(i)), e);
         CHECK(line.rfind("Frame pacing GPU [", 0) == 0 && line.find("]: samples 0,") != std::string::npos);
+    }
+}
+
+// The clock pairing of the D3D12 stage: ID3D12CommandQueue::GetClockCalibration gives both counters at one instant, and
+// every conversion below is that one subtraction, so exact values are checked on a 1 GHz GPU clock and a 10 MHz CPU clock.
+void ClockCalibrationMath()
+{
+    ClockCalibration cal;
+    cal.gpuTimestamp = 5'000'000'000;
+    cal.cpuTimestamp = 20'000'000;
+    cal.gpuFrequency = 1'000'000'000; // 1 GHz GPU counter
+    cal.cpuFrequency = 10'000'000;    // QueryPerformanceCounter at 10 MHz
+    CHECK(CalibrationValid(cal));
+
+    // a stamp 1 ms after the sampling instant is 1 ms on both clocks, so its offset against a CPU read at the same
+    // moment is 0
+    CHECK(GpuStampMsSince(cal, cal.gpuTimestamp + 1'000'000) == std::optional<double>(1.0));
+    CHECK(CpuStampMsSince(cal, cal.cpuTimestamp + 10'000) == std::optional<double>(1.0));
+    CHECK(CpuOffsetMs(cal, cal.gpuTimestamp + 1'000'000, cal.cpuTimestamp + 10'000) == std::optional<double>(0.0));
+
+    // the GPU work began 2 ms before the CPU read: negative offset
+    CHECK(GpuStampMsSince(cal, cal.gpuTimestamp - 2'000'000) == std::optional<double>(-2.0));
+    CHECK(CpuOffsetMs(cal, cal.gpuTimestamp - 2'000'000, cal.cpuTimestamp) == std::optional<double>(-2.0));
+    // and after it: positive
+    CHECK(std::fabs(*CpuOffsetMs(cal, cal.gpuTimestamp + 500'000, cal.cpuTimestamp) - 0.5) < 1e-12);
+    // the two clocks are converted independently: a GPU stamp 3 ms on with a CPU read 1 ms on is +2 ms
+    CHECK(std::fabs(*CpuOffsetMs(cal, cal.gpuTimestamp + 3'000'000, cal.cpuTimestamp + 10'000) - 2.0) < 1e-12);
+
+    // a huge stamp difference stays a number (no wrap to a positive value from a negative one)
+    CHECK(*GpuStampMsSince(cal, cal.gpuTimestamp - 1) < 0.0);
+    CHECK(std::fabs(*GpuStampMsSince(cal, cal.gpuTimestamp - 90'000'000'000) + 90'000.0) < 1e-6);
+
+    // every zero field is a refused sample: the caller keeps its last pairing and logs no offset
+    {
+        ClockCalibration bad = cal;
+        bad.gpuFrequency = 0;
+        CHECK(!CalibrationValid(bad));
+        CHECK(!GpuStampMsSince(bad, cal.gpuTimestamp).has_value());
+        CHECK(!CpuOffsetMs(bad, cal.gpuTimestamp, cal.cpuTimestamp).has_value());
+        bad = cal;
+        bad.cpuFrequency = 0;
+        CHECK(!CalibrationValid(bad) && !CpuOffsetMs(bad, cal.gpuTimestamp, cal.cpuTimestamp).has_value());
+        bad = cal;
+        bad.gpuTimestamp = 0;
+        CHECK(!CalibrationValid(bad) && !GpuStampMsSince(bad, cal.gpuTimestamp).has_value());
+        bad = cal;
+        bad.cpuTimestamp = 0;
+        CHECK(!CalibrationValid(bad) && !CpuStampMsSince(bad, cal.cpuTimestamp).has_value());
+    }
+    // no CPU read was recorded for the pair (0): nothing to measure against
+    CHECK(!CpuStampMsSince(cal, 0).has_value());
+    CHECK(!CpuOffsetMs(cal, cal.gpuTimestamp, 0).has_value());
+}
+
+void CalibrationWindow()
+{
+    // the first sample is always due, then once per reporting window, and a clock that went backwards resamples
+    CHECK(CalibrationDue(0, std::nullopt));
+    CHECK(!CalibrationDue(9'999'999, std::optional<int64_t>(0)));
+    CHECK(CalibrationDue(10'000'000, std::optional<int64_t>(0)));
+    CHECK(CalibrationDue(5'000'000, std::optional<int64_t>(6'000'000)));
+    CHECK(CalibrationDue(25'000'000, std::optional<int64_t>(15'000'000)));
+}
+
+void WindowCpuOffsets()
+{
+    GpuSummary s;
+    {
+        // a window where every sample carries an offset: the mean is the mean of the offsets
+        GpuWindow w;
+        w.Add(0.4, 1000 * kSec, -1.0);
+        w.Add(0.6, 1001 * kSec, -3.0);
+        CHECK(w.CloseIfDue(1011 * kSec, s));
+        CHECK(s.samples == 2);
+        CHECK(s.hasCpuOffset);
+        CHECK(std::fabs(s.meanCpuOffsetMs + 2.0) < 1e-12);
+    }
+    {
+        // a window where only some samples carry one: every sample counts in the durations, the offsets average over
+        // the samples that have one (a D3D11 stage never fills it, and a missing pairing must not read as 0 ms)
+        GpuWindow w;
+        w.Add(1.0, 2000 * kSec);
+        w.Add(3.0, 2001 * kSec, 2.0);
+        w.Add(2.0, 2002 * kSec);
+        CHECK(w.CloseIfDue(2010 * kSec, s));
+        CHECK(s.samples == 3);
+        CHECK(std::fabs(s.meanMs - 2.0) < 1e-9);
+        CHECK(s.hasCpuOffset);
+        CHECK(s.meanCpuOffsetMs == 2.0);
+    }
+    {
+        // no offset at all: the field is absent, not zero
+        GpuWindow w;
+        w.Add(1.0, 3000 * kSec);
+        CHECK(w.CloseIfDue(3010 * kSec, s));
+        CHECK(s.samples == 1 && !s.hasCpuOffset && s.meanCpuOffsetMs == 0.0);
+    }
+    {
+        // Reset (the timers went off) forgets the offsets with the samples
+        GpuSummary out;
+        GpuWindow w;
+        w.Add(1.0, 4000 * kSec, 5.0);
+        w.Reset();
+        w.Add(1.0, 5000 * kSec);
+        CHECK(w.CloseIfDue(5010 * kSec, out));
+        CHECK(out.samples == 1 && !out.hasCpuOffset);
+    }
+    {
+        // a clock that goes backwards restarts the window and its offsets together
+        GpuSummary out;
+        GpuWindow w;
+        w.Add(1.0, 6000 * kSec, 7.0);
+        w.Add(1.0, 5000 * kSec, -1.0);
+        CHECK(w.CloseIfDue(5010 * kSec, out));
+        CHECK(out.samples == 1 && out.hasCpuOffset && out.meanCpuOffsetMs == -1.0);
+    }
+    // Summarize takes the offsets as a separate list (the static entry point the window uses)
+    {
+        const GpuSummary none = GpuWindow::Summarize({ 1.0 }, {});
+        CHECK(!none.hasCpuOffset);
+        const GpuSummary one = GpuWindow::Summarize({ 1.0, 3.0 }, { -4.0, -2.0 });
+        CHECK(one.hasCpuOffset && std::fabs(one.meanCpuOffsetMs + 3.0) < 1e-12);
     }
 }
 
@@ -398,6 +533,9 @@ int main()
     ExclNrMissing();
     StageNames();
     LogLines();
+    ClockCalibrationMath();
+    CalibrationWindow();
+    WindowCpuOffsets();
     KeyResolution();
     OneWarningLatch();
     SlotBookBasics();

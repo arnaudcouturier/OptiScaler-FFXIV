@@ -64,6 +64,12 @@ struct FgConfig
     CustomOptional<bool> xefgExtraPacing { true };                            // ExtraPacing (needs a game restart)
     CustomOptional<bool> xefgResetOnUpscalerChange { true };                  // ResetOnUpscalerChange
 
+    // FSR output ([FrameGen] section). FSR frame generation wants a frame ID that rises by exactly 1 per frame and resets
+    // its interpolation history on any other difference; the shared dispatch selector lets the ID jump when the game skips a
+    // frame or its counter falls back. On = FSR gets its own ID, rising by exactly 1 per dispatch (ext/fg/FsrIdSeams.cpp).
+    // Off = the game's own frame ID, which is today's behaviour.
+    CustomOptional<bool> fsrMonotonicFrameId { false }; // FsrMonotonicFrameId
+
     void Bind(config::Binder& b);
     void PostLoad(); // end of ext::config::Load: range checks that ran right after the keys were read
 };

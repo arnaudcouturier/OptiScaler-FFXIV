@@ -39,6 +39,9 @@ void FgConfig::Bind(config::Binder& b)
     b.Add("XeFG", "ExtraPacing", xefgExtraPacing);
     b.Add("XeFG", "ResetOnUpscalerChange", xefgResetOnUpscalerChange);
 
+    // FSR output: a frame ID that rises by exactly 1 per dispatch (see FgConfig.h).
+    b.Add("FrameGen", "FsrMonotonicFrameId", fsrMonotonicFrameId);
+
     // D5: upstream members (Config.h) whose ini persistence under [LowLatency] is the fork's. Read after upstream's own
     // [fakenvapi] keys (set_from_config only fills an unset value), out-of-range values are ignored.
     b.AddEnum("LowLatency", "Input", Config::Instance()->LowLatencyInput, ::LowLatencyInput::_);

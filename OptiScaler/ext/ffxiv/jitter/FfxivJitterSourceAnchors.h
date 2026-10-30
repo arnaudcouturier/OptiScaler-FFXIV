@@ -30,7 +30,8 @@ inline constexpr std::size_t kAnchorCount = 7;
 //   cameraHead    the camera update's prologue, the load of the settings global and of the mode byte (settings+0x54)
 //   phases        the load of the renderer global, the jitter object pointer, the unbounded phase count (mov edx,-1), the scene size (renderer+0x428),
 //                 the DLSS-mode branch, the counter load and the other arguments of the generator call; the device global and the output width (device+0x8c)
-//   strength      the generator call (its rel32 lands on the generator, its return address is generatorCallReturnRva), the extents (renderer+0x700/+0x704),
+//   strength      the generator call (its rel32 lands on the generator, its return address is generatorCallReturnRva), the render heights
+//                 (renderer+0x700, the height the scene is drawn at, and +0x704, MaxRenderHeight),
 //                 the settings global, the amount (settings+0x78), the scale (settings+0x4c), the strength expression, the doubling and the NDC division
 //   deviceSize    another reader of the same device global: the output size as the pair (+0x8c width, +0x90 height)
 inline std::array<Anchor, kAnchorCount> Anchors(const JitterSourceBuild& b)

@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -132,6 +134,41 @@ bool HasTarget(const std::vector<std::uint32_t>& v, std::uint32_t rva)
     return false;
 }
 
+// The two render heights the strength block reads, and where the game keeps the first of them. The block at RVA 0x2dab0d, read from
+// the supported executable, chooses RenderHeight (+0x702) or MaxRenderHeight (+0x704) with the DLSS / dynamic-resolution tests, stores
+// the choice at +0x700, and the camera update's strength block divides that +0x700 by +0x704. So +0x700 is a field of its own (the
+// structure notes leave it unnamed) and not a misaligned read of RenderHeight: this checks the table's two reads against the
+// instructions that define and use the field, so moving them to a neighbouring structure field fails here.
+void TestExtentFieldIsTheDerivedRenderHeight(const JitterSourceBuild& b)
+{
+    // mov rcx,[r14+0x30] ; call resizeCallbacks ; mov rax,[settings] ; cmp byte [rax+0x54],2 ; je ; cmp byte [rax+0x44],0 ;
+    // je ; cmp byte [rax+0x45],0 ; je ; movzx eax,word [rbx+0x702] ; jmp ; movzx eax,word [rbx+0x704] ; mov [rbx+0x700],ax
+    const std::vector<std::uint8_t> resizeBlock = FromHex("498b4e30e88abef5ff488b055339630280785402740680784400740f8078450074090f"
+                                                          "b78302070000eb070fb7830407000066898300070000");
+    const auto loadWord = [](std::uint32_t offset)
+    {
+        std::vector<std::uint8_t> p { 0x0f, 0xb7, 0x83 }; // movzx eax, word [rbx+offset]
+        for (auto v : Le32(offset))
+            p.push_back(v);
+        return p;
+    };
+    const auto storeWord = [](std::uint32_t offset)
+    {
+        std::vector<std::uint8_t> p { 0x66, 0x89, 0x83 }; // mov [rbx+offset], ax
+        for (auto v : Le32(offset))
+            p.push_back(v);
+        return p;
+    };
+    CHECK(resizeBlock.size() == 57);
+    CHECK(Contains(resizeBlock, loadWord(0x702))); // RenderHeight, the height the scene targets are rendered at
+    CHECK(Contains(resizeBlock, loadWord(0x704))); // MaxRenderHeight, used while render scaling is off
+    CHECK(Contains(resizeBlock, storeWord(0x700))); // what the camera's strength formula reads
+    // the table's pair is the field this block writes and the field it falls back to, four bytes apart
+    CHECK(b.rendererExtentOffset == 0x700);
+    CHECK(Contains(resizeBlock, loadWord(b.rendererExtentOffset + 4)));
+    CHECK(Contains(resizeBlock, storeWord(b.rendererExtentOffset)));
+}
+
 void TestTableMatchesRecordedBytes()
 {
     const JitterSourceBuild& b = kCurrentBuild.jitterSource;
@@ -247,6 +284,11 @@ void TestOffsetsAreInTheBytes()
             e2.push_back(v);
         CHECK(Contains(strength, e0) && Contains(strength, e2));
         CHECK(b.rendererExtentOffset == 0x700);
+        // the second read is the next u16 of the same pair, four bytes on: a table that moved either read to a neighbouring
+        // field (the structure notes name RenderHeight at +0x702) would break the strength formula, not just an anchor
+        CHECK(b.rendererExtentOffset + 4 == 0x704);
+        CHECK(e0[3] == 0x00 && e0[4] == 0x07 && e2[3] == 0x04 && e2[4] == 0x07);
+        TestExtentFieldIsTheDerivedRenderHeight(b);
     }
     // amount: movss xmm2,[rax+0x78] ; scale: mulss xmm1,[rax+0x4c]
     CHECK(Contains(strength, { 0xf3, 0x0f, 0x10, 0x50, std::uint8_t(b.settingsAmountOffset) }));
@@ -264,8 +306,20 @@ void TestOffsetsAreInTheBytes()
     CHECK(Contains(strength, { 0xf3, 0x0f, 0x5e, 0xce }));       // divss xmm1,xmm6     (/ width)
 }
 
-void TestVerifyOnTheRecordedImage()
+void TestVerifyOnTheRecordedImage(const std::string& repo)
 {
+    // The consumer's read of the table's pair: the glue hands the core the u16 at the table's offset and the one after the
+    // skipped u16 (extent[2]), never the neighbouring RenderHeight at +0x702 that the same 6-byte read also covers. A glue
+    // that read extent[1] would compute the strength from RenderHeight instead of the height the scene is drawn at.
+    {
+        std::ifstream f(repo + "/OptiScaler/ext/ffxiv/jitter/FfxivJitterSourceHooks.cpp", std::ios::binary);
+        const std::string hooks { std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>() };
+        CHECK(hooks.size() > 2000);
+        CHECK(hooks.find("in.extent0 = extent[0];") != std::string::npos);
+        CHECK(hooks.find("in.extent2 = extent[2];") != std::string::npos);
+        CHECK(hooks.find("in.extent0 = extent[1];") == std::string::npos);
+        CHECK(hooks.find("ReadBytes(renderer + b.rendererExtentOffset, extent, sizeof(extent))") != std::string::npos);
+    }
     const JitterSourceBuild& b = kCurrentBuild.jitterSource;
     const Image image = MakeImage(b);
     auto reader = [&](std::uintptr_t a, void* out, std::size_t n) { return image.Read(a, out, n); };
@@ -308,11 +362,12 @@ void TestVerifyOnTheRecordedImage()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    const std::string repo = argc > 1 ? argv[1] : ".";
     TestTableMatchesRecordedBytes();
     TestAddressesAreWhatTheBytesEncode();
     TestOffsetsAreInTheBytes();
-    TestVerifyOnTheRecordedImage();
+    TestVerifyOnTheRecordedImage(repo);
     return TEST_RESULT("jitter_source_anchors");
 }
