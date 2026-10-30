@@ -45,7 +45,8 @@ auto D3D12_DestroyParameters() { return &MockDestroy; }
 class DlssNr_Dx12 {};
 static std::recursive_mutex g_nrMutex;
 static std::atomic_bool g_bridgeSuspended {false};
-static struct { bool reset = false, passNeedsReset[30] {}; } g_nr;
+// the status texts the menu reads: bridge shutdown resets them so no stale answer survives the model
+static struct { bool reset = false, passNeedsReset[30] {}; std::string spatialStatus = "active", depthAwareStatus = "on"; } g_nr;
 static std::optional<double> g_lastGpuTime, g_lastNgxTime;
 // the picker's hash worker is stopped with the bridge and may hash again when it comes back (ext/nr/runtime, review N2)
 namespace ext::nr::runtime
@@ -56,6 +57,9 @@ inline void Resume() { ++resumes; }
 }
 namespace DlssNr
 {
+// the menu readout is cleared when the bridge takes the model away (the real one keeps the output size)
+static int readoutClears = 0;
+static void ClearSpatialReadout() { ++readoutClears; }
 #include "nr_shutdown_production.inl"
 }
 
@@ -95,6 +99,7 @@ int main(int argc, char**)
     assert(g_nr.reset && std::all_of(std::begin(g_nr.passNeedsReset), std::end(g_nr.passNeedsReset),
                                    [](bool reset) { return reset; }));
     assert(!g_lastGpuTime && !g_lastNgxTime);
+    assert(g_nr.spatialStatus == "disabled" && g_nr.depthAwareStatus.empty() && DlssNr::readoutClears == 1);
     assert(ext::nr::runtime::shutdowns == 1 && ext::nr::runtime::resumes == 0);
     DlssNr::SuspendForBridgeShutdown(); // Repeated shutdown cannot double-release.
     assert(released == 2 && destroyed == 2);
