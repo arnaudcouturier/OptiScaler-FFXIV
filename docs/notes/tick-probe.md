@@ -2,7 +2,13 @@
 
 `[FramePacing] TickProbe` (off by default) measures where the game's own simulation tick sits relative to the frame that reaches the display. It
 exists to answer one question before anything is built on it: does the simulation finish early and wait for the render thread, or does the render
-thread wait for the simulation? Only the first case is worth acting on, and the number that separates the two is the queue wait `W` below.
+thread wait for the simulation? Only the first case is worth acting on, and the number that separates the two is `W` below.
+
+Which number that is depends on the shape of the loop, and the line says which shape it measured. FFXIV runs its main loop on one thread: the
+bridge present is a piece of the tick body, so a finished simulation never waits in a queue. There `W` is the time the game thread spends inside
+the native present - the wait a sleep at tick start would move to before the input sampling. On a game with a separate render thread (or on this
+one if an overlay moves the present), the present runs outside the tick and `queue` is the old queue wait: a finished tick waiting for the render
+thread's previous present to end.
 
 Nothing about the feature is guessed from a single session's numbers. The probe is a measurement, and a session that reads badly is a normal
 outcome.
@@ -36,8 +42,9 @@ Expected log lines, in order:
 ```
 [ffxiv-gate] feature latencyTick ON all 2 required checks pass
 Tick probe: installed instance=0x... vtable=0x... slot=0x... original=0x... order=slot-first counter=on entry=48 8B 5C 24 08 48 89 74 ...
-Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=3.1 p95=5.0 | slack p50=-1.2 |
-sleep->tick p50=-0.4 (DLSS-G) | threads tick=0x1a3c bridge=0x2b10 | paired 99.9% | counter ok
+Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=6.2 p95=8.0 |
+queue p50=n/a p95=n/a | slack p50=0.6 | sleep->tick p50=0.6 | sleep p50=0.0 p95=0.1 (DLSS-G) | threads tick=0x6554 bridge=0x6554 same |
+paired 99.9% | counter ok
 ```
 
 The numbers above are illustrative. With the key off, or on a build whose anchors did not resolve, there is no install line and no window line,
@@ -49,8 +56,8 @@ running process. If they start with `E9` or `FF 25`, another tool inline-hooked 
 but its work then runs inside the tick body this probe measures, which is worth noting in a session report.
 
 `counter=on` means this build resolved the game's frame counter and the numbers below are paired by it. `counter=n/a` means the frame-counter
-anchor did not resolve (an inline hook over the tick entry is the usual reason): the lease still installs, and `age` and `W` read `n/a` rather than
-guessing a pairing.
+anchor did not resolve (an inline hook over the tick entry is the usual reason): the lease still installs, and `age`, `W` and `queue` read `n/a`
+rather than guessing a pairing.
 
 ## Reading one window
 
@@ -62,18 +69,27 @@ All times are milliseconds of CPU time, from `QueryPerformanceCounter`. One line
 | `presents` | bridge presents in the window |
 | `period p50/p95` | distance from one tick start to the next |
 | `body p50` | how long one tick call took |
-| `age p5/p50/p95` | tick start to the end of the bridge present that carries the same frame number: the age of the frame at present time |
-| `W p50/p95` | the queue wait: a tick finished, and the render thread's previous present had not ended yet |
+| `age p5/p50/p95` | tick start to the bridge present of the same frame: to the present's start when the present runs inside the tick (`same`), to its end when the present runs outside it (`split`) |
+| `W p50/p95` | inside the tick: the game thread's time inside the native present of that tick (an upper bound, see below) |
+| `queue p50/p95` | outside the tick: a tick finished, and the render thread's previous present had not ended yet |
 | `slack p50` | tick start minus the last finished present; negative means the render thread was still busy when the simulation began the next tick |
 | `sleep->tick p50` | tick start minus the end of the last Reflex sleep (the frame-generation present path); negative means the game thread was already running when that sleep ended |
+| `sleep p50/p95` | how long that Reflex sleep lasted, measured from its own begin and end; it sits inside the present path, so inside the tick it is part of `W` |
 | `threads tick/bridge` | the thread id that ran each kind, with a count in brackets when a kind ran on more than one thread |
+| the word after `threads` | `same` when the window's presents ran inside the tick on its thread, `split` when they ran outside it, `mixed` when both happened, `none` when there is no present or no tick to describe |
 | `paired` | share of presents that found the tick their frame number named |
 | `counter` | `ok`, `missing` (the offset did not resolve) or `inconsistent` (the counter did not advance by exactly one per tick) |
 
-`W` is the number a sleep at tick start could give back: a finished simulation that sits in a queue is time nothing else can use. A negative
-`W` says the opposite (the render thread waited for the simulation), and a sleeping tick would then make latency worse, not better. That is why
-`W`, not the spread of `age`, is the reading to trust: a pipeline that always runs two frames deep has a nearly constant `age` and still a large
-positive `W`.
+`W` is the number a sleep at tick start could give back. Inside the tick that is the time the game thread spends in the native present, which
+contains the bridge's copy and submit as well as its waits: the probe cannot tell those apart, so `W` is an upper bound on what a sleep could move
+to before the input sampling, never a prediction of the gain. On a single-thread loop the simulation never runs ahead of the render thread, so
+there is no queue to drain and `queue` reads `n/a`; a sleep then has to earn its place against `W` alone, and only if the wait it moves sits
+between the input sampling and the display.
+
+Outside the tick, `queue` is the number a sleep could give back: a finished simulation that sits in a queue is time nothing else can use. A
+negative `queue` says the opposite (the render thread waited for the simulation), and a sleeping tick would then make latency worse, not better.
+That is why `queue`, not the spread of `age`, is the reading for that shape: a pipeline that always runs two frames deep has a nearly constant
+`age` and still a large positive `queue`.
 
 Ticks and presents are numbered by one source, the game's own `Framecounter`: the observer reads it before and after every tick, the bridge present
 reads it when the present begins. A present is paired with the tick whose frame number it carries, so there is no lag to infer and a deeper
@@ -89,22 +105,25 @@ tick.
 ## Play checklist rows for this build
 
 1. Default keys: no `tick.hook` line, no slot write, behaviour unchanged.
-2. `TickProbe=true`, overlay closed: the install line with `order=slot-first`, `counter=on`, a `threads` table, `paired` near 100 percent and
-   `counter ok`; `W` and `age` are numbers, not `n/a`.
+2. `TickProbe=true`, overlay closed: the install line with `order=slot-first`, `counter=on`, a `threads` table ending in `same`, `paired` near 100
+   percent and `counter ok`; `W` and `age` are numbers and `queue` reads `n/a`.
 3. Same with an overlay's framework hook on: `entry=` starts with a jump, the probe still works, and the session report says so (its work runs
    inside the tick body).
 4. A loading screen, a cutscene and an alt-tab: `paired` dips and recovers, `counter` stays `ok`.
-5. A session where the game build's frame-counter anchor did not resolve: `counter=n/a` on the install line, `age` and `W` read `n/a`, and the
-   period, body and slack still report.
+5. A session where the game build's frame-counter anchor did not resolve: `counter=n/a` on the install line, `age`, `W` and `queue` read `n/a`,
+   and the period, body, slack and sleep still report.
 6. Exit and restart: no hang (the module stays pinned only if the slot is still ours).
 
 ## What it cannot tell
 
 - It is CPU timestamps. It does not measure input-to-photon latency, and `age` includes whatever the GPU needs anyway.
+- `W` inside the tick is the whole native present, copy and submit included. It does not say how much of that time is a wait for the GPU or the
+deck, which is what decides how much of it a sleep could move; a session that needs that split has to time the present's stages or read the GPU
+stage timers beside it.
 - A frame the game never ticked has no pairing; `paired` is the share that did.
 - A loading screen, a cutscene or an alt-tab makes `paired` dip and the metrics jump. That is expected and recovers by itself; a session report
   should say which part of the window was a scene change.
-- On an AMD machine the Reflex sleep does not exist, so `sleep->tick` stays `n/a`.
+- On an AMD machine the Reflex sleep does not exist, so `sleep->tick` and `sleep` stay `n/a`.
 
 ## Cost
 

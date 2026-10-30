@@ -1,7 +1,8 @@
 // The probe's rules (ext/latency/TickProbeCore.h) with injected events: the histogram edges and percentile ranks, the signed split, the 10 s window
-// and its restart rules, the frame-number pairing (one numbering for ticks and presents, no lag search, no guess), the metrics of one window (period,
-// body, age, queue wait W, slack, sleep->tick, the share of presents that found their tick, the thread table) and the exact text of the one line the
-// sink logs.
+// and its restart rules, the frame-number pairing (one numbering for ticks and presents, no lag search, no guess), the two pairing rules (a present
+// inside the tick on its thread, and the two-thread case the queue wait was built for), the metrics of one window (period, body, age, the present
+// wait, the queue wait, slack, sleep->tick, the Reflex sleep's own duration, the share of presents that found their tick, the thread table and the
+// pairing word) and the exact text of the one line the sink logs.
 //
 // The pairing scenarios are the independent reviewer's: ticks every 7 ms with a small jitter, a serial render pipeline two frames deep (a present ends
 // 14 ms after the start of the tick whose frame number it carries), which the reviewer measured as an age of 13.9 ms and a queue wait W of +4.9 ms.
@@ -97,10 +98,11 @@ struct Stream
     struct Event
     {
         std::int64_t t;
-        int kind; // 0 tick begin, 1 tick end, 2 present (begin and end at the same moment), 3 sleep end
+        int kind; // 0 tick begin, 1 tick end, 2 present (begin and end at the same moment), 3 sleep end, 4 present with a span
         std::uint32_t frame;
         bool counter;
         std::int64_t body;
+        std::int64_t tEnd = 0; // kind 4: when the present ends
     };
     std::vector<Event> events;
     std::uint32_t nextFrame = 1; // the frame number of the next tick
@@ -113,6 +115,11 @@ struct Stream
         ++nextFrame;
     }
     void Present(std::int64_t end, std::uint32_t frame, bool counter = true) { events.push_back({ end, 2, frame, counter, 0 }); }
+    // A present that begins and ends apart, on the thread the stream's ticks run on: the FFXIV shape, the present inside the tick body.
+    void PresentSpan(std::int64_t begin, std::int64_t end, std::uint32_t frame, bool counter = true)
+    {
+        events.push_back({ begin, 4, frame, counter, 0, end });
+    }
     void Sleep(std::int64_t end) { events.push_back({ end, 3, 0, false, 0 }); }
 
     // Feeds every event oldest first (a stable sort keeps the insertion order of equal timestamps: a tick's end before a present at the same
@@ -124,6 +131,7 @@ struct Stream
         std::vector<Summary> windows;
         for (const Event& e : sorted)
         {
+            std::int64_t now = e.t;
             switch (e.kind)
             {
             case 0:
@@ -136,12 +144,17 @@ struct Stream
                 probe.PresentBegin(e.t, tid + 1, e.frame, e.counter);
                 probe.PresentEnd(e.t, e.frame);
                 break;
+            case 4:
+                probe.PresentBegin(e.t, tid, e.frame, e.counter); // the tick's own thread
+                probe.PresentEnd(e.tEnd, e.frame);
+                now = e.tEnd;
+                break;
             default:
                 probe.SleepEnd(e.t);
                 break;
             }
             Summary s;
-            if (probe.Due(e.t, s))
+            if (probe.Due(now, s))
                 windows.push_back(s);
         }
         return windows;
@@ -198,7 +211,94 @@ void TestTwoFramePipelineAcrossWindows()
         CHECK(s.pairedShare == 100.0);
         CHECK(s.hasPeriod && s.periodP50 == Bucket(7000));
         CHECK(s.hasBody && s.bodyP50 == Bucket(2000));
+        // the render thread is not the tick's thread: the two-thread rule produces the number, and the inside-the-tick W has no sample
+        CHECK(s.pairing == Pairing::Split && s.presentsInsideTick == 0);
+        CHECK(s.pairedSplit == s.presents && s.pairedSame == 0);
+        CHECK(!s.hasPresentWait);
     }
+}
+
+// The single-thread loop, which is the shape FFXIV runs: one thread, the bridge present inside the tick body, and nothing left over between the
+// tick's end and the next tick's start. The present pairs with the tick it runs inside, age is the tick's start to the present's start and W is the
+// present's own duration; the queue wait, which describes a finished simulation waiting for a render thread, has no sample and reads n/a.
+constexpr std::int64_t kSinglePeriodUs = 15000;
+constexpr std::int64_t kSingleBodyUs = 14500;
+constexpr std::int64_t kPresentBeginOffsetUs = 4000;
+constexpr std::int64_t kPresentDurationUs = 7000;
+constexpr std::int64_t kSameThreadAgeUs = kPresentBeginOffsetUs;
+void TestSingleThreadLoopAcrossWindows()
+{
+    Stream stream;
+    for (std::int64_t n = 0, t = 0; t < 40'000'000; ++n, t += kSinglePeriodUs)
+    {
+        const std::uint32_t frame = stream.nextFrame;
+        stream.Tick(t, kSingleBodyUs);
+        stream.PresentSpan(t + kPresentBeginOffsetUs, t + kPresentBeginOffsetUs + kPresentDurationUs, frame);
+    }
+    Probe probe;
+    const std::vector<Summary> windows = stream.Run(probe);
+    CHECK(windows.size() >= 3);
+    for (const Summary& s : windows)
+    {
+        if (!(s.pairing == Pairing::Same && s.paired == s.presents && s.hasPresentWait && !s.hasWait))
+            std::printf("FAIL: same-thread window: pairing %s, paired %llu of %llu, W %lld, queue %lld\n", PairingText(s.pairing),
+                        (unsigned long long) s.paired, (unsigned long long) s.presents, (long long) s.presentWaitP50, (long long) s.waitP50);
+        CHECK(s.pairing == Pairing::Same && s.presentsInsideTick == s.presents);
+        CHECK(s.pairedSame == s.presents && s.pairedSplit == 0);
+        CHECK(s.pairedShare == 100.0 && s.counter == CounterState::Ok);
+        CHECK(s.hasAge && s.ageP5 == Bucket(kSameThreadAgeUs) && s.ageP50 == Bucket(kSameThreadAgeUs) && s.ageP95 == Bucket(kSameThreadAgeUs));
+        CHECK(s.hasPresentWait && s.presentWaitP50 == Bucket(kPresentDurationUs) && s.presentWaitP95 == Bucket(kPresentDurationUs));
+        CHECK(!s.hasWait); // no finished simulation waited for a render thread
+        CHECK(s.hasPeriod && s.periodP50 == Bucket(kSinglePeriodUs));
+        CHECK(s.hasBody && s.bodyP50 == Bucket(kSingleBodyUs));
+        const std::string line = FormatSummary(s);
+        CHECK(line.find("W p50=7.1 p95=7.1") != std::string::npos);
+        CHECK(line.find("queue p50=n/a p95=n/a") != std::string::npos);
+        CHECK(line.find("age p5=4.1 p50=4.1 p95=4.1") != std::string::npos);
+        CHECK(line.find("threads tick=0x1a3c bridge=0x1a3c same") != std::string::npos);
+    }
+}
+
+// A present inside a tick on the tick's own thread that carries another frame number pairs with nothing: it never falls back to an older finished
+// tick, where the age would be a different frame's. The window still says it ran the same-thread rule and the paired share shows the failure.
+void TestInsideTheTickNeedsItsFrame()
+{
+    Probe probe;
+    probe.TickBegin(0, 0x10, 4, true); // frame 5
+    probe.PresentBegin(1000, 0x10, 3, true); // same thread, inside the tick, carries frame 3
+    probe.PresentEnd(4000, 3);
+    Summary s = probe.Build();
+    CHECK(s.presents == 1 && s.presentsInsideTick == 1 && s.pairing == Pairing::Same);
+    CHECK(s.paired == 0 && s.pairedSame == 0 && s.pairedSplit == 0);
+    CHECK(!s.hasAge && !s.hasPresentWait && !s.hasWait);
+
+    // and the healthy control: the same span carrying the open tick's own number pairs
+    Probe ok;
+    ok.TickBegin(0, 0x10, 4, true);
+    ok.PresentBegin(1000, 0x10, 5, true);
+    ok.PresentEnd(4000, 5);
+    s = ok.Build();
+    CHECK(s.pairedSame == 1 && s.hasAge && s.ageP50 == Bucket(1000) && s.presentWaitP50 == Bucket(3000));
+}
+
+// One window can hold both shapes (a provider switch mid-window): it says mixed, and each number is reported under its own name.
+void TestMixedWindowReportsBothNumbers()
+{
+    Probe probe;
+    probe.TickBegin(0, 0x10, 0, true); // frame 1, inside-the-tick present
+    probe.PresentBegin(1000, 0x10, 1, true);
+    probe.PresentEnd(5000, 1);
+    probe.TickEnd(6000, 1);
+    probe.TickBegin(15000, 0x10, 1, true); // frame 2, present on another thread after the tick ended
+    probe.TickEnd(17000, 2);
+    probe.PresentBegin(20000, 0x20, 2, true);
+    probe.PresentEnd(21000, 2);
+    const Summary s = probe.Build();
+    CHECK(s.presents == 2 && s.presentsInsideTick == 1 && s.pairing == Pairing::Mixed);
+    CHECK(s.pairedSame == 1 && s.pairedSplit == 1 && s.paired == 2);
+    CHECK(s.hasAge && s.hasPresentWait && s.hasWait);
+    const std::string line = FormatSummary(s);
+    CHECK(line.find("threads tick=0x10 bridge=0x10(2 threads) mixed") != std::string::npos);
 }
 
 // Arming in the middle of the pipeline: the probe starts recording after a tick has begun, so that tick was never recorded. Its present finds no
@@ -285,10 +385,23 @@ void TestInconsistentCounterIsNotGuessed()
     ok.PresentEnd(14000, 3);
     s = ok.Build();
     CHECK(s.counter == CounterState::Ok && s.paired == 1 && s.hasAge);
+
+    // a present that pairs normally while the counter is inconsistent still keeps W out of the window: no number rests on a broken numbering
+    Probe pairedButBroken;
+    pairedButBroken.TickBegin(0, 1, 5, true);
+    pairedButBroken.TickEnd(2000, 7); // expected 6
+    pairedButBroken.TickBegin(7000, 1, 7, true); // frame 8
+    pairedButBroken.PresentBegin(8000, 1, 8, true); // inside that tick, on its thread
+    pairedButBroken.PresentEnd(12000, 8);
+    pairedButBroken.TickEnd(13000, 8);
+    s = pairedButBroken.Build();
+    CHECK(s.counter == CounterState::Inconsistent);
+    CHECK(!s.hasPresentWait && !s.hasAge); // the samples exist, the flag keeps them off the line
+    CHECK(!s.hasPaired);
 }
 
-// A present pairs only with a tick the probe actually recorded and finished: a missing record (arming, an evicted ring, a frame the game never ticked)
-// contributes nothing, and a tick still running cannot be the frame a present carries.
+// A present pairs only with a tick the probe actually recorded and finished when it began outside a tick: a missing record (arming, an evicted ring,
+// a frame the game never ticked) contributes nothing, and a tick still running cannot be the frame a present carries on another thread.
 void TestPairingNeedsTheFinishedTick()
 {
     Stream stream;
@@ -304,10 +417,22 @@ void TestPairingNeedsTheFinishedTick()
 
     Probe running;
     running.TickBegin(0, 1, 4, true); // frame 5
-    running.PresentBegin(1000, 2, 5, true); // a present carrying a tick that has not ended yet
+    running.PresentBegin(1000, 2, 5, true); // another thread, carrying a tick that has not ended yet
     running.PresentEnd(1500, 5);
     const Summary r = running.Build();
-    CHECK(r.presents == 1 && r.paired == 0 && !r.hasAge && !r.hasWait);
+    CHECK(r.presents == 1 && r.paired == 0 && !r.hasAge && !r.hasWait && !r.hasPresentWait);
+    CHECK(r.pairing == Pairing::Split); // outside the tick, so the two-thread rule applies and simply has nothing to pair
+
+    // a present on the tick's own thread but after the tick ended: outside the tick, so the two-thread rule applies to it as well
+    Probe serial;
+    serial.TickBegin(0, 0x10, 4, true); // frame 5
+    serial.TickEnd(2000, 5);
+    serial.PresentBegin(3000, 0x10, 5, true);
+    serial.PresentEnd(6000, 5);
+    const Summary ser = serial.Build();
+    CHECK(ser.presentsInsideTick == 0 && ser.pairing == Pairing::Split);
+    CHECK(ser.pairedSplit == 1 && ser.hasAge && ser.ageP50 == Bucket(6000));
+    CHECK(!ser.hasPresentWait); // the inside-the-tick wait is not measured for a present that began outside the tick
 }
 
 // The window: the event 10 s or more after the window opened carries its summary, and the next one opens a new window.
@@ -349,10 +474,16 @@ void TestNoTicks()
     CHECK(s.ticks == 0 && s.presents > 0); // presents, no tick: the pairing has nothing to work with
     CHECK(!s.hasAge && !s.hasPeriod);
     CHECK(s.hasPaired && s.paired == 0 && s.pairedShare == 0.0); // a usable counter, and not one present found a tick
+    CHECK(s.pairing == Pairing::None); // no tick, so no rule ran: the line must say none, not one of the two rules
     const std::string line = FormatSummary(s);
     CHECK(line.find("period p50=n/a p95=n/a") != std::string::npos);
     CHECK(line.find("paired 0.0%") != std::string::npos);
     CHECK(line.find("threads tick=none") != std::string::npos);
+    CHECK(line.find("none | paired 0.0%") != std::string::npos);
+
+    // a probe that recorded nothing at all is not a window that ran a rule either
+    Probe untouched;
+    CHECK(untouched.Build().pairing == Pairing::None);
 }
 
 // sleep->tick only uses a sleep that ended recently: the one before the tick, not the one before the loading screen.
@@ -411,31 +542,47 @@ void TestLineText()
     s.paired = 1439;
     s.hasPaired = true;
     s.pairedShare = 100.0 * 1439.0 / 1440.0;
-    s.hasPeriod = s.hasBody = s.hasAge = s.hasWait = s.hasSlack = s.hasSleep = true;
+    s.pairing = Pairing::Same;
+    s.hasPeriod = s.hasBody = s.hasAge = s.hasPresentWait = s.hasSlack = s.hasSleep = s.hasSleepDur = true;
     s.periodP50 = 7100;
     s.periodP95 = 7900;
     s.bodyP50 = 2400;
     s.ageP5 = 9600;
     s.ageP50 = 13800;
     s.ageP95 = 19200;
-    s.waitP50 = 3100;
-    s.waitP95 = 5000;
-    s.slackP50 = -1200;
-    s.sleepP50 = -400;
-    s.tickThreads.Add(0x1a3c);
-    s.presentThreads.Add(0x2b10);
-    const std::string want = "Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=3.1 "
-                             "p95=5.0 | slack p50=-1.2 | sleep->tick p50=-0.4 (DLSS-G) | threads tick=0x1a3c bridge=0x2b10 | paired 99.9% | "
-                             "counter ok";
+    s.presentWaitP50 = 6200;
+    s.presentWaitP95 = 8000;
+    s.slackP50 = 600;
+    s.sleepP50 = 600;
+    s.sleepDurP50 = kBucketUs / 2;
+    s.sleepDurP95 = 2500;
+    s.tickThreads.Add(0x6554);
+    s.presentThreads.Add(0x6554);
+    const std::string want = "Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=6.2 "
+                             "p95=8.0 | queue p50=n/a p95=n/a | slack p50=0.6 | sleep->tick p50=0.6 | sleep p50=0.1 p95=2.5 (DLSS-G) | threads "
+                             "tick=0x6554 bridge=0x6554 same | paired 99.9% | counter ok";
     const std::string got = FormatSummary(s);
     if (got != want)
         std::printf("FAIL: the line is\n  %s\nexpected\n  %s\n", got.c_str(), want.c_str());
     CHECK(got == want);
 
+    // the two-thread shape: the queue wait is the number, and the inside-the-tick wait reads n/a
+    Summary split;
+    split.pairing = Pairing::Split;
+    split.hasWait = true;
+    split.waitP50 = 4900;
+    split.waitP95 = 5000;
+    const std::string splitLine = FormatSummary(split);
+    CHECK(splitLine.find("W p50=n/a p95=n/a") != std::string::npos);
+    CHECK(splitLine.find("queue p50=4.9 p95=5.0") != std::string::npos);
+    CHECK(splitLine.find("split |") != std::string::npos);
+    CHECK(std::string(PairingText(Pairing::Mixed)) == "mixed" && std::string(PairingText(Pairing::None)) == "none");
+
     // nothing measured: every number that needs a sample reads n/a, so a zero cannot be mistaken for a measurement
     const std::string empty = FormatSummary(Summary {});
-    CHECK(empty == "Tick probe: ticks=0 presents=0 period p50=n/a p95=n/a body p50=n/a | age p5=n/a p50=n/a p95=n/a | W p50=n/a p95=n/a | slack "
-                   "p50=n/a | sleep->tick p50=n/a (DLSS-G) | threads tick=none bridge=none | paired n/a | counter ok");
+    CHECK(empty == "Tick probe: ticks=0 presents=0 period p50=n/a p95=n/a body p50=n/a | age p5=n/a p50=n/a p95=n/a | W p50=n/a p95=n/a | queue "
+                   "p50=n/a p95=n/a | slack p50=n/a | sleep->tick p50=n/a | sleep p50=n/a p95=n/a (DLSS-G) | threads tick=none bridge=none none | "
+                   "paired n/a | counter ok");
 
     // a counter that did not resolve keeps every pairing number out of the line, whatever samples the histograms hold
     Summary missing;
@@ -443,9 +590,11 @@ void TestLineText()
     missing.presents = 10;
     missing.hasAge = false;
     missing.hasWait = false;
+    missing.hasPresentWait = false;
     missing.hasPaired = false;
     const std::string noCounter = FormatSummary(missing);
     CHECK(noCounter.find("age p5=n/a p50=n/a p95=n/a") != std::string::npos);
+    CHECK(noCounter.find("W p50=n/a p95=n/a") != std::string::npos);
     CHECK(noCounter.find("paired n/a") != std::string::npos);
     CHECK(noCounter.find("counter missing") != std::string::npos);
     CHECK(std::string(CounterText(CounterState::Inconsistent)) == "inconsistent");
@@ -456,6 +605,31 @@ void TestLineText()
     big.periodP50 = kMaxReportedUs;
     CHECK(FormatSummary(big).find("period p50=64.0") != std::string::npos);
 }
+
+// The Reflex sleep's own duration: measured from its begin and end taps, reported next to sleep->tick, and never invented when the probe armed in
+// the middle of one.
+void TestSleepDuration()
+{
+    Probe probe;
+    probe.SleepBegin(1000);
+    probe.SleepEnd(1500);
+    Summary s = probe.Build();
+    CHECK(s.sleeps == 1 && s.hasSleepDur && s.sleepDurP50 == Bucket(500) && s.sleepDurP95 == Bucket(500));
+    const std::string line = FormatSummary(s);
+    CHECK(line.find("sleep p50=0.6 p95=0.6 (DLSS-G)") != std::string::npos);
+
+    // an end without a begin (armed mid-sleep) contributes no duration, and the sleep still ends for sleep->tick
+    Probe mid;
+    mid.SleepEnd(2000);
+    s = mid.Build();
+    CHECK(s.sleeps == 1 && !s.hasSleepDur);
+
+    // a clock that stepped back inside the sleep is not a duration at all, rather than a negative one clipped to zero
+    Probe back;
+    back.SleepBegin(5000);
+    back.SleepEnd(4000);
+    CHECK(back.Build().sleeps == 1 && !back.Build().hasSleepDur);
+}
 } // namespace
 
 int main()
@@ -464,6 +638,9 @@ int main()
     TestHistogram();
     TestSignedHistogram();
     TestTwoFramePipelineAcrossWindows();
+    TestSingleThreadLoopAcrossWindows();
+    TestInsideTheTickNeedsItsFrame();
+    TestMixedWindowReportsBothNumbers();
     TestArmMidPipeline();
     TestMissingCounterIsNotGuessed();
     TestInconsistentCounterIsNotGuessed();
@@ -471,6 +648,7 @@ int main()
     TestWindowRolloverAndBackwardsClock();
     TestNoTicks();
     TestStaleSleep();
+    TestSleepDuration();
     TestThreadTable();
     TestLineText();
     return TEST_RESULT("tick_probe");

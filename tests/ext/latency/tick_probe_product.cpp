@@ -258,6 +258,54 @@ void TestWindowLineThroughTheLogSink()
     ext::latency::SetEventSink(&g_recorder);
 }
 
+// The taps nested the way FFXIV runs them: the bridge present begins and ends between the tick's begin and end, on this thread. The window's line
+// must say `same`, report W as the present's own duration, and leave the queue wait at n/a. The arming present sits in a window of its own so the
+// measured window holds exactly one tick and one present; the counter numbering continues from the window test before this one (9 -> 10 -> 11 ->
+// 12), because the log sink keeps one probe for the process.
+void TestSameThreadWindowLineThroughTheLogSink()
+{
+    ext::latency::SetEventSink(nullptr);
+    ResetRecording();
+    SetKey(true);
+    SetLeased(true);
+    g_nowUs = 0;
+    Present(); // the arming present, outside any tick; it opens the first window
+    g_nowUs = 10'000'000;
+    ext::latency::OnTickBegin(9, true); // frame 10; closes the arming window
+    g_nowUs = 10'001'000;
+    ext::latency::OnTickEnd(10);
+
+    // the measured window: one tick, with the present and the Reflex sleep inside it
+    g_counterValue = 11;
+    g_nowUs = 10'002'000;
+    ext::latency::OnTickBegin(10, true); // frame 11, opens the window
+    g_nowUs = 10'006'000;
+    ext::latency::OnBridgePresentBegin();
+    g_nowUs = 10'006'500;
+    ext::latency::OnSleepScopeBegin();
+    g_nowUs = 10'007'000;
+    ext::latency::OnSleepScopeEnd();
+    g_nowUs = 10'009'000;
+    ext::latency::OnBridgePresentEnd();
+    g_nowUs = 10'011'000;
+    ext::latency::OnTickEnd(11);
+    const int lines = g_testLogLines;
+    g_nowUs = 20'004'000;
+    ext::latency::OnTickBegin(11, true); // frame 12; closes the window, part of it
+    g_nowUs = 20'006'000;
+    ext::latency::OnTickEnd(12);
+    CHECK(g_testLogLines > lines);
+    const std::string& line = g_testLastLog;
+    if (line.find("same") == std::string::npos)
+        std::printf("FAIL: the same-thread tick line did not say same (last: %s)\n", line.c_str());
+    CHECK(line.find("W p50=3.1 p95=3.1") != std::string::npos); // the present's duration, 3000 us
+    CHECK(line.find("queue p50=n/a p95=n/a") != std::string::npos);
+    CHECK(line.find("sleep p50=0.6 p95=0.6 (DLSS-G)") != std::string::npos); // the Reflex sleep inside the present, 500 us
+    CHECK(line.find("age p5=4.1 p50=4.1 p95=4.1") != std::string::npos); // tick start 10.002 s to present start 10.006 s
+    CHECK(line.find("same |") != std::string::npos);
+    ext::latency::SetEventSink(&g_recorder);
+}
+
 // ---- source pins ----
 std::string ReadFile(const std::string& path)
 {
@@ -296,6 +344,11 @@ void TestSourcePins(const std::string& repo)
     // arming takes the lease, so the probe cannot start before the observer is in the slot
     const std::string armed = Between(source, "bool ComputeArmed()", "void OnKeysLoaded()");
     CHECK(armed.find("Leased()") != std::string::npos);
+    // both ends of the Reflex sleep are tapped by the frame-pacing scope, which is what gives the sleep its own duration
+    const std::string pacing = ReadFile(repo + "/OptiScaler/ext/present/FramePacingTrace.cpp");
+    CHECK(!pacing.empty());
+    CHECK(pacing.find("ext::latency::OnSleepScopeBegin();") != std::string::npos);
+    CHECK(pacing.find("ext::latency::OnSleepScopeEnd();") != std::string::npos);
 }
 } // namespace
 
@@ -345,6 +398,7 @@ int main(int argc, char** argv)
     TestEventsCarryTheCounter();
     TestNoteIsDeduplicated();
     TestWindowLineThroughTheLogSink();
+    TestSameThreadWindowLineThroughTheLogSink();
     if (argc > 1)
         TestSourcePins(argv[1]);
     else

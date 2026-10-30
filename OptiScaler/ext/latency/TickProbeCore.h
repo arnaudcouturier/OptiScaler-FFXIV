@@ -7,10 +7,13 @@
 //
 //   period       tickBegin(N+1) - tickBegin(N)              the tick-to-tick distance
 //   body         tickEnd(N) - tickBegin(N)                  how long one tick took
-//   age          presentEnd(M) - tickBegin(N)               tick start to the end of the bridge present that carries frame N
-//   W            presentEnd(M-1) - tickEnd(N)               how long a finished tick waited for the previous present to end
+//   age (inside) presentBegin(M) - tickBegin(N)             tick start to the start of the bridge present that runs inside tick N
+//   age (outside) presentEnd(M) - tickBegin(N)              tick start to the end of the bridge present that carries frame N
+//   W (inside)   presentEnd(M) - presentBegin(M)            the game thread's time inside the native present of tick N
+//   queue        presentEnd(M-1) - tickEnd(N)               how long a finished tick waited for the previous present to end (outside only)
 //   slack        tickBegin(N) - the last completed present end before it
 //   sleep->tick  tickBegin(N) - the last Reflex sleep end before it
+//   sleep        sleepEnd - sleepBegin                      how long the Reflex sleep itself lasted
 //
 // PAIRING. Ticks and presents are numbered by ONE source: the game's own frame counter (Framework.Framecounter, which the first instruction of
 // Tick increments). The observer reads it before and after the original tick and hands both values in; a tick's frame number is the value the
@@ -19,12 +22,22 @@
 // and no guessing: a present whose number has no recorded tick contributes nothing, and a window in which the counter did not resolve or did not
 // advance by exactly one per tick reports age and W as n/a with `counter missing` or `counter inconsistent` on the line.
 //
+// TWO RULES, ONE PER SHAPE OF THE LOOP. When a present begins inside a tick that is still open on the present's own thread and carries that tick's
+// frame number, the present runs inside the tick: FFXIV's main loop is one thread, and its bridge present is a piece of the tick body. That present
+// pairs with the open tick, age is the tick's start to the present's start, and W is the present's own duration - the time the game thread spends
+// inside the native present, the wait a sleep at tick start would move to before the input sampling. A present that begins anywhere else (on
+// another thread, or after the tick ended) pairs with the finished tick whose frame number it carries, exactly as before: age is the tick's start
+// to the present's end and `queue` is the old queue wait. A present that began inside an open tick never falls back to the other rule: if it does
+// not carry that tick's number it contributes nothing, so a broken numbering shows as a low paired share instead of a wrong age.
+//
 // A window boundary never restarts the numbering: the tick ring, the in-flight tick and present and the last-event timestamps survive a window
 // close, so a frame that straddles the boundary pairs the same way on either side. Only the histograms and the summary are cleared.
 //
-// W is the number a tick-side sleep could give back: positive W is time a finished simulation spent waiting for the render thread, negative W
-// means the render thread was waiting for the simulation. age, W, slack and sleep->tick are signed on purpose; a median below zero is a result, not
-// a broken sample.
+// W is the number a tick-side sleep could give back, and what it holds follows the rule that paired the present. Inside the tick it is the game
+// thread's own time in the native present, an upper bound: that time also contains the bridge's copy and submit, which the probe cannot tell apart
+// from a wait. Outside the tick it is the queue wait of a finished simulation: positive means the render thread was behind, negative means it was
+// waiting for the simulation. age, queue, slack and sleep->tick are signed on purpose; a median below zero is a result, not a broken sample. W is a
+// duration and is never negative.
 //
 // Every metric keeps 0.25 ms buckets (256 of them, 0..64 ms) plus an overflow bucket. A percentile is the midpoint of the bucket it lands in, so it
 // is accurate to +-0.125 ms; a percentile inside the overflow bucket reads as the 64 ms floor, which is also the largest number this line can show.
@@ -64,6 +77,33 @@ inline const char* CounterText(CounterState state)
         return "missing";
     case CounterState::Inconsistent:
         return "inconsistent";
+    }
+    return "?";
+}
+
+// Which of the two pairing rules a window's presents ran under: `Same` when they began inside an open tick on its thread (FFXIV's main loop),
+// `Split` when they began on another thread or after the tick ended, `Mixed` when both happened in one window, `None` when the window has no
+// present or no tick to describe. The word is on the line next to the thread table, so a number is never read without the rule that produced it.
+enum class Pairing : std::uint8_t
+{
+    None,
+    Same,
+    Split,
+    Mixed,
+};
+
+inline const char* PairingText(Pairing pairing)
+{
+    switch (pairing)
+    {
+    case Pairing::None:
+        return "none";
+    case Pairing::Same:
+        return "same";
+    case Pairing::Split:
+        return "split";
+    case Pairing::Mixed:
+        return "mixed";
     }
     return "?";
 }
@@ -228,15 +268,22 @@ struct Summary
 {
     std::uint64_t ticks = 0;
     std::uint64_t presents = 0;
+    std::uint64_t presentsInsideTick = 0; // presents that began inside an open tick on its own thread, paired or not
     std::uint64_t sleeps = 0;
-    std::uint64_t paired = 0; // presents whose carried frame number found its tick
+    std::uint64_t paired = 0;      // presents whose carried frame number found its tick
+    std::uint64_t pairedSame = 0;  // ... through the open tick the present ran inside
+    std::uint64_t pairedSplit = 0; // ... through a finished tick
     CounterState counter = CounterState::Ok;
-    bool hasPeriod = false, hasBody = false, hasAge = false, hasWait = false, hasSlack = false, hasSleep = false, hasPaired = false;
+    Pairing pairing = Pairing::None;
+    bool hasPeriod = false, hasBody = false, hasAge = false, hasWait = false, hasPresentWait = false, hasSlack = false, hasSleep = false,
+         hasSleepDur = false, hasPaired = false;
     std::int64_t periodP50 = 0, periodP95 = 0, bodyP50 = 0;
     std::int64_t ageP5 = 0, ageP50 = 0, ageP95 = 0;
-    std::int64_t waitP50 = 0, waitP95 = 0;
+    std::int64_t presentWaitP50 = 0, presentWaitP95 = 0; // W: the game thread's time inside the native present (inside the tick)
+    std::int64_t waitP50 = 0, waitP95 = 0;               // queue: a finished tick waiting for the previous present to end (outside the tick)
     std::int64_t slackP50 = 0;
     std::int64_t sleepP50 = 0;
+    std::int64_t sleepDurP50 = 0, sleepDurP95 = 0; // the Reflex sleep itself
     double pairedShare = 0.0;
     ThreadSet tickThreads;
     ThreadSet presentThreads;
@@ -266,6 +313,7 @@ class Probe
         _pendingFrame = counterBefore + 1; // the frame this tick simulates (wraps with the game's u32 counter)
         _pendingUsable = frameCounter;
         _pendingBeginUs = nowUs;
+        _pendingTid = tid;
         _pendingSlot = static_cast<std::uint8_t>(_nextSlot);
         _havePending = true;
 
@@ -305,12 +353,17 @@ class Probe
         _havePending = false;
     }
 
-    // The bridge present began. `counterAtBegin` is Framecounter at that moment: the frame number the present carries.
+    // The bridge present began. `counterAtBegin` is Framecounter at that moment: the frame number the present carries. A present that begins while a
+    // tick is open on this same thread is running inside that tick, which is the shape of FFXIV's main loop; the end decides whether it pairs with
+    // that tick, and the flag is kept here because the tick may have been finished by the time the present ends (another thread) or dropped by a
+    // re-entrant begin.
     void PresentBegin(std::int64_t nowUs, std::uint32_t tid, std::uint32_t counterAtBegin, bool frameCounter)
     {
-        (void) nowUs; // the age is measured to the end of the present; the begin only names the carried frame
+        _presentBeginUs = nowUs;
+        _presentTid = tid;
         _presentFrame = counterAtBegin;
         _presentUsable = frameCounter;
+        _presentInsideTick = frameCounter && _havePending && _pendingUsable && _pendingTid == tid;
         _havePresent = true;
         _sum.presentThreads.Add(tid);
         if (!frameCounter)
@@ -320,30 +373,58 @@ class Probe
     void PresentEnd(std::int64_t nowUs, std::uint32_t counterAfter)
     {
         ++_sum.presents;
+        if (_presentInsideTick)
+            ++_sum.presentsInsideTick;
         const bool usable = _havePresent && _presentUsable;
         if (usable)
         {
             if (counterAfter < _presentFrame)
                 NoteInconsistentCounter(); // the counter went backwards inside one present
-            const TickRec* rec = FindTick(_presentFrame);
-            if (rec != nullptr && rec->ended && rec->usable)
+            if (_presentInsideTick)
             {
-                _age.Add(nowUs - rec->beginUs);
-                if (_haveLastPresentEnd)
-                    _wait.Add(_lastPresentEndUs - rec->endUs);
-                ++_sum.paired;
+                // The same-thread rule: the present ran inside the open tick and carries its frame. The tick is still open (its end comes after the
+                // present on this thread), so the age is the tick's start to the present's start and W is the present's own duration. A present that
+                // began inside a tick but does not carry that tick's number pairs with nothing, never with an older finished tick.
+                if (_havePending && _pendingUsable && _pendingTid == _presentTid && _pendingFrame == _presentFrame)
+                {
+                    _age.Add(_presentBeginUs - _pendingBeginUs);
+                    _presentWait.Add(nowUs - _presentBeginUs);
+                    ++_sum.pairedSame;
+                    ++_sum.paired;
+                }
+            }
+            else
+            {
+                const TickRec* rec = FindTick(_presentFrame);
+                if (rec != nullptr && rec->ended && rec->usable)
+                {
+                    _age.Add(nowUs - rec->beginUs);
+                    if (_haveLastPresentEnd)
+                        _wait.Add(_lastPresentEndUs - rec->endUs);
+                    ++_sum.pairedSplit;
+                    ++_sum.paired;
+                }
             }
         }
         _lastPresentEndUs = nowUs;
         _haveLastPresentEnd = true;
         _havePresent = false;
+        _presentInsideTick = false;
     }
 
-    void SleepBegin(std::int64_t nowUs) { _sleepBeginUs = nowUs; }
+    void SleepBegin(std::int64_t nowUs)
+    {
+        _sleepBeginUs = nowUs;
+        _haveSleepBegin = true;
+    }
 
     void SleepEnd(std::int64_t nowUs)
     {
-        (void) _sleepBeginUs; // the duration is the recorder's business; the tick cares about the end
+        // The sleep's own duration, reported separately from sleep->tick: it is a wait the game thread sits through inside the present path, and W
+        // inside the tick contains it. A sleep whose begin the probe did not see (armed in the middle of one) contributes nothing.
+        if (_haveSleepBegin && nowUs >= _sleepBeginUs)
+            _sleepDur.Add(nowUs - _sleepBeginUs);
+        _haveSleepBegin = false;
         _lastSleepEndUs = nowUs;
         _haveLastSleepEnd = true;
         ++_sum.sleeps;
@@ -388,15 +469,31 @@ class Probe
         s.hasBody = !_body.Empty();
         s.hasSlack = !_slack.Empty();
         s.hasSleep = !_sleepToTick.Empty() && s.sleeps != 0;
+        s.sleepDurP50 = Percentile(_sleepDur, 0.50);
+        s.sleepDurP95 = Percentile(_sleepDur, 0.95);
+        s.hasSleepDur = !_sleepDur.Empty() && s.sleeps != 0;
         // age and W exist only on top of a frame counter that can carry the pairing
         const bool counterOk = _counter == CounterState::Ok;
         s.ageP5 = Percentile(_age, 0.05);
         s.ageP50 = Percentile(_age, 0.50);
         s.ageP95 = Percentile(_age, 0.95);
+        s.presentWaitP50 = Percentile(_presentWait, 0.50);
+        s.presentWaitP95 = Percentile(_presentWait, 0.95);
         s.waitP50 = Percentile(_wait, 0.50);
         s.waitP95 = Percentile(_wait, 0.95);
         s.hasAge = counterOk && !_age.Empty();
+        s.hasPresentWait = counterOk && !_presentWait.Empty();
         s.hasWait = counterOk && !_wait.Empty();
+        // The pairing path of the window: which rule produced its age and W samples (counted per present, not per pair, so a window whose presents
+        // ran inside the tick but carried a broken number still reads `same` with a low paired share).
+        if (s.presents == 0 || s.ticks == 0)
+            s.pairing = Pairing::None;
+        else if (s.presentsInsideTick == 0)
+            s.pairing = Pairing::Split;
+        else if (s.presentsInsideTick == s.presents)
+            s.pairing = Pairing::Same;
+        else
+            s.pairing = Pairing::Mixed;
         if (counterOk && s.presents > 0)
         {
             s.hasPaired = true;
@@ -407,6 +504,7 @@ class Probe
 
     const SignedHistogram& AgeHistogram() const { return _age; }
     const SignedHistogram& WaitHistogram() const { return _wait; }
+    const Histogram& PresentWaitHistogram() const { return _presentWait; }
 
   private:
     struct TickRec
@@ -447,32 +545,39 @@ class Probe
         _body.Clear();
         _slack.Clear();
         _sleepToTick.Clear();
+        _sleepDur.Clear();
         _age.Clear();
+        _presentWait.Clear();
         _wait.Clear();
         _open = false;
         _windowStartUs = 0;
-        // not reset here: _ticks, _nextSlot, _havePending, _pending*, _havePresent, _present*, _haveLastTickBegin, _lastTickBeginUs,
+        // not reset here: _ticks, _nextSlot, _havePending, _pending*, _havePresent, _present*, _haveSleepBegin, _haveLastTickBegin, _lastTickBeginUs,
         // _haveLastTickAfter, _lastTickAfter, _haveLastPresentEnd, _lastPresentEndUs, _haveLastSleepEnd, _lastSleepEndUs
     }
 
     Summary _sum;
     CounterState _counter = CounterState::Ok;
     std::array<TickRec, kTickRing> _ticks {};
-    Histogram _period, _body;
+    Histogram _period, _body, _sleepDur;
     SignedHistogram _slack, _sleepToTick;
-    SignedHistogram _age;  // signed: a wrong pairing shows as a present before the tick it names
-    SignedHistogram _wait; // signed: a negative queue wait means the render thread was waiting
+    SignedHistogram _age;         // signed: a wrong pairing shows as a present before the tick it names
+    Histogram _presentWait;       // W inside the tick: a present's own duration, never negative
+    SignedHistogram _wait;        // signed: a negative queue wait means the render thread was waiting
     bool _open = false;
     std::int64_t _windowStartUs = 0;
     std::size_t _nextSlot = 0;
     bool _havePending = false;
     std::uint8_t _pendingSlot = 0;
     std::uint32_t _pendingFrame = 0;
+    std::uint32_t _pendingTid = 0;
     bool _pendingUsable = false;
     std::int64_t _pendingBeginUs = 0;
     bool _havePresent = false;
+    std::int64_t _presentBeginUs = 0;
+    std::uint32_t _presentTid = 0;
     std::uint32_t _presentFrame = 0;
     bool _presentUsable = false;
+    bool _presentInsideTick = false;
     std::int64_t _lastTickBeginUs = 0;
     bool _haveLastTickBegin = false;
     std::uint32_t _lastTickAfter = 0;
@@ -482,6 +587,7 @@ class Probe
     std::int64_t _lastSleepEndUs = 0;
     bool _haveLastSleepEnd = false;
     std::int64_t _sleepBeginUs = 0;
+    bool _haveSleepBegin = false;
 };
 
 // ---- the line one window logs -----------------------------------------------------------------------------------------------------------
@@ -510,22 +616,26 @@ inline std::string ThreadText(const ThreadSet& set)
     return out;
 }
 
-//   Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=3.1 p95=5.0 | slack p50=-1.2 |
-//   sleep->tick p50=-0.4 (DLSS-G) | threads tick=0x1a3c bridge=0x2b10 | paired 99.9% | counter ok
+//   Tick probe: ticks=1432 presents=1440 period p50=7.1 p95=7.9 body p50=2.4 | age p5=9.6 p50=13.8 p95=19.2 | W p50=6.2 p95=8.0 | queue
+//   p50=n/a p95=n/a | slack p50=0.6 | sleep->tick p50=0.6 | sleep p50=0.0 p95=0.1 (DLSS-G) | threads tick=0x6554 bridge=0x6554 same | paired
+//   99.9% | counter ok
 //
-// "n/a" replaces the number of a metric that had no sample in the window, never a zero: a zero age and "no pairing" must not read alike. age and W
-// read n/a together whenever the frame counter cannot carry the pairing, whether it never resolved (`counter missing`) or did not advance by
-// exactly one per tick (`counter inconsistent`).
+// "n/a" replaces the number of a metric that had no sample in the window, never a zero: a zero age and "no pairing" must not read alike. age, W and
+// queue read n/a together whenever the frame counter cannot carry the pairing, whether it never resolved (`counter missing`) or did not advance by
+// exactly one per tick (`counter inconsistent`). W and queue also read n/a on their own when the window ran under the other pairing rule: W exists
+// only for presents inside the tick, queue only for presents outside it.
 inline std::string FormatSummary(const Summary& s)
 {
     std::string out = "Tick probe: ticks=" + std::to_string(s.ticks) + " presents=" + std::to_string(s.presents);
     out += " period p50=" + Value(s.hasPeriod, s.periodP50) + " p95=" + Value(s.hasPeriod, s.periodP95);
     out += " body p50=" + Value(s.hasBody, s.bodyP50);
     out += " | age p5=" + Value(s.hasAge, s.ageP5) + " p50=" + Value(s.hasAge, s.ageP50) + " p95=" + Value(s.hasAge, s.ageP95);
-    out += " | W p50=" + Value(s.hasWait, s.waitP50) + " p95=" + Value(s.hasWait, s.waitP95);
+    out += " | W p50=" + Value(s.hasPresentWait, s.presentWaitP50) + " p95=" + Value(s.hasPresentWait, s.presentWaitP95);
+    out += " | queue p50=" + Value(s.hasWait, s.waitP50) + " p95=" + Value(s.hasWait, s.waitP95);
     out += " | slack p50=" + Value(s.hasSlack, s.slackP50);
-    out += " | sleep->tick p50=" + Value(s.hasSleep, s.sleepP50) + " (DLSS-G)";
-    out += " | threads tick=" + ThreadText(s.tickThreads) + " bridge=" + ThreadText(s.presentThreads);
+    out += " | sleep->tick p50=" + Value(s.hasSleep, s.sleepP50);
+    out += " | sleep p50=" + Value(s.hasSleepDur, s.sleepDurP50) + " p95=" + Value(s.hasSleepDur, s.sleepDurP95) + " (DLSS-G)";
+    out += " | threads tick=" + ThreadText(s.tickThreads) + " bridge=" + ThreadText(s.presentThreads) + " " + PairingText(s.pairing);
     out += " | paired ";
     if (s.hasPaired)
     {
