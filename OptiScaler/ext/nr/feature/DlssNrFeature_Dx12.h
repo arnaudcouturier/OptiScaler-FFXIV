@@ -4,6 +4,7 @@
 #include "ext/gpu/GpuSubmission.h"
 #include <string>
 
+#include "ext/nr/NrGovernor.h"
 #include "ext/nr/NrModelSize.h"
 #include "ext/nr/pass/DlssNr_Common.h"
 #include <nvsdk_ngx.h>
@@ -206,6 +207,12 @@ std::string SpatialStatus();
 std::string DepthAwareStatus();
 // The model size the runtime refused, if it did: while it holds the pass works at the uniform WorkingScale (see AnamorphicLatch).
 AnamorphicLatch AnamorphicLatchState();
+// The governor's last tick (tier, target, measured rate, reason) for the menu status line: a copy under the NR lock.
+Governor::Output CurrentGovernorStatus();
+// The per-axis model scales the pass works at for this uniform scale: the keys through the refusal latch and the mixed
+// above/below 100% rule, then the governor's run-time cap while it is on. The menu greys its controls from these and the
+// enlargement key decides from them, so a control and its key always agree with the size in use.
+AxisScales ShownEffectiveScales(float uniformScale);
 
 // What the spatial profiles amount to for the frame being processed, for the menu: the share of the ordinary NR pixels the model
 // handles, its size, and the output the Foveated pixel sizes are written against.

@@ -67,6 +67,9 @@ void NrConfig::Bind(config::Binder& b)
     b.Add("DlssNr", "DepthAwareResolve", depthAwareResolve);
     b.Add("DlssNr", "WorkingScaleX", workingScaleX);
     b.Add("DlssNr", "WorkingScaleY", workingScaleY);
+    b.Add("DlssNr", "Governor", governor);
+    b.Add("DlssNr", "GovernorTargetFps", governorTargetFps);
+    b.Add("DlssNr", "GovernorProbe", governorProbe);
     b.AddEnum("DlssNr", "ScalingDownscaler", scalingDownscaler, Scaler::Count);
     b.Add("DlssNr", "AutoCapture", autoCapture);
     b.Add("DlssNr", "ReplayCapture", replayCapture);
@@ -153,6 +156,10 @@ void NrConfig::PostLoad()
         passFeedback = 1.0f;
     else
         passFeedback = std::clamp(passFeedback.value_or_default(), 0.0f, 1.0f);
+    // Like [DLSSG] AutoMFGTarget: 0 (auto) or a frame rate, anything else means unset.
+    if (governorTargetFps.has_value() && (!std::isfinite(governorTargetFps.value()) || governorTargetFps.value() < 0.0f ||
+                                          governorTargetFps.value() > 1000.0f))
+        governorTargetFps.reset();
 
     // Off keeps the resolve's own output, so an uninterpretable value fails open to the upstream default strength, clamped.
     if (!std::isfinite(classicSharpenStrength.value_or_default()))

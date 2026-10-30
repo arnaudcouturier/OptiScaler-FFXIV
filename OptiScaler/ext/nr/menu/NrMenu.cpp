@@ -92,7 +92,12 @@ void StepModelResolution(bool up)
 
     const int percent = (int) std::lround(nr.workingScale.value_or_default() * 100.0f);
     std::string content = std::format("Model resolution {}%", percent);
-    if (PerAxisOverrides())
+    // The pass ignores the per-axis keys while the anamorphic refusal latch holds (NrModelSize.h): say "override"
+    // only when the keys are really in force, judged against the keys after this press like the pass will be.
+    const DlssNr::AnamorphicLatch toastLatch = DlssNr::AnamorphicLatchState();
+    if (PerAxisOverrides() &&
+        !DlssNr::AnamorphicLatchHolds(toastLatch, nr.workingScaleX.value_or_default(),
+                                      nr.workingScaleY.value_or_default(), nr.workingScale.value_or_default()))
         content += " (per-axis keys override)";
     ShowHotkeyToast("DLSS Neural Rendering", content);
 }
@@ -104,12 +109,9 @@ void OnTransferTogglePressed(ext::menu::Ctx&)
 {
     auto& nr = ext::Cfg().nr;
 
-    // The same numbers the Enlargement combo is greyed from, through the same rule, so the key is a no-op
-    // exactly while the combo is greyed.
-    const DlssNr::AnamorphicLatch latch = DlssNr::AnamorphicLatchState();
-    const DlssNr::AxisScales scales =
-        DlssNr::EffectiveScales(latch, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(),
-                                nr.workingScale.value_or_default());
+    // The same numbers the Enlargement combo is greyed from (the governor's cap included), through the same
+    // function, so the key is a no-op exactly while the combo is greyed.
+    const DlssNr::AxisScales scales = DlssNr::ShownEffectiveScales(nr.workingScale.value_or_default());
     const bool toggleable = DlssNr::Hotkeys::TransferToggleable(scales.x, scales.y);
     if (!toggleable)
         return;

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ext/nr/presr/PassProfiles.h"
+#include "ext/nr/NrGovernor.h"
 #include "ext/nr/NrModelSize.h"
 #include "ext/nr/NrHotkeys.h"
 #include "ext/nr/NrSettle.h"
@@ -10,6 +11,8 @@
 
 #include "ext/nr/DlssNr.h"
 #include "ext/gpu/GpuLifetime.h"
+#include "ext/fg/DynamicMfgGate.h"
+#include "ext/fg/FgSeams.h"
 #include "ext/nr/amd/AmdBridge.h"
 #include "ext/nr/NrFocus.h"
 #include "ext/nr/NrHooks.h"
@@ -189,6 +192,17 @@ struct NrState
     // The model refused a model size that differs per axis: the pass works at the uniform WorkingScale until one of the three scale keys
     // changes (NrModelSize.h). Guarded by g_nrMutex like the rest.
     DlssNr::AnamorphicLatch anamorphic {};
+    // The frame-rate governor: pass-thread state under g_nrMutex. The menu reads governorOut through
+    // CurrentGovernorStatus. governorReleaseSeq is RetireSeq() after the last work-size park: the gate the
+    // governor waits on. governorProbeLogged is the probe's one-shot flag for the running build.
+    DlssNr::Governor::Governor governor {};
+    DlssNr::Governor::Output governorOut {};
+    uint64_t governorReleaseSeq = 0;
+    bool governorProbeLogged = false;
+    double governorRefreshHz = 0.0; // the display refresh, re-read at most every 5 s (a system call)
+    uint64_t governorRefreshAt = 0;
+    uint64_t governorDbgAt = 0;    // the last once-a-second governor debug line, ms
+    uint64_t governorDbgFrame = 0; // the present counter at that line (its advance is the freshness state)
     std::string spatialStatus = "disabled";
     std::string depthAwareStatus; // the depth-aware enlargement: empty while its key is off
     ID3D12Resource *spatialColor = nullptr, *spatialDepth = nullptr, *spatialMotion = nullptr;
@@ -762,6 +776,10 @@ void ParkWorkSizeScratch()
     for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion, &g_nr.spatialProxy, &g_nr.spatialAnswer })
         ParkNrResource(*r);
     g_nr.passScratchFailed = false;
+    // The governor gate: the retirements this work-size change queued, nothing else. A frame-size change parks
+    // the work scratch too (its scope covers both sets), so the mark advances for it as well and the governor
+    // holds until the old size releases, like after any rebuild.
+    g_nr.governorReleaseSeq = g_nrLifetime.RetireSeq();
 }
 
 void TickNrRetired() { g_nrLifetime.Collect(); }
@@ -1931,8 +1949,111 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float scaleKeyUniform = nr.workingScale.value_or_default();
     g_nr.anamorphic = DlssNr::RefreshAnamorphicLatch(g_nr.anamorphic, scaleKeyX, scaleKeyY, scaleKeyUniform);
     const DlssNr::AxisScales axisScales = DlssNr::EffectiveScales(g_nr.anamorphic, scaleKeyX, scaleKeyY, scaleKeyUniform);
-    const float scaleX = axisScales.x;
-    const float scaleY = axisScales.y;
+    float scaleX = axisScales.x;
+    float scaleY = axisScales.y;
+    // The governor's run-time cap enters here, the one place, so the guides, the motion vectors, the geometry and
+    // the settle below all read the capped size while the menu readout keeps showing what is asked for. Never a
+    // config write: nr.workingScale and every other ext::Cfg() member are only read on this path.
+    {
+        // Off: the user value runs untouched. Nothing is read here (no display-refresh query, no VRAM gate):
+        // this ticks on the render thread under the NR lock, so an off governor costs a reset, nothing more.
+        if (!nr.governor.value_or_default())
+        {
+            g_nr.governor.Reset();
+            g_nr.governorOut = DlssNr::Governor::Output {};
+        }
+        else
+        {
+            DlssNr::Governor::Input govIn {};
+            govIn.governorOn = true;
+            govIn.nowMs = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+            const auto& govState = State::Instance();
+            govIn.intervalMs = govState.lastFGFrameTime;
+            // Freshness counter for the signal above: a present counter, not a timestamp. Timestamps cannot tell
+            // a frozen signal from the game path (D3D11 through the bridge, DLSS-G), where the output presents
+            // tick several times per game frame and any timestamp delta disagrees with the game-frame signal. The
+            // governor reads stale only while a feature owns presents and this counter stops advancing across ticks.
+            govIn.fgFrame = govState.fgLastFrame;
+            // One read of the current feature: another path can swap or clear it on the present thread, so the
+            // presence test and the activity test must look at the same object.
+            IFGFeature* govFg = govState.CurrentFG();
+            govIn.fgFeature = govFg != nullptr;
+            const bool govDlssg = govState.activeFgOutput == FGOutput::DLSSG;
+            // Whether anything is being generated right now, not whether it is selected: DLSS-G selected but
+            // generating nothing (paused, waiting for frames) must not park the governor in WaitingForCount
+            // forever. Idle, the displayed rate is the present rate and the governor regulates on it.
+            govIn.fgActive = govFg != nullptr && govFg->IsActive() && !govFg->IsPaused();
+            govIn.unsupportedFg = govIn.fgActive && !govDlssg;
+            // The observed count, not the requested one: it matches the "DLSSG xN" overlay and the frame limiter's
+            // displayed-rate math, and it cannot disagree with the measured interval mid-transition the way the
+            // requested options count can. AutoMFG reads the requested count for its own applied factor; that is a
+            // different input for a different decision.
+            const int govDetected = govState.dlssgDetectedInterpolationCount;
+            govIn.multiplier =
+                govIn.fgActive && govDlssg && govDetected > 0 ? (double) (govDetected + 1) : 0.0;
+            const double govTargetCfg = std::isfinite(nr.governorTargetFps.value_or_default())
+                                            ? (double) nr.governorTargetFps.value_or_default()
+                                            : 0.0;
+            const double govLimit = Config::Instance()->FramerateLimit.value_or_default();
+            // The display refresh is a system call (monitor + mode query): re-read it at most every 5 s, like AutoMFG.
+            if (g_nr.governorRefreshAt == 0 || govIn.nowMs - g_nr.governorRefreshAt >= 5000)
+            {
+                g_nr.governorRefreshAt = govIn.nowMs;
+                g_nr.governorRefreshHz =
+                    (double) Util::GetActiveRefreshRate(State::Instance().currentSwapchainDesc.OutputWindow);
+            }
+            const double govRefresh = ext::fg::UsableRefresh(
+                g_nr.governorRefreshHz);
+            govIn.targetFps = ext::fg::ResolveTarget(govTargetCfg, govLimit, govRefresh);
+            govIn.userCeiling = DlssNr::SanitizeWorkScale(nr.workingScale.value_or_default());
+            govIn.autoMfgOn = ext::Cfg().fg.autoMfg.value_or_default();
+            const float govKeyX = nr.workingScaleX.value_or_default(), govKeyY = nr.workingScaleY.value_or_default();
+            govIn.perAxisSet =
+                (std::isfinite(govKeyX) && govKeyX > 0.0f) || (std::isfinite(govKeyY) && govKeyY > 0.0f);
+            govIn.spatialOn = nr.spatialCompression.value_or_default();
+            govIn.texturesReleased = g_nrLifetime.RetirementsComplete(g_nr.governorReleaseSeq);
+            // When a size change is actually applied: the parked-retirements mark advanced (a work-size park, including
+            // a slider or hotkey rebuild) or the running model size changed. From that point the governor drops its
+            // transition window of samples instead of reacting to its own rebuild hitch.
+            govIn.appliedSeq = g_nr.governorReleaseSeq;
+            govIn.appliedWorkW = g_nr.workWidth;
+            govIn.appliedWorkH = g_nr.workHeight;
+            g_nr.governorOut = g_nr.governor.Tick(govIn);
+            // Once a second, for the play session: the signal the governor decides on, so the log proves whether
+            // the freshness counter advances with presents on this path.
+            if (govIn.nowMs - g_nr.governorDbgAt >= 1000)
+            {
+                g_nr.governorDbgAt = govIn.nowMs;
+                const uint64_t govFrames = govIn.fgFrame - g_nr.governorDbgFrame;
+                g_nr.governorDbgFrame = govIn.fgFrame;
+                // Info level on purpose: once a second and only while the governor is on, and the only evidence a
+                // session log carries that the present counter advances on the game's path.
+                LOG_INFO("DLSS-NR governor: interval {:.3f} ms, multiplier x{}, fg frame {} (+{} in the last "
+                          "second) -> {}",
+                          govIn.intervalMs, govIn.multiplier, govIn.fgFrame, govFrames,
+                          DlssNr::Governor::ReasonText(g_nr.governorOut.reason));
+            }
+            // The default-off probe answers for a later play session whether the model can evaluate below its created
+            // size. The forwarder takes the created size as raw width and height and exposes no documented
+            // dynamic-resolution or render-subrect parameter, so there is nothing to ask through: one line per build,
+            // never a rebuild, a latch change or a model failure, and the governor keeps the rebuild-per-step path.
+            if (nr.governorProbe.value_or_default() && !g_nr.governorProbeLogged && g_nr.feature != nullptr)
+            {
+                g_nr.governorProbeLogged = true;
+                LOG_INFO("DLSS-NR governor probe: evaluate below the created size of {}x{}: not available (the NR "
+                         "forwarder takes the created size as raw width and height; no documented dynamic-resolution or "
+                         "render-subrect parameter exists, so the governor keeps the rebuild-per-step path)",
+                         g_nr.workWidth, g_nr.workHeight);
+            }
+        }
+        if (g_nr.governorOut.cap > 0.0f)
+        {
+            scaleX = std::min(scaleX, g_nr.governorOut.cap);
+            scaleY = std::min(scaleY, g_nr.governorOut.cap);
+        }
+    }
     auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
                                                    (unsigned int) desc.Height, scaleX, scaleY, g_nr.spatialFailed);
     if (g_nr.spatialFailed && requested.layout != g_nr.applied.layout)
@@ -2031,6 +2152,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
+        // Any rebuild hitches its frame: tell AutoMFG to ignore the next two intervals (not the switch's stall).
+        ext::fg::NoteModelRebuild();
         ParkNrFeature(g_nr.feature);
         g_nr.featurePendingSubmission = false;
         g_nr.featureReady = {};
@@ -2054,6 +2177,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
             if (DlssNr::Settle::ParksWorkScratch(parkScope))
                 ParkWorkSizeScratch();
+            // The frame-sized copies retire here without moving the governor mark further: ParkWorkSizeScratch
+            // above already advanced it for this change, and the gate holds on that until the old size releases.
             if (DlssNr::Settle::ParksFrameScratch(parkScope))
             {
                 ParkNrResource(g_nr.colorCopy);
@@ -2250,6 +2375,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.featureReady = g_nrLifetime.CompletionProbe(cmdList);
         RecordBuiltPrimaryTuning(nr);
         LOG_INFO("DLSS-NR model feature created from {}", snippet->string());
+        // A new build gets its own probe line, and it hitches its frame like any rebuild.
+        g_nr.governorProbeLogged = false;
+        ext::fg::NoteModelRebuild();
         LOG_INFO("DLSS-NR running {}: target {}x{}, model input {}x{} (main network {}x{}), guides {}x{} "
                  "(preset {}, intensity {}, style {}, build epoch {})",
                  frame.RayReconstruction ? (frame.BeforeUpscale ? "before RR+SR" : "after RR+SR") :
@@ -3440,6 +3568,23 @@ namespace DlssNr
 std::string SpatialStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialStatus; }
 std::string DepthAwareStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.depthAwareStatus; }
 AnamorphicLatch AnamorphicLatchState() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.anamorphic; }
+Governor::Output CurrentGovernorStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.governorOut; }
+AxisScales ShownEffectiveScales(float uniformScale)
+{
+    const auto& nr = ext::Cfg().nr;
+    AxisScales scales = EffectiveScales(AnamorphicLatchState(), nr.workingScaleX.value_or_default(),
+                                        nr.workingScaleY.value_or_default(), uniformScale);
+    if (nr.governor.value_or_default())
+    {
+        const Governor::Output governor = CurrentGovernorStatus();
+        if (governor.cap > 0.0f)
+        {
+            scales.x = std::min(scales.x, governor.cap);
+            scales.y = std::min(scales.y, governor.cap);
+        }
+    }
+    return scales;
+}
 SpatialReadout CurrentSpatialReadout() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialReadout; }
 
 void CurrentModelSize(unsigned int& width, unsigned int& height)

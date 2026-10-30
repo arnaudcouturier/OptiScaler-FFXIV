@@ -41,6 +41,12 @@ class GpuLifetime
     // The caller supplies a live object, never a stored identity that may be destroyed.
     bool HasOpenRecording(ID3D12CommandList* commands);
     void Retire(std::function<void()> destroy);
+    // Monotonic count of Retire calls (0 = none yet). A caller that parks a resource set records this and later asks
+    // RetirementsComplete whether every retirement queued at or before that point has run. Only those retirements hold
+    // the answer: later ones (a partial park, a format change) never do. Fences that never resolve (device removal)
+    // never complete: the caller must treat that as a fail-safe freeze, not a wait.
+    uint64_t RetireSeq();
+    bool RetirementsComplete(uint64_t seq);
     void Collect();
     // All captured executions completed; recordings may still be replayable.
     bool GpuComplete();

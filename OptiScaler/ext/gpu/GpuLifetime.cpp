@@ -91,11 +91,13 @@ struct GpuLifetime::Impl
     {
         Uses uses;
         std::function<void()> destroy;
+        uint64_t seq = 0; // the Retire call that queued it (monotonic)
     };
     Uses recordings;
     Uses currentGeneration;
     std::vector<Retired> retired;
     std::vector<std::shared_ptr<Timeline>> timelines;
+    uint64_t retireSeq = 0;
     bool collecting = false;
     std::shared_ptr<Impl> abandoned;
     void Collect();
@@ -282,7 +284,7 @@ void GpuLifetime::Retire(std::function<void()> destroy)
 {
     const auto state = impl;
     std::lock_guard lock(state->mutex);
-    state->retired.push_back({ state->currentGeneration, std::move(destroy) });
+    state->retired.push_back({ state->currentGeneration, std::move(destroy), ++state->retireSeq });
     state->Collect();
 }
 void GpuLifetime::BeginGeneration()
@@ -291,6 +293,20 @@ void GpuLifetime::BeginGeneration()
     std::lock_guard lock(state->mutex);
     state->currentGeneration.clear();
     state->Collect();
+}
+uint64_t GpuLifetime::RetireSeq()
+{
+    const auto state = impl;
+    std::lock_guard lock(state->mutex);
+    return state->retireSeq;
+}
+bool GpuLifetime::RetirementsComplete(uint64_t seq)
+{
+    const auto state = impl;
+    std::lock_guard lock(state->mutex);
+    state->Collect();
+    return std::all_of(state->retired.begin(), state->retired.end(),
+                       [seq](const auto& item) { return item.seq > seq || Impl::Complete(item.uses); });
 }
 void GpuLifetime::Collect()
 {

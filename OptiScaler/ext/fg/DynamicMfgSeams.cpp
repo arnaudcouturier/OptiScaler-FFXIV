@@ -106,6 +106,12 @@ void AutoMfgObserve(bool queryOk, const sl::DLSSGState& state)
     g_glue.Observe(world, queryOk, state);
 }
 
+void NoteModelRebuild()
+{
+    std::scoped_lock lock(g_mutex);
+    g_glue.controller.NoteExternalStall();
+}
+
 void ResetAutoMfg()
 {
     std::scoped_lock lock(g_mutex);

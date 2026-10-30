@@ -203,7 +203,24 @@ class AutoMfgController
                 SelfTestInterrupted(out, now, restart_ ? "frame generation was reactivated" : "the game paused");
             restart_ = false;
         }
-        UpdateStall(in);
+        if (externalStall_ || externalStallWatch_)
+        {
+            // An NR model rebuild owns this hitch, not the game and not the last switch: the first tick restarts the
+            // selector (its settle drops exactly the next two intervals) and an open watch starts over on both ticks,
+            // so the hitch is never judged as the switch re-creation stall. Neither tick feeds the stall average.
+            if (externalStall_)
+            {
+                externalStall_ = false;
+                externalStallWatch_ = true;
+                sel_.Restart(now);
+            }
+            else
+                externalStallWatch_ = false;
+            if (w_.open)
+                w_.StartOver(now);
+        }
+        else
+            UpdateStall(in); // skipped on both ignored ticks above, as before the rewrite
         int current = std::max(1, in.appliedFactor);
         if (lastGood_ == 0)
             lastGood_ = current;
@@ -349,6 +366,12 @@ class AutoMfgController
     // DLSS-G was (re)activated: a new observation window, any open watch closes without a verdict. What the kill-switch
     // learned (costly count, session stop, reduced trust) stays.
     void OnActivated() { restart_ = true; }
+    // Expected stall from outside (an NR model rebuild hitches its frame): the next two frame intervals are
+    // ignored. The next open tick restarts the selector (its settle drops exactly those two) and an open watch starts
+    // over on both (the hitch is not the switch's); the stall average keeps its clipped value. Pure; the NR pass calls
+    // it through NoteModelRebuild. Cleared while the gate is closed, so a rebuild with AutoMFG off cannot swallow the
+    // first intervals after it is switched on.
+    void NoteExternalStall() { externalStall_ = true; }
 
     const AutoMfgStatus& Status() const { return status_; }
     bool Stopped() const { return stopped_; }
@@ -431,6 +454,9 @@ class AutoMfgController
 
     void GateClosed(AutoMfgGate gate, const AutoMfgTick& in, AutoMfgOut& out)
     {
+        // A rebuild while the gate is closed must not eat the first open intervals: the next tick after
+        // opening already restarts on the activation path, so a pending external stall is dropped here.
+        externalStall_ = externalStallWatch_ = false;
         const bool wasOpen = lastGate_ == AutoMfgGate::Open;
         if (gate != lastGate_)
         {
@@ -697,6 +723,8 @@ class AutoMfgController
     int cleanRun_ = 0;  // clean switches since the last signature
     int lastGood_ = 0;
     int restore_ = 0;   // self-test over: the count to return to (0 = none)
+    bool externalStall_ = false; // an NR model rebuild owns the next tick: restart the selector, restart the watch
+    bool externalStallWatch_ = false; // ...and restart the watch once more on the tick after
     double realAvg_ = 0.0;     // the controller's own average of the real frame interval, ms (0 = none yet)
     bool stalled_ = false;     // realAvg_ is above kStallMs
     bool calm_ = false;        // realAvg_ is known and has not been above kStallMs since calmSince_

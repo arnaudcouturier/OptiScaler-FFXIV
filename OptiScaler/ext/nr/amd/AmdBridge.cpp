@@ -240,6 +240,8 @@ ID3D12Resource* Prepare(ID3D12GraphicsCommandList* commandList, NVSDK_NGX_Parame
 
     const auto& config = *Config::Instance();
     const auto& nr = ext::Cfg().nr;
+    // The governor cap does not apply here: on an AMD device the governed pass returns before its runtime
+    // path, so this pre-SR capture always sees the user value.
     const float scale = std::clamp(nr.workingScale.value_or_default(), 0.25f, 2.0f);
     const FrameIdentity current { frame.width, frame.height, scale };
     const auto now = GetTickCount64();

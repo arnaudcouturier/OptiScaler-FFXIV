@@ -45,6 +45,7 @@ template<class C, class F> void Fields(C& c, F&& f)
     NR_FIELD(WorkingScale, workingScale, 0.25, 2);
     NR_FIELD(DepthAwareResolve, depthAwareResolve, 0, 1);
     NR_FIELD(WorkingScaleX, workingScaleX, 0, 2); NR_FIELD(WorkingScaleY, workingScaleY, 0, 2);
+    NR_FIELD(Governor, governor, 0, 1); NR_FIELD(GovernorTargetFps, governorTargetFps, 0, 500);
     NR_FIELD(ScalingDownscaler, scalingDownscaler, 0, 7);
     NR_FIELD(TransferStrength, transferStrength, 0, 2); NR_FIELD(ColourStrength, colourStrength, 0, 4);
     NR_FIELD(Transfer, transfer, 0, 1); NR_FIELD(ReversibleMode, reversibleMode, 0, 5); NR_FIELD(ApplyModel, applyModel, 0, 1);
@@ -118,6 +119,8 @@ inline Json Upgrade(Json j)
         if (!j.contains("ClassicSharpen")) j["ClassicSharpen"] = false;
         if (!j.contains("ClassicSharpenStrength")) j["ClassicSharpenStrength"] = 0.4;
         for (const char* key : {"WorkingScaleX", "WorkingScaleY"}) if (!j.contains(key)) j[key] = 0.0;
+        if (!j.contains("Governor")) j["Governor"] = false;
+        if (!j.contains("GovernorTargetFps")) j["GovernorTargetFps"] = 0.0;
         if (!j.contains("VitEvery")) j["VitEvery"] = 1;
         if (!j.contains("PassFeedback")) j["PassFeedback"] = 1.0;
     }

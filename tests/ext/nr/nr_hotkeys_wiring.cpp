@@ -203,7 +203,8 @@ int main(int argc, char** argv)
         CHECK(InOrder(step, { "nr.workingScale=DlssNr::Hotkeys::StepWorkingScale(",
                               "constintpercent=(int)std::lround(nr.workingScale.value_or_default()*100.0f);",
                               "std::stringcontent=std::format(\"Modelresolution{}%\",percent);",
-                              "if(PerAxisOverrides())content+=\"(per-axiskeysoverride)\";",
+                              "constDlssNr::AnamorphicLatchtoastLatch=DlssNr::AnamorphicLatchState();",
+                              "if(PerAxisOverrides()&&!DlssNr::AnamorphicLatchHolds(toastLatch,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),nr.workingScale.value_or_default()))content+=\"(per-axiskeysoverride)\";",
                               "ShowHotkeyToast(\"DLSSNeuralRendering\",content);" }));
         CHECK(Body(menu, "boolPerAxisOverrides()") ==
               "{constauto&nr=ext::Cfg().nr;constfloatx=nr.workingScaleX.value_or_default(),y=nr.workingScaleY.value_or_default();"
@@ -213,9 +214,7 @@ int main(int argc, char** argv)
         // otherwise writes the toggled value once
         const std::string transfer = Body(menu, "voidOnTransferTogglePressed(ext::menu::Ctx&)");
         CHECK(!transfer.empty());
-        CHECK(InOrder(transfer, { "constDlssNr::AnamorphicLatchlatch=DlssNr::AnamorphicLatchState();",
-                                  "DlssNr::EffectiveScales(latch,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),"
-                                  "nr.workingScale.value_or_default());",
+        CHECK(InOrder(transfer, { "constDlssNr::AxisScalesscales=DlssNr::ShownEffectiveScales(nr.workingScale.value_or_default());",
                                   "constbooltoggleable=DlssNr::Hotkeys::TransferToggleable(scales.x,scales.y);",
                                   "if(!toggleable)return;",
                                   "nr.transfer=DlssNr::Hotkeys::ToggleTransfer(nr.transfer.value_or_default(),toggleable);",

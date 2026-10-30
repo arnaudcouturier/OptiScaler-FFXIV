@@ -176,7 +176,9 @@ int main(int argc, char** argv)
     CHECK(Count(pass, "constfloatscaleKeyUniform=nr.workingScale.value_or_default();") == 1);
     CHECK(Count(pass, "g_nr.anamorphic=DlssNr::RefreshAnamorphicLatch(g_nr.anamorphic,scaleKeyX,scaleKeyY,scaleKeyUniform);") == 1);
     CHECK(Count(pass, "constDlssNr::AxisScalesaxisScales=DlssNr::EffectiveScales(g_nr.anamorphic,scaleKeyX,scaleKeyY,scaleKeyUniform);") == 1);
-    CHECK(Count(pass, "constfloatscaleX=axisScales.x;") == 1 && Count(pass, "constfloatscaleY=axisScales.y;") == 1);
+    // not const: the frame-rate governor's run-time cap lowers them right after this rule
+    CHECK(Count(pass, "floatscaleX=axisScales.x;") == 1 && Count(pass, "floatscaleY=axisScales.y;") == 1);
+    CHECK(Count(pass, "scaleX=std::min(scaleX,g_nr.governorOut.cap);") == 1 && Count(pass, "scaleY=std::min(scaleY,g_nr.governorOut.cap);") == 1);
     CHECK(!Has(pass, "DlssNr::EffectiveAxisScale(")); // nothing in the pass computes a scale by itself any more
     // the order: the latch is refreshed against the keys first, then the scales are taken, then the geometry is built from them
     {
@@ -315,7 +317,8 @@ int main(int argc, char** argv)
         // are greyed whenever either scale is above 100% (nothing is enlarged then: a model above 100% is brought back down)
         CHECK(Count(menu, "constfloatuniformShown=pendingScale>=0?pendingScale/100.0f:nr.workingScale.value_or_default();") == 1);
         CHECK(Count(menu, "constAnamorphicLatchrefusal=AnamorphicLatchState();") == 1);
-        CHECK(Count(menu, "constAxisScalesshownScales=EffectiveScales(refusal,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),uniformShown);") == 1);
+        // one function for the menu and the enlargement key: the keys through the latch, then the governor's run-time cap
+        CHECK(Count(menu, "constAxisScalesshownScales=DlssNr::ShownEffectiveScales(uniformShown);") == 1);
         CHECK(Count(menu, "constfloateffectiveScaleX=shownScales.x;") == 1 && Count(menu, "constfloateffectiveScaleY=shownScales.y;") == 1);
         CHECK(Count(menu, "constboolaboveFull=effectiveScaleX>1.0f||effectiveScaleY>1.0f;") == 1);
         CHECK(Count(menu, "if(aboveFull){") == 1);
@@ -326,7 +329,7 @@ int main(int argc, char** argv)
         CHECK(Count(menu, "if(AnamorphicLatchHolds(refusal,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),uniformShown))ImGui::TextDisabled(\"Themodelrefusedasizethatdiffersperaxis:workingatModelresolutiononbothaxes.\");") == 1);
         // the order: the uniform scale and the latch are read before the scales, the scales before the controls that follow them
         {
-            const size_t shown = menu.find("constAxisScalesshownScales=EffectiveScales(");
+            const size_t shown = menu.find("constAxisScalesshownScales=DlssNr::ShownEffectiveScales(");
             const size_t downscaler = menu.find("if(aboveFull){");
             const size_t reducedAt = menu.find("constboolreduced=DlssNr::Hotkeys::TransferToggleable(");
             const size_t checkbox = menu.find("ImGui::BeginDisabled(!reduced||depthSpatial);");

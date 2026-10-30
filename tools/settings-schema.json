@@ -553,6 +553,43 @@
           "description": "Strength of the Classic sharpening, 0 to 1 (0.4 is upstream RCAS's own default). 0 skips the step entirely; a value that cannot be read falls back to 0.4."
         },
         {
+          "key": "[DlssNr] Governor",
+          "section": "DlssNr",
+          "name": "Governor",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": "Upscaling", "card": "dlss_nr", "cardTitle": "DLSS Neural Rendering" },
+          "description": "Frame-rate governor (experimental): steps the model resolution over 100/90/80/70/60/50% to hold the target frame rate. A run-time cap only: Model resolution stays the ceiling and is never written. Steps down after 3 s below 95% of the target; probes one tier up after 10 s at or above 97% of the target and keeps the probe only if the rate holds 97% of the target over the next 2 s. Stands down while AutoMFG, a per-axis model size or spatial compression is on.",
+          "flags": [ "experimental" ]
+        },
+        {
+          "key": "[DlssNr] GovernorTargetFps",
+          "section": "DlssNr",
+          "name": "GovernorTargetFps",
+          "type": "float",
+          "min": 0.0,
+          "max": 1000.0,
+          "default": "auto",
+          "defaultMeans": "0",
+          "applies": "live",
+          "menu": { "tab": "Upscaling", "card": "dlss_nr", "cardTitle": "DLSS Neural Rendering" },
+          "description": "Frame rate the governor holds, in frames per second as displayed (frame generation included). 0 is auto: the lower of the frame rate limit and the display refresh rate. Manual values below 30 are raised to 30."
+        },
+        {
+          "key": "[DlssNr] GovernorProbe",
+          "section": "DlssNr",
+          "name": "GovernorProbe",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "developer probe: logs once per model build whether a below-created-size evaluate exists; the governor never uses it" },
+          "description": "Developer probe: once per model build, logs whether the model can evaluate below the size it was created for (works / refused / not available). Changes nothing on screen; the governor never uses it.",
+          "flags": [ "diagnostic" ]
+        },
+        {
           "key": "[DlssNr] DisableOnFocusLoss",
           "section": "DlssNr",
           "name": "DisableOnFocusLoss",

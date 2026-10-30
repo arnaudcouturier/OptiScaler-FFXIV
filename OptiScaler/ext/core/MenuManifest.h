@@ -59,6 +59,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[Mipmap] AutomaticFFXIV", // another name for MipmapBiasAuto, which the Automatic Mipmap Bias card shows
     "[Mipmap] MipmapBiasObserve", // a debug log switch for the bind-time mipmap bias
     "[DlssNr] PauseOnFocusLoss", // another name for DisableOnFocusLoss, moved into it when the ini is read
+    "[DlssNr] GovernorProbe", // developer probe: logs once per model build whether a below-created-size evaluate exists; the governor never uses it
     "[FFXIV] FfxivLegacyGameBuild", // persistent rollback switch of the game build handling, read once at start
     "[FFXIV] FfxivUnknownBuildHooks", // persistent switch: the game-address features on a game build the table does not know
     "[FFXIV] FfxivForceUnknownBuild", // persistent debug switch: ignore the known-build table

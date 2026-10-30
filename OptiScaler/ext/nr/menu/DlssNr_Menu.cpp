@@ -506,6 +506,22 @@ void RenderMenu(float menuResScale)
             ImGui::TextDisabled("NR scale: %.2fx. Higher resolution increases GPU cost.",
                                 scalePercent / 100.0f);
 
+        // The frame-rate governor: a run-time cap only, never a config write. The target 0 is auto (the lower
+        // of the frame rate limit and the display refresh rate); the status line shows the tier, the target, the
+        // measured rate and why it stands down if it does.
+        bool governor = nr.governor.value_or_default();
+        if (ImGui::Checkbox("Frame rate governor (experimental)", &governor))
+            nr.governor = governor;
+        HelpMarker("Steps the model resolution down and up over 100/90/80/70/60/50% to hold the target frame rate below.\nA run-time cap only: Model resolution stays the ceiling and is never written. Dwell: 3 s before a step down, 10 s before a step up; never below 50%.\nStands down while AutoMFG is on, while a per-axis key is set, or while spatial compression is on. Applies live.");
+        float governorTarget = nr.governorTargetFps.value_or_default();
+        ImGui::BeginDisabled(!governor);
+        if (ImGui::SliderFloat("Governor target FPS", &governorTarget, 0.0f, 500.0f,
+                               governorTarget > 0.0f ? "%.0f" : "Auto"))
+            nr.governorTargetFps = governorTarget;
+        HelpMarker("Frame rate the governor holds. Auto is the lower of the frame rate limit and the display refresh rate. Manual values below 30 fps are raised to 30 fps.");
+        ImGui::TextDisabled("%s", DlssNr::Governor::StatusLine(DlssNr::CurrentGovernorStatus()).c_str());
+        ImGui::EndDisabled();
+
         // Per-axis resolution: 0 means "same as Model resolution". The effective scale of each axis decides what the controls below it
         // offer (the downscaler for an enlarged axis, the enlargement mode for a reduced one).
         static int pendingAxisX = -1, pendingAxisY = -1;
@@ -540,7 +556,9 @@ void RenderMenu(float menuResScale)
         // the mixed above/below 100% rule. The same function the pass calls, so the controls below follow the numbers in use.
         const float uniformShown = pendingScale >= 0 ? pendingScale / 100.0f : nr.workingScale.value_or_default();
         const AnamorphicLatch refusal = AnamorphicLatchState();
-        const AxisScales shownScales = EffectiveScales(refusal, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(), uniformShown);
+        // Including the frame-rate governor's run-time cap, so the controls below (the Enlargement combo, Classic sharpening)
+        // follow the capped size the status line shows; the enlargement key decides from the same function.
+        const AxisScales shownScales = DlssNr::ShownEffectiveScales(uniformShown);
         const float effectiveScaleX = shownScales.x;
         const float effectiveScaleY = shownScales.y;
         const bool aboveFull = effectiveScaleX > 1.0f || effectiveScaleY > 1.0f;

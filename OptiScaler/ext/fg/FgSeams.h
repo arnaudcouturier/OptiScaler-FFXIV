@@ -83,6 +83,10 @@ void AfterDlssgSetOptions(IFGFeature* fg, const sl::ViewportHandle& viewport, co
 // Reflex options built next to the DLSS-G ones: in dynamic mode Streamline sees the same output cap as the user, so
 // dynamic MFG can account for it.
 void AdjustReflexOptions(const sl::DLSSGOptions& options, sl::ReflexOptions& reflex);
+// An NR model rebuild (a governor step, a Model resolution change, a hotkey press): the rebuild hitches its frame
+// (about 0.2 s without NR), which is not an AutoMFG switch's re-creation stall. The next two frame intervals are
+// ignored (AutoMfgController::NoteExternalStall). Called from the NR pass; nothing outside ext.
+void NoteModelRebuild();
 // WS2: DLSSG_Dx12::Dispatch, before the options of the frame are set. A live change of the DLSS-G render preset ([DLSSG]
 // RenderPreset) is made here: FG off, resources freed, the request activated (ext/fg/dlssg/PresetSeams.cpp). True = a switch
 // just happened, skip this frame; FG resumes on the next dispatch with fresh history.

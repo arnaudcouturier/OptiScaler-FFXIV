@@ -108,6 +108,16 @@ struct NrConfig
     // of that axis, 0.25..2. The model works at (x * width) by (y * height).
     CustomOptional<float> workingScaleX { 0.0f };
     CustomOptional<float> workingScaleY { 0.0f };
+    // Frame-rate governor over model-resolution tiers (experimental, off): while on, the pass steps the model
+    // resolution down and up over 100/90/80/70/60/50% to hold GovernorTargetFps. A run-time cap only: the user value
+    // stays the ceiling and no config key is ever written (see NrGovernor.h).
+    CustomOptional<bool> governor { false };
+    // Governor target in fps, 0 = auto (the lower of the frame rate limit and the display refresh rate).
+    CustomOptional<float> governorTargetFps { 0.0f };
+    // Developer probe for a later play session: with the key on the pass logs, once per model build, whether the
+    // model can evaluate below its created size. No menu control (MenuManifest.h kIniOnlyKeys); the governor never
+    // uses it, so it cannot change what the governor does.
+    CustomOptional<bool> governorProbe { false };
     // Downscaler for NR supersampling (working scale > 1).
     CustomOptional<Scaler> scalingDownscaler { Scaler::Lanczos3 };
     // Write one set of matched before/after frames per session after the capture delay (180 frames). SEAMS 3.4: real key, default false keeps the oracle behaviour (no capture).
