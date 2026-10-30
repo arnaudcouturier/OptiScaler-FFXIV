@@ -3,6 +3,7 @@
 #include <Config.h>
 #include <low_latency/input/input_common.h>
 #include <shaders/reproject/Reproject.h>
+#include "ext/Seams.h"
 
 int IFGFeature::GetIndex() { return (_frameCount % BUFFER_COUNT); }
 
@@ -41,8 +42,7 @@ UINT64 IFGFeature::StartNewFrame()
 
     if (_lastDispatchedFrame == 0 || (_frameCount - _lastDispatchedFrame) > 2)
     {
-        LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
-                 _lastDispatchedFrame);
+        ext::fg::NoteFrameCountJump(_frameCount, _lastDispatchedFrame);
 
         _lastDispatchedFrame = _frameCount - 1;
     }
