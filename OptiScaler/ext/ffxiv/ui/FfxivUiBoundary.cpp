@@ -157,7 +157,7 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
         // Partial UI catalog (a game patch recompiled some of the UI shaders, so their CRCs no longer match): R1b could then fire on a
         // later UI draw than the real first HUD draw and the "UI-free" capture would contain HUD pixels. Fail safe: no boundary this frame, the
         // engine falls back (Reason::NoBoundaryThisFrame). Decided per frame, never latched, so a shader created late clears it. Not even the live
-        // source is consulted: its Take() would arm the ReShade presets at a boundary that cannot be trusted. A healthy build (6 or 7 of the 7 UI
+        // source is consulted: its Take() would arm the ReShade presets at a boundary that cannot be trusted. A healthy build (the pinned set of UI
         // shaders created) is unaffected.
         if (!ext::ffxiv::catalog::UiBoundaryUsable())
             return ext::hudless::TakeResult::NotThisFrame;

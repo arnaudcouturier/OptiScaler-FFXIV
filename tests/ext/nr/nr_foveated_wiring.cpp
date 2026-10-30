@@ -165,10 +165,12 @@ int main(int argc, char** argv)
     // the settle runs on a real clock in milliseconds and gets the flag that ends the waiting
     CHECK(Count(pass, "constautonowMs=(int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();") == 1);
 
-    // The output size the geometry is built for is the colour allocation (`desc`), never the active rectangle (`width`/`height`):
-    // the Foveated pixel inputs are output pixels and the pass converts them to the model's frame (pre-SR: the frame is smaller).
-    CHECK(Count(pass, "MakeGeometry(requestedSettings,width,height,(unsignedint)desc.Width,(unsignedint)desc.Height,scaleX,scaleY,g_nr.spatialFailed);") == 1);
-    CHECK(Count(pass, "MakeGeometry(requestedSettings,width,height,(unsignedint)desc.Width,(unsignedint)desc.Height,scaleX,scaleY,false);") == 1);
+    // The output size the geometry is built for is the declared output (`outputW`/`outputH`: the Out parameters, else the
+    // colour allocation), never the target allocation (`desc`): the Foveated pixel inputs are output pixels and the pass converts
+    // them to the model's frame (pre-SR: the frame is smaller). Scratches and dispatches address the ACTIVE rectangle (the declared
+    // size clamped to the allocation per axis); geometry and readout keep the declared size.
+    CHECK(Count(pass, "MakeGeometry(requestedSettings,frame.BeforeUpscale?width:outputW,frame.BeforeUpscale?height:outputH,outputW,outputH,scaleX,scaleY,g_nr.spatialFailed);") == 1);
+    CHECK(Count(pass, "MakeGeometry(requestedSettings,frame.BeforeUpscale?width:outputW,frame.BeforeUpscale?height:outputH,outputW,outputH,scaleX,scaleY,false);") == 1);
     // the scale of each axis is the per-axis key when set, otherwise the uniform one: X reads the X key, Y reads the Y key; one function
     // (shared with the menu) applies the refusal latch and the mixed above/below 100% rule to them
     CHECK(Count(pass, "constfloatscaleKeyX=nr.workingScaleX.value_or_default();") == 1);
@@ -215,7 +217,7 @@ int main(int argc, char** argv)
     // the model is evaluated at its own width and height
     CHECK(Count(pass, "passInput,depthIn,motionIn,passOutput,workWidth,workHeight,") == 1);
     // and the menu readout reports that same output size, width then height
-    CHECK(Count(pass, "requested.workW,requested.workH,(unsignedint)desc.Width,(unsignedint)desc.Height};") == 1);
+    CHECK(Count(pass, "requested.workW,requested.workH,outputW,outputH};") == 1);
     CHECK(Count(pass, "settleAction=DlssNr::Settle::Decide(g_nr.settle,appliedId,DlssNr::Spatial::IdentityOf(requested),nowMs,immediate);") == 1);
     // a change of the placement parks everything; otherwise what the change invalidates
     CHECK(Count(pass, "constautoparkScope=placementChanged?DlssNr::Settle::ParkScope::All:DlssNr::Settle::ParkScopeFor(appliedId,adoptedId);") == 1);
@@ -290,7 +292,7 @@ int main(int argc, char** argv)
         CHECK(Count(mainShader, "constbooldepthWeighted=usable&&sum>gDepthMinSum;") == 1 && Count(mainShader, "#definegDepthMinSumgSideNeg.w") == 1);
         CHECK(!Has(mainShader, "sum>1e-4") && !Has(mainShader, "sum>0.0001") && !Has(mainShader, "usable&&sum>1"));
         // Vulkan reads the GPU time under the lock the evaluation writes it with
-        CHECK(Count(Read(nr + "vk/DlssNrFeature_Vk.cpp"), "std::optional<double>LastGpuTimeVk(){std::lock_guard<std::mutex>lock(g_vkMutex);returng_vk.lastGpuTime;}") == 1);
+        CHECK(Count(Read(nr + "vk/DlssNrFeature_Vk.cpp"), "std::optional<double>LastGpuTimeVk(){std::lock_guard<std::mutex>time(g_vkTimeMutex);returng_vk.lastGpuTime;}") == 1);
         // the motion vectors handed to the model follow the model's size on each axis (the X ratio on X, the Y ratio on Y)
         CHECK(Count(pass, "spatial?1.0f:g_nr.guideMvScaleX*mvToWorkX,") == 1 && Count(pass, "spatial?1.0f:g_nr.guideMvScaleY*mvToWorkY);") == 1);
         CHECK(Count(pass, "DlssNr::DepthAware::PackFields(resolveParams.SpatialWarp,depthRect,g_nr.guideDepthInverted);") == 1);
@@ -326,7 +328,7 @@ int main(int argc, char** argv)
         // exactly while the combo is greyed, and the menu keeps no grey-out rule of its own.
         CHECK(Count(menu, "constboolreduced=DlssNr::Hotkeys::TransferToggleable(effectiveScaleX,effectiveScaleY);") == 1);
         CHECK(!Has(menu, "EffectiveAxisScale(")); // the menu has no scale rule of its own
-        CHECK(Count(menu, "if(AnamorphicLatchHolds(refusal,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),uniformShown))ImGui::TextDisabled(\"Themodelrefusedasizethatdiffersperaxis:workingatModelresolutiononbothaxes.\");") == 1);
+        CHECK(Count(menu, "if(AnamorphicLatchHolds(refusal,nr.workingScaleX.value_or_default(),nr.workingScaleY.value_or_default(),nr.workingScale.value_or_default()))ImGui::TextDisabled(\"Themodelrefusedasizethatdiffersperaxis:workingatModelresolutiononbothaxes.\");") == 1);
         // the order: the uniform scale and the latch are read before the scales, the scales before the controls that follow them
         {
             const size_t shown = menu.find("constAxisScalesshownScales=DlssNr::ShownEffectiveScales(");

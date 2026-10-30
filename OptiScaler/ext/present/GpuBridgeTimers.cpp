@@ -26,7 +26,7 @@
 
 // GPU stage timers ([FramePacing] GpuTimers; seams ext/present/PresentSeams.h, rules GpuTimerStats.h).
 //
-// What runs where (all on the render thread; the menu thread only reads the published on/off flag and lastMs):
+// What runs where (all on the render thread; the menu thread only reads the published on/off flag and the published last samples):
 //   GpuTimersBeginFrame / GpuTimersOnPresent: the bridge PresentScope (BridgeHdr.cpp).
 //   Begin/EndCopyIn: BeforeSharedCopy / AfterSharedCopy around the present copy-in.
 //   Begin/End/CancelInteropCopy: ConvertCopySource / PrepareScreenshot around the D3D12 interop copy (a failed
@@ -62,6 +62,25 @@ std::atomic<bool>& PublishedOn()
 {
     static std::atomic<bool> on { false };
     return on;
+}
+
+// The last sample of each logged stage, published at Present exit. The render thread stores them under
+// TimerMutex; the menu rows load them with plain atomic loads, so the menu never takes TimerMutex.
+// A negative value means no sample yet (durations are never negative).
+std::atomic<double>& PublishedCopyInMs()
+{
+    static std::atomic<double> ms { -1.0 };
+    return ms;
+}
+std::atomic<double>& PublishedEffectsMs()
+{
+    static std::atomic<double> ms { -1.0 };
+    return ms;
+}
+std::atomic<double>& PublishedInteropMs()
+{
+    static std::atomic<double> ms { -1.0 };
+    return ms;
 }
 
 bool IsFfxivExe()
@@ -483,11 +502,18 @@ void GpuTimersOnPresent()
             ClearD3D11(CopyInStage());
             ClearD3D11(EffectsStage());
             ClearD3D12();
+            // the menu rows read the published samples without the lock: a negative value means empty, so a cleared stage must not keep its last number.
+            PublishedCopyInMs().store(-1.0, std::memory_order_relaxed);
+            PublishedEffectsMs().store(-1.0, std::memory_order_relaxed);
+            PublishedInteropMs().store(-1.0, std::memory_order_relaxed);
             return;
         }
         ReadD3D11(CopyInStage(), nowUs);
         ReadD3D11(EffectsStage(), nowUs);
         ReadD3D12(nowUs);
+        PublishedCopyInMs().store(CopyInStage().lastMs.value_or(-1.0), std::memory_order_relaxed);
+        PublishedEffectsMs().store(EffectsStage().lastMs.value_or(-1.0), std::memory_order_relaxed);
+        PublishedInteropMs().store(InteropStage().lastMs.value_or(-1.0), std::memory_order_relaxed);
         // One 10 s log line per closed window that holds samples (a stage with no samples, like ReShade effects
         // without ReShade, stays silent instead of logging zeros every 10 s). Collected here, logged below without
         // the mutex: the present path never waits on log file I/O while holding it.
@@ -790,24 +816,24 @@ std::optional<double> RowCopyIn()
 {
     if (!PublishedOn().load(std::memory_order_relaxed))
         return std::nullopt;
-    std::scoped_lock lock(TimerMutex());
-    return CopyInStage().lastMs;
+    const double ms = PublishedCopyInMs().load(std::memory_order_relaxed);
+    return ms < 0.0 ? std::nullopt : std::optional<double>(ms);
 }
 
 std::optional<double> RowEffects()
 {
     if (!PublishedOn().load(std::memory_order_relaxed))
         return std::nullopt;
-    std::scoped_lock lock(TimerMutex());
-    return EffectsStage().lastMs;
+    const double ms = PublishedEffectsMs().load(std::memory_order_relaxed);
+    return ms < 0.0 ? std::nullopt : std::optional<double>(ms);
 }
 
 std::optional<double> RowInterop()
 {
     if (!PublishedOn().load(std::memory_order_relaxed))
         return std::nullopt;
-    std::scoped_lock lock(TimerMutex());
-    return InteropStage().lastMs;
+    const double ms = PublishedInteropMs().load(std::memory_order_relaxed);
+    return ms < 0.0 ? std::nullopt : std::optional<double>(ms);
 }
 
 // The corrected row, computed here on the menu thread (never snapshotted on the present path): upstream "Interop"

@@ -1,13 +1,13 @@
 #pragma once
 // Anchors of P2 group 2: the companion / nameplate native hooks (seam ids companion.*).
 //
-// OWNER: the P2 "companion" writer. This is the ONLY resolver file that writer edits (plus its own tests under tests/ext/ffxiv/resolve/).
+// OWNER: the companion seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 // Every anchor below was written AFTER reading its consumer: ext\ffxiv\companion\CompanionNative.cpp (the four Detours and the queue chain),
 // CompanionPackets.h (queue snapshot, batch header, Substitute/PointerScope), CompanionVisibilityQueue.h (index buffer, layout slot table,
 // vertex ranges) and replay\FfxivNameplate*.h (the same offsets again). The consumer facts each anchor pins are listed per seam; what it
 // cannot pin is listed in the "not self-healing" list at the end of this file.
 //
-// ---- TWO TIERS PER DETOUR SITE (P2bfix review #2, the design of AnchorsJitter.h) -----------------------------------------------------------
+// ---- TWO TIERS PER DETOUR SITE (the two-tier shape follows the design of AnchorsJitter.h) --------------------------------------------------
 // On an UNKNOWN build a bound Guard field is filled with the LIVE bytes read at the resolved site, so once P3 replaces the kCurrentBuild reads
 // the hooks' byte guard (Install()) compares live bytes with themselves and checks nothing: the anchors are then the ONLY verification. Every
 // Detour site (batch16, batch32, enqueue, bindState) therefore has
@@ -85,7 +85,7 @@ inline const char* DispatcherCall()
     return "48 8B 83 E0 01 00 00 40 0F B6 D5 48 8B CB 83 78 3C 02 75 07 E8 ?? ?? ?? ?? EB 05 E8 ?? ?? ?? ??";
 }
 
-// The tail-call dispatcher stub (0x63b730), the SECOND caller of the 16-bit batch function (P2bfix review #6): the same choice as the dispatcher
+// The tail-call dispatcher stub (0x63b730), the SECOND caller of the 16-bit batch function: the same choice as the dispatcher
 // above made with a `je` to the 32-bit batch and a `jmp` (E9, Rel32 at 17) to the 16-bit one. Only the jmp can be decoded (Rel32 reads E8 / E9;
 // RipDisp32 refuses the `0F 84` that carries the je). Unique (margin 5), target the 16-bit function. It is what turns "both strict heads broken
 // AND the dispatcher's call order inverted" from a silent swap of the two batch seams into a Conflict of batch16.
@@ -145,7 +145,7 @@ inline const char* BindStatePrologue()
 // bindState: the load of the native context ([rsi+CONTEXT]) before the virtual calls through its vtable, twice in the function. The consumer
 // dereferences that field as a COM pointer (CompanionLayer.cpp Stamp: GetType / SetPrivateData), so the bytes must prove it is a D3D11 context:
 //   A  mov rdi,[rsi+CTX] ; mov edx,ebp ; mov rax,[rdi] ; mov rbx,[rax+0x118]   (vtable slot 35: loaded here, called later through rbx)
-//   Call  the whole call site (P2bfix review #3): cmp [rbx+0x3c],2 ; mov edx,0x39 ; mov rcx,[rsi+CTX] ; mov r8d,0x2a ; cmovne r8d,edx ; ... ;
+//   Call  the whole call site of the vtable call: cmp [rbx+0x3c],2 ; mov edx,0x39 ; mov rcx,[rsi+CTX] ; mov r8d,0x2a ; cmovne r8d,edx ; ... ;
 //         mov rax,[rcx] ; ... ; call [rax+0x98]   (vtable slot 19 = ID3D11DeviceContext::IASetIndexBuffer, r8d 0x2a / 0x39 = R32_UINT / R16_UINT).
 //         The same text is the location anchor `contextCall` of the bindState seam (the CTX displacement masked in both).
 inline const char* BindStateContextA() { return "48 8B BE ?? ?? ?? ?? 8B D5 48 8B 07 48 8B 98 18 01 00 00"; }
@@ -224,7 +224,7 @@ inline void AddCompanionAnchors(Registry& r)
     // renderer+0x580 (PointerScope) while the original runs, reads count at +0x588, vertex allocation +0x570, vertex stride/offset +0x500/+0x504,
     // the index buffer at +0x1e0, and passes the index width (2 for batch16, 4 for batch32) to the visibility code.
     //
-    // Anchors (both seams, two independent ways, neither is the prologue alone; batch16 has a third, the tail-call stub, P2bfix review #6):
+    // Anchors (both seams, two independent ways, neither is the prologue alone; batch16 has a third, the tail-call stub):
     //   entryToIndexShift  the whole head from the entry (entryAnchor: a foreign jump over the entry reads as EntryPatched) through the load of
     //                      the index byte size and the shift that makes the index count: shr 1 is batch16, shr 2 is batch32. It pins the
     //                      Detour's instruction boundaries (the first 9 bytes are two whole instructions), the (renderer, mode) spills, the
@@ -282,7 +282,7 @@ inline void AddCompanionAnchors(Registry& r)
     //   entryWriteTail   the tail of the same function: lea rcx,[rdx+0x10] ; mov [r9+0x20],rcx ; mov [rdx],eax ; mov [rdx+8],r11 ; ret, with the
     //                    reset of the block counter (mov dword [r9+0x28],0x3ff) in front. It pins that rdx (the command) is stored in the entry
     //                    at +8 and that an entry is 16 bytes. The entry is 0x9b bytes back (valueOffset: leaf functions have no .pdata).
-    //   callerEpilogue   the CALLER side (P2bfix review #1): the tail of a wrapper that calls enqueue (mov rdx,rdi ; mov [rdi+0x30],r14 ; mov rcx,rsi ;
+    //   callerEpilogue   the CALLER side: the tail of a wrapper that calls enqueue (mov rdx,rdi ; mov [rdi+0x30],r14 ; mov rcx,rsi ;
     //                    call enqueue ; the epilogue). The Rel32 target IS the entry, read from a real call instruction, so it is the only anchor
     //                    that does not move with the function's own bytes. Without it a leaf whose head and tail shift together (a prefix before
     //                    the head, a changed head and length) gave a usable single-anchor or a silent plain Found at entry+k, inside the function.

@@ -28,7 +28,7 @@
 //
 // Failure of the resolver ITSELF: on the exact known build an infrastructure failure (the image could not be opened, a cached exception,
 // a scan that hit an unreadable window) falls back to the legacy decision, the same Group 2 decision as FfxivLegacyGameBuild (the compile-time table
-// and the old byte guards decide). The gate block of the log carries one WARN for it (and, after a cached exception, also the not-self-healing WARN: that failed result is not marked as a known build); what is printed BEFORE that depends on the failure: nothing
+// and the old byte guards decide). The gate block of the log carries one WARN for it; after a cached exception the not-self-healing line still prints, worded for the known build the gate runs on (the failed result itself is not marked as one); what is printed BEFORE that depends on the failure: nothing
 // for an image that could not be opened, a WARN line per unresolved seam after a scan abort, an Error line from the resolver after a cached exception,
 // an Error line from the startup after a startup exception. An unknown build stays off, and so does FfxivForceUnknownBuild (it asked for the resolver's
 // values).
@@ -148,8 +148,8 @@ inline constexpr CrossPair kCrossPairs[] = {
 };
 
 // Seams that stay STRICT (plain Usable, never filled from the table) on a KNOWN build too, besides every hook site (location AND shape) of the three
-// groups. Taken from the contract text of the Anchors headers: the quality write path (AnchorsQuality.h item 2: managerPointer, managerContextOffset,
-// contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape (item 3), and the three
+// groups. Taken from the contract text of the Anchors headers: the quality display-size cache write (AnchorsQuality.h contract, managerPointer, managerContextOffset,
+// contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape, and the three
 // jitter globals, strengthFloor, ndcSignMask and the camera global of the world tie (AnchorsJitter.h). Every other seam a feature reads is accepted on a
 // known build when its field was filled from the verified table. On an UNKNOWN build everything is strict.
 inline constexpr const char* kStrictOnKnownBuild[] = {
@@ -617,9 +617,9 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
         return r;
     }
 
-    // ---- Group 1: the exe name is the whole condition
+    // ---- Group 1: the exe identity is the whole condition (the stamp and size on the known build, the name otherwise)
     for (std::size_t i = 0; i < static_cast<std::size_t>(kFirstGroup2Feature); ++i)
-        SetOn(r.features[i], "ffxiv_dx11.exe: identified by name and shader CRC, no executable address is read");
+        SetOn(r.features[i], in.exactKnownBuild ? "exact known build (PE stamp and size): identified without the exe name, no executable address is read" : "ffxiv_dx11.exe: identified by name and shader CRC, no executable address is read");
 
     // ---- Group 2
     const ResolvedBuild* rb = in.rb;
@@ -633,7 +633,7 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
     {
         if (in.exactKnownBuild && !s.forceUnknownBuild)
         {
-            // F3: the resolver itself failed on the exact known build. That says nothing about the executable, so the legacy decision runs for Group 2
+            // The resolver itself failed on the exact known build. That says nothing about the executable, so the legacy decision runs for Group 2
             // (the compile-time table and the old byte guards decide, as under FfxivLegacyGameBuild). The forced-unknown debug key asked for the
             // resolver's own values and stays off; an unknown build stays off.
             r.known = true;
@@ -757,15 +757,23 @@ inline std::vector<std::string> UnhealedOffsets(const ResolvedBuild& rb, const R
     return out;
 }
 
-inline std::string FormatNotSelfHealing(const ResolvedBuild& rb, const Registry& reg)
+inline std::string FormatNotSelfHealing(const ResolvedBuild& rb, const Registry& reg, bool knownBuild)
 {
     const std::vector<std::string> list = UnhealedOffsets(rb, reg);
     std::string line = "[ffxiv-gate] not self-healing: " + std::to_string(list.size()) + " struct offsets keep their table values on this build (" +
-                       std::string(rb.knownBuild ? "known build, table verified offline" : "UNKNOWN build: a patch that moved one of them is not followed") + "): ";
+                       std::string(knownBuild ? "known build, table verified offline" : "UNKNOWN build: a patch that moved one of them is not followed") + "): ";
     for (std::size_t i = 0; i < list.size(); ++i)
         line += (i ? ", " : "") + list[i];
     line += ". Decoded and range-checked but pinned, not healed: nativeQuality.contextCacheOffset, charaView.targetsOffset and every jitterSource offset "
             "(a moved one refuses the hook).";
     return line;
+}
+
+// The result's own mark, for the callers that log a resolve that ran (the tests and the unknown-build path):
+// there the result is the verdict. The gate block passes the gate's verdict instead (FormatGateBlock below),
+// so a failed resolve on the exact known build still reads as the known build it runs on.
+inline std::string FormatNotSelfHealing(const ResolvedBuild& rb, const Registry& reg)
+{
+    return FormatNotSelfHealing(rb, reg, rb.knownBuild);
 }
 } // namespace ext::ffxiv::resolve

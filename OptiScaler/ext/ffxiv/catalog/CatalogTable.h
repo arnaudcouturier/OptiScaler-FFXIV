@@ -124,10 +124,12 @@ constexpr const CatalogInfo& Info(Catalog c) { return kInfo[static_cast<size_t>(
 // One bit per UI entry (bit i = table::kUi[i] was created).
 inline constexpr uint32_t kUiCatalogMask = (1u << (sizeof(table::kUi) / sizeof(table::kUi[0]))) - 1;
 
-// The exact set of UI shaders a healthy build creates. 0 = NOT PINNED YET: which 6 of the 7 a healthy build creates is unknown (no log
-// ever printed a UI CRC). After one real run, the `[ffxiv-catalog] first seen` lines show it: set this to the OR of (1u << index) of the
-// UI entries that appeared, e.g. 0x3Fu, and the rule becomes "all of these were created" instead of "6 of 7 were created".
-inline constexpr uint32_t kUiRequiredMask = 0;
+// The exact set of UI shaders a healthy build creates: every bit in 0x5F. Three real runs created all of ui0, ui1, ui2, ui3, ui4 and ui6
+// (ui3 arrives late, with the scene, but in every run); ui5 (crc 0xe95deec4) never appeared in the 2026-10-26 run, so it stays out of the set.
+// The rule is "all of these were created" instead of "6 of 7 were created"; 0 would mean not pinned yet.
+inline constexpr uint32_t kUiRequiredMask = 0x5F; // ui0, ui1, ui2, ui3, ui4, ui6; ui5 is scene-dependent
+static_assert((kUiRequiredMask & ~kUiCatalogMask) == 0, "the pinned UI set names only catalogued entries");
+static_assert(std::popcount(kUiRequiredMask) == kUiCatalogHealthyMin, "the pinned UI set keeps the healthy threshold at 6");
 
 // Is the UI catalog complete enough for the HUD-less boundary source to be trusted? A partial set is the dangerous case: R1b can then
 // fire on a later UI draw than the real first HUD draw and the "UI-free" capture would contain HUD pixels.

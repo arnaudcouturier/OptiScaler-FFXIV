@@ -325,7 +325,12 @@ class Ledger
                     continue;
                 const Entry& e = info.entries[i];
                 std::string line = Fmt("[ffxiv-catalog] %s #%u (%s) crc=0x%08x missing", info.name, static_cast<unsigned>(i), e.name, e.crc);
-                if (info.healthyMin != 0 && have >= info.healthyMin)
+                // Health is the pinned required set, not the count: a session that created ui5 but not ui3 holds 6 of 7
+                // yet is in FALLBACK, so its missing-ui3 line must not claim the healthy baseline.
+                const bool catalogHealthy = c == static_cast<size_t>(Catalog::Ui) && kUiRequiredMask != 0
+                    ? UiCatalogHealthy(mask[c])
+                    : (info.healthyMin != 0 && have >= info.healthyMin);
+                if (catalogHealthy)
                     line += Fmt(" (within the healthy baseline of %u)", info.healthyMin);
                 if (e.refFingerprint == 0)
                     line += "; no reference fingerprint, no candidate can be named";
@@ -370,9 +375,22 @@ class Ledger
         {
             const CatalogInfo& info = _tables[c];
             const unsigned have = static_cast<unsigned>(std::popcount(mask[c]));
-            if (info.healthyMin != 0 && !info.vertexShaders && have < info.healthyMin)
-                below += Fmt("%s%s %u/%u below the healthy baseline of %u", below.empty() ? "" : ", ", info.name, have, static_cast<unsigned>(info.count),
-                             info.healthyMin);
+            // The dump runs while a catalog is below its baseline; for the UI catalog that is the pinned required set,
+            // not the count, so a session holding ui5 instead of ui3 still dumps.
+            const bool belowBaseline = c == static_cast<size_t>(Catalog::Ui) && kUiRequiredMask != 0
+                ? !UiCatalogHealthy(mask[c])
+                : (info.healthyMin != 0 && have < info.healthyMin);
+            if (!info.vertexShaders && belowBaseline)
+            {
+                // The UI catalog is judged by its pinned set, not a count: say so, so a 6/7 session missing a
+                // required shader does not read as "below 6".
+                if (c == static_cast<size_t>(Catalog::Ui) && kUiRequiredMask != 0)
+                    below += Fmt("%s%s %u/%u, required set of %u incomplete", below.empty() ? "" : ", ", info.name, have,
+                                 static_cast<unsigned>(info.count), static_cast<unsigned>(std::popcount(kUiRequiredMask)));
+                else
+                    below += Fmt("%s%s %u/%u below the healthy baseline of %u", below.empty() ? "" : ", ", info.name, have,
+                                 static_cast<unsigned>(info.count), info.healthyMin);
+            }
         }
         if (!below.empty())
         {

@@ -2,7 +2,7 @@
 // Anchors of P2 group 3: the source-level jitter fix (generator, camera getter, producer call, camera head, phases, strength, device
 // size), the globals those blocks load and the struct offsets / constants their instructions carry. Seam ids are `jitterSource.*`.
 //
-// OWNER: the P2 "jitter" writer. This is the ONLY resolver file that writer edits (plus its own tests under tests/ext/ffxiv/resolve/).
+// OWNER: the jitter seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 //
 // Consumers (read before writing the anchors): FfxivJitterSourceHooks.cpp / FfxivJitterSourceDetours.h / FfxivJitterSourceCore.h /
 // FfxivJitterSourceAnchors.h. The hooks: a Detour on the generator (rewrites its phase count and divides its x/y outputs by the native

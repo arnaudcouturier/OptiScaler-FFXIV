@@ -28,11 +28,12 @@
       outside OptiScaler\ stops the script with exit 5 before any archive is written; there is no switch to ignore it. One in a
       third-party library under OptiScaler\ (FidelityFX, XeSS, Direct3D 12 core) is a vendor build path: it is reported as a
       warning with the string, and the file is packed. The scan does not look at .pdb files (-IncludeSymbols packs them knowingly).
-    * Tag-first: the build embeds `git describe` of the commit it was built from (ext\ext.props, the version in the banner) as a
+    * Tag-first: the build embeds `git describe --long --dirty` of the commit it was built from (ext\ext.props, the version in the banner) as a
       NUL-terminated string in OptiScaler.dll, which is packed as winmm.dll. The script reads that string, prints it, and stops with
-      exit 6 before anything is classified or written unless it equals the tag named by -Version. The tag therefore has to exist, locally,
-      on the commit that was built: create it first, build, package, smoke test, then push the tag (docs\RELEASE.md). There is no switch
-      to skip the check; tools\package.ps1 (the development package) never calls this script.
+      exit 6 before anything is classified or written unless it reads <tag>-0-g<sha> with the tag of -Version AND that tag's commit starts
+      with <sha>. The tag therefore has to exist, locally, on the clean commit that was built: create it first, build, package, smoke test,
+      then push the tag (docs\RELEASE.md). A dirty tree or a build from any other commit fails the check. There is no switch to skip it;
+      tools\package.ps1 (the development package) never calls this script.
   After writing the archive the script extracts it to a scratch folder and checks every hash against SHA256SUMS.txt, and checks that
   -Package was not modified (its tree hash before and after).
 
@@ -52,7 +53,9 @@
 .PARAMETER Exclude
   File names or package-relative paths to leave out of the archive. Default: libxell.dll (Intel's XeLL library: its licence file does not name it, so it is not redistributed; pass -Exclude @() to pack it anyway).
 .PARAMETER OutDir
-  Output folder, default <repo>\dist. A .gitignore containing "*" is written there so the archive can never be committed by accident.
+  Output folder, default <repo>\dist (this script's own checkout, not -RepoRoot). A .gitignore containing "*" is written there so the archive can never be committed by accident.
+.PARAMETER RepoRoot
+  Repository the tag checks (the git rev-parse of the tag) run against, default the checkout this script lives in. A test points it at a scratch repo to exercise the tag checks without touching the real checkout.
 .EXAMPLE
   pwsh -File tools\package.ps1 -Target C:\work\pkg ; pwsh -File tools\package-release.ps1 -Package C:\work\pkg -Version ffxiv-2026.10.23-d9b62110
 #>
@@ -63,12 +66,14 @@ param(
     [Parameter(Mandatory)][string]$Version,
     [string]$OutDir,
     [switch]$IncludeSymbols,
-    [string[]]$Exclude = @('libxell.dll')
+    [string[]]$Exclude = @('libxell.dll'),
+    [string]$RepoRoot
 )
 
 $ErrorActionPreference = 'Stop'
 function Fail([string]$Message, [int]$Code) { Write-Host "[release] $Message" -ForegroundColor Red; exit $Code }
 $root = Split-Path -Parent $PSScriptRoot
+$tagRoot = if ($RepoRoot) { $RepoRoot } else { $root }  # only the tag checks run here; every content file still comes from the script's own checkout
 if (-not $OutDir) { $OutDir = Join-Path $root 'dist' }
 
 if ($Version -cnotmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(-rc\d+)?$') {
@@ -81,14 +86,15 @@ foreach ($need in 'OptiScaler.dll', 'OptiScaler.ini', 'nvngx.dll_dlssnr.dll', 's
 }
 $tag = if ($Version.StartsWith('ffxiv-', [StringComparison]::Ordinal)) { $Version } else { "ffxiv-$Version" }
 
-# ---------------------------------------------------------------- tag-first: the DLL has to carry the tag's name
-# The build writes `git describe --tags --always --match "ffxiv-*"` of the commit it was built from into OptiScaler.dll as a C string
-# literal (ext\ext.props; the banner prints it). On the tagged commit it is the tag; on a later commit it reads <tag>-<n>-g<sha>, and a build
-# made before the new tag existed carries the previous tag in that form; with no ffxiv-* tag reachable it is a bare sha. The archive is
-# named by the tag, so the DLL has to say the same: the bytes that were smoke-tested are the bytes that ship. Only a string that stands on
-# its own (a NUL before and after) and has the shape of a describe result counts, so the tag quoted inside a longer text does not.
+# ---------------------------------------------------------------- tag-first: the DLL has to carry the tag's name and tree
+# The build writes `git describe --tags --long --dirty --always --match "ffxiv-*"` of the commit it was built from into OptiScaler.dll as a C string
+# literal (ext\ext.props; the banner prints it). On the tagged commit it reads <tag>-0-g<sha>; on a later commit <tag>-<n>-g<sha>; a dirty tree appends -dirty;
+# a build made before the new tag existed carries the previous tag in that form; with no ffxiv-* tag reachable it is a bare sha. The archive is
+# named by the tag, so the DLL has to say the same, and the tag's commit has to be the commit the DLL was built from: the bytes that were
+# smoke-tested are the bytes that ship. Only a string that stands on its own (a NUL before and after) with the long describe shape counts,
+# so the tag quoted inside a longer text does not.
 # Nothing has been written yet at this point.
-$describeShape = [regex]::new('ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?(?:-\d+-g[0-9a-f]{7,40})?(?=\x00)', 'CultureInvariant, Compiled')
+$describeShape = [regex]::new('ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?-\d+-g[0-9a-f]{7,40}(?:-dirty)?(?=\x00)', 'CultureInvariant, Compiled')
 $dllText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes((Join-Path $Package 'OptiScaler.dll')))   # one char per byte
 $found = [System.Collections.Generic.List[string]]::new()
 foreach ($m in $describeShape.Matches($dllText)) {
@@ -97,16 +103,33 @@ foreach ($m in $describeShape.Matches($dllText)) {
 }
 $embedded = @($found)
 if ($embedded.Count -eq 0) {
-    Fail ("no version string found in OptiScaler.dll (packed as winmm.dll): the DLL was built before the tag, or no ffxiv-* tag was reachable from the commit it was built on. " +
+    Fail ("no long-form version string found in OptiScaler.dll (packed as winmm.dll): the DLL was built before the --long stamp, before the tag, or no ffxiv-* tag was reachable from the commit it was built on. " +
           "Create the annotated tag $tag on the commit to be tested, rebuild, package again (docs\RELEASE.md section 1).") 6
 }
 foreach ($e in $embedded) { Write-Host "[release] embedded version string (OptiScaler.dll, packed as winmm.dll): $e" }
 if ($embedded.Count -gt 1) {
     Fail "OptiScaler.dll holds $($embedded.Count) different version strings (listed above), so the one the build embedded cannot be told apart." 6
 }
-if ($embedded[0] -cne $tag) {
+if ($embedded[0] -match '-dirty$') {
+    Fail ("OptiScaler.dll was built from a dirty tree (it carries '$($embedded[0])'): uncommitted changes are baked into those bytes, so the tag cannot vouch for them. " +
+          "Commit or stash every change, recreate the annotated tag on the clean commit, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
+}
+$em = [regex]::Match($embedded[0], '^(ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?)-(\d+)-g([0-9a-f]{7,40})$')
+if (-not $em.Success -or $em.Groups[1].Value -cne $tag) {
     Fail ("the DLL was built before the tag, or on another commit: it carries '$($embedded[0])' but -Version names '$tag'. " +
           "Create the annotated tag on the commit to be tested, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
+}
+if ($em.Groups[2].Value -cne '0') {
+    Fail ("the DLL was built $($em.Groups[2].Value) commits after the tag: it carries '$($embedded[0])'. " +
+          "Create the annotated tag on the commit to be tested, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
+}
+$tagCommit = (& git -C $tagRoot rev-parse --verify "$tag^{commit}" 2>$null | Select-Object -First 1)
+if (-not $tagCommit) {
+    Fail "tag '$tag' does not resolve to a commit in this checkout: fetch or recreate it before packaging." 6
+}
+if (-not $tagCommit.StartsWith($em.Groups[3].Value, [StringComparison]::OrdinalIgnoreCase)) {
+    Fail ("tag '$tag' points at $tagCommit, but the DLL was built from $($em.Groups[3].Value): the tag moved since the build. " +
+          "Recreate the annotated tag on the commit that was tested, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
 }
 
 # ---------------------------------------------------------------- classification tables

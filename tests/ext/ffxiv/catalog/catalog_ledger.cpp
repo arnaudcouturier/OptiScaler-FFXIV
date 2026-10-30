@@ -239,9 +239,9 @@ void UiHealth()
         NoteEntry(l, Catalog::Ui, i, 1);
         CHECK(!l.UiHealthy());
     }
-    NoteEntry(l, Catalog::Ui, 5, 2);
+    NoteEntry(l, Catalog::Ui, 6, 2); // the pinned sixth (ui6), not ui5
     CHECK(l.UiHealthy()); // a late creation clears the fallback, no latch
-    NoteEntry(l, Catalog::Ui, 6, 3);
+    NoteEntry(l, Catalog::Ui, 5, 3); // ui5 completes the set
     CHECK(l.UiHealthy());
 
     // Other catalogs do not count towards the UI set, uncatalogued shaders neither.
@@ -254,7 +254,10 @@ void UiHealth()
         m.NotePixelShader(g_zeros.data(), 100, 0x70000000u + i, 4);
     CHECK(!m.UiHealthy());
     CHECK_EQ(m.Mask(Catalog::Ui), 0x1Fu);
-    NoteEntry(m, Catalog::Ui, 6, 5); // which one it is does not matter (6 of 7 in any combination)
+    NoteEntry(m, Catalog::Ui, 5, 5); // ui5 without ui3: 6 of 7, still FALLBACK (not the pinned set)
+    CHECK(!m.UiHealthy());
+    CHECK_EQ(m.Mask(Catalog::Ui), 0x3Fu);
+    NoteEntry(m, Catalog::Ui, 6, 6); // the pinned sixth arrives: a superset of the pinned set is healthy
     CHECK(m.UiHealthy());
 }
 
@@ -340,12 +343,12 @@ void Settling()
 void LogLines()
 {
     Ledger l;
-    // Pixel shaders created over time: UI 0..5 (six of seven: the healthy state), all scene stages, all chara; companion 4 = 3 + ...
+    // Pixel shaders created over time: the pinned six UI entries (0,1,2,3,4,6, missing only ui5: the healthy state), all scene stages, all chara; companion 4 = 3 + ...
     for (size_t i = 0; i < 6; ++i)
     {
         Presents(l, 10);
         const Bytes b = Blob(40 + uint32_t(i));
-        l.NotePixelShader(b.data(), b.size(), Info(Catalog::Ui).entries[i].crc, 1000 + uint32_t(i) * 100);
+        l.NotePixelShader(b.data(), b.size(), Info(Catalog::Ui).entries[i == 5 ? 6 : i].crc, 1000 + uint32_t(i) * 100); // the pinned six (ui5 is scene-dependent)
     }
     NoteAll(l, Catalog::Scene, 5000);
     NoteAll(l, Catalog::Chara, 6000);
@@ -357,11 +360,11 @@ void LogLines()
     const auto first = l.Poll(40000);
     const std::string text = Joined(first);
     // one summary line with every catalog
-    CHECK_HAS(text, "[ffxiv-catalog] UI 6/7 scene 5/5 lighting 9/9 chara 9/9 companion 3/4 nameplate 3/3");
+    CHECK_HAS(text, "[ffxiv-catalog] UI 6/7 scene 5/5 lighting 9/9 chara 9/9 companion 4/4 nameplate 3/3");
     CHECK_HAS(text, "UI boundary ok");
     CHECK_EQ(CountLines(first, "[ffxiv-catalog] UI 6/7 "), 1u);
-    // one first-seen line per entry that was seen (6 + 5 + 9 + 9 + 3 + 3 companion = 35; 4 CRCs are in two catalogs and still get a line per catalog)
-    CHECK_EQ(CountLines(first, "first seen crc=0x"), 6u + 5u + 9u + 9u + 3u + 3u);
+    // one first-seen line per entry that was seen (6 + 5 + 9 + 9 + 4 + 3 companion = 36; 6 CRCs are in two catalogs and still get a line per catalog)
+    CHECK_EQ(CountLines(first, "first seen crc=0x"), 6u + 5u + 9u + 9u + 4u + 3u);
     CHECK_HAS(text, "first seen crc=0xe66dae4e name=UI:ui0 t=1000ms present=10 order=1");
     CHECK_HAS(text, "first seen crc=0xb0d428d9 name=UI:ui1 t=1100ms present=20 order=2");
     CHECK_HAS(text, "first seen crc=0x85e777ef name=scene:tonemap");
@@ -373,10 +376,10 @@ void LogLines()
     CHECK_HAS(text, " size=");
     CHECK_HAS(text, " chunks=ISGN:");
     CHECK_HAS(text, "model=ps_5_0");
-    // the one missing UI shader is listed, as within the baseline; the other catalogs have all their entries (companion 3/4)
-    CHECK_HAS(text, "UI #6 (ui6) crc=0x6ca9bb69 missing (within the healthy baseline of 6)");
-    CHECK_HAS(text, "companion #1 (layout4) crc=0x6ca9bb69 missing");
-    CHECK_EQ(CountLines(first, " missing"), 2u);
+    // the one missing UI shader (ui5) is listed, as within the baseline; every other catalog has all its entries
+    CHECK_HAS(text, "UI #5 (ui5) crc=0xe95deec4 missing (within the healthy baseline of 6)");
+    CHECK(text.find("companion #") == std::string::npos); // companion is complete (all four are UI shaders of the pinned six)
+    CHECK_EQ(CountLines(first, " missing"), 1u); // only the ui5 line
     // healthy: no uncatalogued dump
     CHECK_EQ(CountLines(first, "uncatalogued #"), 0u);
 
@@ -385,13 +388,13 @@ void LogLines()
 
     // ...and a changed count logs the summary again plus ONLY the new CRC.
     const Bytes late = Blob(77);
-    l.NotePixelShader(late.data(), late.size(), Info(Catalog::Ui).entries[6].crc, 45000);
+    l.NotePixelShader(late.data(), late.size(), Info(Catalog::Ui).entries[5].crc, 45000); // the late ui5 completes the set
     const auto second = l.Poll(46000);
     const std::string text2 = Joined(second);
     CHECK_HAS(text2, "[ffxiv-catalog] UI 7/7 scene 5/5 lighting 9/9 chara 9/9 companion 4/4 nameplate 3/3");
-    CHECK_EQ(CountLines(second, "first seen crc=0x"), 2u); // ui6 and companion layout4
-    CHECK_HAS(text2, "first seen crc=0x6ca9bb69 name=UI:ui6 t=45000ms");
-    CHECK_HAS(text2, "first seen crc=0x6ca9bb69 name=companion:layout4 t=45000ms");
+    CHECK_EQ(CountLines(second, "first seen crc=0x"), 1u); // only ui5 (companion was already complete)
+    CHECK_HAS(text2, "first seen crc=0xe95deec4 name=UI:ui5 t=45000ms");
+    CHECK_EQ(CountLines(second, "name=companion:"), 0u); // no companion entry is new
     CHECK_EQ(CountLines(second, "fingerprint crc=0x"), 1u);
     CHECK_EQ(CountLines(second, " missing"), 0u);
     CHECK(l.Poll(47000).empty());
@@ -421,7 +424,7 @@ void NameplateNotes()
 void NearMiss()
 {
     // a table copy with a reference fingerprint on UI #3
-    const Bytes recompiled = Blob(123); // what UI #3 became after a "patch"
+    const Bytes recompiled = Blob(123); // the recompiled UI #3 after a "patch"
     const Bytes other = Blob(321);
     const uint64_t ref = Fingerprint(recompiled.data(), recompiled.size()).hash;
     CHECK(ref != 0);
@@ -444,7 +447,7 @@ void NearMiss()
 
     const auto lines = l.Poll(40000);
     const std::string text = Joined(lines);
-    CHECK_HAS(text, "UI boundary FALLBACK");
+    CHECK_HAS(text, "UI boundary FALLBACK (UI 5/7, needs the pinned set: HUD-less reports NoBoundaryThisFrame until it is complete)");
     CHECK_HAS(text, "UI #3 (ui3) crc=0x712eb335 missing");
     CHECK_HAS(text, "UI #5 (ui5) crc=0xe95deec4 missing; no reference fingerprint");
     // the candidate: equal fingerprint only
@@ -453,8 +456,8 @@ void NearMiss()
     CHECK(text.find("candidate crc=0xdead0002") == std::string::npos);
     CHECK(text.find("candidate crc=0xdead0003") == std::string::npos);
     // only UI has an established baseline: scene (0/5) and chara (0/9) are empty here and are NOT named as below a baseline
-    CHECK_HAS(text, "near-miss: UI 5/7 below the healthy baseline of 6; shaders created this session");
-    CHECK_EQ(CountLines(lines, "below the healthy baseline"), 1u);
+    CHECK_HAS(text, "near-miss: UI 5/7, required set of 6 incomplete; shaders created this session");
+    CHECK_EQ(CountLines(lines, "required set of 6 incomplete"), 1u);
     // the dump of the session's uncatalogued shaders, with fingerprints and creation order
     CHECK_HAS(text, "uncatalogued #6 crc=0xdead0002 fp=0x");
     CHECK_HAS(text, "uncatalogued #7 crc=0xdead0001 fp=0x");
@@ -507,7 +510,7 @@ void DumpIsCapped()
     // Healthy baseline met: never a dump, however many shaders are uncatalogued.
     Ledger h;
     for (size_t i = 0; i < 6; ++i)
-        NoteEntry(h, Catalog::Ui, i, 1);
+        NoteEntry(h, Catalog::Ui, i == 5 ? 6 : i, 1); // the pinned six (ui5 is scene-dependent)
     NoteAll(h, Catalog::Scene, 1);
     NoteAll(h, Catalog::Chara, 1);
     for (uint32_t i = 0; i < 300; ++i)
@@ -524,7 +527,7 @@ void HealthyLaunchIsQuiet()
     const Bytes b = Blob(30);
     Ledger l;
     for (size_t i = 0; i < 6; ++i)
-        NoteEntry(l, Catalog::Ui, i, 1000 + uint32_t(i));
+        NoteEntry(l, Catalog::Ui, i == 5 ? 6 : i, 1000 + uint32_t(i)); // the pinned six (ui5 is scene-dependent)
     for (size_t i = 0; i < 5; ++i)
         if (i != 2) // scene stage 3 (lut3) never appears
             NoteEntry(l, Catalog::Scene, i, 3000);
@@ -543,7 +546,7 @@ void HealthyLaunchIsQuiet()
     CHECK_HAS(text, "UI boundary ok");
     CHECK_HAS(text, "scene #2 (lut3) crc=0x27ebc404 missing");
     CHECK_HAS(text, "chara #7 (finisher) crc=0xfdb2f4fc missing");
-    CHECK_HAS(text, "UI #6 (ui6) crc=0x6ca9bb69 missing (within the healthy baseline of 6)"); // UI keeps its baseline
+    CHECK_HAS(text, "UI #5 (ui5) crc=0xe95deec4 missing (within the healthy baseline of 6)"); // UI keeps its baseline, ui5 is the one missing
     for (const auto& s : lines)
         if (s.find("scene #2") != std::string::npos || s.find("chara #7") != std::string::npos)
             CHECK(s.find("healthy baseline") == std::string::npos); // no baseline is claimed for them
@@ -555,7 +558,7 @@ void HealthyLaunchIsQuiet()
     // The same with the scene and the chara catalogs still completely empty (an early session): quiet as long as UI is healthy.
     Ledger e;
     for (size_t i = 0; i < 6; ++i)
-        NoteEntry(e, Catalog::Ui, i, 1000);
+        NoteEntry(e, Catalog::Ui, i == 5 ? 6 : i, 1000); // the pinned six (ui5 is scene-dependent)
     for (uint32_t i = 0; i < 40; ++i)
         e.NotePixelShader(b.data(), b.size(), 0x61000000u + i, 10 + i);
     Presents(e, 700);
@@ -573,8 +576,8 @@ void HealthyLaunchIsQuiet()
         u.NotePixelShader(b.data(), b.size(), 0x62000000u + i, 10 + i);
     Presents(u, 700);
     const auto bad = u.Poll(40000);
-    CHECK_HAS(Joined(bad), "near-miss: UI 5/7 below the healthy baseline of 6; shaders created");
-    CHECK_EQ(CountLines(bad, "below the healthy baseline"), 1u);
+    CHECK_HAS(Joined(bad), "near-miss: UI 5/7, required set of 6 incomplete; shaders created");
+    CHECK_EQ(CountLines(bad, "required set of 6 incomplete"), 1u);
     CHECK(CountLines(bad, "uncatalogued #") > 0);
 }
 
@@ -701,14 +704,14 @@ uint64_t HashOf(const Bytes& b) { return Fingerprint(b.data(), b.size()).hash; }
 // below-baseline dump keeps. It is still found, because once a reference exists every uncatalogued shader is compared at creation.
 void ReferenceLateMatch()
 {
-    const Bytes recompiled = Blob(123); // what UI #3 became
+    const Bytes recompiled = Blob(123); // what UI #5 became
     const Bytes other = Blob(60);
     RefTables t;
-    t.Ref(Catalog::Ui, 3, HashOf(recompiled));
+    t.Ref(Catalog::Ui, 5, HashOf(recompiled));
 
     Ledger l(t.info);
     for (size_t i = 0; i < 7; ++i)
-        if (i != 3) // UI 6 of 7: healthy, so the below-baseline dump is NOT what finds the candidate
+        if (i != 5) // the pinned six: healthy, so the below-baseline dump is NOT what finds the candidate
             NoteEntry(l, Catalog::Ui, i, 100 + uint32_t(i));
     for (uint32_t i = 0; i < 1000; ++i) // init-time shaders: 1000 distinct CRCs, none matches
         l.NotePixelShader(other.data(), other.size(), 0x80000000u + i, 200 + i);
@@ -721,10 +724,10 @@ void ReferenceLateMatch()
     const auto first = l.Poll(40000);
     const std::string text = Joined(first);
     CHECK_EQ(CountLines(first, "candidate crc=0x"), 1u);
-    CHECK_HAS(text, "UI #3 (ui3) missing; candidate crc=0xdead0001 same fingerprint");
+    CHECK_HAS(text, "UI #5 (ui5) missing; candidate crc=0xdead0001 same fingerprint");
     CHECK_HAS(text, "reference matches kept 1/16 dropped 0"); // in the summary line
     CHECK_HAS(text, "created #1007"); // 6 UI entries, then 1000 init-time shaders, then this one
-    CHECK_HAS(text, "UI #3 (ui3) crc=0x712eb335 missing (within the healthy baseline of 6); reference fp=");
+    CHECK_HAS(text, "UI #5 (ui5) crc=0xe95deec4 missing (within the healthy baseline of 6); reference fp=");
     CHECK_HAS(text, ", candidates follow");
     CHECK_EQ(CountLines(first, "uncatalogued #"), 0u); // healthy: no dump
     // it was found by the comparison at creation, not by the first-256 sample (which is full of init-time shaders)
@@ -737,7 +740,7 @@ void ReferenceLateMatch()
     l.NotePixelShader(recompiled.data(), recompiled.size(), 0xDEAD0004u, 50000);
     const auto later = l.Poll(51000);
     CHECK_EQ(CountLines(later, "candidate crc=0x"), 1u);
-    CHECK_HAS(Joined(later), "UI #3 (ui3) missing; candidate crc=0xdead0004 same fingerprint");
+    CHECK_HAS(Joined(later), "UI #5 (ui5) missing; candidate crc=0xdead0004 same fingerprint");
     CHECK(l.Poll(52000).empty());
     // the same shader created again, and again: not named again
     for (int i = 0; i < 3; ++i)
@@ -809,12 +812,12 @@ void ReferenceMatchesOnly()
     const Bytes uiNew = Blob(123);
     const Bytes charaNew = Blob(77);
     RefTables t;
-    t.Ref(Catalog::Ui, 3, HashOf(uiNew));
+    t.Ref(Catalog::Ui, 5, HashOf(uiNew));
     t.Ref(Catalog::Chara, 7, HashOf(charaNew)); // a later entry of a later catalog: the whole list is searched, not its first element
     Ledger l(t.info);
     CHECK_EQ(l.ReferenceCount(), 2u);
     for (size_t i = 0; i < 7; ++i)
-        if (i != 3)
+        if (i != 5) // all but ui5 (the reference sits on ui5 now)
             NoteEntry(l, Catalog::Ui, i, 10);
     for (size_t i = 0; i < 9; ++i)
         if (i != 7)
@@ -847,9 +850,9 @@ void ReferenceMatchesOnly()
     Presents(l, 700);
     const auto lines = l.Poll(40000);
     CHECK_EQ(CountLines(lines, "candidate crc=0x"), 2u);
-    CHECK_HAS(Joined(lines), "UI #3 (ui3) missing; candidate crc=0xcafe0001 same fingerprint");
+    CHECK_HAS(Joined(lines), "UI #5 (ui5) missing; candidate crc=0xcafe0001 same fingerprint");
     CHECK_HAS(Joined(lines), "chara #7 (finisher) missing; candidate crc=0xcafe0002 same fingerprint");
-    CHECK_EQ(CountLines(lines, "uncatalogued #"), 0u); // UI is healthy (6 of 7): no dump
+    CHECK_EQ(CountLines(lines, "uncatalogued #"), 0u); // UI is healthy (the pinned six): no dump
 }
 
 // A match for an entry that EXISTS is not kept (it is not missing, and its siblings must not use up the candidate slots); it is kept when the

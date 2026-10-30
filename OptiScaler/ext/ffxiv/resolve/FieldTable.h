@@ -1,7 +1,7 @@
 #pragma once
 // Every Rva, Offset, Guard and constant field of GameBuild (GameBuild.h) as a row: key, kind, byte offset inside GameBuild, size.
-// The resolver fills and compares the table through these rows, so a Binding names a field by key ("charaView.accessorRva") and a P2
-// writer never writes an accessor. FROZEN with the other resolver headers: a P2 writer must not edit it.
+// The resolver fills and compares the table through these rows, so a Binding names a field by key ("charaView.accessorRva") and a codegen
+// writer never writes an accessor. FROZEN with the other resolver headers: never hand-edit it.
 //
 // Kinds (derived from the field name by the generator that wrote this table; tests/ext/ffxiv/resolve/resolve_field_table.cpp reads
 // GameBuild.h and fails when a member is missing here or a row names no member, so a reshaped GameBuild cannot drift silently):

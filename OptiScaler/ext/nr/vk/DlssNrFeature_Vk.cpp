@@ -160,6 +160,10 @@ constexpr uint32_t kTimingSlots = 4;
 
 VkState g_vk;
 std::mutex g_vkMutex;
+// Guards only g_vk.lastGpuTime, on every thread that touches it. A leaf lock, never held while taking g_vkMutex
+// (the evaluation takes it inside its g_vkMutex section, the reader and the teardown take it alone), so locking the
+// teardown resets cannot deadlock against a ShutdownVk(false) that runs under the evaluation's lock.
+std::mutex g_vkTimeMutex;
 
 void Fail(const char* why)
 {
@@ -520,10 +524,10 @@ unsigned long long FramesVk() { return g_vk.frames; }
 
 bool ExposureOfferedVk() { return g_vk.exposureOffered; }
 
-// Read from the menu thread (the NR time line, the per-shader row) while the evaluation writes it under g_vkMutex.
+// Read from the menu thread (the NR time line, the per-shader row) while the evaluation writes it under g_vkTimeMutex.
 std::optional<double> LastGpuTimeVk()
 {
-    std::lock_guard<std::mutex> lock(g_vkMutex);
+    std::lock_guard<std::mutex> time(g_vkTimeMutex);
     return g_vk.lastGpuTime;
 }
 
@@ -1324,7 +1328,10 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                 // A pass that appears to have taken over a second did not; the queue was reset under
                 // it or the pair straddled a device change.
                 if (ms > 0.0 && ms < 1000.0)
+                {
+                    std::lock_guard<std::mutex> time(g_vkTimeMutex);
                     g_vk.lastGpuTime = ms;
+                }
             }
         }
     }
@@ -1407,7 +1414,10 @@ void ShutdownVk(bool deviceAlive)
         g_vk.workHeight = 0;
         g_vk.timedFrames = 0;
         g_vk.meterFrames = 0;
-        g_vk.lastGpuTime.reset();
+        {
+            std::lock_guard<std::mutex> time(g_vkTimeMutex);
+            g_vk.lastGpuTime.reset();
+        }
         g_vk.ngxInitialised = false;
         g_vk.reset = true;
         return;
@@ -1463,7 +1473,10 @@ void ShutdownVk(bool deviceAlive)
     }
 
     g_vk.timedFrames = 0;
-    g_vk.lastGpuTime.reset();
+    {
+        std::lock_guard<std::mutex> time(g_vkTimeMutex);
+        g_vk.lastGpuTime.reset();
+    }
 
     g_vk.device = VK_NULL_HANDLE;
     g_vk.width = 0;

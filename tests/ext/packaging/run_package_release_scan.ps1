@@ -4,6 +4,27 @@ param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $Repo 'tools\package-release.ps1'
 $version = 'ffxiv-2026.10.23-d9b62110'
+$rc = 'ffxiv-2026.10.23-d9b62110-rc1'
+# hermetic tag-check root: a scratch git repo under {out} with the release tag and the rc tag on two commits, so the
+# tag-commit check runs without touching the real checkout. Every Invoke-Release below points -RepoRoot at it.
+$tagRepo = Join-Path $Out 'tagroot'
+Remove-Item -LiteralPath $tagRepo -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $tagRepo | Out-Null
+& git -C $tagRepo -c init.defaultBranch=main init -q
+& git -C $tagRepo config user.email 'test@localhost'
+& git -C $tagRepo config user.name 'test'
+Set-Content -LiteralPath (Join-Path $tagRepo 'f.txt') -Value 'one' -Encoding ascii
+& git -C $tagRepo add f.txt
+& git -C $tagRepo commit -qm 'first'
+& git -C $tagRepo tag -a $version -m $version
+Set-Content -LiteralPath (Join-Path $tagRepo 'f.txt') -Value 'two' -Encoding ascii
+& git -C $tagRepo commit -qam 'second'
+& git -C $tagRepo tag -a $rc -m $rc
+$shaFinal = (& git -C $tagRepo rev-parse --verify "$version^{commit}" 2>$null | Select-Object -First 1)
+$shaRc = (& git -C $tagRepo rev-parse --verify "$rc^{commit}" 2>$null | Select-Object -First 1)
+if ($shaFinal -notmatch '^[0-9a-f]{40}$' -or $shaRc -notmatch '^[0-9a-f]{40}$') { Write-Host 'scratch tag repo setup failed'; exit 1 }
+$long = "$version-0-g" + $shaFinal.Substring(0, 12)
+$rcLong = "$rc-0-g" + $shaRc.Substring(0, 12)
 $failures = 0
 function Check([bool]$ok, [string]$what, [string]$detail = '') {
     if (-not $ok) { Write-Host "FAIL: $what $detail"; $script:failures++ }
@@ -25,8 +46,8 @@ function Add-Text([string]$path, [string]$text, [string]$encoding) {
 }
 $caseNo = 0
 # $embedded: the version string a build leaves in OptiScaler.dll, NUL-terminated on both sides like a C string literal (default: the
-# tag of the run, so a package is what a tag-first build produces); '' = no version string at all
-function New-Package([string]$embedded = $version) {
+# long form of the tag of the run, so a package is what a tag-first build produces); '' = no version string at all
+function New-Package([string]$embedded = $long) {
     $script:caseNo++
     $dir = Join-Path $Out ("pkg$script:caseNo")
     New-Filler "$dir\OptiScaler.dll" 'core'
@@ -45,7 +66,7 @@ function New-Package([string]$embedded = $version) {
 }
 function Invoke-Release([string]$pkg, [string[]]$extra = @(), [string]$ver = $version) {
     $outDir = Join-Path $Out ("dist" + $script:caseNo)
-    $text = & pwsh -NoProfile -File $script -Package $pkg -Version $ver -OutDir $outDir @extra 2>&1 | Out-String
+    $text = & pwsh -NoProfile -File $script -Package $pkg -Version $ver -OutDir $outDir -RepoRoot $tagRepo @extra 2>&1 | Out-String
     $zip = Join-Path $outDir "OptiScaler-FFXIV-$ver.zip"
     $code = $LASTEXITCODE
     $entries = @(); $install = ''
@@ -174,9 +195,11 @@ Check (($r.Entries -contains 'OptiScaler.pdb') -and ($r.Entries -contains 'nvngx
 $uninstall = $r.Install.Substring($r.Install.IndexOf("`nUNINSTALL"))
 Check ($uninstall.Contains('OptiScaler.pdb') -and $uninstall.Contains('nvngx.dll_dlssnr.pdb')) 'uninstall text names the packed .pdb files'
 
-# ---------------------------------------------------------------- tag-first: the DLL has to carry the tag's name (exit 6)
-# The build embeds `git describe` of the commit it was built from as a NUL-terminated string in OptiScaler.dll (the future winmm.dll).
-# On the tagged commit that is the tag; built before the tag existed, or later, it reads <tag>-<n>-g<sha>.
+# ---------------------------------------------------------------- tag-first: the DLL has to carry the tag's name and tree (exit 6)
+# The build embeds `git describe --long --dirty` of the commit it was built from as a NUL-terminated string in OptiScaler.dll (the future winmm.dll).
+# On the tagged commit that reads <tag>-0-g<sha>; built later it reads <tag>-<n>-g<sha> with n > 0, from a dirty tree with -dirty
+# appended. The release script refuses anything but <tag>-0-g<sha> for the tag of -Version, and the tag's commit has to start with
+# <sha> (checked with -RepoRoot against the scratch repo above).
 function Check-Refused($r, [string]$what) {
     Check ($r.Code -eq 6) "$what gives exit 6" "code $($r.Code): $($r.Text)"
     Check (-not $r.Zip) "$what writes no zip"
@@ -187,7 +210,7 @@ function Check-Refused($r, [string]$what) {
 $p = New-Package
 $r = Invoke-Release $p
 Check ($r.Code -eq 0 -and $r.Zip) 'embedded string equals -Version: packs' $r.Text
-Check ($r.Text -match 'embedded version string[^\r\n]*: ffxiv-2026\.10\.23-d9b62110\r?\n') 'the embedded string is printed when it matches' $r.Text
+Check ($r.Text -match ('embedded version string[^\r\n]*: ' + [regex]::Escape($long) + '\r?\n')) 'the embedded string is printed when it matches' $r.Text
 # the -Version argument may leave the ffxiv- prefix out
 $p = New-Package
 $r = Invoke-Release $p @() '2026.10.23-d9b62110'
@@ -198,7 +221,7 @@ $late = 'ffxiv-2026.10.23-d9b62110-2-g171bdb06'
 $p = New-Package $late
 $r = Invoke-Release $p
 Check-Refused $r 'a DLL built two commits after the tag'
-Check ($r.Text.Contains($late) -and $r.Text.Contains($version) -and $r.Text -match 'built before the tag') 'the message prints the embedded string and the tag, and says the DLL was built before the tag' $r.Text
+Check ($r.Text.Contains($late) -and $r.Text.Contains($version) -and $r.Text -match 'commits after the tag') 'the message prints the embedded string and the tag, and says the DLL was built after the tag' $r.Text
 
 # candidates: -rc1 is a different name from the final tag and from a later describe of itself
 $rc = 'ffxiv-2026.10.23-d9b62110-rc1'
@@ -206,7 +229,7 @@ $p = New-Package "$rc-2-g171bdb06"
 $r = Invoke-Release $p @() $rc
 Check-Refused $r 'an rc DLL built after its tag'
 Check ($r.Text.Contains("$rc-2-g171bdb06")) 'the message prints the rc describe string' $r.Text
-$p = New-Package $rc
+$p = New-Package $rcLong
 $r = Invoke-Release $p @() $rc
 Check ($r.Code -eq 0 -and $r.Zip) 'an rc DLL built on its tag packs' $r.Text
 $p = New-Package $rc
@@ -217,7 +240,7 @@ $r = Invoke-Release $p @() $rc
 Check-Refused $r 'a final-tag DLL packaged as the rc'
 
 # another tag
-$p = New-Package 'ffxiv-2026.10.22-d9b62110'
+$p = New-Package 'ffxiv-2026.10.22-d9b62110-0-g171bdb06'
 $r = Invoke-Release $p
 Check-Refused $r 'a DLL that carries another tag'
 
@@ -226,7 +249,7 @@ foreach ($s in 'f2a5723e', 'unknown', '') {
     $p = New-Package $s
     $r = Invoke-Release $p
     Check-Refused $r "a DLL with the version string '$s'"
-    Check ($r.Text -match 'no version string') "the message says there is no version string for '$s'" $r.Text
+    Check ($r.Text -match 'no long-form version string') "the message says there is no version string for '$s'" $r.Text
     Check ($r.Text -notmatch 'it carries') "the no-string refusal stops there, it does not fall through to the tag comparison for '$s'" $r.Text
 }
 # the tag inside a longer string is not the embedded version string (the build embeds it on its own, NUL-terminated)
@@ -236,13 +259,13 @@ $r = Invoke-Release $p
 Check-Refused $r 'the tag inside a longer string'
 # two different version strings: ambiguous, refused with both printed
 $p = New-Package
-Add-Text "$p\OptiScaler.dll" ("`0" + 'ffxiv-2026.10.22-d9b62110' + "`0") 'ascii'
+Add-Text "$p\OptiScaler.dll" ("`0" + 'ffxiv-2026.10.22-d9b62110-0-g171bdb06' + "`0") 'ascii'
 $r = Invoke-Release $p
 Check-Refused $r 'two different embedded version strings'
 Check ($r.Text.Contains('ffxiv-2026.10.22-d9b62110') -and $r.Text.Contains($version)) 'the message prints both strings' $r.Text
 # the same string twice is one string
 $p = New-Package
-Add-Text "$p\OptiScaler.dll" ("`0" + $version + "`0") 'ascii'
+Add-Text "$p\OptiScaler.dll" ("`0" + $long + "`0") 'ascii'
 $r = Invoke-Release $p
 Check ($r.Code -eq 0 -and $r.Zip) 'the same version string twice still packs' $r.Text
 # the refusal comes before anything is classified: a late DLL in a package that also holds an unclassified file is exit 6, not 3
@@ -250,6 +273,16 @@ $p = New-Package $late
 New-Filler "$p\mystery.bin" 'unknown'
 $r = Invoke-Release $p
 Check-Refused $r 'a late DLL in a package that also holds an unclassified file'
+# a dirty tree: the describe string ends in -dirty, refused before anything is written
+$p = New-Package ($long + '-dirty')
+$r = Invoke-Release $p
+Check-Refused $r 'a DLL built from a dirty tree'
+Check ($r.Text.Contains($long + '-dirty') -and $r.Text -match 'dirty tree') 'the message prints the dirty string and says the tree was dirty' $r.Text
+# a moved tag: the string is well-formed with N=0, but the tag now points at another commit
+$p = New-Package ($version + '-0-gdeadbee1')
+$r = Invoke-Release $p
+Check-Refused $r 'a DLL built before the tag moved'
+Check ($r.Text.Contains($version + '-0-gdeadbee1') -and $r.Text -match 'moved since the build') 'the message prints the string and says the tag moved' $r.Text
 
 # a refused run adds nothing to an output folder that already exists (no archive, no stage folder, no .gitignore)
 $p = New-Package $late
@@ -284,16 +317,16 @@ Check ($r.Code -eq 2 -and -not $r.OutDirExists) 'a package without OptiScaler.dl
 # the version string has to stand on its own (a NUL on each side). The longer-string case above has plain text on both sides, so it cannot
 # tell which half of the rule works: one case per side
 $p = New-Package ''
-Add-Text "$p\OptiScaler.dll" ('prefix ' + $version + "`0") 'ascii'    # NUL behind it, text in front
+Add-Text "$p\OptiScaler.dll" ('prefix ' + $long + "`0") 'ascii'    # NUL behind it, text in front
 $r = Invoke-Release $p
 Check-Refused $r 'the tag glued to text in front of it (NUL behind only)'
 $p = New-Package ''
-Add-Text "$p\OptiScaler.dll" ("`0" + $version + ' trailing') 'ascii'   # NUL in front, text behind
+Add-Text "$p\OptiScaler.dll" ("`0" + $long + ' trailing') 'ascii'   # NUL in front, text behind
 $r = Invoke-Release $p
 Check-Refused $r 'the tag glued to text behind it (NUL in front only)'
 # a string at offset 0 has no byte in front of it; the last byte of the file (a NUL here) must not stand in for it
 $p = New-Package ''
-[IO.File]::WriteAllBytes("$p\OptiScaler.dll", [Text.Encoding]::ASCII.GetBytes($version + "`0" + ('x' * 200) + "`0"))
+[IO.File]::WriteAllBytes("$p\OptiScaler.dll", [Text.Encoding]::ASCII.GetBytes($long + "`0" + ('x' * 200) + "`0"))
 $r = Invoke-Release $p
 Check-Refused $r 'the tag at the very start of the file'
 
@@ -305,5 +338,5 @@ Check ($r.Install -match 'keep running' -and $r.Install -match 'FfxivUnknownBuil
 Check ($r.Install -notmatch 'switch themselves off') 'INSTALL.txt no longer says every FFXIV feature switches itself off after a patch'
 
 if ($failures) { Write-Host "package_release_scan: $failures check(s) failed"; exit 1 }
-Write-Host 'package_release_scan: privacy scan (backslash, forward slash, doubled backslash, UTF-16LE), third-party warning, Licenses classification, tag-first version string (exit 6) passed'
+Write-Host 'package_release_scan: privacy scan (backslash, forward slash, doubled backslash, UTF-16LE), third-party warning, Licenses classification, tag-first long-form version string with hermetic -RepoRoot tag checks (exit 6: late, dirty, moved tag) passed'
 exit 0

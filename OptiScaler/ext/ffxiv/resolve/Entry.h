@@ -11,7 +11,7 @@
 //   # charaView.managerPointerRva unresolved: NotFound   (comment lines last: a field no usable seam filled)
 // A trailing " # ..." is a comment: a value line of a plain Found seam never has one.
 //
-// Only the fields a Registry binds appear: the golden test therefore grows with every seam the P2 writers register.
+// Only the fields a Registry binds appear: the golden test therefore grows with every seam registered later.
 
 #include "FieldTable.h"
 #include "ResolveTypes.h"

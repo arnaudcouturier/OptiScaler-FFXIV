@@ -562,7 +562,8 @@ void RenderMenu(float menuResScale)
         const float effectiveScaleX = shownScales.x;
         const float effectiveScaleY = shownScales.y;
         const bool aboveFull = effectiveScaleX > 1.0f || effectiveScaleY > 1.0f;
-        if (AnamorphicLatchHolds(refusal, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(), uniformShown))
+        // The latch test reads the committed keys, like the pass: dragging the Model resolution slider must not hide the refusal notice.
+        if (AnamorphicLatchHolds(refusal, nr.workingScaleX.value_or_default(), nr.workingScaleY.value_or_default(), nr.workingScale.value_or_default()))
             ImGui::TextDisabled("The model refused a size that differs per axis: working at Model resolution on both axes.");
 
         if (aboveFull)

@@ -80,9 +80,9 @@ inline std::vector<GateLine> FormatGateBlock(const GateReport& g, const Resolved
         out.push_back({ c.compared && c.agree ? LogLevel::Info : LogLevel::Warn, "[ffxiv-gate] cross-check " + c.name + buf });
     }
 
-    // only where a resolve ran and the build is not known to the table: the fixed offsets are a risk the player should be able to read
-    if (rb != nullptr && !rb->knownBuild)
-        out.push_back({ LogLevel::Warn, FormatNotSelfHealing(*rb, registry) });
+    // only where a resolve ran and the gate does not call the build known, or the legacy fallback runs on the exact known build: the fixed offsets are a risk the player should be able to read. The verdict is the gate's, not the failed result's, so a cached resolver exception on the exact known build still reads as the known build the legacy fallback runs on.
+    if (rb != nullptr && (!g.known || g.legacyFallback))
+        out.push_back({ LogLevel::Warn, FormatNotSelfHealing(*rb, registry, g.known) });
     return out;
 }
 } // namespace ext::ffxiv::resolve

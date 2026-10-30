@@ -1786,9 +1786,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nrLifetime.Record(cmdList);
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
+    // The upscaler's declared output size (the OutWidth/OutHeight parameters, else the output texture): what the model answer is
+    // resolved onto. The pixel sizes the spatial profiles are written against must follow it, not the target allocation. Post-upscale the ACTIVE rectangle below is that declared size clamped to the allocation per axis (a mismatched CopyResource is illegal in D3D12): every scratch, dispatch and copy addresses the clamped rectangle, while MakeGeometry and the readout keep the declared size; a copy-back whose sides then differ copies the clamped rectangle, never a mismatched CopyResource.
+    const unsigned int outputW = frame.OutputWidth != 0 ? frame.OutputWidth : (unsigned int) desc.Width;
+    const unsigned int outputH = frame.OutputHeight != 0 ? frame.OutputHeight : (unsigned int) desc.Height;
     const auto active = frame.BeforeUpscale
         ? DlssNr::PreSrColorExtent(desc, frame.RenderSubrectWidth, frame.RenderSubrectHeight)
-        : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { (unsigned int) desc.Width, desc.Height } };
+        : std::optional<DlssNr::ColorExtent> { DlssNr::ColorExtent { std::min(outputW, (unsigned int) desc.Width), std::min(outputH, (unsigned int) desc.Height) } };
     if (!active)
     {
         ReportSkipOnce("the pre-SR active colour size is invalid");
@@ -1920,14 +1924,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                    1u, nr.unlockPasses.value_or_default() ? DlssNr::MaxPassCount
                                                                : DlssNr::DefaultMaxPassCount);
     const unsigned int requestedPasses = configuredPasses;
-    if (!_descriptorSlots.HasCapacity(8 + 2 * requestedPasses))
-    {
-        ReportSkipOnce("GPU descriptor reservations are full; retaining the complete clean frame");
-        g_nr.reset = true;
-        device->Release();
-        return;
-    }
-
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     // What the model works at. The frame and its edit stay full resolution; only the model's input and
@@ -2054,19 +2050,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             scaleY = std::min(scaleY, g_nr.governorOut.cap);
         }
     }
-    auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
-                                                   (unsigned int) desc.Height, scaleX, scaleY, g_nr.spatialFailed);
+    auto requested = DlssNr::Spatial::MakeGeometry(requestedSettings, frame.BeforeUpscale ? width : outputW, frame.BeforeUpscale ? height : outputH, outputW,
+                                                   outputH, scaleX, scaleY, g_nr.spatialFailed);
     if (g_nr.spatialFailed && requested.layout != g_nr.applied.layout)
     {
         // A new layout gets a fresh attempt at spatial processing.
         g_nr.spatialFailed = false;
-        requested = DlssNr::Spatial::MakeGeometry(requestedSettings, width, height, (unsigned int) desc.Width,
-                                                  (unsigned int) desc.Height, scaleX, scaleY, false);
+        requested = DlssNr::Spatial::MakeGeometry(requestedSettings, frame.BeforeUpscale ? width : outputW, frame.BeforeUpscale ? height : outputH, outputW,
+                                                  outputH, scaleX, scaleY, false);
     }
     // The menu readout follows what is asked for, so a slider answers at once even while the picture waits.
     g_nr.spatialReadout = { true, requested.layout.requested, requested.spatial,
                             requested.spatial ? requested.layout.pixelShare : 1.0f, requested.workW, requested.workH,
-                            (unsigned int) desc.Width, (unsigned int) desc.Height };
+                            outputW, outputH };
 
     // The model reads its tuning once, while the feature is built, so a changed setting only takes
     // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
@@ -2113,6 +2109,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nr.spatialStatus = DlssNr::Spatial::StatusText(geometry, g_nr.spatialFailed, fusedSpatial);
     g_nr.depthAwareStatus.clear(); // set again where the resolve decides; a frame that returns early does not keep an old answer
     g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
+
+    // The reservations guard the allocations below (scratch, pass features), not the bookkeeping above: a frame skipped for
+    // lack of descriptors still feeds the readout, the status and the settle, instead of leaving last frame's answers in place;
+    // a held request keeps settling while frames are skipped.
+    if (!_descriptorSlots.HasCapacity(8 + 2 * requestedPasses))
+    {
+        ReportSkipOnce("GPU descriptor reservations are full; retaining the complete clean frame");
+        g_nr.reset = true;
+        device->Release();
+        return;
+    }
     const bool reduced = workWidth != width || workHeight != height;
     static int lastSpatialResolve = -1;
     const int spatialResolve = spatial ? (fusedSpatial ? 2 : 1) : 0;
@@ -3369,7 +3376,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     D3D12_RESOURCE_STATE_COPY_SOURCE);
             const D3D12_RESOURCE_STATES priorTargetState = targetState;
             TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
-            cmdList->CopyResource(target, g_nr.hdrCopy);
+            if (desc.Width == width && desc.Height == height) cmdList->CopyResource(target, g_nr.hdrCopy); else DlssNr::CopyActiveColor(cmdList, target, g_nr.hdrCopy, DlssNr::ColorExtent { width, height }); // the clamped rectangle: a mismatched CopyResource is illegal
             TransitionTarget(priorTargetState);
             Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3423,7 +3430,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_COPY_SOURCE);
                     TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
-                    cmdList->CopyResource(target, g_nr.hdrCopy);
+                    if (desc.Width == width && desc.Height == height) cmdList->CopyResource(target, g_nr.hdrCopy); else DlssNr::CopyActiveColor(cmdList, target, g_nr.hdrCopy, DlssNr::ColorExtent { width, height }); // the clamped rectangle: a mismatched CopyResource is illegal
                     TransitionTarget(sharpenTargetState);
                     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3653,6 +3660,15 @@ bool DispatchSceneNr(ID3D12GraphicsCommandList* cmd,ID3D12Resource* target,ID3D1
 
 #include "ext/nr/presr/DlssNr_DeferredSr.inl"
 
+// The clear keeps the last declared output size: the foveated slider ranges are written against it, so they must not jump to the 3840x2160 fallback while NR is off. Everything the last run computed goes.
+static void ClearSpatialReadout()
+{
+    const unsigned int keptW = g_nr.spatialReadout.outputW, keptH = g_nr.spatialReadout.outputH;
+    g_nr.spatialReadout = {};
+    g_nr.spatialReadout.outputW = keptW;
+    g_nr.spatialReadout.outputH = keptH;
+}
+
 void SuspendForBridgeShutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
@@ -3667,6 +3683,9 @@ void SuspendForBridgeShutdown()
     for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
     g_lastGpuTime.reset();
     g_lastNgxTime.reset();
+    ClearSpatialReadout(); // the model is gone until the bridge rebuilds it: the menu must not show its last numbers
+    g_nr.spatialStatus = "disabled";
+    g_nr.depthAwareStatus.clear();
 }
 
 void ResumeAfterBridgeInit()
@@ -3801,6 +3820,9 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             g_nr.reset = true;
             for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
         }
+        ClearSpatialReadout(); // nothing evaluated this frame: the menu must not keep showing the last run's numbers
+        g_nr.spatialStatus = "disabled";
+        g_nr.depthAwareStatus.clear();
         ReportSkipOnce(g_focusPaused.load() ? "the game window is not focused" : "it is switched off");
         return;
     }

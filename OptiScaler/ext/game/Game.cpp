@@ -2,6 +2,7 @@
 
 #include "ext/ExtFeatures.h"
 #include "ext/core/ExtConfig.h"
+#include <State.h>
 #include "ext/ffxiv/GameBuild.h"
 #include "ext/ffxiv/resolve/Gate.h"
 #include "ext/ffxiv/resolve/ModulePath.h"
@@ -82,6 +83,9 @@ const Game& SelectGame()
             LOG_INFO("FFXIV executable recognised by name on a game build the table does not know (stamp {:#x}, size {:#x}): the game-module seams that read "
                      "no executable address are on; the ones that do follow the [ffxiv-gate] lines",
                      nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
+        // The upstream FG backbuffer quirk keys on the exe name only, so it stays active on a build the table does not know, while every game-module seam that reads executable addresses is off. That mismatch is silent upstream: say it once here, where the name-recognised unknown build is already logged.
+        if (!exactBuild && (State::Instance().gameQuirks & GameQuirk::ReleaseBackbufferOnce))
+            LOG_WARN("ReleaseBackbufferOnce quirk is active by exe name on a game build the resolver does not know: the FG backbuffer is still released once while the address-reading seams stay off");
         return true;
     }();
     (void) initialized;

@@ -1,7 +1,7 @@
 #pragma once
 // Anchors of P2 group 1: native quality, the CharaView accessor and the camera global.
 //
-// OWNER: the P2 "quality" writer. This is the ONLY resolver file that writer edits (plus its own tests under tests/ext/ffxiv/resolve/).
+// OWNER: the quality seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 // It must NOT edit: ResolveTypes.h, ImageView.h, DenseImage.h, LiveImage.h, Pattern.h, Scan.h, Unwind.h, Resolver.h, ResolveLog.h,
 // Entry.h, ResolveCache.h, FieldTable.h, Registry.h, AnchorsCompanion.h, AnchorsJitter.h, GameBuild.h, CharaTable.h, Game.cpp.
 //

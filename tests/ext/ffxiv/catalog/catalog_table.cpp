@@ -5,8 +5,8 @@
 //   * the CRC values themselves, written out here independently of the production tables (a changed catalog constant must fail here);
 //   * the mirrors against their owners: UI and chara are built FROM the owner's constants, the scene stages are checked against
 //     SceneStageOfCrc, companion against the UI set (the lighting, companion and nameplate literals are checked in catalog_wiring_pins);
-//   * UiCatalogHealthy: a healthy build creates 6 of the 7 UI shaders, so the threshold is exactly 6: every mask with 6 or 7 bits
-//     is healthy, every mask with 5 or fewer is not, evaluated per call (no latch), and an exact required mask can replace the count;
+//   * UiCatalogHealthy: a healthy build creates the pinned six UI shaders (ui0, ui1, ui2, ui3, ui4, ui6; ui5 is scene-dependent), so the rule is the set, not a count
+//     healthy exactly when every required bit is set, evaluated per call (no latch), and an explicit mask or count can replace the pinned set;
 //   * refFingerprint is optional (0 = unknown) and is not part of CRC identity.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -165,17 +165,18 @@ void Baselines()
 
 void Health()
 {
-    CHECK_EQ(kUiCatalogHealthyMin, 6u); // a healthy build creates 6 of the 7 UI shaders (26 runs)
+    CHECK_EQ(kUiCatalogHealthyMin, 6u); // the pinned set keeps the healthy threshold at 6 (26 runs + the 2026-10-26 run)
     CHECK_EQ(kUiCatalogMask, 0x7Fu);
+    CHECK_EQ(kUiRequiredMask, 0x5Fu); // the pinned six (ui5 is scene-dependent); 0 would mean not pinned yet
 
-    // Every 7-bit mask: healthy exactly when 6 or 7 shaders were created. This pins the threshold from both sides.
+    // Every 7-bit mask: healthy exactly when the pinned six are all present, whatever else is set. This pins the rule from both sides.
     for (uint32_t mask = 0; mask < 128; ++mask)
-        CHECK_EQ(UiCatalogHealthy(mask) ? 1 : 0, std::popcount(mask) >= 6 ? 1 : 0);
+        CHECK_EQ(UiCatalogHealthy(mask) ? 1 : 0, (mask & 0x5Fu) == 0x5Fu ? 1 : 0);
 
-    // Spelled out: every 6-of-7 set is healthy (which 6 is not known yet), 5 is not, 7 is.
+    // Spelled out: only the 6-of-7 missing ui5 is healthy; missing any pinned entry is not, 5 is not, 7 is.
     for (uint32_t missing = 0; missing < 7; ++missing)
     {
-        CHECK(UiCatalogHealthy(kUiCatalogMask & ~(1u << missing)));
+        CHECK_EQ(UiCatalogHealthy(kUiCatalogMask & ~(1u << missing)) ? 1 : 0, missing == 5 ? 1 : 0);
         for (uint32_t second = 0; second < 7; ++second)
             if (second != missing)
                 CHECK(!UiCatalogHealthy(kUiCatalogMask & ~(1u << missing) & ~(1u << second)));
@@ -186,18 +187,21 @@ void Health()
     // Bits outside the catalog are not UI shaders.
     CHECK(!UiCatalogHealthy(0xFFFFFF80u));
     CHECK(!UiCatalogHealthy(0x1Fu | 0xFFFFFF80u)); // 5 real bits + noise
-    CHECK(UiCatalogHealthy(0x3Fu | 0xFFFFFF80u));  // 6 real bits + noise
+    CHECK(!UiCatalogHealthy(0x3Fu | 0xFFFFFF80u)); // 6 real bits + noise, ui6 missing: not the pinned set
+    CHECK(UiCatalogHealthy(0x5Fu | 0xFFFFFF80u));  // the pinned six + noise
 
     // Not latched: a late creation clears it (the function has no state; the same mask gives the same answer).
     uint32_t mask = 0x1Fu;
     CHECK(!UiCatalogHealthy(mask));
     CHECK(!UiCatalogHealthy(mask));
-    mask |= 1u << 5;
+    mask |= 1u << 5; // ui5 without ui6: 6 bits, still not the pinned set
+    CHECK(!UiCatalogHealthy(mask));
+    mask |= 1u << 6; // ui6 completes the pinned six
     CHECK(UiCatalogHealthy(mask));
     CHECK(UiCatalogHealthy(mask));
 
-    // The place to pin the exact required set once a real run shows which 6: with a required mask the count no longer matters.
-    CHECK_EQ(kUiRequiredMask, 0u); // not pinned yet (needs the per-CRC log of a real run)
+    // An explicit required mask replaces the pinned set (here a pretend one, ui0..ui5); the count then no longer matters.
+    // (the production pinned set itself is pinned above: kUiRequiredMask == 0x5F)
     const uint32_t required = 0x3Fu; // pretend the real run showed ui0..ui5
     CHECK(UiCatalogHealthy(0x3Fu, required));
     CHECK(UiCatalogHealthy(0x7Fu, required));
