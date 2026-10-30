@@ -412,8 +412,9 @@ Generic upstream bug fixes, each carried as a separate self-contained commit at 
 | 24 | D5 Streamline: one Detours transaction mutex around `Begin..Commit` in the hooking functions | `hooks/Streamline_Hooks.cpp` | 9 |
 | 25 | D5 Streamline: `eOk` guards on `slDLSSGGetState` results, clamp via `set_volatile_value` instead of overwriting the ini value | `hooks/Streamline_Hooks.cpp` | 8 |
 | 26 | Vulkan DLSS-G menu interlock: while the menu is visible on a Vulkan swapchain/overlay, force DLSS-G `eOff` + `eRetainResourcesWhenOff` and frame count 0 (`State::menuOverlayIsVulkan` set in `menu_overlay_vk.cpp`). Not covered by nightly; dead `delayMenuRenderBy` not carried | `hooks/Streamline_Hooks.cpp`, `State.h`, `menu/menu_overlay_vk.cpp` | 24 |
+| 27 | Streamline plugin loads: load the module first and take its plugin hook mutex only for the hook (all five branches), and take the catch-up's plugin mutexes with `try_to_lock`, doing its work only when it owns them. A thread that held a plugin mutex while waiting for the loader lock, against a thread that held the loader lock inside a nested load and waited for that mutex, was a deadlock (docs/notes/streamline-loader-lock-hazard.md) | `hooks/LibraryLoad_Hooks.cpp` | 45 |
 
-Count: 26 rows. Row 16 is not carried because nightly's DLSS-SR flag is already per instance. Items 1-17 and 21-25 are enumerated or implied by SEAMS 5; 18-19 and 26 are additions. Section (d)'s current `[UP]` measurement comes from `tools\footprint.ps1`; the old 718-line estimate is not used.
+Count: 27 rows. Row 16 is not carried because nightly's DLSS-SR flag is already per instance. Items 1-17 and 21-25 are enumerated or implied by SEAMS 5; 18-19 and 26 are additions. Section (d)'s current `[UP]` measurement comes from `tools\footprint.ps1`; the old 718-line estimate is not used.
 
 ## (b) `ext::Access` needs
 
