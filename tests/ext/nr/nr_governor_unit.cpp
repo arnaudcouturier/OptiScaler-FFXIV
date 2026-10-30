@@ -696,7 +696,7 @@ void CounterFreshness()
     CHECK(w.log.back().tierPct == 80);
 }
 
-// A pass pause over a second reads no-signal instead of stepping on stale timers: every timer shifts past the gap
+// A pass pause over a second holds instead of stepping on stale timers: every timer shifts past the gap
 // and the rate reseeds from what renders after it.
 void PassGap()
 {
@@ -706,7 +706,7 @@ void PassGap()
     const uint64_t before = w.t;
     w.t += 5000; // the pass does not tick for 5 s: focus pause, bridge suspended, loading
     w.Step(); // this tick reads the gap
-    CHECK(w.log.back().reason == Reason::NoSignal);
+    CHECK(w.log.back().reason == Reason::Holding);
     CHECK(w.log.back().tierPct == 0); // no step from stale timers
     const uint64_t resumed = w.t;
     w.Run(4000);
@@ -999,6 +999,7 @@ void ConstantsAndStatus()
     CHECK(kSmoothTauMs == 1000.0 && kSpikeClip == 3.0 && kMaxSampleMs == 250.0);
     CHECK(kFgStaleTicks == 4 && kPassGapMs == 1000);
     CHECK(ReasonText(Reason::Off) == std::string("off"));
+    CHECK(kKeepRegressMs == 30000);
     CHECK(ReasonText(Reason::WaitingForCount) == std::string("waiting for the frame-generation count"));
     CHECK(ReasonText(Reason::UnsupportedFg) == std::string("frame generation is not DLSS-G"));
     CHECK(ReasonText(Reason::NoSignal) == std::string("no frame-time signal"));
@@ -1027,6 +1028,197 @@ void ConstantsAndStatus()
     CHECK(StatusLine(full) == "Governor: full resolution (target 60 fps, measured 59 fps)");
 }
 
+// A keep followed by a sag inside kKeepRegressMs counts as a failed probe: the dwell doubles from the dwell in force
+// before the keep instead of resetting, so a keep-then-regress cycle backs off to the 96 s cap (at most two rebuilds
+// per 96 s there) instead of retrying every dwell. A keep the rate then holds still resets to the base.
+void KeepThenRegressDoublesFromPreKeepDwell()
+{
+    World w;
+    w.rate = 51.0;
+    w.Run(5000); // one step down to 90
+    CHECK(w.log.back().tierPct == 90);
+    const uint64_t expected[] = { 20000, 40000, 80000, 96000, 96000 };
+    for (int cycle = 0; cycle < 5; ++cycle)
+    {
+        w.rate = 70.0; // holds the target through the whole judgment
+        const int from = w.log.back().tierPct;
+        const uint64_t armed = w.t;
+        int guard = 0;
+        while (w.log.back().tierPct == from && w.t - armed < 200000 && guard++ < 30000)
+            w.Step();
+        CHECK(w.log.back().tierPct == from + 10); // the probe climbs one tier
+        const uint64_t probeAt = w.t;
+        if (w.log.back().upDwell == kUpDwellBaseMs)
+            w.Run(4500); // the first keep reads base before and after: the verdict lands ~4 s after the probe
+        else
+        {
+            guard = 0; // later keeps flip the dwell from doubled back to the base: that tick is the verdict
+            while (w.log.back().upDwell != kUpDwellBaseMs && w.t - probeAt < 60000 && guard++ < 10000)
+                w.Step();
+        }
+        CHECK(w.log.back().tierPct == from + 10); // kept: no revert
+        CHECK(w.log.back().upDwell == kUpDwellBaseMs); // the keep still resets to the base
+        const uint64_t keptAt = w.t;
+        w.rate = 40.0; // the sag the judge missed: a down step inside the window
+        guard = 0;
+        while (w.log.back().tierPct == from + 10 && w.t - keptAt < 60000 && guard++ < 10000)
+            w.Step();
+        CHECK(w.log.back().tierPct == from); // back to the tier the probe came from
+        CHECK(w.log.back().upDwell == expected[cycle]); // doubled from the dwell in force before the keep
+        CHECK(w.t - keptAt <= 10000); // the step landed on the sag, not a dwell later
+    }
+    // At the cap the cycle costs at most two rebuilds per 96 s: the probe up and the regress down.
+    const uint64_t capped = w.t;
+    w.rate = 70.0;
+    w.Run(96000);
+    size_t rebuilds = 0;
+    for (uint64_t s : w.StepTimes())
+        if (s >= capped && s < capped + 96000)
+            ++rebuilds;
+    CHECK(rebuilds <= 2);
+}
+
+// A slow sag (the rate holds well past the judge, then fades) is still a late failure inside the window, while a down
+// step after the window closes is an ordinary step: the keep's reset to the base stands.
+void SlowSagInsideWindowLateStepOutside()
+{
+    for (int late = 0; late < 2; ++late)
+    {
+        World w;
+        w.rate = 51.0;
+        w.Run(5000); // one step down to 90
+        w.rate = 70.0;
+        const uint64_t armed = w.t;
+        int guard = 0;
+        while (w.log.back().tierPct == 90 && w.t - armed < 200000 && guard++ < 30000)
+            w.Step();
+        CHECK(w.log.back().tierPct == 100);
+        w.Run(4500); // the verdict: kept at the base dwell
+        CHECK(w.log.back().tierPct == 100 && w.log.back().upDwell == kUpDwellBaseMs);
+        const uint64_t keptAt = w.t;
+        w.rate = 0.96 * w.target; // the dead zone between the lines: the tier holds, no probe, no step
+        w.Run(late ? kKeepRegressMs + 2000 : 12000); // the rate holds well past the judge
+        CHECK(w.log.back().tierPct == 100);
+        w.rate = 40.0;
+        guard = 0;
+        while (w.log.back().tierPct == 100 && w.t - keptAt < 120000 && guard++ < 30000)
+            w.Step();
+        CHECK(w.log.back().tierPct == 90);
+        if (late)
+            CHECK(w.log.back().upDwell == kUpDwellBaseMs); // outside the window: an ordinary step
+        else
+            CHECK(w.log.back().upDwell == 2 * kUpDwellBaseMs); // inside the window: a late failure
+    }
+}
+
+// A pass gap whose first tick takes a transient exit still reseeds: the exit returns its own reason, but no step
+// comes from the pre-pause average and regulation resumes on the live rate.
+void GapFirstTickTransient()
+{
+    World w;
+    w.rate = 51.0;
+    w.Run(4400); // nearly the full first down dwell is banked, no step yet
+    CHECK(w.StepTimes().empty());
+    w.t += 5000; // the pass does not tick for 5 s
+    w.fgActive = true; // generating, count not observed: the first post-pause tick takes this exit
+    w.multiplier = 0.0;
+    w.Step();
+    CHECK(w.log.back().reason == Reason::WaitingForCount); // the exit still returns its own reason
+    CHECK(w.log.back().tierPct == 0); // no step from the pre-pause average
+    w.fgActive = false; // the count arrives on the next tick
+    w.rate = 70.0; // the world improved across the pause: the old average must not step down
+    w.Run(30000);
+    CHECK(w.StepTimes().empty()); // never stepped on the stale average
+    CHECK(w.log.back().avg >= 69.0 && w.log.back().avg <= 71.0); // reseeded on the live rate
+}
+
+// Freshness is exact: three missed counter ticks are fine, the fourth reads stale.
+void StaleTickBoundary()
+{
+    World w;
+    w.fgFeature = true; // a feature owns presents
+    w.rate = 51.0;
+    w.presentsFlow = false; // the counter never advances
+    for (int i = 0; i < 4; ++i)
+        w.Step(); // adoption plus three missed ticks
+    CHECK(w.log.back().reason != Reason::NoSignal); // three missed ticks still regulate
+    CHECK(w.log.back().tierPct == 0);
+    w.Step(); // the fourth missed tick
+    CHECK(w.log.back().reason == Reason::NoSignal); // stale: the tier holds, the timers pause
+    CHECK(w.log.back().tierPct == 0);
+}
+
+// The pass gap is exact: 1000 ms between ticks ticks normally, 1001 ms reseeds.
+void PassGapBoundary()
+{
+    World exact;
+    exact.rate = 51.0;
+    exact.Run(2500); // banks about a second of the first down dwell
+    exact.t += 1000 - 8; // now - lastTick_ is exactly 1000 ms
+    exact.Step();
+    CHECK(exact.log.back().reason != Reason::NoSignal); // not a pause: the dwell keeps banking
+    exact.Run(30000);
+    CHECK(!exact.StepTimes().empty() && exact.StepTimes()[0] == 4512); // on schedule, like no gap at all
+
+    World over;
+    over.rate = 51.0;
+    over.Run(2500);
+    over.t += 1001 - 8; // now - lastTick_ is 1001 ms
+    const uint64_t resumed = over.t;
+    over.Step();
+    CHECK(over.log.back().reason == Reason::Holding); // the gap reseeds: holding, not standing down
+    CHECK(over.log.back().tierPct == 0);
+    over.Run(8000);
+    const std::vector<uint64_t> steps = over.StepTimes();
+    CHECK(steps.size() == 1);
+    if (steps.size() == 1)
+        CHECK(steps[0] - resumed >= 4400 && steps[0] - resumed <= 4700); // reseed plus the full dwell
+}
+
+// A rate pinned exactly at the 0.97x line still probes up and keeps the verdict: the arm and the verdict share it.
+void PinnedAtNinetySevenPercent()
+{
+    World w;
+    w.rate = 51.0;
+    w.Run(5000); // one step down to 90
+    CHECK(w.log.back().tierPct == 90);
+    w.rate = 58.2; // exactly 0.97x the 60 fps target
+    const uint64_t armed = w.t;
+    int guard = 0;
+    while (w.log.back().tierPct == 90 && w.t - armed < 120000 && guard++ < 20000)
+        w.Step();
+    CHECK(w.log.back().tierPct == 100); // probes even pinned at the line
+    const uint64_t probeAt = w.t;
+    guard = 0;
+    while (w.t - probeAt < 8000 && guard++ < 2000)
+        w.Step();
+    CHECK(w.log.back().tierPct == 100); // the verdict keeps it: the rate holds the line
+    CHECK(w.log.back().upDwell == kUpDwellBaseMs);
+}
+
+// Noise around the 0.95 and 0.97 lines steps neither way while the mean holds the line: the dwells never bank
+// 3 s down or 10 s up on 2 s alternations.
+void NoiseAroundLines()
+{
+    World w;
+    w.rate = 51.0;
+    w.Run(5000); // one step down to 90
+    CHECK(w.log.back().tierPct == 90);
+    for (int i = 0; i < 15; ++i) // alternates 57.3/56.7 every 2 s: the mean sits on the 0.95 line
+    {
+        w.rate = (i % 2 == 0) ? 57.3 : 56.7;
+        w.Run(2000);
+    }
+    CHECK(w.StepTimes().size() == 1); // no step down, no probe
+    for (int i = 0; i < 15; ++i) // alternates 58.5/57.9 every 2 s: the mean sits on the 0.97 line
+    {
+        w.rate = (i % 2 == 0) ? 58.5 : 57.9;
+        w.Run(2000);
+    }
+    CHECK(w.StepTimes().size() == 1); // still no probe: 2 s above the line never banks the 10 s dwell
+    CHECK(w.log.back().tierPct == 90);
+}
+
 } // namespace
 
 int main()
@@ -1051,6 +1243,13 @@ int main()
     FrameGenerationMultiplier();
     ProbeOwnsTheVerdict();
     ProbeFromFullTier();
+    KeepThenRegressDoublesFromPreKeepDwell();
+    SlowSagInsideWindowLateStepOutside();
+    GapFirstTickTransient();
+    StaleTickBoundary();
+    PassGapBoundary();
+    PinnedAtNinetySevenPercent();
+    NoiseAroundLines();
     ConstantsAndStatus();
     if (failures != 0)
     {

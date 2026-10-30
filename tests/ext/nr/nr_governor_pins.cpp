@@ -131,7 +131,7 @@ int main(int argc, char** argv)
     const size_t gateAsk = pass.find("RetirementsComplete(g_nr.governorReleaseSeq)");
     CHECK(offBranch != std::string::npos && refresh != std::string::npos && gateAsk != std::string::npos);
     CHECK(offBranch < refresh && offBranch < gateAsk);
-    CHECK(Has(pass, "if(!nr.governor.value_or_default()){g_nr.governor.Reset();g_nr.governorOut=DlssNr::Governor::Output{};}"));
+    CHECK(Has(pass, "g_nr.governorOut=DlssNr::Governor::Output{};g_nr.governorDbgHas=false;"));
     CHECK(Count(pass, "RetirementsComplete(g_nr.governorReleaseSeq)") == 1); // asked only while on
     // the feed: one read of the current feature, live activity (not selection), the observed count
     CHECK(Has(pass, "govIn.fgFeature=govFg!=nullptr;"));
@@ -141,12 +141,14 @@ int main(int argc, char** argv)
     CHECK(Has(pass, "govIn.targetFps=ext::fg::ResolveTarget(govTargetCfg,govLimit,govRefresh);"));
     // ---- the probe: one line per build, nothing else ----------------------------------------------------------------
     CHECK(Count(pass, "if(nr.governorProbe.value_or_default()&&!g_nr.governorProbeLogged&&g_nr.feature!=nullptr){") == 1);
+    CHECK(Count(pass, "nr.governor.value_or_default()") == 2); // off branch plus the menu readout: the probe never asks the key
     CHECK(Count(pass, "g_nr.governorProbeLogged=true;") == 1); // latched: one line per build
     CHECK(Count(pass, "g_nr.governorProbeLogged=false;") == 1); // a new build gets its own probe line
     CHECK(Has(pass, "governorprobe:evaluatebelowthecreatedsizeof"));
     CHECK(Has(pass, "notavailable(theNR"));
     {
         const size_t probe = pass.find("if(nr.governorProbe.value_or_default()");
+        CHECK(probe < offBranch); // independent: the probe block sits before the off branch and runs whatever Governor says
         CHECK(probe != std::string::npos);
         if (probe != std::string::npos)
         {
@@ -160,6 +162,8 @@ int main(int argc, char** argv)
     CHECK(Count(pass, "if(govIn.nowMs-g_nr.governorDbgAt>=1000)") == 1); // governor-on only, once a second
     CHECK(Has(pass, "DLSS-NRgovernor:interval"));
     CHECK(Has(pass, "govIn.fgFrame-g_nr.governorDbgFrame")); // the counter advance in the last second
+    CHECK(Count(pass, "g_nr.governorDbgHas") == 3); // off-path reset, first-line guard, latch
+    CHECK(Has(pass, "g_nr.governorDbgHas?(int64_t)(govIn.fgFrame-g_nr.governorDbgFrame):0;")); // signed, no advance on the first line
     CHECK(Has(pass, "DlssNr::Governor::ReasonText(g_nr.governorOut.reason)"));
     // ---- the VRAM gate: the mark a work-size park advances, nothing else -------------------------------------------
     CHECK(Count(pass, "g_nr.governorReleaseSeq=g_nrLifetime.RetireSeq();") == 1);
@@ -182,6 +186,8 @@ int main(int argc, char** argv)
     CHECK(Has(control, "}elseexternalStallWatch_=false;"));
     CHECK(Has(control, "if(w_.open)w_.StartOver(now);"));
     CHECK(Has(control, "}elseUpdateStall(in);")); // skipped on both ignored ticks
+    CHECK(Has(control, "recordingresumesonthenexttick")); // accepted trade: a real re-creation stall on the ignored ticks is not seen
+    CHECK(Has(control, "!ignoredTick&&st_.at4x")); // the self-test readout never takes the ignored interval
     CHECK(Has(control, "externalStall_=externalStallWatch_=false;")); // cleared while the gate is closed
     // ---- the hotkey toast: override only while per-axis keys win ------------------------------------------------------
     CHECK(Has(nrMenu, "if(PerAxisOverrides()&&!DlssNr::AnamorphicLatchHolds(toastLatch,"));

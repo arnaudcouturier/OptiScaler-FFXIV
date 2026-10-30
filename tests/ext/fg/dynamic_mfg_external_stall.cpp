@@ -34,6 +34,8 @@ struct Rig
     uint64_t t = 100000;
     int factor = 2;
     double target = 263.0; // the presented rate at 2x sits at 0.95 of this: the selector holds
+    bool selfTest = false;
+    uint32_t status = 0; // a Streamline status the fake plugin reports, 0 = clean
     std::vector<std::pair<uint64_t, std::string>> lines;
 
     Rig()
@@ -52,14 +54,14 @@ struct Rig
         in.nowMs = t;
         in.realMs = realMs;
         in.appliedFactor = factor;
-        in.selfTest = false;
+        in.selfTest = selfTest;
         in.maxCfg = 4;
         in.targetCfg = target;
         in.limit = 0.0;
         in.refresh = 240.0;
         in.gate = gate;
         in.stateValid = true;
-        in.slStatus = 0;
+        in.slStatus = status;
         in.presented = (uint32_t) factor;
         in.detectedGenerated = factor - 1;
         in.paused = false;
@@ -203,6 +205,69 @@ void WatchRestartsAndStallSkipped()
         CHECK(settled > csettled); // the restarted watch judges later than the untouched one
 }
 
+// Positive control: a real status fault that persists past a rebuild is still caught. The two ignored ticks
+// restart the watch and record nothing, but recording resumes on the next tick, so a fault that is still there
+// builds its run and is convicted at the next verdict.
+void PersistentStatusFaultAfterRebuildIsStillCaught()
+{
+    Rig seam;
+    seam.RunMs(5000, 8.0);
+    const uint64_t swAt = seam.SwitchUp();
+    CHECK(swAt != 0 && seam.factor == 3);
+    seam.c.NoteExternalStall();
+    seam.Step(190.0);
+    seam.Step(190.0); // the rebuild's own intervals: ignored, the watch starts over twice
+    seam.status = 1; // a real Streamline fault, still present on the next tick
+    seam.RunMs(3000, 8.0);
+    CHECK(seam.factor == 2); // convicted: back to the last good count
+    CHECK(seam.Has("automatic mode stopped")); // ...and automatic mode stopped
+    (void) swAt;
+}
+
+// A rebuild on every tick keeps the watch unjudged: after kStallGiveUpMs it ends as unknown, with no strike
+// and the count staying where the switch left it.
+void RepeatedRebuildsReachGiveUp()
+{
+    Rig seam;
+    seam.RunMs(5000, 8.0);
+    const uint64_t swAt = seam.SwitchUp();
+    CHECK(swAt != 0 && seam.factor == 3);
+    int guard = 0;
+    while (seam.t - swAt < 5200 && guard++ < 2000)
+    {
+        seam.c.NoteExternalStall();
+        seam.Step(8.0);
+        seam.Step(8.0); // every interval is ignored: the watch restarts faster than the verdict
+    }
+    CHECK(seam.Has("skipped, the game was stalled")); // unknown, not a signature
+    CHECK(seam.factor == 3); // the count stays
+    CHECK(!seam.Has("cost a") && !seam.Has("automatic mode stopped")); // no strike, no stop
+    CHECK(seam.c.CostlyCount() == 0);
+}
+
+// A rebuild during the self-test changes neither the verdict nor the refresh-bound readout: the ignored
+// intervals feed neither the watch nor the at-4x mean.
+void RebuildDuringSelfTest()
+{
+    Rig seam;
+    seam.selfTest = true;
+    seam.RunMs(21000, 8.0); // 20 s of calm: the test starts
+    CHECK(seam.Has("AutoMFG self-test: started"));
+    int guard = 0;
+    while (seam.factor != 4 && guard++ < 20000)
+        seam.Step(8.0); // the cycle climbs to 4x on its own
+    CHECK(seam.factor == 4);
+    const uint64_t at4x = seam.t;
+    while (seam.t < at4x + 3500 && guard++ < 20000)
+        seam.Step(8.0); // into the measured second half of the 4x step
+    seam.c.NoteExternalStall();
+    seam.Step(190.0);
+    seam.Step(190.0); // the rebuild's own intervals: ignored by the watch and the readout
+    seam.RunMs(60000, 8.0);
+    CHECK(seam.Has("AutoMFG self-test: PASS")); // pass/fail unchanged
+    CHECK(seam.Has("at 4x real interval 8.0 ms")); // the readout never took the hitch
+}
+
 } // namespace
 
 int main()
@@ -211,6 +276,9 @@ int main()
     GateClosedClearsPendingStall();
     StallAverageSkippedOnBothTicks();
     WatchRestartsAndStallSkipped();
+    PersistentStatusFaultAfterRebuildIsStillCaught();
+    RepeatedRebuildsReachGiveUp();
+    RebuildDuringSelfTest();
     if (failures != 0)
     {
         std::printf("%d check(s) failed\n", failures);

@@ -21,7 +21,8 @@ namespace DlssNr::Governor
 inline constexpr float kTiers[] = { 1.0f, 0.90f, 0.80f, 0.70f, 0.60f, 0.50f };
 inline constexpr int kTierCount = 6;
 // At least 3 s below the band before stepping down; at least 10 s above it before probing one tier up. The up dwell
-// doubles on every failed probe, up to the cap, and returns to the base on a ceiling change.
+// doubles on every failed probe, up to the cap, and returns to the base on a kept probe or a ceiling change: a down
+// step within kKeepRegressMs of a keep counts as a failed probe and doubles from the dwell in force before the keep.
 inline constexpr uint64_t kStepDownDwellMs = 3000;
 inline constexpr uint64_t kUpDwellBaseMs = 10000;
 inline constexpr uint64_t kUpDwellMaxMs = 96000;
@@ -61,6 +62,11 @@ inline constexpr unsigned kFgStaleTicks = 4;
 // Longer than this between two pass ticks is a pause (focus loss, bridge suspended, loading): the AutoMFG
 // kGapMs rule. No step is ever decided on timers that sat through one.
 inline constexpr uint64_t kPassGapMs = 1000;
+// A down step this soon after a keep is the probe failing late: the sag the 2 s judge missed (a boost clock fading,
+// a GPU warming up over several seconds, a heavier scene). The window is three times the base up dwell, so a sag that
+// takes up to ~25 s to show (plus the 3 s down dwell) is still caught; a wrongly doubled dwell only delays the next
+// probe, which is cheap. A keep that survives this long held for real; with a constant rate it still resets to base.
+inline constexpr uint64_t kKeepRegressMs = 30000;
 
 // Why the governor holds its tier or stands down; the status line quotes the text.
 enum class Reason : uint8_t
@@ -133,7 +139,8 @@ struct Output
     int tierPct = 0;           // the tier as a whole percent (100/90/80/70/60/50), 0 when uncapped
     double measuredFps = 0.0;  // the smoothed displayed rate, 0 while nothing valid has been seen
     double targetFps = 0.0;    // the target this tick decided against
-    uint64_t upDwellMs = kUpDwellBaseMs; // the up dwell in force (grows on failed probes, resets on ceiling change)
+    uint64_t upDwellMs = kUpDwellBaseMs; // the up dwell in force (grows on failed probes and keep-then-regress
+                                       // steps, resets on a kept probe or a ceiling change)
     Reason reason = Reason::Off;
 };
 
@@ -204,6 +211,17 @@ class Governor
             out.reason = reason_;
             return out;
         }
+        // The pass did not tick for over a second (focus pause, bridge suspended, loading): no step from
+        // stale timers. Every timer shifts past the gap like a transient freeze, then the transition window
+        // drops the pre-pause average so the rate reseeds from what renders after it. The transient exits
+        // below still return their own reason; the timers are already shifted and the discard already runs.
+        if (lastTick_ != kUnset && in.nowMs > lastTick_ && in.nowMs - lastTick_ > kPassGapMs)
+        {
+            ShiftTimers(in.nowMs - lastTick_);
+            StartDiscard(in.nowMs);
+            lastTick_ = in.nowMs;
+            reason_ = Reason::Holding; // the tier holds through the transition, then the numbers speak
+        }
         if (in.unsupportedFg)
         {
             Freeze(in.nowMs, Reason::UnsupportedFg);
@@ -217,16 +235,6 @@ class Governor
         if (!(in.targetFps > 0.0))
         {
             Freeze(in.nowMs, Reason::NoTarget);
-            return Finish(out, in.nowMs);
-        }
-        // The pass did not tick for over a second (focus pause, bridge suspended, loading): no step from
-        // stale timers. Every timer shifts past the gap like a transient freeze, then the transition window
-        // drops the pre-pause average so the rate reseeds from what renders after it.
-        if (lastTick_ != kUnset && in.nowMs > lastTick_ && in.nowMs - lastTick_ > kPassGapMs)
-        {
-            ShiftTimers(in.nowMs - lastTick_);
-            StartDiscard(in.nowMs);
-            reason_ = Reason::NoSignal;
             return Finish(out, in.nowMs);
         }
         // Signal freshness. The frame-time signal freezes on exactly one live path: the D3D11 wrap path stops
@@ -322,15 +330,26 @@ class Governor
             if (avg_ >= kProbeKeep * in.targetFps)
             {
                 // The higher tier holds the target: it is the new baseline, and the next probe waits the base dwell.
+                // A down step soon after this keep is the probe failing late, so the dwell in force now is kept for
+                // the regress rule below instead of being forgotten with the reset.
                 probeOpen_ = false;
                 probeJudgeFrom_ = kUnset;
+                keptFrom_ = upDwellMs_;
+                keptAt_ = in.nowMs;
                 upDwellMs_ = kUpDwellBaseMs;
                 belowSince_ = aboveSince_ = kUnset;
             }
             else
             {
-                // The probe failed: back to the tier it came from, and the next probe waits twice as long.
-                upDwellMs_ = std::min(upDwellMs_ * 2, kUpDwellMaxMs);
+                // The probe failed: back to the tier it came from, and the next probe waits twice as long. A keep
+                // just before it is the same failure one probe later: double from the dwell in force before the keep.
+                uint64_t doubled = std::min(upDwellMs_ * 2, kUpDwellMaxMs);
+                if (keptAt_ != kUnset && in.nowMs >= keptAt_ && in.nowMs - keptAt_ <= kKeepRegressMs)
+                {
+                    doubled = std::max(doubled, std::min(keptFrom_ * 2, kUpDwellMaxMs));
+                    keptAt_ = kUnset;
+                }
+                upDwellMs_ = doubled;
                 const int back = probeFrom_;
                 probeOpen_ = false;
                 probeJudgeFrom_ = kUnset;
@@ -360,6 +379,13 @@ class Governor
             if (in.nowMs - belowSince_ >= kStepDownDwellMs &&
                 (dwellStart_ == kUnset || in.nowMs - dwellStart_ >= kStepDownDwellMs))
             {
+                // A keep just before this step is a failed probe with a slow verdict: double from the dwell in
+                // force before the keep, not from the reset base, or the climb retries every dwell forever.
+                if (keptAt_ != kUnset && in.nowMs >= keptAt_ && in.nowMs - keptAt_ <= kKeepRegressMs)
+                {
+                    upDwellMs_ = std::min(keptFrom_ * 2, kUpDwellMaxMs);
+                    keptAt_ = kUnset;
+                }
                 if (tier_ < 0)
                 {
                     const int next = FirstStepForCeiling(ceiling);
@@ -420,6 +446,8 @@ class Governor
         probeFrom_ = -1;
         probeJudgeFrom_ = kUnset;
         upDwellMs_ = kUpDwellBaseMs;
+        keptAt_ = kUnset;
+        keptFrom_ = kUpDwellBaseMs;
         appliedSeq_ = 0;
         appliedWorkW_ = appliedWorkH_ = 0;
         haveApplied_ = false;
@@ -456,6 +484,7 @@ class Governor
         shift(seedUntil_);
         shift(probeJudgeFrom_);
         shift(avgAt_);
+        shift(keptAt_); // a pause does not consume the keep-then-regress window
     }
 
     // A transient stand-down: the tier and the cap stay, every timer pauses past the gap, and the average
@@ -476,6 +505,8 @@ class Governor
         probeFrom_ = -1;
         probeJudgeFrom_ = kUnset;
         upDwellMs_ = kUpDwellBaseMs;
+        keptAt_ = kUnset;
+        keptFrom_ = kUpDwellBaseMs;
         dwellStart_ = kUnset;
         belowSince_ = aboveSince_ = kUnset;
         lastTick_ = now;
@@ -507,6 +538,8 @@ class Governor
         probeFrom_ = -1;
         probeJudgeFrom_ = kUnset;
         upDwellMs_ = kUpDwellBaseMs;
+        keptAt_ = kUnset; // a new ceiling is a new regime: no late verdict from the old one
+        keptFrom_ = kUpDwellBaseMs;
         dwellStart_ = now;
         lastTick_ = now;
         StartDiscard(now);
@@ -604,6 +637,8 @@ class Governor
     int probeFrom_ = -1;         // the tier the open probe came from
     uint64_t probeJudgeFrom_ = kUnset; // the verdict window runs on the applied size, from here
     uint64_t upDwellMs_ = kUpDwellBaseMs;
+    uint64_t keptAt_ = kUnset;             // the last kept probe: a down step soon after it failed late
+    uint64_t keptFrom_ = kUpDwellBaseMs;   // the up dwell in force before that keep (the regress step doubles from it)
     uint64_t appliedSeq_ = 0; // the last parked-retirements mark seen
     unsigned appliedWorkW_ = 0, appliedWorkH_ = 0;
     bool haveApplied_ = false;

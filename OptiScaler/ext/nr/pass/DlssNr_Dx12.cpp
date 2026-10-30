@@ -203,6 +203,7 @@ struct NrState
     uint64_t governorRefreshAt = 0;
     uint64_t governorDbgAt = 0;    // the last once-a-second governor debug line, ms
     uint64_t governorDbgFrame = 0; // the present counter at that line (its advance is the freshness state)
+    bool governorDbgHas = false;   // a debug line has run: the next one can print an advance
     std::string spatialStatus = "disabled";
     std::string depthAwareStatus; // the depth-aware enlargement: empty while its key is off
     ID3D12Resource *spatialColor = nullptr, *spatialDepth = nullptr, *spatialMotion = nullptr;
@@ -1951,12 +1952,26 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the settle below all read the capped size while the menu readout keeps showing what is asked for. Never a
     // config write: nr.workingScale and every other ext::Cfg() member are only read on this path.
     {
-        // Off: the user value runs untouched. Nothing is read here (no display-refresh query, no VRAM gate):
+        // The default-off probe answers for a later play session whether the model can evaluate below its created
+        // size. It runs whatever Governor says: the key is independent of it. The forwarder takes the created size
+        // as raw width and height and exposes no documented dynamic-resolution or render-subrect parameter, so there
+        // is nothing to ask through: one line per build, never a rebuild, a latch change or a model failure, and the
+        // governor keeps the rebuild-per-step path.
+        if (nr.governorProbe.value_or_default() && !g_nr.governorProbeLogged && g_nr.feature != nullptr)
+        {
+            g_nr.governorProbeLogged = true;
+            LOG_INFO("DLSS-NR governor probe: evaluate below the created size of {}x{}: not available (the NR "
+                     "forwarder takes the created size as raw width and height; no documented dynamic-resolution or "
+                     "render-subrect parameter exists, so the governor keeps the rebuild-per-step path)",
+                     g_nr.workWidth, g_nr.workHeight);
+        }
+        // Off: the user value runs untouched. Nothing else is read here (no display-refresh query, no VRAM gate):
         // this ticks on the render thread under the NR lock, so an off governor costs a reset, nothing more.
         if (!nr.governor.value_or_default())
         {
             g_nr.governor.Reset();
             g_nr.governorOut = DlssNr::Governor::Output {};
+            g_nr.governorDbgHas = false; // no previous value: the next on-tick prints no advance
         }
         else
         {
@@ -2022,26 +2037,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (govIn.nowMs - g_nr.governorDbgAt >= 1000)
             {
                 g_nr.governorDbgAt = govIn.nowMs;
-                const uint64_t govFrames = govIn.fgFrame - g_nr.governorDbgFrame;
+                // Signed: a swapchain recreate restarts the counter and the unsigned wrap would read as a flood. The first line
+                // after the key is switched on has no previous value and prints no advance.
+                const int64_t govFrames = g_nr.governorDbgHas ? (int64_t) (govIn.fgFrame - g_nr.governorDbgFrame) : 0;
                 g_nr.governorDbgFrame = govIn.fgFrame;
+                g_nr.governorDbgHas = true;
                 // Info level on purpose: once a second and only while the governor is on, and the only evidence a
                 // session log carries that the present counter advances on the game's path.
                 LOG_INFO("DLSS-NR governor: interval {:.3f} ms, multiplier x{}, fg frame {} (+{} in the last "
                           "second) -> {}",
                           govIn.intervalMs, govIn.multiplier, govIn.fgFrame, govFrames,
                           DlssNr::Governor::ReasonText(g_nr.governorOut.reason));
-            }
-            // The default-off probe answers for a later play session whether the model can evaluate below its created
-            // size. The forwarder takes the created size as raw width and height and exposes no documented
-            // dynamic-resolution or render-subrect parameter, so there is nothing to ask through: one line per build,
-            // never a rebuild, a latch change or a model failure, and the governor keeps the rebuild-per-step path.
-            if (nr.governorProbe.value_or_default() && !g_nr.governorProbeLogged && g_nr.feature != nullptr)
-            {
-                g_nr.governorProbeLogged = true;
-                LOG_INFO("DLSS-NR governor probe: evaluate below the created size of {}x{}: not available (the NR "
-                         "forwarder takes the created size as raw width and height; no documented dynamic-resolution or "
-                         "render-subrect parameter exists, so the governor keeps the rebuild-per-step path)",
-                         g_nr.workWidth, g_nr.workHeight);
             }
         }
         if (g_nr.governorOut.cap > 0.0f)

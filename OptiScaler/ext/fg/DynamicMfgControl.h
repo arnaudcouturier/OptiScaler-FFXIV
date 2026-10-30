@@ -245,6 +245,10 @@ class AutoMfgController
         if (w_.open && ignoredTick)
         {
             // The rebuild's own interval: the watch already started over above and records nothing from this tick.
+            // Accepted trade: a real switch re-creation stall that lands exactly on these two ignored ticks is not
+            // seen, and recording resumes on the next tick. Only a user-driven rebuild coincides with a switch, and
+            // a status or count fault that persists past the window is still recorded then and convicted at the next
+            // verdict, so a real fault cannot hide here.
         }
         else if (w_.open && stalled_)
         {
@@ -326,7 +330,7 @@ class AutoMfgController
             }
         }
         else if (st_.running)
-            next = SelfTestStep(in, out, now, current);
+            next = SelfTestStep(in, out, now, current, ignoredTick);
         else if (stalled_)
         {
             // Nothing new starts while the game stalls. The selector is not asked (it would record a switch that is dropped here)
@@ -671,10 +675,10 @@ class AutoMfgController
                               verdict));
     }
 
-    int SelfTestStep(const AutoMfgTick& in, AutoMfgOut& out, uint64_t now, int current)
+    int SelfTestStep(const AutoMfgTick& in, AutoMfgOut& out, uint64_t now, int current, bool ignoredTick)
     {
-        // the second half of the 4x step is what is measured
-        if (st_.at4x && now >= st_.at4xSince && std::isfinite(in.realMs) && in.realMs > 0.0)
+        // the second half of the 4x step is what is measured; an ignored rebuild interval never feeds it
+        if (!ignoredTick && st_.at4x && now >= st_.at4xSince && std::isfinite(in.realMs) && in.realMs > 0.0)
         {
             st_.sumMs += in.realMs;
             ++st_.n;
