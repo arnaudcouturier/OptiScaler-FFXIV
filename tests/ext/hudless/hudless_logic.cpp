@@ -486,9 +486,9 @@ struct DensityRig
 {
     CoverageGuard g;
     uint64_t seq = 0;
-    explicit DensityRig(GuardPolicy policy = GuardPolicy::Density)
+    explicit DensityRig(GuardPolicy policy = GuardPolicy::Density, int releaseHolds = 0, bool tripOnAnchorLater = false)
     {
-        g.Configure(0.60f, policy);
+        g.Configure(0.60f, policy, releaseHolds, tripOnAnchorLater);
         Fresh(0.9f); // the baseline: a readback from before the guard started is never a sample
     }
     // one present with a new readback, then the boundary's answer for the same present
@@ -797,6 +797,199 @@ void TestGuardEdges()
     }
 }
 
+// ---- the two opt-in extensions of the density guard: a release limit (GuardReleaseHolds) and a per-frame trip
+// (GuardTripOnAnchorLater) ---------------------------------------------------------------------------------------------------
+void TestDensityReleaseLimit()
+{
+    static_assert(CoverageGuard::kMaxReleaseHolds == 600);
+
+    // A tripped guard and one anchor-later present per 40: the clean run is reset every time, so the plain density rule never releases and the
+    // release limit needs N holds. The first hold counts as a window too (no sample over the release level since the trip).
+    auto run = [](int holds, int anchorPresents)
+    {
+        DensityRig d(GuardPolicy::Density, holds);
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f); // tripped
+        for (int i = 1; i <= anchorPresents * 40; ++i)
+            d.Fresh(0.1f, i % 40 == 0);
+        return d.g;
+    };
+    // default 0 = off: never released by holds, whatever comes
+    assert(run(0, 6).Blocking() && run(0, 6).Releases() == 0 && run(0, 6).HoldReleases() == 0);
+    // 3 holds: not released at 2, released at the 3rd
+    {
+        const CoverageGuard at2 = run(3, 2);
+        assert(at2.Blocking() && at2.Holds() == 2 && at2.Releases() == 0 && at2.HoldReleases() == 0);
+        const CoverageGuard at3 = run(3, 3);
+        assert(!at3.Blocking() && at3.Holds() == 3 && at3.Releases() == 1 && at3.HoldReleases() == 1);
+    }
+    // 1 releases at the first hold
+    {
+        const CoverageGuard one = run(1, 1);
+        assert(!one.Blocking() && one.Releases() == 1 && one.HoldReleases() == 1);
+    }
+
+    // A hold window with a sample over the release level does not count and restarts the run: band samples count as not clean, as everywhere else
+    {
+        DensityRig d(GuardPolicy::Density, 2);
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        assert(d.g.Blocking() && d.g.Holds() == 0);
+        d.Fresh(0.1f, true); // 1st clean hold
+        assert(d.g.Blocking() && d.g.Holds() == 1);
+        d.Fresh(0.50f); // band sample: the next hold window is not clean
+        d.Fresh(0.1f, true); // a hold, but the run starts over
+        assert(d.g.Blocking() && d.g.Holds() == 2 && d.g.Releases() == 0);
+        d.Fresh(0.1f, true); // a clean window: run 1 of 2
+        assert(d.g.Blocking() && d.g.Releases() == 0);
+        d.Fresh(0.1f, true); // run 2 of 2
+        assert(!d.g.Blocking() && d.g.Releases() == 1 && d.g.HoldReleases() == 1);
+    }
+    // ... and a sample over the limit (a bad frame) does the same
+    {
+        DensityRig d(GuardPolicy::Density, 2);
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f); // tripped
+        d.Fresh(0.9f); // over the limit, while tripped: the window since the trip is not clean
+        d.Fresh(0.1f, true); // hold 1, run 0
+        assert(d.g.Blocking() && d.g.Holds() == 1 && d.g.Releases() == 0);
+        d.Fresh(0.1f, true); // hold 2, run 1
+        assert(d.g.Blocking() && d.g.Releases() == 0);
+        d.Fresh(0.1f, true); // hold 3, run 2: the limit
+        assert(!d.g.Blocking() && d.g.Releases() == 1 && d.g.HoldReleases() == 1);
+    }
+
+    // After the release the guard is off the trip and trips again by the normal rule (3 bad of the last 12), not by the limit
+    {
+        DensityRig d(GuardPolicy::Density, 1);
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f); // the trip it started with
+        d.Fresh(0.1f, true); // a clean window ends it at once
+        assert(!d.g.Blocking() && d.g.Trips() == 1 && d.g.Releases() == 1 && d.g.HoldReleases() == 1);
+        d.Fresh(0.9f);
+        d.Fresh(0.9f);
+        assert(!d.g.Blocking());
+        d.Fresh(0.9f);
+        assert(d.g.Blocking() && d.g.Trips() == 2 && d.g.Releases() == 1);
+        // a new limit starts the guard over, and the new trip starts its hold run from zero: two clean holds end it, one does not
+        d.g.Configure(0.60f, GuardPolicy::Density, 2, false);
+        assert(!d.g.Blocking());
+        for (int i = 0; i < 4; ++i)
+            d.Fresh(0.9f); // the first sample after a reset is a baseline
+        assert(d.g.Blocking() && d.g.Trips() == 3);
+        d.Fresh(0.1f, true);
+        assert(d.g.Blocking() && d.g.HoldReleases() == 1);
+        d.Fresh(0.1f, true);
+        assert(!d.g.Blocking() && d.g.HoldReleases() == 2);
+    }
+
+    // The clean-run release is untouched: 60 clean samples release while no anchor-later present comes
+    {
+        DensityRig d(GuardPolicy::Density, 5);
+        for (int i = 0; i < 3; ++i)
+            d.Fresh(0.9f);
+        for (int i = 0; i < CoverageGuard::kDensityReleaseSamples; ++i)
+            d.Fresh(0.1f);
+        assert(!d.g.Blocking() && d.g.Releases() == 1 && d.g.HoldReleases() == 0);
+    }
+
+    // The limit is clamped by the guard: a negative value is off, a huge one is one summary window
+    {
+        DensityRig off(GuardPolicy::Density, -5);
+        for (int i = 0; i < 3; ++i)
+            off.Fresh(0.9f);
+        assert(off.g.Blocking());
+        for (int i = 0; i < 200; ++i)
+            off.Fresh(0.1f, true); // holds alone never release
+        assert(off.g.Blocking() && off.g.Releases() == 0 && off.g.HoldReleases() == 0);
+
+        DensityRig big(GuardPolicy::Density, 100000);
+        for (int i = 0; i < 3; ++i)
+            big.Fresh(0.9f);
+        assert(big.g.Blocking());
+        for (int i = 0; i < CoverageGuard::kMaxReleaseHolds - 1; ++i)
+            big.Fresh(0.1f, true);
+        assert(big.g.Blocking() && big.g.HoldReleases() == 0);
+        big.Fresh(0.1f, true);
+        assert(!big.g.Blocking() && big.g.HoldReleases() == 1);
+    }
+}
+
+void TestDensityAnchorTrip()
+{
+    // A cleaner stream than the density rule needs: one anchor-later present per 40, every image clean (0.10). The samples never trip it.
+    auto clean = [](bool tripOnAnchorLater, GuardPolicy policy = GuardPolicy::Density)
+    {
+        DensityRig d(policy, 0, tripOnAnchorLater);
+        for (int i = 1; i <= 200; ++i)
+            d.Fresh(0.10f, i % 40 == 0);
+        return d.g;
+    };
+    // the key off: today's behaviour, nothing trips, nothing holds
+    assert(!clean(false).Blocking() && clean(false).Trips() == 0 && clean(false).Holds() == 0);
+    // the key on: the first anchor-later present trips the guard itself (it is the present whose own base would have been swapped)
+    {
+        const CoverageGuard on = clean(true);
+        assert(on.Trips() == 1);
+        assert(on.Holds() >= 1);
+        // a trip lasts until the normal release rules end it: this stream keeps it (every 40 presents a hold restarts the 60-sample run)
+        assert(on.Blocking());
+    }
+    // the frame itself: the trip happens on the anchor-later present, not two presents later when its readback arrives
+    {
+        DensityRig d(GuardPolicy::Density, 0, true);
+        for (int i = 1; i < 40; ++i)
+            d.Fresh(0.10f);
+        assert(!d.g.Blocking() && d.g.Trips() == 0);
+        d.Fresh(0.10f, true); // anchor-later: tripped at once, before its own readback
+        assert(d.g.Blocking() && d.g.Trips() == 1);
+    }
+    // an anchor-later present that is not tripped and has the key off changes nothing (the old rule)
+    {
+        DensityRig d;
+        d.Fresh(0.10f, true);
+        assert(!d.g.Blocking() && d.g.Trips() == 0);
+    }
+    // guard off (limit 0): the per-frame trip cannot start a guard that is off
+    {
+        CoverageGuard g;
+        g.Configure(0.f, GuardPolicy::Density, 0, true);
+        g.Update(-1.f, 0, false);
+        g.ResolveRelease(true);
+        assert(!g.Blocking() && g.Trips() == 0);
+    }
+    // legacy ignores the key (its decisions are the recorded ones)
+    assert(!clean(true, GuardPolicy::Legacy).Blocking() && clean(true, GuardPolicy::Legacy).Trips() == 0);
+    // the trip ends by the normal clean run: the anchor-later present that tripped it is itself a clean sample
+    {
+        DensityRig d(GuardPolicy::Density, 0, true);
+        d.Fresh(0.10f, true);
+        assert(d.g.Blocking() && d.g.Trips() == 1);
+        for (int i = 0; i < CoverageGuard::kDensityReleaseSamples - 1; ++i)
+            d.Fresh(0.10f);
+        assert(d.g.Blocking()); // 59 clean samples after the trip
+        d.Fresh(0.10f);
+        assert(!d.g.Blocking() && d.g.Trips() == 1 && d.g.Releases() == 1);
+    }
+    // a changed key starts the guard over, like a changed policy
+    {
+        DensityRig d(GuardPolicy::Density, 0, true);
+        d.Fresh(0.10f, true);
+        assert(d.g.Blocking());
+        d.g.Configure(0.60f, GuardPolicy::Density, 0, false);
+        assert(!d.g.Blocking());
+    }
+    // the line written when density becomes active names the options that are on
+    const std::string plain = DensityGuardLine(0, false);
+    assert(plain.find("trips on " + std::to_string(CoverageGuard::kDensityTripBad) + " bad of the last " +
+                      std::to_string(CoverageGuard::kDensityWindow) + " samples") != std::string::npos);
+    assert(plain.find("releases after " + std::to_string(CoverageGuard::kDensityReleaseSamples) + " clean ones in a row") != std::string::npos);
+    assert(plain.find("clean holds") == std::string::npos && plain.find("trips it at once") == std::string::npos);
+    const std::string limited = DensityGuardLine(4, true);
+    assert(limited.find("or after 4 clean holds in a row") != std::string::npos);
+    assert(limited.find("such a frame trips it at once") != std::string::npos);
+}
+
 void TestSlotRing()
 {
     FakeFences fences;
@@ -883,19 +1076,20 @@ void TestFormats()
     const std::string line = SummaryLine(Mode::UiFree, Phase::Active, Reason::None, w, 598, 1190, 6, "ok");
     assert(line == "HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
                    "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
-                   "slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
+                   "slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad frames 0; "
                    "anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
 
     // The log counters come last, after every field that was there before, in this order
     w.guardTrips = 2;
     w.guardReleases = 1;
+    w.guardHoldReleases = 1;
     w.swappedBad = 3;
     w.anchorFrames = 74;
     w.anchorTakes = 598;
     w.anchorLongest = 31;
     w.tagChanges = 5;
     const std::string counted = SummaryLine(Mode::UiFree, Phase::Active, Reason::None, w, 598, 1190, 6, "ok");
-    assert(counted.ends_with("slot waits 0; boundary: ok; guard trips 2 releases 1; swapped bad frames 3; "
+    assert(counted.ends_with("slot waits 0; boundary: ok; guard trips 2 releases 1 (1 by release limit); swapped bad frames 3; "
                              "anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 5"));
     assert(counted.rfind("HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, "
                          "NoBoundaryThisFrame 1); mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; "
@@ -918,8 +1112,8 @@ void TestFormats()
     clean.captured = 600;
     assert(SummaryLine(Mode::Recomposition, Phase::Active, Reason::None, clean, 0, 0, 0, "ok") ==
            "HudLess: mode recomposition, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage n/a; paste "
-           "built 0 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
-           "anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
+           "built 0 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped bad "
+           "frames 0; anchor-later 0 of 0 frames (0.0%), longest run 0; tag changes 0");
     assert(SummaryLine(Mode::UiFree, Phase::Fallback, Reason::MaskCoverage, clean, 1, 2, 3, "not detected")
                .find("state Fallback(MaskCoverage);") != std::string::npos);
 
@@ -941,9 +1135,12 @@ int main()
     TestCoverageGuardRelease();
     TestCoverageGuardStarvation();
     TestDensityGuard();
+    TestDensityReleaseLimit();
+    TestDensityAnchorTrip();
     TestGuardEdges();
     TestSlotRing();
     TestFormats();
-    std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown), slot ring fences, log formats");
+    std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown, release limit, per-frame trip), "
+              "slot ring fences, log formats");
     return 0;
 }

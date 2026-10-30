@@ -63,6 +63,9 @@ constexpr GuardPolicy ParseGuardPolicy(std::string_view text)
     return detail::EqualsNoCase(detail::Trim(text), "density") ? GuardPolicy::Density : GuardPolicy::Legacy;
 }
 
+// Upper bound of [HudLess] GuardReleaseHolds, applied by the config and by the guard (one summary window of presents).
+constexpr int kGuardReleaseHoldsMax = 600;
+
 // [HudLess] HdrPaste: off | on. Only "on" (case-insensitive) switches the HDR paste path on; anything else, "auto" and the empty
 // string included, is off: fail open.
 constexpr bool ParseHdrPaste(std::string_view text) { return detail::EqualsNoCase(detail::Trim(text), "on"); }

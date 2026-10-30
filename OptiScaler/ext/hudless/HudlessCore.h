@@ -41,6 +41,10 @@ struct IEngineHost
     virtual float CoverageLimit() = 0;
     // [HudLess] GuardMode. Asked only in ui_free; the default is today's guard.
     virtual GuardPolicy CoverageGuardPolicy() { return GuardPolicy::Legacy; }
+    // [HudLess] GuardReleaseHolds (0 = off) and GuardTripOnAnchorLater, both density policy only. A host that does not answer
+    // them runs today's density rule.
+    virtual int CoverageGuardReleaseHolds() { return 0; }
+    virtual bool CoverageGuardTripOnAnchorLater() { return false; }
     virtual IHudlessSource* Source() = 0;
     // Size / format / sample count of the capture against the bridge's backbuffer: None, SizeMismatch,
     // FormatUnsupported, MsaaOrArray or CaptureRejected.
@@ -159,13 +163,17 @@ class Core
         {
             const float limit = _host.CoverageLimit();
             const GuardPolicy policy = _host.CoverageGuardPolicy();
-            _guard.Configure(limit, policy);
-            if (policy != _announcedPolicy)
+            const int releaseHolds = _host.CoverageGuardReleaseHolds();
+            const bool tripOnAnchorLater = _host.CoverageGuardTripOnAnchorLater();
+            _guard.Configure(limit, policy, releaseHolds, tripOnAnchorLater);
+            if (policy != _announcedPolicy ||
+                (policy == GuardPolicy::Density && (releaseHolds != _announcedHolds || tripOnAnchorLater != _announcedTrip)))
             {
                 _announcedPolicy = policy;
+                _announcedHolds = releaseHolds;
+                _announcedTrip = tripOnAnchorLater;
                 if (policy == GuardPolicy::Density)
-                    _host.Log("HudLess: coverage guard: density is active (trips on 3 bad of the last 12 samples, releases after 60 "
-                              "clean ones in a row; a frame anchored after off-screen UI draws keeps it tripped)");
+                    _host.Log(DensityGuardLine(releaseHolds, tripOnAnchorLater));
             }
             _guard.Update(paste.coverage, paste.coverageSequence, probedLast);
 
@@ -436,8 +444,10 @@ class Core
     {
         _window.guardTrips += static_cast<uint32_t>(_guard.Trips() - _lastTrips);
         _window.guardReleases += static_cast<uint32_t>(_guard.Releases() - _lastReleases);
+        _window.guardHoldReleases += static_cast<uint32_t>(_guard.HoldReleases() - _lastHoldReleases);
         _lastTrips = _guard.Trips();
         _lastReleases = _guard.Releases();
+        _lastHoldReleases = _guard.HoldReleases();
     }
 
     // The counters start again with a mode change: nothing from before is attributed to the new mode
@@ -448,6 +458,7 @@ class Core
         _images = {};
         _lastTrips = _guard.Trips();
         _lastReleases = _guard.Releases();
+        _lastHoldReleases = _guard.HoldReleases();
         _lastTagSet = 0;
         _anchorRun = 0;
     }
@@ -488,11 +499,14 @@ class Core
     bool _producedSwapped = false; // the previous present ran the producer on a swapped base
     int _lastTrips = 0;
     int _lastReleases = 0;
+    int _lastHoldReleases = 0;
     uint8_t _tagSet = 0;
     uint8_t _lastTagSet = 0;
     bool _anchorThisPresent = false;
     uint32_t _anchorRun = 0;
     bool _guardResolved = false;                        // this present's ResolveRelease ran (after the boundary was asked)
     GuardPolicy _announcedPolicy = GuardPolicy::Legacy; // written to the log each time density becomes active
+    int _announcedHolds = 0;                            // ... and again when the release limit or the per-frame trip changes
+    bool _announcedTrip = false;
 };
 } // namespace ext::hudless

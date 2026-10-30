@@ -55,6 +55,8 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] ReShadeProbe", // shows the ReShade add-on probe card
     "[HudLess] HdrPaste", // opt-in for a GPU path no HDR user has confirmed yet: kept out of the menu until one does
     "[HudLess] GuardMode", // opt-in guard policy that has not been tried in a game: kept out of the menu until it has
+    "[HudLess] GuardReleaseHolds", // opt-in time limit of that guard policy: kept out of the menu until the policy has been tried
+    "[HudLess] GuardTripOnAnchorLater", // opt-in per-frame trip of that guard policy, for the same reason
     "[HudLess] PlateDiagnostics", // developer probes (log only) of the output stream and the UI draws
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
     "[DlssNr] ReplayCapture", // developer key: the capture triggers write a full replay set of the pass

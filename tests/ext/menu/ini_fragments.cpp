@@ -491,8 +491,7 @@ int main(int argc, char** argv)
         const std::string hudlessIni = menuscan::ReadFile(repo + "/OptiScaler/ext/ini/HudLess.ini");
         auto hasLine = [&](const std::string& text)
         { return hudlessIni.find("\n" + text + "\r\n") != std::string::npos || hudlessIni.find("\n" + text + "\n") != std::string::npos; };
-        CHECK(hasLine("GuardMode=auto") && hasLine("HdrPaste=auto"));
-        // the developer probe ships switched off: its key line is there once, and it says auto (the code default is false).
+        CHECK(hasLine("GuardMode=auto") && hasLine("HdrPaste=auto"));        // the developer probe ships switched off: its key line is there once, and it says auto (the code default is false).
         // the retired overlay key ships no line: an existing ini that still carries it loads ignored.
         auto keyLines = [&](const std::string& key)
         {
@@ -510,6 +509,10 @@ int main(int argc, char** argv)
         CHECK(hasLine("PlateDiagnostics=auto") && !hasLine("PlateOverlay=auto"));
         CHECK(frags.at("HudLess").at("GuardMode").find("legacy or density - Default (auto) is legacy") != std::string::npos);
         CHECK(frags.at("HudLess").at("HdrPaste").find("off or on - Default (auto) is off") != std::string::npos);
+        // the two options of the density guard ship as auto too, and say which default that is
+        CHECK(hasLine("GuardReleaseHolds=auto") && hasLine("GuardTripOnAnchorLater=auto"));
+        CHECK(frags.at("HudLess").at("GuardReleaseHolds").find("int 0 - 600 - Default (auto) is 0") != std::string::npos);
+        CHECK(frags.at("HudLess").at("GuardTripOnAnchorLater").find("true or false - Default (auto) is false") != std::string::npos);
     }
 
     // the per-axis model scale keys and the depth-aware switch ship as auto (the code default applies): the shipped VALUE

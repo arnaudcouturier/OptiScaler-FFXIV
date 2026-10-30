@@ -334,15 +334,22 @@ class CoverageGuard
     static constexpr int kDensityWindow = 12;
     static constexpr int kDensityTripBad = 3;
     static constexpr int kDensityReleaseSamples = 60;
+    // Time limit of the density policy ([HudLess] GuardReleaseHolds, 0 = off): after this many anchor-later presents in a row, each with no
+    // sample over the release level since the previous one, the guard lets go although the clean run cannot complete. One summary window
+    // (Core::kSummaryPresents) is the upper bound a key value is clamped to.
+    static constexpr int kMaxReleaseHolds = kGuardReleaseHoldsMax;
 
-    // limit 0 = guard off. A different policy starts the guard over.
-    void Configure(float limit, GuardPolicy policy = GuardPolicy::Legacy)
+    // limit 0 = guard off. A different policy, release limit or per-frame trip starts the guard over.
+    void Configure(float limit, GuardPolicy policy = GuardPolicy::Legacy, int releaseHolds = 0, bool tripOnAnchorLater = false)
     {
+        releaseHolds = releaseHolds < 0 ? 0 : (releaseHolds > kMaxReleaseHolds ? kMaxReleaseHolds : releaseHolds);
         _limit = limit;
         _release = limit * kReleaseFraction;
-        if (policy != _policy)
+        if (policy != _policy || releaseHolds != _releaseHolds || tripOnAnchorLater != _tripOnAnchorLater)
         {
             _policy = policy;
+            _releaseHolds = releaseHolds;
+            _tripOnAnchorLater = tripOnAnchorLater;
             Reset();
         }
         if (_limit <= 0.f)
@@ -360,6 +367,8 @@ class CoverageGuard
         _baseSet = false;
         _window = 0;
         _releaseDue = false;
+        _holdRun = 0;
+        _holdWindowClean = true;
     }
 
     // Once per armed present, before the decision. `coverage` is PasteStatus::coverage (0..1, < 0 unknown),
@@ -400,6 +409,7 @@ class CoverageGuard
             {
                 _clean = 0; // still too much UI area, including the band up to the limit: stay tripped
                 _releaseDue = false;
+                _holdWindowClean = false; // such a window does not count towards GuardReleaseHolds
             }
             else if (_policy == GuardPolicy::Density)
             {
@@ -417,25 +427,14 @@ class CoverageGuard
             const bool bad = coverage > _limit;
             _window = static_cast<uint16_t>(((_window << 1) | (bad ? 1u : 0u)) & ((1u << kDensityWindow) - 1u));
             if (std::popcount(static_cast<unsigned>(_window)) >= kDensityTripBad)
-            {
-                _tripped = true;
-                _clean = 0;
-                _starve = 0;
-                _releaseDue = false;
-                ++_trips;
-            }
+                Trip();
             return;
         }
 
         if (coverage > _limit)
         {
             if (++_over >= kTripFrames)
-            {
-                _tripped = true;
-                _clean = 0;
-                _starve = 0;
-                ++_trips;
-            }
+                Trip();
         }
         else
         {
@@ -446,16 +445,31 @@ class CoverageGuard
     // Density policy, once per present after the boundary was asked (or at the end of a present that never got that far, with false):
     // `anchorLater` = this present's frame was anchored after an off-screen UI draw. While tripped such a present keeps the fallback at
     // once, without waiting for its own readback (two presents later), and restarts the clean run. Otherwise a completed clean run
-    // releases the guard. The legacy policy releases inside Update and ignores the fact.
+    // releases the guard.
+    //   - Not tripped and GuardTripOnAnchorLater: such a present trips the guard itself, so the base of this very frame is not swapped and
+    //     its image never reaches the outputs. The trip then ends by the normal release rules, the same as a trip the samples caused.
+    //   - Tripped and GuardReleaseHolds = N: the hold counts when no sample since the previous hold was over the release level; the N-th such
+    //     hold in a row releases (the time limit for a stream of such frames whose images measure clean, where the clean run never completes).
+    // The legacy policy releases inside Update and ignores the fact.
     void ResolveRelease(bool anchorLater)
     {
-        if (_policy != GuardPolicy::Density || !_tripped)
+        if (_policy != GuardPolicy::Density)
             return;
+        if (!_tripped)
+        {
+            if (anchorLater && _tripOnAnchorLater && _limit > 0.f)
+                Trip();
+            return;
+        }
         if (anchorLater)
         {
             _clean = 0;
             _releaseDue = false;
             ++_holds;
+            _holdRun = _holdWindowClean ? _holdRun + 1 : 0;
+            _holdWindowClean = true; // the window after this hold starts empty
+            if (_releaseHolds > 0 && _holdRun >= _releaseHolds)
+                ClearTrip(true);
         }
         else if (_releaseDue)
             ClearTrip();
@@ -465,21 +479,36 @@ class CoverageGuard
     bool Blocking() const { return _tripped; }
     bool Unknown() const { return _limit > 0.f && _unknownRun >= kUnknownFrames; }
     int Trips() const { return _trips; }
-    // Every end of a trip: the clean run, or the starvation release.
+    // Every end of a trip: the clean run, the release limit of GuardReleaseHolds, or the starvation release.
     int Releases() const { return _releases; }
+    // Of Releases(), those the release limit of GuardReleaseHolds ended.
+    int HoldReleases() const { return _holdReleases; }
     // Presents on which an anchor-later frame held a tripped density guard (it restarted the clean run).
     int Holds() const { return _holds; }
 
   private:
-    void ClearTrip()
+    void Trip()
+    {
+        _tripped = true;
+        _clean = 0;
+        _starve = 0;
+        _releaseDue = false;
+        ++_trips;
+    }
+
+    void ClearTrip(bool byReleaseLimit = false)
     {
         ++_releases;
+        if (byReleaseLimit)
+            ++_holdReleases;
         _tripped = false;
         _over = 0;
         _clean = 0;
         _starve = 0;
         _window = 0;
         _releaseDue = false;
+        _holdRun = 0;
+        _holdWindowClean = true;
     }
 
     float _limit = 0.f;
@@ -490,7 +519,12 @@ class CoverageGuard
     int _unknownRun = 0;
     int _trips = 0;
     int _releases = 0;
+    int _holdReleases = 0;
     int _holds = 0;
+    int _releaseHolds = 0;           // density: GuardReleaseHolds, 0 = off
+    int _holdRun = 0;                // density: clean hold windows in a row towards _releaseHolds
+    bool _holdWindowClean = true;    // density: no sample over the release level since the last hold or trip
+    bool _tripOnAnchorLater = false; // density: GuardTripOnAnchorLater
     GuardPolicy _policy = GuardPolicy::Legacy;
     uint16_t _window = 0;     // density: the last kDensityWindow fresh samples, bit 0 the newest, 1 = over the limit
     bool _releaseDue = false; // density: the clean run is complete, the boundary's answer for the present decides
@@ -498,6 +532,20 @@ class CoverageGuard
     bool _baseSet = false;
     uint64_t _seenSequence = 0;
 };
+
+// The one line written when the density guard becomes active: the numbers it uses, then the two opt-in keys when they are on.
+inline std::string DensityGuardLine(int releaseHolds, bool tripOnAnchorLater)
+{
+    std::string line = std::format("HudLess: coverage guard: density is active (trips on {} bad of the last {} samples, releases after {} "
+                                   "clean ones in a row; a frame anchored after off-screen UI draws keeps it tripped",
+                                   CoverageGuard::kDensityTripBad, CoverageGuard::kDensityWindow, CoverageGuard::kDensityReleaseSamples);
+    if (releaseHolds > 0)
+        line += std::format(", or after {} clean holds in a row", releaseHolds);
+    if (tripOnAnchorLater)
+        line += ", and such a frame trips it at once";
+    line += ")";
+    return line;
+}
 
 // ---- The HDR stage before the paste producer (docs/HUDLESS.md section 8) -------------------------------------------------------------
 // Under HDR output the producer builds its image from a PQ copy of the final frame, which needs the slot's HDR stage. The readiness
@@ -708,7 +756,8 @@ struct WindowStats
     uint64_t slotWaits = 0; // blocking waits on the game thread (only the stub-free design has none; counted for the log)
     // Counters that only watch (they never feed a decision), at the end of the summary line
     uint32_t guardTrips = 0;     // times the coverage guard tripped in the window
-    uint32_t guardReleases = 0;  // times it ended a trip (clean run or starvation)
+    uint32_t guardReleases = 0;  // times it ended a trip (clean run, release limit or starvation)
+    uint32_t guardHoldReleases = 0; // of those, the ones GuardReleaseHolds' release limit ended
     uint64_t swappedBad = 0;     // swapped bases whose own paste image measured over the limit (counted when its readback arrives)
     uint64_t anchorFrames = 0;   // presents whose frame was anchored after an off-screen UI draw (the boundary's own predicate)
     uint64_t anchorTakes = 0;    // presents that asked the boundary for a frame (what the share is taken of)
@@ -746,8 +795,8 @@ inline std::string FallbackBreakdown(const WindowStats& w)
 }
 
 // HudLess: mode ui_free, state Active; 600 presents: 598 captured, 2 fallbacks (SlotBusy 1, NoBoundaryThisFrame 1);
-// mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0;
-// swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
+// mask coverage avg 4.1% max 9.7%; paste built 598 pasted 1190 skipped 6; slot waits 0; boundary: ok; guard trips 0 releases 0
+// (0 by release limit); swapped bad frames 0; anchor-later 74 of 598 frames (12.4%), longest run 31; tag changes 2
 inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const WindowStats& w, uint64_t pasteBuilt,
                                uint64_t pastePasted, uint64_t pasteSkipped, const std::string& boundary)
 {
@@ -771,10 +820,10 @@ inline std::string SummaryLine(Mode mode, Phase phase, Reason reason, const Wind
                         pasteSkipped, w.slotWaits, boundary);
 
     const double share = w.anchorTakes == 0 ? 0.0 : 100.0 * static_cast<double>(w.anchorFrames) / static_cast<double>(w.anchorTakes);
-    line += std::format("; guard trips {} releases {}; swapped bad frames {}; anchor-later {} of {} frames ({:.1f}%), longest run "
-                        "{}; tag changes {}",
-                        w.guardTrips, w.guardReleases, w.swappedBad, w.anchorFrames, w.anchorTakes, share, w.anchorLongest,
-                        w.tagChanges);
+    line += std::format("; guard trips {} releases {} ({} by release limit); swapped bad frames {}; anchor-later {} of {} frames ({:.1f}%), "
+                        "longest run {}; tag changes {}",
+                        w.guardTrips, w.guardReleases, w.guardHoldReleases, w.swappedBad, w.anchorFrames, w.anchorTakes, share,
+                        w.anchorLongest, w.tagChanges);
     return line;
 }
 

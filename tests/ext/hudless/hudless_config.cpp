@@ -29,6 +29,9 @@ int main()
     assert(defaults.Threshold() == 0.008f && defaults.Dilation() == 1 && defaults.CoverageLimit() == 0.60f);
     assert(defaults.hdrPaste.value_or_default() == "off" && !defaults.HdrPasteOn()); // the HDR paste is opt-in: untried in a game
     assert(defaults.guardMode.value_or_default() == "legacy" && defaults.GetGuardPolicy() == hudless::GuardPolicy::Legacy);
+    // the two density-guard options are off by default (today's rule)
+    assert(defaults.guardReleaseHolds.value_or_default() == 0 && defaults.ReleaseHolds() == 0);
+    assert(!defaults.guardTripOnAnchorLater.value_or_default() && !defaults.TripOnAnchorLater());
     // the developer probes are off by default (and the seam bit that serves them starts clear)
     assert(!defaults.plateDiagnostics.value_or_default());
     assert(!ext::Active(F::PlateProbe));
@@ -37,8 +40,8 @@ int main()
     config::Binder binder;
     defaults.Bind(binder);
     const std::vector<std::string> expectedKeys { "Mode",         "MaskThreshold", "MaskDilation", "PasteCleanup",
-                                                  "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "HdrPaste",
-                                                  "PlateDiagnostics" };
+                                                  "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "GuardReleaseHolds",
+                                                  "GuardTripOnAnchorLater", "HdrPaste", "PlateDiagnostics" };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
     {
@@ -84,6 +87,8 @@ int main()
     ini.SetValue("HudLess", "ShowDetectedUi", "true");
     ini.SetValue("HudLess", "HdrPaste", "On");
     ini.SetValue("HudLess", "GuardMode", "Density");
+    ini.SetValue("HudLess", "GuardReleaseHolds", "4");
+    ini.SetValue("HudLess", "GuardTripOnAnchorLater", "true");
     ini.SetValue("FrameGen", "ExternalUIFreeFrameGen", "false"); // the old keys are not read
     config::Load(ini);
 
@@ -97,6 +102,7 @@ int main()
     assert(cfg.showDetectedUi.value_or_default());
     assert(cfg.HdrPasteOn());
     assert(cfg.GetGuardPolicy() == hudless::GuardPolicy::Density);
+    assert(cfg.ReleaseHolds() == 4 && cfg.TripOnAnchorLater());
     assert(hudless::CurrentMode() == Mode::UiFree);
     assert(hudless::Wanted());
     assert(ext::Active(ext::F::Hudless));
@@ -107,6 +113,8 @@ int main()
     assert(std::string(out.GetValue("HudLess", "Mode", "")) == "UI_Free");
     assert(std::string(out.GetValue("HudLess", "SteadyTiming", "")) == "true");
     assert(std::string(out.GetValue("HudLess", "PasteCleanup", "")) == "false");
+    assert(std::string(out.GetValue("HudLess", "GuardReleaseHolds", "")) == "4");
+    assert(std::string(out.GetValue("HudLess", "GuardTripOnAnchorLater", "")) == "true");
     assert(out.GetValue("FrameGen", "ExternalUIFreeFrameGen", nullptr) == nullptr);
     // [HudLess] Diagnostics is bound by package A's UiConfig (ext/ffxiv/ui) in the same table; HudlessConfig does not own it,
     // but once both packages are stacked the key is part of the saved section.
@@ -130,6 +138,16 @@ int main()
     assert(cfg.Threshold() == 0.008f && cfg.CoverageLimit() == 0.60f);
     cfg.coverageGuard = 3.0f;
     assert(cfg.CoverageLimit() == 1.0f);
+
+    // the guard options clamp the way the guard does: negative is off, above one summary window is the window
+    cfg.guardReleaseHolds = -5;
+    assert(cfg.ReleaseHolds() == 0);
+    cfg.guardReleaseHolds = 100000;
+    assert(cfg.ReleaseHolds() == hudless::kGuardReleaseHoldsMax);
+    cfg.guardReleaseHolds = 3;
+    assert(cfg.ReleaseHolds() == 3);
+    cfg.guardTripOnAnchorLater = false;
+    assert(!cfg.TripOnAnchorLater());
 
     // PlateDiagnostics publishes its own seam bit at load; unset or false clears it again.
     assert(!cfg.plateDiagnostics.value_or_default() && !ext::Active(F::PlateProbe));

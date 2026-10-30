@@ -58,6 +58,8 @@ struct FakeHost final : IEngineHost
     bool sceneOwns = false;
     bool pausedByPreset = false; // the DLSS-G render preset takes the UI recomposition away
     GuardPolicy policy = GuardPolicy::Legacy; // [HudLess] GuardMode
+    int releaseHolds = 0;                     // [HudLess] GuardReleaseHolds, 0 = off
+    bool tripOnAnchorLater = false;           // [HudLess] GuardTripOnAnchorLater
     int pausedQueries = 0;
     int stages = 0;
     std::vector<std::string> log;
@@ -70,6 +72,8 @@ struct FakeHost final : IEngineHost
     bool DebugCompareOn() override { ++calls; return compare; }
     float CoverageLimit() override { ++calls; return limit; }
     GuardPolicy CoverageGuardPolicy() override { return policy; }
+    int CoverageGuardReleaseHolds() override { return releaseHolds; }
+    bool CoverageGuardTripOnAnchorLater() override { return tripOnAnchorLater; }
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
     Reason CheckCapture(const FrameImage&) override { ++calls; return check; }
     Reason StageCapture(const FrameImage&) override { ++calls; ++stages; return stage; }
@@ -1194,8 +1198,8 @@ void TestSteadyGameplayReplay()
     assert(lines.size() == 2);
     assert(lines[1] ==
            "HudLess: mode ui_free, state Active; 600 presents: 600 captured, 0 fallbacks; mask coverage avg 12.0% max 12.0%; "
-           "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0; swapped bad frames 0; "
-           "anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
+           "paste built 600 pasted 1200 skipped 0; slot waits 0; boundary: ok; guard trips 0 releases 0 (0 by release limit); swapped "
+           "bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
 
 // A black screen inside a cutscene (the boundary still fires, the mask covers nearly everything): after the trip the
@@ -1210,7 +1214,7 @@ void TestBlackScreenSummary()
     assert(lines[1] ==
            "HudLess: mode ui_free, state Fallback(MaskCoverage); 600 presents: 0 captured, 600 fallbacks (MaskCoverage 600); "
            "mask coverage avg 95.0% max 95.0%; paste built 600 pasted 0 skipped 0; slot waits 0; boundary: ok; guard trips 0 "
-           "releases 0; swapped bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
+           "releases 0 (0 by release limit); swapped bad frames 0; anchor-later 0 of 600 frames (0.0%), longest run 0; tag changes 0");
 }
 
 // One fade: the displayed state changes twice (into Fallback(MaskCoverage) at the trip, back to Active after the release),
@@ -1401,6 +1405,10 @@ void TestDecisionsRecorded()
 {
     // Streams 0, 2 and 3 share a value: with the legacy guard an alternating or every-fourth bad frame never trips it, so every
     // present is swapped, exactly as in steady play.
+    // The two opt-in keys of the density guard are unset here (FakeHost answers 0 and false, the defaults); the table below is therefore the
+    // byte-identical check for them: the new keys at their defaults leave every decision where it was when the literals were recorded.
+    FakeHost defaults;
+    assert(defaults.CoverageGuardReleaseHolds() == 0 && !defaults.CoverageGuardTripOnAnchorLater());
     static constexpr uint64_t kRecorded[5] = { 11994251758413254906ull, 15914297416367574552ull, 11994251758413254906ull,
                                                11994251758413254906ull, 1196904380689745642ull };
     uint64_t got[5];
@@ -1423,6 +1431,21 @@ uint64_t NumberAfter(const std::string& line, const std::string& key)
     const size_t at = line.find(key);
     assert(at != std::string::npos);
     return std::stoull(line.substr(at + key.size()));
+}
+
+// The number right in front of `key` ("... releases 1 (1 by release limit)" -> 1)
+uint64_t NumberBefore(const std::string& line, const std::string& key)
+{
+    const size_t at = line.find(key);
+    assert(at != std::string::npos);
+    size_t end = at;
+    while (end > 0 && line[end - 1] == ' ')
+        --end;
+    size_t begin = end;
+    while (begin > 0 && line[begin - 1] >= '0' && line[begin - 1] <= '9')
+        --begin;
+    assert(begin < end);
+    return std::stoull(line.substr(begin, end - begin));
 }
 
 // What follows "boundary: ok; ": the counters, exactly as written
@@ -1448,8 +1471,8 @@ void TestLogCounters()
             r.anchorFlag = (n >= 300 && n <= 304) || (n >= 400 && n <= 402);
             r.Step();
         }
-        assert(CounterTail(r) == "guard trips 0 releases 0; swapped bad frames 3; anchor-later 8 of 600 frames (1.3%), longest run 5; "
-                                 "tag changes 1");
+        assert(CounterTail(r) == "guard trips 0 releases 0 (0 by release limit); swapped bad frames 3; anchor-later 8 of 600 frames "
+                                 "(1.3%), longest run 5; tag changes 1");
     }
     // A burst of 20 bad frames: the legacy guard needs five readbacks, so the bad frames 300..305 were swapped (six); the probing
     // presents after the trip are not. One trip, one release; the base goes out at the trip and back at the release (tag set 0 -> 1
@@ -1462,8 +1485,8 @@ void TestLogCounters()
             r.Step();
         }
         assert(r.flips == 3);
-        assert(CounterTail(r) == "guard trips 1 releases 1; swapped bad frames 6; anchor-later 0 of 600 frames (0.0%), longest run 0; "
-                                 "tag changes 3");
+        assert(CounterTail(r) == "guard trips 1 releases 1 (0 by release limit); swapped bad frames 6; anchor-later 0 of 600 frames "
+                                 "(0.0%), longest run 0; tag changes 3");
     }
     // Over HDR output the engine sends no tags at all: the base still changes three times, the tag set never
     {
@@ -1900,6 +1923,28 @@ void TestCounterEdges()
                          std::to_string(CoverageGuard::kDensityWindow) + " samples") != std::string::npos);
         assert(line.find("releases after " + std::to_string(CoverageGuard::kDensityReleaseSamples) + " clean ones in a row") !=
                std::string::npos);
+        // ... and says nothing about the two opt-in keys while they are off
+        assert(line.find("clean holds") == std::string::npos && line.find("trips it at once") == std::string::npos);
+    }
+    // The two opt-in keys are announced too, and a change of either starts the guard over and writes the line again
+    {
+        Replay r;
+        r.host.policy = GuardPolicy::Density;
+        r.Steps(5);
+        r.host.releaseHolds = 4;
+        r.host.tripOnAnchorLater = true;
+        r.Steps(5);
+        size_t count = 0;
+        std::string last;
+        for (const auto& l : r.host.log)
+            if (l.rfind("HudLess: coverage guard", 0) == 0)
+            {
+                ++count;
+                last = l;
+            }
+        assert(count == 2);
+        assert(last.find("or after 4 clean holds in a row") != std::string::npos &&
+               last.find("such a frame trips it at once") != std::string::npos);
     }
     // A host that does not answer the policy runs today's guard
     {
@@ -1919,6 +1964,133 @@ void TestCounterEdges()
             void Log(const std::string&) override {}
         } host;
         assert(host.CoverageGuardPolicy() == GuardPolicy::Legacy);
+        // ... and today's density rule, with no release limit and no per-frame trip
+        assert(host.CoverageGuardReleaseHolds() == 0 && !host.CoverageGuardTripOnAnchorLater());
+    }
+}
+
+// ---- the release limit and the per-frame trip of the density guard, end to end ------------------------------------------------
+// A tripped guard with an anchor-later present in every 40 never completes the 60-sample clean run, so the plain density rule stays in the
+// fallback. [HudLess] GuardReleaseHolds = N ends the trip after N such presents whose windows measured clean; the guard then trips again by
+// the normal rule.
+void TestDensityReleaseLimit()
+{
+    auto stream = [](int releaseHolds)
+    {
+        auto r = std::make_unique<Replay>();
+        r->host.policy = GuardPolicy::Density;
+        r->host.releaseHolds = releaseHolds;
+        for (int n = 1; n <= 900; ++n)
+        {
+            r->coverage = (n >= 10 && n <= 12) ? 0.95f : 0.10f; // three bad images trip it, everything after measures clean
+            r->anchorFlag = n >= 20 && n % 40 == 0;
+            r->Step();
+        }
+        return r;
+    };
+    // key 0 = off, today's rule: one trip at present 14 (the readback of image 12) and no release for the rest of the stream
+    {
+        const auto r = stream(0);
+        assert(r->runs[13].reason == Reason::MaskCoverage && !r->runs[13].swapped);
+        for (size_t i = 13; i < r->runs.size(); ++i)
+            assert(!r->runs[i].swapped && r->runs[i].staged);
+        const auto lines = SummaryLines(*r);
+        assert(!lines.empty());
+        assert(NumberAfter(lines.back(), "guard trips ") == 1 && NumberAfter(lines.back(), "releases ") == 0);
+        assert(NumberBefore(lines.back(), "by release limit") == 0);
+    }
+    // a limit of 3: the fallback ends at the 3rd anchor-later present (40, 80, 120) and the base of that present is swapped again
+    {
+        const auto r = stream(3);
+        size_t released = 0;
+        for (size_t i = 14; i < r->runs.size(); ++i)
+            if (r->runs[i].swapped)
+            {
+                released = i;
+                break;
+            }
+        assert(released != 0 && released + 1 == 120);
+        int holds = 0;
+        for (size_t i = 0; i <= released; ++i)
+            if (static_cast<int>(i + 1) % 40 == 0)
+                ++holds;
+        assert(holds == 3); // the three anchor-later presents while tripped are the three holds of the limit
+        const auto lines = SummaryLines(*r);
+        assert(NumberAfter(lines.back(), "guard trips ") == 1 && NumberAfter(lines.back(), "releases ") == 1);
+        assert(NumberBefore(lines.back(), "by release limit") == 1);
+        // no sample trips it again (the images stay clean), so it stays out of the fallback to the end of the stream
+        for (size_t i = released; i < r->runs.size(); ++i)
+            assert(r->runs[i].swapped);
+    }
+    // ... and it trips again by the normal rule (three bad images after the release), then its limit ends that trip too
+    {
+        auto r = std::make_unique<Replay>();
+        r->host.policy = GuardPolicy::Density;
+        r->host.releaseHolds = 3;
+        for (int n = 1; n <= 900; ++n)
+        {
+            r->coverage = ((n >= 10 && n <= 12) || (n >= 300 && n <= 302)) ? 0.95f : 0.10f;
+            r->anchorFlag = n >= 20 && n % 40 == 0;
+            r->Step();
+        }
+        const auto lines = SummaryLines(*r);
+        assert(!lines.empty());
+        assert(NumberAfter(lines.back(), "guard trips ") == 2 && NumberAfter(lines.back(), "releases ") == 2);
+        assert(NumberBefore(lines.back(), "by release limit") == 2);
+    }
+}
+
+// [HudLess] GuardTripOnAnchorLater: the anchor-later frame itself does not swap its base, without waiting about two presents for its
+// measurement. Every image measures clean here, so no sample ever trips the density guard.
+void TestDensityAnchorLaterTrip()
+{
+    auto stream = [](bool tripOnAnchorLater, int releaseHolds)
+    {
+        auto r = std::make_unique<Replay>();
+        r->host.policy = GuardPolicy::Density;
+        r->host.tripOnAnchorLater = tripOnAnchorLater;
+        r->host.releaseHolds = releaseHolds;
+        for (int n = 1; n <= 600; ++n)
+        {
+            r->coverage = 0.10f;
+            r->anchorFlag = n % 40 == 0;
+            r->Step();
+        }
+        return r;
+    };
+    // key off: today's behaviour, every present swaps its base on a clean readback
+    {
+        const auto r = stream(false, 0);
+        for (size_t i = 3; i < r->runs.size(); ++i) // presents 1 and 2 have no completed image yet
+            assert(r->runs[i].swapped && r->runs[i].reason == Reason::None);
+        const auto lines = SummaryLines(*r);
+        assert(!lines.empty() && NumberAfter(lines.back(), "guard trips ") == 0);
+    }
+    // key on: present 40 is the first anchor-later one, and it does not swap its base; the trip then needs 60 clean samples, which the frame
+    // in every 40 keeps from completing, so the fallback stays
+    {
+        const auto r = stream(true, 0);
+        assert(!r->runs[39].swapped && r->runs[39].staged && r->runs[39].reason == Reason::MaskCoverage);
+        for (size_t i = 39; i < r->runs.size(); ++i)
+            assert(!r->runs[i].swapped);
+        const auto lines = SummaryLines(*r);
+        assert(NumberAfter(lines.back(), "guard trips ") == 1);
+    }
+    // both keys: the limit of one clean hold ends each trip at the next anchor-later present, so exactly the anchor-later frames whose run is
+    // open are skipped (40, 120, 200, ...) and each release present (80, 160, ...) swaps again
+    {
+        const auto r = stream(true, 1);
+        for (int n = 1; n <= 600; ++n)
+        {
+            const Run& run = r->runs[static_cast<size_t>(n - 1)];
+            if (n % 80 == 0)
+                assert(run.swapped && run.reason == Reason::None); // the release limit ended the trip at this hold
+            else if (n % 40 == 0)
+                assert(!run.swapped && run.reason == Reason::MaskCoverage); // the anchor-later frame itself, tripped at once
+        }
+        const auto lines = SummaryLines(*r);
+        assert(NumberAfter(lines.back(), "guard trips ") == 8 && NumberAfter(lines.back(), "releases ") == 7);
+        assert(NumberBefore(lines.back(), "by release limit") == 7);
     }
 }
 
@@ -1929,6 +2101,8 @@ int main()
     TestLogCounters();
     TestDensityReplay();
     TestDensityHoldsRelease();
+    TestDensityReleaseLimit();
+    TestDensityAnchorLaterTrip();
     TestDensityStarvation();
     TestDensityReleaseWithoutBoundary();
     TestDensityLogLine();

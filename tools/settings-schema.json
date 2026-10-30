@@ -125,6 +125,32 @@
           "flags": [ "ffxivOnly", "experimental" ]
         },
         {
+          "key": "[HudLess] GuardReleaseHolds",
+          "section": "HudLess",
+          "name": "GuardReleaseHolds",
+          "type": "int",
+          "min": 0,
+          "max": 600,
+          "default": "auto",
+          "defaultMeans": "0 (off: today's behaviour)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "opt-in time limit of the density guard, which has not been tried in a game" },
+          "description": "Developer switch, ini only, density guard only: 0 = off. With N above 0 the guard leaves the fallback after N anchor-later frames in a row whose window had no measurement over the release level, even though the 60-measurement clean run cannot complete while they keep coming. The guard trips again by the normal rule.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] GuardTripOnAnchorLater",
+          "section": "HudLess",
+          "name": "GuardTripOnAnchorLater",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false (today's behaviour)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "opt-in per-frame trip of the density guard, which has not been tried in a game" },
+          "description": "Developer switch, ini only, density guard only: a frame the game anchored after off-screen UI draws trips the guard at once, so the base of that very frame is not swapped, instead of waiting about two presents for its measurement. The trip then ends by the normal release rules.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
           "key": "[HudLess] HdrPaste",
           "section": "HudLess",
           "name": "HdrPaste",

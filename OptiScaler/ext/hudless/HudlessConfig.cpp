@@ -47,6 +47,8 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "CoverageGuard", coverageGuard);
     b.Add("HudLess", "ShowDetectedUi", showDetectedUi);
     b.Add("HudLess", "GuardMode", guardMode);
+    b.Add("HudLess", "GuardReleaseHolds", guardReleaseHolds);
+    b.Add("HudLess", "GuardTripOnAnchorLater", guardTripOnAnchorLater);
     b.Add("HudLess", "HdrPaste", hdrPaste);
     b.Add("HudLess", "PlateDiagnostics", plateDiagnostics);
 }

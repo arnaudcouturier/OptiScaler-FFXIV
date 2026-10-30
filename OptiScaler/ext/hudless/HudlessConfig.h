@@ -38,6 +38,9 @@ struct HudlessConfig
     CustomOptional<bool> showDetectedUi { false };             // ShowDetectedUi (debug tint on the pasted area)
     // legacy | density. A string key, ini only (see hudless::GuardPolicy); anything else reads as legacy.
     CustomOptional<std::string> guardMode { "legacy" };        // GuardMode
+    // Density policy only, ini only (see hudless::CoverageGuard).
+    CustomOptional<int> guardReleaseHolds { 0 };               // GuardReleaseHolds, 0 = off, clamped to kMaxReleaseHolds
+    CustomOptional<bool> guardTripOnAnchorLater { false };     // GuardTripOnAnchorLater
     // off | on. A string key, ini only. on = under HDR output the paste's HDR stage is made before the first paste image (the PQ
     // conversion path of the paste has not run in a game yet); anything else reads as off.
     CustomOptional<std::string> hdrPaste { "off" };            // HdrPaste
@@ -49,6 +52,13 @@ struct HudlessConfig
     hudless::Mode GetMode() const { return hudless::ParseMode(mode.value_or_default()); }
     bool HdrPasteOn() const { return hudless::ParseHdrPaste(hdrPaste.value_or_default()); }
     hudless::GuardPolicy GetGuardPolicy() const { return hudless::ParseGuardPolicy(guardMode.value_or_default()); }
+    // 0 = off. Out-of-range input is clamped, the stored text is not rewritten.
+    int ReleaseHolds() const
+    {
+        const int v = guardReleaseHolds.value_or_default();
+        return v < 0 ? 0 : (v > hudless::kGuardReleaseHoldsMax ? hudless::kGuardReleaseHoldsMax : v);
+    }
+    bool TripOnAnchorLater() const { return guardTripOnAnchorLater.value_or_default(); }
     float Threshold() const
     {
         const float v = maskThreshold.value_or_default();

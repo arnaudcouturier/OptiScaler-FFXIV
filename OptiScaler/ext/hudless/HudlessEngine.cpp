@@ -116,6 +116,8 @@ class Engine final : public IEngineHost, private FenceReader
     bool DebugCompareOn() override { return State::Instance().fgHudlessCompare; }
     float CoverageLimit() override { return ext::Cfg().hudless.CoverageLimit(); }
     GuardPolicy CoverageGuardPolicy() override { return ext::Cfg().hudless.GetGuardPolicy(); }
+    int CoverageGuardReleaseHolds() override { return ext::Cfg().hudless.ReleaseHolds(); }
+    bool CoverageGuardTripOnAnchorLater() override { return ext::Cfg().hudless.TripOnAnchorLater(); }
     IHudlessSource* Source() override { return ext::game::Current().hudless; }
     Reason CheckCapture(const FrameImage& image) override;
     Reason StageCapture(const FrameImage& image) override;

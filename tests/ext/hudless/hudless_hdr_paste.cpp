@@ -299,6 +299,9 @@ void TestEngineCallSite(const std::string& repo)
     assert(Count(engine, Squash("EnsureStageLatched(_hdrLatch, HdrOutput(), ext::Cfg().hudless.HdrPasteOn(),")) == 1);
     // The key [HudLess] GuardMode reaches the core through the engine, and the core is told which tags the present sent
     assert(Count(engine, Squash("GuardPolicy CoverageGuardPolicy() override { return ext::Cfg().hudless.GetGuardPolicy(); }")) == 1);
+    // ... and so do the two options of that guard policy
+    assert(Count(engine, Squash("int CoverageGuardReleaseHolds() override { return ext::Cfg().hudless.ReleaseHolds(); }")) == 1);
+    assert(Count(engine, Squash("bool CoverageGuardTripOnAnchorLater() override { return ext::Cfg().hudless.TripOnAnchorLater(); }")) == 1);
     assert(Count(engine, Squash("_core.NoteTagSet(static_cast<uint8_t>((tagged.hudlessTagged ? 1 : 0) | (tagged.uiTagged ? 2 : 0)));")) == 1);
 }
 } // namespace
