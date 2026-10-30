@@ -17,8 +17,9 @@ OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiSca
 
 | Feature | What it does | Status |
 |---|---|---|
-| Upscaling | The game renders below your screen resolution and DLSS, FSR or XeSS upscales it, or DLAA runs at full resolution | DLSS tested; FSR and XeSS untested |
 | DLSS Neural Rendering | Adds detail to the upscaled image with NVIDIA's Neural Rendering model (NVIDIA RTX) | tested |
+| Upscaling | The game renders below your screen resolution and DLSS, FSR or XeSS upscales it, or DLAA runs at full resolution | DLSS tested; FSR and XeSS untested |
+| Frame rate governor | Steps the Neural Rendering model resolution down and up to hold a target frame rate | optional, experimental; not tried in game yet |
 | Frame generation | DLSS multi frame generation at 2x to 4x on RTX 40 cards; FSR or XeSS frame generation on other cards | DLSS tested; 5x and 6x are experimental; FSR and XeSS untested |
 | HDR10 output | HDR10 for the game, with RenoDX scene HDR as an option | tested |
 | ReShade depth alignment | Keeps ReShade's depth lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
@@ -47,7 +48,7 @@ The [install guide](../docs/INSTALL.md) has the details, the settings of the tes
 
 ## Status
 
-The current release is v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) on OptiScaler nightly `d9b62110`. The first release was v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`). Both were played in game by the author on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release is v0.4.0 (tag `ffxiv-2026.10.30-d9b62110`) on OptiScaler nightly `d9b62110`. It is a pre-release and has not been played in game yet. The last played release was v0.3.0 (tag `ffxiv-2026.10.26-d9b62110`, played on 2026-10-26); v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) was played on 2026-10-25 and v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`) on 2026-10-23, all on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 
