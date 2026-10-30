@@ -3,6 +3,7 @@
 // colour output, produced by issuing a G-buffer draw a second time. The game's own motion output is 8-bit and unsigned.
 // Rules: CharaMotionRules.h. Everything here runs on the thread that draws on the immediate context.
 
+#include <array>
 #include <d3d11.h>
 
 #include "ext/ffxiv/chara/CharaDraw.h"
@@ -20,6 +21,15 @@ struct ReplayResult
 {
     Outcome outcome = Outcome::NotReplayed;
     Skip skip = Skip::None;
+    // What the rules saw when they refused an untagged shader (Skip::UnknownShader only): the constant buffer sizes and the render
+    // target entries tell a G-buffer draw of another shader from one of the preview renderer's own with another camera block size.
+    // Diagnostics only, nothing here changes the decision.
+    struct Shape
+    {
+        uint32_t vsCb0Bytes = 0;
+        uint32_t psCb2Bytes = 0;
+        std::array<int, 5> rtvEntry { kEntryNone, kEntryNone, kEntryNone, kEntryNone, kEntryNone };
+    } shape;
 };
 
 // The private target at `width` x `height` (R16G16B16A16_FLOAT, render target and shader resource). Creates it, or

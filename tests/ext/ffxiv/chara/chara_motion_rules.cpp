@@ -120,6 +120,83 @@ void TestUntaggedShape()
     CHECK(DecideReplay(f).skip == Skip::UnknownShader);
 }
 
+// The wider shape rule (PreviewReplayWideShape): the camera block may be a view into a larger buffer, so any size the camera snapshot
+// accepts is enough, for both buffers; the render targets must still be entries 8..12 in order and the shader is still untagged.
+void TestWideShape()
+{
+    // the exact shape is accepted with the rule off and on
+    for (const bool wide : { false, true })
+    {
+        ReplayFacts f = Untagged();
+        f.wideShape = wide;
+        ReplayDecision d = DecideReplay(f);
+        CHECK(d.replay && d.tagShader && d.skip == Skip::None);
+    }
+    // a 1024-byte camera block: refused exactly, accepted wide (the sizes this fork's game build reports for the G-buffer pixel shader)
+    {
+        ReplayFacts f = Untagged();
+        f.psCb2Bytes = 1024;
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+        f.wideShape = true;
+        CHECK(DecideReplay(f).replay && DecideReplay(f).skip == Skip::None);
+        // only the exact block proves that the shader reads the camera block, so a wider one is replayed without tagging it: a tag taken
+        // from a buffer that merely fits would follow that shader for every draw it makes, for the rest of the session
+        CHECK(!DecideReplay(f).tagShader);
+    }
+    // both buffers have to pass: a wide pixel buffer with an exact-size vertex buffer is accepted, an out-of-range one is not
+    {
+        ReplayFacts f = Untagged();
+        f.wideShape = true;
+        f.vsCb0Bytes = 0x3b0;
+        f.psCb2Bytes = 0x3b0 + 0xFC50; // the top of the range
+        CHECK(DecideReplay(f).replay);
+        f.psCb2Bytes = 0x3b0 + 0xFC50 + 1; // one byte above it
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+        f.psCb2Bytes = 0x3b0;
+        f.vsCb0Bytes = 0x3af; // one byte below the minimum
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+        f.vsCb0Bytes = 0x3b4; // not a whole number of vectors: inside the range, so accepted wide
+        CHECK(DecideReplay(f).replay);
+        f.vsCb0Bytes = 0; // no constant buffer bound
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+        f.vsCb0Bytes = 0x3b0;
+        f.psCb2Bytes = 0;
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+    }
+    // the rule changes the size test only: the render target requirement and the other skips stay
+    {
+        ReplayFacts f = Untagged();
+        f.wideShape = true;
+        f.psCb2Bytes = 1024;
+        f.rtvEntry[3] = 10;
+        CHECK(DecideReplay(f).skip == Skip::UnknownShader);
+        f = Untagged();
+        f.wideShape = true;
+        f.psCb2Bytes = 1024;
+        f.anyUav = true;
+        CHECK(DecideReplay(f).skip == Skip::UnorderedAccess);
+        f = Untagged();
+        f.wideShape = true;
+        f.psCb2Bytes = 1024;
+        f.psGeometryTag = true; // a tagged shader is replayed without looking at the buffers
+        CHECK(DecideReplay(f).replay && !DecideReplay(f).tagShader);
+    }
+    // the camera rule itself: the range Accept uses, without the bound range
+    CHECK(camera::SizeAccepted(0x3b0) && camera::SizeAccepted(1024) && camera::SizeAccepted(0x3b0 + 0xFC50));
+    CHECK(!camera::SizeAccepted(0x3af) && !camera::SizeAccepted(0) && !camera::SizeAccepted(0x3b0 + 0xFC50 + 1));
+}
+
+// The guides of a pass come from a G-buffer draw whose shader carries the geometry role, or from a draw the replay accepted. The wider shape is
+// replayed without being tagged, so without the second half a pass whose opaque draws are all of the wider shape would never have a camera and
+// could not finish.
+void TestGuideCapture()
+{
+    CHECK(CapturesGuides(true, false));  // a shader already known as a G-buffer shader
+    CHECK(CapturesGuides(true, true));
+    CHECK(CapturesGuides(false, true));  // a wider-shape shader the replay accepted (and did not tag)
+    CHECK(!CapturesGuides(false, false)); // an opaque draw the replay refused: nothing proves it reads the camera block
+}
+
 void TestDepth()
 {
     CHECK(IsReversedZ(true, D3D11_COMPARISON_GREATER));
@@ -305,6 +382,8 @@ int main()
     TestTagged();
     TestSkipConditions();
     TestUntaggedShape();
+    TestWideShape();
+    TestGuideCapture();
     TestDepth();
     TestDepthCache();
     TestQueries();

@@ -30,6 +30,8 @@ struct Stats
     std::atomic<uint64_t> slotsAcquired { 0 };     // preview slots claimed by a UI draw
     std::atomic<uint64_t> consumerSwaps { 0 };     // UI draws that got the processed (composed) preview image
     std::atomic<uint64_t> frames { 0 };
+    std::atomic<uint32_t> windowsProcessed { 0 }; // preview windows the processed set holds (the budget)
+    std::atomic<uint32_t> windowsMax { 0 };       // ... and how many it holds at most
 
     // Spatial AA
     std::atomic<uint64_t> equipShaderSeen { 0 }; // equipment display shader drawn on the immediate context

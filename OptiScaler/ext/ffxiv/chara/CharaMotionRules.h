@@ -11,6 +11,7 @@
 #include <memory>
 #include <unordered_set>
 
+#include "ext/ffxiv/chara/CharaCameraRules.h"
 #include "ext/ffxiv/chara/CharaDecision.h"
 
 namespace ext::ffxiv::chara::motion
@@ -34,6 +35,9 @@ struct ReplayFacts
     bool psGeometryTag = false;        // the pixel shader carries the geometry role
     uint32_t vsCb0Bytes = 0;           // byte width of vertex-shader constant buffer 0
     uint32_t psCb2Bytes = 0;           // byte width of pixel-shader constant buffer 2
+    // Accept any constant buffer size that can hold the camera block (camera::SizeAccepted) instead of exactly the 59-float4 block:
+    // a shader that reads the block as a view into a larger buffer has the G-buffer shape too. Off by default.
+    bool wideShape = false;
 };
 
 enum class Skip : uint8_t
@@ -120,12 +124,25 @@ inline ReplayDecision DecideReplay(const ReplayFacts& f)
         if (!f.rtvBound[i] || f.rtvEntry[i] != 8 + static_cast<int>(i))
             return skip(Skip::UnknownShader);
     }
-    if (f.vsCb0Bytes != kGBufferCbBytes || f.psCb2Bytes != kGBufferCbBytes)
+    // The camera block is 59 float4 (944 bytes) when the shader reads the whole buffer; a shader may read it as a view into a larger
+    // one. `wideShape` accepts any size the camera snapshot accepts, for both buffers, and keeps the render target requirement above:
+    // only draws of the preview renderer's own G-buffer qualify either way.
+    const bool cameraBlock = f.wideShape ? (camera::SizeAccepted(f.vsCb0Bytes) && camera::SizeAccepted(f.psCb2Bytes))
+                                         : (f.vsCb0Bytes == kGBufferCbBytes && f.psCb2Bytes == kGBufferCbBytes);
+    if (!cameraBlock)
         return skip(Skip::UnknownShader);
     d.replay = true;
-    d.tagShader = true;
+    // Only the exact shape proves that the shader reads the camera block, so only that one tags the shader for the session: a wider size
+    // may be a buffer that merely fits, and a tag taken from it would follow that shader for every draw it makes.
+    d.tagShader = f.vsCb0Bytes == kGBufferCbBytes && f.psCb2Bytes == kGBufferCbBytes;
     return d;
 }
+
+// Whether a G-buffer draw gives the guides their inputs (camera copy, depth view, depth convention). A shader already known as a G-buffer
+// shader carries the geometry role, so its draws do. A draw the replay accepted is proof as well: the wider shape is replayed without being
+// tagged (only the exact 944-byte block proves that the shader reads the camera block), so without this the camera of a pass whose opaque
+// draws are all of the wider shape would never be copied and the pass could not finish.
+constexpr bool CapturesGuides(bool geometryRole, bool replayed) { return geometryRole || replayed; }
 
 // ---- Depth convention and the replay depth state -------------------------------------------------------------------
 

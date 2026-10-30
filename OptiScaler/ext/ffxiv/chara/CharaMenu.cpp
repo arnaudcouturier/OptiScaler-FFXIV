@@ -9,6 +9,7 @@
 #include "ext/ffxiv/chara/CharaProbe.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
+#include "ext/ffxiv/chara/CharaWindowSet.h"
 #include "ext/game/Game.h"
 
 #include <imgui/imgui.h>
@@ -72,6 +73,35 @@ void DrawNrStatusLine(const CharaConfig& cfg)
         ImGui::TextDisabled("Preview NR: preparing the model (the first result comes a few frames later)");
     else
         ImGui::Text("Preview NR: running");
+}
+
+// The processed set: how many preview windows get the upscaler and the NR work. Drawn with the user switches, before the fold.
+void DrawWindowBudget(CharaConfig& cfg)
+{
+    bool budget = cfg.previewBudget.value_or_default();
+    if (ImGui::Checkbox("Limit the number of processed preview windows (experimental)", &budget))
+        cfg.previewBudget = budget;
+    ext::menu::Tooltip("With this on, only the set number of preview windows gets the DLSS pass and preview NR; the others keep the game's own "
+                       "picture and are not jittered. A window is recognised by the camera constant buffer it draws with (the buffer, its first "
+                       "constant and the render size), without reading anything back from the GPU, so a render whose window cannot be recognised yet "
+                       "runs untouched. If the game's windows cannot be told apart, none of them is processed and each keeps the game's own picture; "
+                       "the log line `preview identity` shows it. A window that draws and is on screen takes the place of one that has not been drawn "
+                       "for a quarter of a second, at most one exchange per quarter of a second, so a hitch does not rebuild the whole set; two windows "
+                       "that alternate keep their places. Closing a processed window hands its place to a waiting one. Every processed window costs GPU "
+                       "time and video memory, so a view with several characters is smoother with two than with all of them. Off by default: every preview "
+                       "window is processed as before.");
+
+    int maxWindows = static_cast<int>(cfg.previewMaxWindows.value_or_default());
+    ImGui::BeginDisabled(!budget);
+    if (ImGui::SliderInt("Processed preview windows", &maxWindows, 1, 8, "%d", ImGuiSliderFlags_AlwaysClamp))
+        cfg.previewMaxWindows = static_cast<uint32_t>(maxWindows);
+    ImGui::EndDisabled();
+    ext::menu::Tooltip("How many preview windows are processed while the limit above is on (1 to 8; the preview renderer has eight output entries). "
+                       "Two covers the character window plus one more (examine, try-on, dye). Not read while the limit is off.");
+
+    if (budget)
+        ImGui::TextDisabled("Processed preview windows: %u of %u (the others keep the game's picture)",
+                            g_stats.windowsProcessed.load(std::memory_order_relaxed), g_stats.windowsMax.load(std::memory_order_relaxed));
 }
 
 // ---- Advanced (debug) ------------------------------------------------------------------------------------------------
@@ -163,6 +193,16 @@ void DrawDebugSection(CharaConfig& cfg, bool inert)
         cfg.previewNrTrace = trace;
     ext::menu::Tooltip("Rate-limited log lines for the preview NR path (finisher verdicts, evaluations, UI swaps). Only logs, "
                        "changes nothing. Read live: applies at once.");
+
+    bool wideShape = cfg.previewReplayWideShape.value_or_default();
+    if (ImGui::Checkbox("Signed-motion replay: any camera block size (diagnostics)", &wideShape))
+        cfg.previewReplayWideShape = wideShape;
+    ext::menu::Tooltip("Diagnostics, leave off in normal use. The replay that produces the signed motion vectors normally only takes a "
+                       "G-buffer draw whose vertex and pixel constant buffers are exactly the 59-float4 camera block (944 bytes). With this "
+                       "on, any constant buffer size that can hold the camera block is accepted (the draw must still write the preview "
+                       "renderer's own G-buffer). A shader that reads the camera block as a view into a larger buffer is then replayed "
+                       "too, so more pixels get motion vectors and the picture can change: look for shimmer on hair and cloth and switch "
+                       "it off if you see any. Read live: applies at once.");
     ImGui::Separator();
 
     const dlss::Counters counters = dlss::GetCounters();
@@ -279,6 +319,7 @@ void DrawCharaCard(ext::menu::Ctx&)
 
     DrawNrToggles(cfg);
     DrawNrStatusLine(cfg);
+    DrawWindowBudget(cfg);
 
     // Why the whole feature is off, if it is (wrong game build, accessor not verified). Never written to the config.
     const char* reason = table::InertReason();

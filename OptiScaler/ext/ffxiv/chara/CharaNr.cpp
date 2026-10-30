@@ -4,6 +4,7 @@
 #include "ext/core/PathText.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaNr.h"
+#include "ext/ffxiv/chara/CharaWindowSet.h"
 #include "ext/nr/runtime/NrPreviewRuntime.h"
 #include "ext/ffxiv/chara/CharaNrRecipe.h"
 #include "ext/gpu/Gpu.h"
@@ -37,7 +38,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-constexpr size_t kAllocators = 4;
 constexpr DXGI_FORMAT kResultFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DXGI_FORMAT kScratchFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -112,6 +112,7 @@ struct Module
     FenceCounter done;                   // values of the done fence (the completion counter: allocators, releases, creation)
     bool doneBroken = false;             // a done signal failed after its list ran: the next drain repairs the fence first
     bool tableFullLogged = false;        // the one line about a full stream table
+    bool setSkipLogged = false;          // the one line about a preview window outside the processed set
     std::atomic<bool> releasePending { false }; // the old objects are kept and released in Maintain: a device change found the GPU busy, or a teardown threw (set from the handler of a teardown entry, so atomic)
 
     DlssNr::PreviewBackend backend;
@@ -157,6 +158,12 @@ struct Module
     std::atomic<uint64_t> lastProductionGpuUs { 0 }, lastProductionCpuUs { 0 };
     std::atomic<uint64_t> lastPreSrGpuUs { 0 }, lastPreSrCpuUs { 0 };
     VideoMemoryAccount vram; // the figure of the menu: what the streams' images and models added
+    // Why a call was skipped, split by cause (guarded by the mutex), and the most streams that existed at once: the log line of the
+    // preview activity reads them through Status.
+    uint64_t skipTableFull = 0;
+    uint64_t skipSettling = 0;
+    uint64_t skipNoList = 0;
+    uint32_t streamsPeak = 0;
 };
 
 Module& M()
@@ -264,11 +271,11 @@ void RepairDone()
 bool BeginList()
 {
     Module& m = M();
-    for (size_t i = 0; i < kAllocators; ++i)
+    std::array<size_t, kAllocators> order {};
+    const size_t free = FreeAllocators(m.allocatorValue, m.allocatorNext, [](uint64_t value) { return GpuDone(value); }, order);
+    for (size_t i = 0; i < free; ++i)
     {
-        const size_t index = (m.allocatorNext + i) % kAllocators;
-        if (!GpuDone(m.allocatorValue[index]))
-            continue;
+        const size_t index = order[i];
         if (FAILED(m.allocators[index]->Reset()))
             continue;
         if (FAILED(ext::gpu::ResetCommands(m.list.Get(), m.allocators[index].Get())))
@@ -419,7 +426,10 @@ void UpdateHolds()
 {
     Module& m = M();
     m.holds.store(m.inited || m.table.UsedCount() != 0, std::memory_order_relaxed);
-    m.streamCount.store(static_cast<uint32_t>(m.table.UsedCount()), std::memory_order_relaxed);
+    const size_t used = m.table.UsedCount();
+    m.streamCount.store(static_cast<uint32_t>(used), std::memory_order_relaxed);
+    if (used > m.streamsPeak)
+        m.streamsPeak = static_cast<uint32_t>(used);
 }
 
 void ReleaseGlobal()
@@ -811,7 +821,10 @@ RunOutcome CreateFeatureStep(int index, Stream& s, StreamState& st)
 {
     Module& m = M();
     if (!BeginList())
+    {
+        ++m.skipNoList;
         return RunOutcome::Skipped;
+    }
     const DlssNr::PreviewBackend& b = m.backend;
     const DlssNr::PreviewTuning t = DlssNr::CurrentPreviewTuning();
     const auto start = std::chrono::steady_clock::now();
@@ -915,7 +928,10 @@ RunOutcome Run(int index, Stream& s, const RunRequest& req, const ProductionRequ
     // A free command allocator is needed before anything is queued: none free (many windows open, a slow GPU) is not an error, the
     // native image stays for this render.
     if (!BeginList())
+    {
+        ++m.skipNoList;
         return RunOutcome::Skipped;
+    }
 
     ID3D11DeviceContext* ctx = req.context;
     if (plan.initGuides)
@@ -1098,13 +1114,43 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         return RunOutcome::Paused;
     }
 
+    // Several windows: with the budget on, only an image the set processes may own a stream. The others keep the native picture, which
+    // is what the set exists for; the stream of an image that left the set is released by the linger rule as usual.
+    g_windowSet.Configure(ext::Cfg().ffxiv.chara.previewBudget.value_or_default(),
+                          static_cast<uint32_t>(ext::Cfg().ffxiv.chara.previewMaxWindows.value_or_default()));
+    if (!g_windowSet.Processed(key))
+    {
+        if (!m.setSkipLogged)
+        {
+            m.setSkipLogged = true;
+            LOG_INFO("CharaView NR: a preview window is not one of the processed windows (PreviewMaxWindows); it keeps the game's picture and "
+                     "gets no NR model while it is outside the set");
+        }
+        return RunOutcome::Skipped;
+    }
+
     ObserveRuntime(); // before the availability is read: a selection without a model must show at once
     if (Refresh() != Availability::Available || !EnsureInit(req.context))
         return RunOutcome::NotAvailable;
 
-    int index = m.table.Bind(key, req.width, req.height, req.now);
+    int index = m.table.Bind(key, req.width, req.height, req.now, req.entry);
+    if (index == kNoStream && g_windowSet.On())
+    {
+        // The table is full: the least recently used stream that is not live and whose GPU work is finished makes room, so a window
+        // that is closed does not block a new one (only with the budget on: off, the linger rule alone decides).
+        const int victim = m.table.Evictable(req.now, [](uint64_t done) { return GpuDone(done); });
+        if (victim != kNoStream)
+        {
+            LOG_INFO("CharaView NR: stream {} (output entry {}) released to make room for another preview window (its preview was not drawn lately)",
+                     victim, m.table.At(victim).entry);
+            ReleaseStreamObjects(m.streams[victim], true);
+            m.table.Free(victim);
+            index = m.table.Bind(key, req.width, req.height, req.now, req.entry);
+        }
+    }
     if (index == kNoStream)
     {
+        ++m.skipTableFull;
         if (!m.tableFullLogged)
         {
             m.tableFullLogged = true;
@@ -1127,9 +1173,12 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
         LOG_INFO("CharaView NR: stream {} rebuilt for NR runtime revision {} (was {})", index, m.backend.revision, m.streamRuntime[index]);
         ReleaseStreamObjects(m.streams[index], true);
         m.table.Free(index);
-        index = m.table.Bind(key, req.width, req.height, req.now);
+        index = m.table.Bind(key, req.width, req.height, req.now, req.entry);
         if (index == kNoStream)
+        {
+            ++m.skipTableFull;
             return RunOutcome::Skipped;
+        }
         m.table.At(index).attempts = 1;
     }
 
@@ -1144,7 +1193,7 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
     m.table.At(index).lastLive = req.now;
     switch (DecideRebuild(m.table.At(index), wanted, req.now))
     {
-    case RebuildAction::Settle: UpdateHolds(); return RunOutcome::Skipped;
+    case RebuildAction::Settle: UpdateHolds(); ++m.skipSettling; return RunOutcome::Skipped;
     case RebuildAction::Rebuild:
     {
         // The old stream goes once the GPU is finished with it.
@@ -1156,9 +1205,12 @@ static RunOutcome RunCoreSteps(const RunRequest& req, const ProductionRequest* p
                  wanted.style, old.late ? "late" : "same frame", wanted.late ? "late" : "same frame");
         ReleaseStreamObjects(m.streams[index], true);
         m.table.Free(index);
-        index = m.table.Bind(key, req.width, req.height, req.now);
+        index = m.table.Bind(key, req.width, req.height, req.now, req.entry);
         if (index == kNoStream)
+        {
+            ++m.skipTableFull;
             return RunOutcome::Skipped;
+        }
         m.table.At(index).attempts = 1;
         m.table.At(index).lastLive = req.now;
         break;
@@ -1352,7 +1404,12 @@ static void MaintainImpl(uint64_t now)
     if (!m.inited && m.table.UsedCount() == 0)
         return;
     const bool disabled = a != Availability::Available;
-    const uint64_t linger = LingerMs(ext::Cfg().ffxiv.chara.previewNrLingerSeconds.value_or_default());
+    // Several windows: while the processed set is full and an image waits for a place, a closed window's model goes after the live window
+    // (a quarter of a second) instead of its full linger time, so the place arrives quickly. Only with the budget on.
+    g_windowSet.Configure(ext::Cfg().ffxiv.chara.previewBudget.value_or_default(),
+                          static_cast<uint32_t>(ext::Cfg().ffxiv.chara.previewMaxWindows.value_or_default()));
+    const bool pressure = g_windowSet.On() && g_windowSet.HasWaitingCandidate(now);
+    const uint64_t linger = pressure ? 0 : LingerMs(ext::Cfg().ffxiv.chara.previewNrLingerSeconds.value_or_default());
     for (size_t i = 0; i < kMaxStreams; ++i)
     {
         const int index = static_cast<int>(i);
@@ -1436,7 +1493,13 @@ static Status GetStatusImpl()
         {
             const StreamState& st = m.table.At(static_cast<int>(i));
             s.late = s.late || (st.Used() && st.hasBuilt && LateVariantInUse(st.built));
+            s.streamEntries[i] = st.Used() ? st.entry : -1;
+            s.streamRuns[i] = st.Used() ? st.runs : 0;
         }
+        s.skipTableFull = m.skipTableFull;
+        s.skipSettling = m.skipSettling;
+        s.skipNoList = m.skipNoList;
+        s.streamsPeak = m.streamsPeak;
     }
     s.streams = m.streamCount.load(std::memory_order_relaxed);
     s.liveStreams = m.liveCount.load(std::memory_order_relaxed);

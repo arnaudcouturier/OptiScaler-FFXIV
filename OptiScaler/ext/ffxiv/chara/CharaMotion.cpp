@@ -1,5 +1,6 @@
 #include "pch.h"
 
+#include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaTags.h"
@@ -184,6 +185,7 @@ ReplayResult Replay(const DrawView& view, DrawCall draw)
     facts.openQueries = static_cast<uint32_t>(g_queries.Count());
     facts.replayAllowedByQueries = !g_queries.Blind();
     facts.psGeometryTag = (view.roles & RoleGeometry) != 0;
+    facts.wideShape = ext::Cfg().ffxiv.chara.previewReplayWideShape.value_or_default();
 
     // Cheap exits before any state is read.
     if (facts.ownDraw)
@@ -239,7 +241,16 @@ ReplayResult Replay(const DrawView& view, DrawCall draw)
 
     const ReplayDecision decision = DecideReplay(facts);
     if (!decision.replay)
-        return Skipped(decision.skip);
+    {
+        ReplayResult refused = Skipped(decision.skip);
+        if (decision.skip == Skip::UnknownShader)
+        {
+            refused.shape.vsCb0Bytes = facts.vsCb0Bytes;
+            refused.shape.psCb2Bytes = facts.psCb2Bytes;
+            refused.shape.rtvEntry = facts.rtvEntry;
+        }
+        return refused;
+    }
     if (decision.tagShader && view.pixelShader != nullptr)
         SetRoles(view.pixelShader, view.roles | RoleGeometry);
 

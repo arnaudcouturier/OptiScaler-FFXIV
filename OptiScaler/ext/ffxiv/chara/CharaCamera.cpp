@@ -85,6 +85,35 @@ Result Capture(ID3D11DeviceContext* context)
     return Result::Captured;
 }
 
+// The camera block of the pass in flight, from the binding alone (see CharaCamera.h): the buffer object, its first constant and the pass size.
+// No copy and no Map, so naming a pass costs two context calls and never waits for the GPU.
+BlockKey BoundBlock(ID3D11DeviceContext* context, Stage stage, uint32_t width, uint32_t height)
+{
+    BlockKey key;
+    if (context == nullptr)
+        return key;
+    ComPtr<ID3D11DeviceContext1> context1;
+    if (FAILED(context->QueryInterface(IID_PPV_ARGS(&context1))))
+        return key;
+    ComPtr<ID3D11Buffer> source;
+    UINT first = 0, count = 0;
+    if (stage == Stage::Vertex)
+        context1->VSGetConstantBuffers1(SlotOf(stage), 1, &source, &first, &count);
+    else
+        context1->PSGetConstantBuffers1(SlotOf(stage), 1, &source, &first, &count);
+    if (source == nullptr)
+        return key;
+    D3D11_BUFFER_DESC bd {};
+    source->GetDesc(&bd);
+    if (!Accept(bd.ByteWidth, first, count))
+        return key; // not a camera block: the pass cannot be named from this binding
+    key.buffer = reinterpret_cast<uintptr_t>(source.Get());
+    key.first = first;
+    key.width = width;
+    key.height = height;
+    return key;
+}
+
 bool Ready() { return g_ready && g_copy != nullptr; }
 ID3D11Buffer* Buffer() { return g_copy.Get(); }
 UINT FirstConstant() { return g_first; }

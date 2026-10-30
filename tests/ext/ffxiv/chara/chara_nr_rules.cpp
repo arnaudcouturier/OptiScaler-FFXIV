@@ -132,6 +132,49 @@ void TestStreams()
     CHECK(full.Bind(0x9999, 1, 1, 0) == kNoStream);
 }
 
+// The eviction rule of the stream table: the least recently used stream that is not live and whose GPU work is finished. The
+// budget path uses it when the table is full; with the budget off the linger rule alone decides.
+void TestStreamEvictable()
+{
+    StreamTable t;
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == kNoStream);
+    const int a = t.Bind(0x1000, 576, 960, 1000);
+    const int b = t.Bind(0x2000, 576, 960, 1000);
+    CHECK(a == 0 && b == 1);
+    t.At(a).lastLive = 1000;
+    t.At(b).lastLive = 900;
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == kNoStream); // both are within the live window
+    // A is live (just drawn), B has been idle for more than 250 ms
+    t.At(b).lastLive = 700;
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == b);
+    // the GPU may still be reading B's images: not evictable until its done value reports complete
+    t.At(b).lastSubmitted = 42;
+    CHECK(t.Evictable(1000, [](uint64_t done) { return done != 42; }) == kNoStream);
+    CHECK(t.Evictable(1000, [](uint64_t done) { return done == 42; }) == b);
+    // the oldest idle stream wins when several are idle
+    const int c = t.Bind(0x3000, 576, 960, 1000);
+    CHECK(c == 2);
+    t.At(c).lastLive = 800; // 200 ms: still live, so it is skipped whatever its age
+    t.At(b).lastLive = 400;
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == b);
+    // two idle streams: the one idle longest goes, whichever index it has
+    t.At(c).lastLive = 700; // 300 ms idle
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == b); // 600 ms idle
+    t.At(b).lastLive = 700;
+    t.At(c).lastLive = 400; // 600 ms idle, on a higher index than the 300 ms one
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == c);
+    // a live stream is never evicted, even when it is the oldest
+    t.At(c).lastLive = 1000;
+    CHECK(t.Evictable(1000, [](uint64_t) { return true; }) == b);
+    // freeing the victim lets a new image bind; the new stream starts with nothing
+    t.Free(b);
+    const int d = t.Bind(0x4000, 576, 960, 1000);
+    CHECK(d == b && t.At(d).runs == 0 && t.At(d).lastSubmitted == 0 && t.At(d).entry == -1);
+    // the entry label of the image is kept for the log lines
+    t.Free(d);
+    CHECK(t.Bind(0x5000, 576, 960, 1000, 7) == d && t.At(d).entry == 7);
+}
+
 void TestLinger()
 {
     CHECK(LingerMs(5) == 5000 && LingerMs(0) == 0 && LingerMs(100000) == kMaxLingerSeconds * 1000ull);
@@ -190,6 +233,20 @@ void TestLinger()
     f.disabled = true;
     f.now = 1001;
     CHECK(DecideStream(f) == StreamAction::Release);
+
+    // Under pressure (the processed set is full and another image waits for a place) the caller passes a linger of 0: a closed window
+    // then goes after the live window instead of its configured linger time, and only then. The rule is the same one DecideStream
+    // applies to any short linger.
+    f = StreamFacts {};
+    f.lastLive = 1000;
+    f.lingerMs = 0;
+    f.now = 1000 + kLiveMs;
+    CHECK(DecideStream(f) == StreamAction::Keep); // still inside the live window
+    f.now = 1000 + kLiveMs + 1;
+    CHECK(DecideStream(f) == StreamAction::Release);
+    f.lingerMs = LingerMs(5);
+    f.now = 2000;
+    CHECK(DecideStream(f) == StreamAction::Keep); // without pressure the configured linger keeps the model
 }
 
 void TestReset()
@@ -1000,6 +1057,7 @@ int main()
     TestStateLog();
     TestLatches();
     TestStreams();
+    TestStreamEvictable();
     TestLinger();
     TestReset();
     TestHandoff();

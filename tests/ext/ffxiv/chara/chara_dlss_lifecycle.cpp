@@ -192,7 +192,7 @@ void TestLifecycle()
     bool queryDone = false;
     auto cleanup = [&](bool disabled) {
         return t.Cleanup(
-            now, disabled, [&](int) { return queryDone; }, [&](int i) { released.insert(i); });
+            now, disabled, true, [&](int) { return queryDone; }, [&](int i) { released.insert(i); });
     };
 
     // Pass 1: the finisher runs, no slot yet, so nothing is jittered or finished.
@@ -241,7 +241,7 @@ void TestLatchDrain()
     bool queryDone = false;
     auto cleanup = [&](bool disabled) {
         return t.Cleanup(
-            now, disabled, [&](int) { return queryDone; }, [&](int i) { released.insert(i); });
+            now, disabled, true, [&](int) { return queryDone; }, [&](int i) { released.insert(i); });
     };
 
     t.NoteRecent(kOutput, now, 1);

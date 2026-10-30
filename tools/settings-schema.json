@@ -2141,6 +2141,44 @@
           "flags": [ "ffxivOnly", "diagnostic" ]
         },
         {
+          "key": "[FFXIV] PreviewReplayWideShape",
+          "section": "FFXIV",
+          "name": "PreviewReplayWideShape",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "ffxiv_character_preview", "cardTitle": "Character preview" },
+          "description": "Diagnostic: the signed-motion replay also takes a G-buffer draw whose camera constant buffer is a view into a larger buffer instead of exactly the 59-float4 block.",
+          "flags": [ "ffxivOnly", "diagnostic" ]
+        },
+        {
+          "key": "[FFXIV] PreviewBudget",
+          "section": "FFXIV",
+          "name": "PreviewBudget",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "ffxiv_character_preview", "cardTitle": "Character preview" },
+          "description": "Limit how many preview windows get the DLSS pass and preview NR; the others keep the game's picture and are not jittered. A window is recognised by the camera constant buffer it draws with (the buffer, its first constant and the render size), without reading anything back from the GPU, so a render whose window cannot be recognised yet runs untouched. If the game's windows cannot be told apart, none of them is processed and each keeps the game's own picture; the log line `preview identity` shows it.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[FFXIV] PreviewMaxWindows",
+          "section": "FFXIV",
+          "name": "PreviewMaxWindows",
+          "type": "int",
+          "min": 1,
+          "max": 8,
+          "default": "auto",
+          "defaultMeans": "2",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "ffxiv_character_preview", "cardTitle": "Character preview" },
+          "description": "How many preview windows are processed while PreviewBudget is on (1 to 8).",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
           "key": "[FFXIV] JitterProbe",
           "section": "FFXIV",
           "name": "JitterProbe",

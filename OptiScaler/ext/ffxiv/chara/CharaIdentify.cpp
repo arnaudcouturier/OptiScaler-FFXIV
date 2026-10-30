@@ -4,9 +4,12 @@
 #include "ext/ffxiv/chara/CharaDlssApi.h"
 #include "ext/ffxiv/chara/CharaDlssRules.h"
 #include "ext/ffxiv/chara/CharaJitter.h"
+#include "ext/ffxiv/chara/CharaNr.h"
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/ffxiv/chara/CharaTags.h"
+#include "ext/ffxiv/chara/CharaWindowSet.h"
+#include "ext/ffxiv/chara/CharaWindowStats.h"
 
 #include <array>
 #include <format>
@@ -52,6 +55,12 @@ struct State
     uint32_t bursts = 0;
     std::array<uint64_t, kMaxSignatures> signatures {};
     size_t signatureCount = 0;
+    // The preview NR counters when the burst started (the burst line prints the differences).
+    uint64_t startNrRuns = 0;
+    uint64_t startNrSkipTableFull = 0;
+    uint64_t startNrSkipSettling = 0;
+    uint64_t startNrSkipNoList = 0;
+    std::array<uint64_t, nr::kMaxStreams> startNrStreamRuns {};
 };
 
 State g_state;
@@ -108,9 +117,106 @@ std::string DownstreamCounts()
     return text;
 }
 
+// One entry's line of the per-output-entry summary: "" when the entry saw nothing in this burst.
+std::string EntryCountsText(size_t bucket, const WindowEntryCounts& e)
+{
+    if (e.finishers == 0 && e.rejected == 0 && e.evaluated == 0 && e.processedDraws == 0 && e.failures == 0)
+        return {};
+    std::string verdicts;
+    for (size_t i = 1; i < e.verdicts.size(); ++i)
+    {
+        if (e.verdicts[i] == 0)
+            continue;
+        verdicts += std::string(verdicts.empty() ? "" : ", ") + dlss::FinishVerdictName(static_cast<dlss::FinishVerdict>(i)) + " " +
+                    std::to_string(e.verdicts[i]);
+    }
+    return std::format("{}: finishers {}, rejected {}, evaluated {}, processed UI draws {}, failures {}{}",
+                       bucket < kWindowEntries ? "entry " + std::to_string(bucket) : std::string("not an output entry"), e.finishers, e.rejected,
+                       e.evaluated, e.processedDraws, e.failures, verdicts.empty() ? "" : " (" + verdicts + ")");
+}
+
+// The several-window part of the burst: which windows were processed, how many images were on screen, the renders per game frame, the
+// motion replay's refusals and the slot failures. Log only.
+void LogSeveralWindows()
+{
+    std::string entries;
+    const auto& counts = g_windowStats.Entries();
+    for (size_t i = 0; i < counts.size(); ++i)
+    {
+        const std::string text = EntryCountsText(i, counts[i]);
+        if (!text.empty())
+            entries += std::string(entries.empty() ? "" : "; ") + text;
+    }
+    LOG_INFO("CharaView: that burst, per output entry: {}", entries.empty() ? std::string("none") : entries);
+
+    const auto& renders = g_windowStats.RendersPerFrame();
+    LOG_INFO("CharaView: that burst, several preview images: distinct output entries {}, most images a UI draw sampled within 250 ms {}, "
+             "renders per game frame 1: {}, 2: {}, 3: {}, 4 or more: {}; two accepted finishers of one image in one frame {}",
+             g_windowStats.DistinctEntries(), g_windowStats.PeakSampled(), renders[0], renders[1], renders[2], renders[3], g_windowStats.Collisions());
+
+    std::string skips;
+    for (size_t i = 1; i < kReplaySkips; ++i)
+    {
+        const uint64_t n = g_windowStats.ReplaySkips(static_cast<motion::Skip>(i));
+        if (n != 0)
+            skips += std::string(skips.empty() ? "" : ", ") + motion::SkipName(static_cast<motion::Skip>(i)) + " " + std::to_string(n);
+    }
+    if (!skips.empty())
+        LOG_INFO("CharaView: that burst, signed-motion replay refused draws: {}", skips);
+    for (size_t i = 0; i < g_windowStats.UnknownShapeCount(); ++i)
+    {
+        const UnknownShape& shape = g_windowStats.UnknownShapeAt(i);
+        LOG_INFO("CharaView: that burst, an untagged G-buffer draw the replay did not recognise: pixel shader {}, vertex cb0 {} bytes, pixel "
+                 "cb2 {} bytes, render target entries 0..4 {}/{}/{}/{}/{}",
+                 shape.crc != 0 ? std::format("{:08X}", shape.crc) : std::string("CRC not recorded"), shape.vsCb0Bytes, shape.psCb2Bytes,
+                 shape.rtvEntry[0], shape.rtvEntry[1], shape.rtvEntry[2], shape.rtvEntry[3], shape.rtvEntry[4]);
+    }
+
+    std::string slots;
+    for (int i = 0; i < static_cast<int>(kMaxSlots); ++i)
+    {
+        const uint64_t n = g_windowStats.SlotFailures(i);
+        if (n != 0)
+            slots += std::string(slots.empty() ? "" : ", ") + "slot " + std::to_string(i) + " " + std::to_string(n);
+    }
+    if (!slots.empty())
+        LOG_INFO("CharaView: that burst, super-resolution failures by slot: {} (the failure window that switches the path off is session-wide)", slots);
+
+    // Preview NR in this burst: why calls were skipped, the stream peak and what each stream did. The reasons are the module's own counters.
+    const nr::Status nr = nr::GetStatus();
+    NrBurstCounts nrBurst;
+    nrBurst.runs = nr.runs - g_state.startNrRuns;
+    nrBurst.skipTableFull = nr.skipTableFull - g_state.startNrSkipTableFull;
+    nrBurst.skipSettling = nr.skipSettling - g_state.startNrSkipSettling;
+    nrBurst.skipNoList = nr.skipNoList - g_state.startNrSkipNoList;
+    nrBurst.streamsPeak = nr.streamsPeak;
+    nrBurst.streamsNow = nr.streams;
+    for (size_t i = 0; i < nrBurst.entries.size(); ++i)
+    {
+        nrBurst.entries[i] = nr.streamEntries[i];
+        nrBurst.streamRuns[i] = nr.streamRuns[i] >= g_state.startNrStreamRuns[i] ? nr.streamRuns[i] - g_state.startNrStreamRuns[i] : 0;
+    }
+    // Nothing to say while preview NR is off (no run, no stream): the line would repeat "0 runs" at every burst end.
+    if (NrBurstWorthLogging(nrBurst))
+        LOG_INFO("CharaView: that burst, preview NR: {}", NrBurstText(nrBurst));
+
+    // Which preview image each pass was drawn for. A camera block is learned at every accepted finisher, so a window that has drawn once is
+    // named on its next pass; a pass that cannot be named (nothing that can hold the camera block bound at its stage, a binding no finisher has
+    // taught yet, or two windows drawing with one block) runs untouched, and these numbers say how often that happens and why. A pass whose
+    // finisher was another image than the binding named is counted as mis-named: that is the number that says whether the binding can tell the
+    // windows apart at all. Only while the limit is on: with it off nothing is learned or named.
+    if (g_windowSet.On())
+    {
+        IdentityCounts identity = g_windowStats.Identity();
+        identity.known = static_cast<uint32_t>(g_windowSet.KnownBlocks());
+        LOG_INFO("CharaView: that burst, preview identity: {}", IdentityBurstText(identity));
+    }
+}
+
 void LogEndOfBurst(uint64_t now)
 {
     State& s = g_state;
+    g_windowStats.FlushFrame(); // the renders of the frame in progress count too
     LOG_INFO("CharaView: preview render activity ended after {} ms: passes started {}, prepass {}, GBuffer {}, finisher {} (accepted {}, rejected {}), "
              "consumer {}",
              now >= s.activityStart ? now - s.activityStart : 0, s.burstPasses, s.burst[static_cast<size_t>(DrawKind::Prepass)],
@@ -139,6 +245,7 @@ void LogEndOfBurst(uint64_t now)
                      "evaluations {}, UI draws given the processed image {}, jitter cycle {} phases",
                      live, slots, finishes.empty() ? std::string("none") : finishes, evaluations, swaps, kJitterPhases);
     }
+    LogSeveralWindows();
     s.inActivity = false;
 }
 
@@ -196,10 +303,19 @@ void Observe(const DrawView& v)
         s.burstVerdict = {};
         s.burstOffTable = s.burstDepthOnly = 0;
         s.burstShapeOnly = s.burstPasses = 0;
+        g_windowStats.Reset(); // the several-window counters belong to one burst
         s.startEvaluations = dlss::GetCounters().evaluations;
         s.startPassesLive = g_stats.passesLive.load();
         s.startSlots = g_stats.slotsAcquired.load();
         s.startSwaps = g_stats.consumerSwaps.load();
+        {
+            const nr::Status nr = nr::GetStatus();
+            s.startNrRuns = nr.runs;
+            s.startNrSkipTableFull = nr.skipTableFull;
+            s.startNrSkipSettling = nr.skipSettling;
+            s.startNrSkipNoList = nr.skipNoList;
+            s.startNrStreamRuns = nr.streamRuns;
+        }
         for (size_t i = 0; i < s.startFinish.size(); ++i)
             s.startFinish[i] = g_stats.finishVerdict[i].load();
         ++s.bursts;
@@ -215,9 +331,20 @@ void Observe(const DrawView& v)
     if (v.passStarted)
     {
         ++s.burstPasses;
+        g_windowStats.NoteRenderStart(v.pass != nullptr ? v.pass->currentFrame : 0);
         if (s.lines.ShouldLog(0, s.bursts))
             LOG_INFO("CharaView: pass started (pass {}, {}x{}, first draw is a {} into table entry {}, via {})", v.pass != nullptr ? v.pass->counter : 0u,
                      v.facts.targetWidth, v.facts.targetHeight, DrawKindName(v.kind), v.facts.rtv0Entry, DrawApiName(v.api));
+    }
+
+    // Several windows: what happened to the output entry of this draw, and whether one image finished twice in one game frame. Noted
+    // for every finisher draw, also one the upscaler step does not take, and before the per-signature dedup below returns.
+    if (v.kind == DrawKind::Finisher)
+    {
+        g_windowStats.NoteFinisher(v.facts.rtv0Entry, v.finisherAccepted, reinterpret_cast<uintptr_t>(v.rtvTexture),
+                                   v.pass != nullptr ? v.pass->currentFrame : 0);
+        // Which camera block binding belongs to which image is learned by the upscaler step (it holds the binding and the output texture of the
+        // render).
     }
 
     // One line per new signature.

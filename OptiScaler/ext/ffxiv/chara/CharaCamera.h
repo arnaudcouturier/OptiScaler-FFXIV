@@ -20,6 +20,11 @@ enum class Result : uint8_t
 // required). The copy is a private default-usage buffer of the same size.
 Result Capture(ID3D11DeviceContext* context);
 
+// The camera block the pass is drawing with, asked from the binding alone: the constant buffer object bound at the draw's own stage (`stage`),
+// its first bound constant and the pass size (camera::BlockKey). Nothing is read from video memory, so this never waits for the GPU. An
+// invalid key when nothing that can hold the camera block is bound at that stage.
+BlockKey BoundBlock(ID3D11DeviceContext* context, Stage stage, uint32_t width, uint32_t height);
+
 bool Ready();
 ID3D11Buffer* Buffer();
 UINT FirstConstant();

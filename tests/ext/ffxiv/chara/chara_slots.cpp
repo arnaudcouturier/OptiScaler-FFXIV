@@ -148,25 +148,25 @@ void TestCleanup()
     CHECK(t.ActiveFeatures() == 2);
 
     // within 2000 ms of use nothing is released
-    CHECK(t.Cleanup(3000, false, done, release) == 0);
+    CHECK(t.Cleanup(3000, false, true, done, release) == 0);
     CHECK(t.Find(kA) == a && t.Find(kB) == b);
     // exactly 2000 ms is not "more than 2000"
-    CHECK(t.Cleanup(3000, false, done, release) == 0);
+    CHECK(t.Cleanup(3000, false, true, done, release) == 0);
     // a's last use is 1000: at 3001 it is idle for 2001 ms
     pending.insert(a); // its query is not done yet: kept
-    CHECK(t.Cleanup(3001, false, done, release) == 0 && released.empty());
+    CHECK(t.Cleanup(3001, false, true, done, release) == 0 && released.empty());
     CHECK(t.Find(kA) == a);
     pending.clear();
-    CHECK(t.Cleanup(3001, false, done, release) == 1);
+    CHECK(t.Cleanup(3001, false, true, done, release) == 1);
     CHECK(released.size() == 1 && released[0] == a);
     CHECK(t.Find(kA) == kNoSlot && t.Find(kB) == b);
     CHECK(t.ActiveFeatures() == 1);
 
     // disabling releases every slot (once its query is done)
     pending.insert(b);
-    CHECK(t.Cleanup(3002, true, done, release) == 0);
+    CHECK(t.Cleanup(3002, true, true, done, release) == 0);
     pending.clear();
-    CHECK(t.Cleanup(3002, true, done, release) == 1);
+    CHECK(t.Cleanup(3002, true, true, done, release) == 1);
     CHECK(t.Find(kB) == kNoSlot && t.ActiveFeatures() == 0);
 
     // a slot that was never evaluated has no pending query and releases at once
@@ -175,7 +175,7 @@ void TestCleanup()
     const int f = fresh.AcquireForConsumer(kA, 1000, 64, 64);
     pending.insert(f); // would block, but there is no query to wait for
     released.clear();
-    CHECK(fresh.Cleanup(4000, false, done, release) == 1);
+    CHECK(fresh.Cleanup(4000, false, true, done, release) == 1);
 
     // a released slot starts clean when the texture comes back
     fresh.NoteRecent(kA, 4100, 2);
@@ -201,10 +201,10 @@ void TestFailureSticks()
     for (uint64_t now = 1100; now <= 1000 + kFailedReleaseMs; now += 500)
     {
         t.Touch(s, now);
-        CHECK(t.Cleanup(now, false, done, release) == 0); // still inside the window
+        CHECK(t.Cleanup(now, false, true, done, release) == 0); // still inside the window
     }
     t.Touch(s, 1000 + kFailedReleaseMs + 1);
-    CHECK(t.Cleanup(1000 + kFailedReleaseMs + 1, false, done, release) == 1 && released == 1);
+    CHECK(t.Cleanup(1000 + kFailedReleaseMs + 1, false, true, done, release) == 1 && released == 1);
     CHECK(t.Find(kA) == kNoSlot); // free again: the next consumer claims a fresh slot
     t.NoteRecent(kA, 12000, 2);
     const int again = t.AcquireForConsumer(kA, 12000, 64, 64);
@@ -213,7 +213,7 @@ void TestFailureSticks()
     // a slot marked failed without a clock value (0) is never released by this rule
     t.MarkFailed(again);
     t.Touch(again, 99999);
-    CHECK(t.Cleanup(99999, false, done, release) == 0);
+    CHECK(t.Cleanup(99999, false, true, done, release) == 0);
 
     // the failed release still waits for the slot's query
     SlotTable u;
@@ -222,8 +222,8 @@ void TestFailureSticks()
     u.MarkEvaluated(b, 1000, 1);
     u.MarkFailed(b, 1100);
     u.Touch(b, 20000);
-    CHECK(u.Cleanup(20000, false, [](int) { return false; }, release) == 0);
-    CHECK(u.Cleanup(20000, false, done, release) == 1);
+    CHECK(u.Cleanup(20000, false, true, [](int) { return false; }, release) == 0);
+    CHECK(u.Cleanup(20000, false, true, done, release) == 1);
 }
 
 // A slot's GPU objects may go only after the work submitted for it finished: the same check serves the idle release and the rebuild
@@ -383,7 +383,7 @@ void TestJitterPhasePerSlot()
         u.NoteFinishedRender(a);
         u.NoteFinishedRender(a);
         CHECK(u.PredictPassSlot() == a && u.JitterPhase(9) == 2);
-        u.Cleanup(100 + kIdleReleaseMs + 1, false, [](int) { return true; }, [](int) {});
+        u.Cleanup(100 + kIdleReleaseMs + 1, false, true, [](int) { return true; }, [](int) {});
         CHECK(u.PredictPassSlot() == kNoSlot && u.JitterPhase(9) == 9);
         u.NoteRecent(kB, 5000, 1);
         const int b = u.AcquireForConsumer(kB, 5000, 576, 960);
@@ -407,12 +407,135 @@ void TestRecentExpiryInCleanup()
 {
     SlotTable t;
     t.NoteRecent(kA, 1000, 1);
-    t.Cleanup(1251, false, [](int) { return true; }, [](int) {});
+    t.Cleanup(1251, false, true, [](int) { return true; }, [](int) {});
     CHECK(!t.RecentContains(kA, 1000)); // expired entries are dropped
     t.NoteRecent(kB, 1000, 1);
-    t.Cleanup(1250, false, [](int) { return true; }, [](int) {});
+    t.Cleanup(1250, false, true, [](int) { return true; }, [](int) {});
     CHECK(t.RecentContains(kB, 1250));
 }
+// The eviction rule of the slot table: the least recently used slot that is not live and whose GPU work is finished. Only the budget
+// path asks for it; the rule itself is pure.
+void TestEvictable()
+{
+    SlotTable t;
+    t.NoteRecent(kA, 1000, 1);
+    t.NoteRecent(kB, 1000, 1);
+    const int a = t.AcquireForConsumer(kA, 1000, 576, 960);
+    const int b = t.AcquireForConsumer(kB, 1000, 576, 960);
+    CHECK(a == 0 && b == 1);
+    t.Slot(a).lastUse = 1000;
+    t.Slot(b).lastUse = 900;
+    // both are live (a slot unused for at most 250 ms): nothing may go
+    CHECK(t.Evictable(1000, 0, [](int) { return true; }) == kNoSlot);
+    CHECK(t.Evictable(1150, 0, [](int) { return true; }) == kNoSlot); // exactly the live window
+    CHECK(t.Evictable(1151, 0, [](int) { return true; }) == b);       // B is idle, A is live
+    // ... unless the GPU is still using it
+    t.Slot(b).queryPending = true;
+    CHECK(t.Evictable(1151, 0, [](int) { return false; }) == kNoSlot);
+    CHECK(t.Evictable(1151, 0, [b](int i) { return i != b; }) == kNoSlot);
+    CHECK(t.Evictable(1151, 0, [](int) { return true; }) == b);
+    // the image that asks for the place is never its own victim
+    CHECK(t.Evictable(1151, t.Slot(b).key, [](int) { return true; }) == kNoSlot);
+    // the oldest idle slot wins
+    t.NoteRecent(0xC000, 1000, 1);
+    const int c = t.AcquireForConsumer(0xC000, 1000, 576, 960);
+    CHECK(c == 2);
+    t.Slot(a).lastUse = 300;
+    t.Slot(b).lastUse = 700;
+    t.Slot(c).lastUse = 600;
+    CHECK(t.Evictable(2000, 0, [](int) { return true; }) == a);
+    // a freed slot starts from nothing and takes the next image
+    t.Free(a);
+    CHECK(!t.Slot(a).Used() && t.Find(kA) == kNoSlot);
+    t.NoteRecent(kA, 2000, 1);
+    const int d = t.AcquireForConsumer(kA, 2000, 576, 960);
+    CHECK(d == a);
+    // an empty table has nothing to evict
+    SlotTable empty;
+    CHECK(empty.Evictable(1000, 0, [](int) { return true; }) == kNoSlot);
+}
+
+// A freed slot (eviction, an image that left the processed set, cleanup) keeps nothing of the image that used it: the next image that takes
+// the index must not inherit the order of the renders or the jitter phase of the one before it.
+void TestFreeForgetsTheImage()
+{
+    SlotTable t;
+    t.NoteRecent(kA, 1000, 1);
+    t.NoteRecent(kB, 1000, 1);
+    const int a = t.AcquireForConsumer(kA, 1000, 576, 960);
+    const int b = t.AcquireForConsumer(kB, 1000, 576, 960);
+    t.NoteFinishedRender(a);
+    t.NoteFinishedRender(b); // A -> B is the learned successor of A
+    t.Free(b);               // B's preview left the processed set
+    CHECK(t.PredictPassSlot() == kNoSlot); // the freed index is no longer "the last finished image"
+    t.NoteRecent(0xC000, 1000, 1);
+    const int c = t.AcquireForConsumer(0xC000, 1000, 576, 960);
+    CHECK(c == b && t.Slot(c).key == 0xC000 && t.Slot(c).renders == 0);
+    // the freed index is not "the last finished image" any more: the next pass is not predicted to be the image that just took it
+    CHECK(t.PredictPassSlot() == kNoSlot);
+    t.NoteFinishedRender(a);
+    CHECK(t.PredictPassSlot() == a); // the edge A -> (the freed slot) is gone: A's own phase, not that of the reused index
+    // cleaning a slot up forgets it the same way
+    SlotTable u;
+    u.NoteRecent(kA, 1000, 1);
+    u.NoteRecent(kB, 1000, 1);
+    const int ua = u.AcquireForConsumer(kA, 1000, 576, 960);
+    const int ub = u.AcquireForConsumer(kB, 1000, 576, 960);
+    u.NoteFinishedRender(ua);
+    u.NoteFinishedRender(ub);
+    u.Slot(ub).lastUse = 0;
+    u.Touch(ua, 5000); // the other slot is still used: only the idle one is released
+    u.Cleanup(5000, false, true, [](int) { return true; }, [](int) {});
+    CHECK(!u.Slot(ub).Used() && u.Find(kB) == kNoSlot);
+    CHECK(u.PredictPassSlot() == kNoSlot);
+    u.NoteRecent(kB, 5000, 1);
+    const int again = u.AcquireForConsumer(kB, 5000, 576, 960);
+    CHECK(again == ub);
+    u.NoteFinishedRender(ua);
+    CHECK(u.PredictPassSlot() == ua);
+
+    // The edge from the freed slot goes too: after the order A, B, A, B's successor is A, so an image that later takes B's index would be
+    // predicted to be followed by A although nothing was learned about it.
+    SlotTable v;
+    v.NoteRecent(kA, 1000, 1);
+    v.NoteRecent(kB, 1000, 1);
+    const int va = v.AcquireForConsumer(kA, 1000, 576, 960);
+    const int vb = v.AcquireForConsumer(kB, 1000, 576, 960);
+    v.NoteFinishedRender(va);
+    v.NoteFinishedRender(vb);
+    v.NoteFinishedRender(va); // the renders came A, B, A
+    CHECK(v.PredictPassSlot() == vb); // after A came B the last time
+    v.Free(vb);
+    v.NoteRecent(0xC000, 1000, 1);
+    const int vc = v.AcquireForConsumer(0xC000, 1000, 576, 960);
+    CHECK(vc == vb && v.Slot(vc).key == 0xC000);
+    v.NoteFinishedRender(vc);
+    CHECK(v.PredictPassSlot() == vc); // no successor was learned for the reused index: it is its own successor, not A
+}
+
+// A cleanup keeps the order of the renders while the processed-window rules are off (the path before they existed only emptied the slot); with
+// them on, a released slot forgets its place in the order both ways.
+void TestCleanupOrderFollowsTheBudget()
+{
+    for (const bool forgetOrder : { false, true })
+    {
+        SlotTable t;
+        t.NoteRecent(kA, 1000, 1);
+        t.NoteRecent(kB, 1000, 1);
+        const int a = t.AcquireForConsumer(kA, 1000, 576, 960);
+        const int b = t.AcquireForConsumer(kB, 1000, 576, 960);
+        t.NoteFinishedRender(a);
+        t.NoteFinishedRender(b);
+        t.NoteFinishedRender(a); // the renders came A, B, A: after A came B the last time
+        t.Touch(b, 5000);
+        CHECK(t.Cleanup(5000, false, forgetOrder, [](int) { return true; }, [](int) {}) == 1); // A has been idle since 1000
+        CHECK(!t.Slot(a).Used() && t.Find(kA) == kNoSlot);
+        // With the order forgotten (the budget on) the released image is no longer the last finished one, so the shared counter is used. Without
+        // it (the path before the budget existed) the last finished index and its successor survive, and the prediction is B.
+        CHECK(t.PredictPassSlot() == (forgetOrder ? kNoSlot : b));
+    }
+}
+
 } // namespace
 
 int main()
@@ -428,5 +551,8 @@ int main()
     TestEvaluatedInPass();
     TestRecentExpiryInCleanup();
     TestJitterPhasePerSlot();
+    TestEvictable();
+    TestFreeForgetsTheImage();
+    TestCleanupOrderFollowsTheBudget();
     return TEST_RESULT("chara_slots");
 }

@@ -23,6 +23,8 @@
 #include "ext/ffxiv/chara/CharaStats.h"
 #include "ext/ffxiv/chara/CharaTable.h"
 #include "ext/ffxiv/chara/CharaTags.h"
+#include "ext/ffxiv/chara/CharaWindowSet.h"
+#include "ext/ffxiv/chara/CharaWindowStats.h"
 
 #include <Config.h>
 #include <State.h>
@@ -96,6 +98,7 @@ constexpr uint64_t kEvaluationLogEvery = 300;
 constexpr uint32_t kMaxSlotFailures = 4; // this many failed slots end the path for the session
 constexpr UINT kSrvSlots = 8;
 constexpr uint32_t kNrMaxSide = 4096; // larger finisher outputs are not offered to preview NR
+std::atomic<uint64_t> g_collisionResets { 0 }; // history resets given because one image finished twice in one game frame
 
 // ---- Gate state (any thread) -------------------------------------------------------------------------------------------
 // The SR latch lives in the object shared with preview NR (nr::SharedLatches()): an SR failure must not stop NR and the reverse.
@@ -157,6 +160,9 @@ struct PassData
     uint32_t width = 0;
     uint32_t height = 0;
     bool live = false;        // a live slot exists: the pass is jittered, replayed and finished
+    bool identified = false;  // the pass was decided for an image (or without needing one)
+    camera::BlockKey cameraKey; // the camera constant buffer binding of the pass's first geometry draw (the finisher teaches it)
+    uintptr_t nameImage = 0;    // the image the binding named this pass for (0: not named); the finisher proves whether it was right
     bool prepassSeen = false;
     bool replayed = false;
     bool cameraCaptured = false;
@@ -348,8 +354,21 @@ void UpdateAuxCounts()
     g_passesHeld.store(g_passes.Ready(), std::memory_order_relaxed);
 }
 
+// The processed set, configured from the keys. Cheap: it only changes state when a value changed, and it forgets the set when the
+// budget is switched off.
+WindowSet& Windows()
+{
+    WindowSet& set = g_windowSet;
+    set.Configure(ext::Cfg().ffxiv.chara.previewBudget.value_or_default(),
+                  static_cast<uint32_t>(ext::Cfg().ffxiv.chara.previewMaxWindows.value_or_default()));
+    return set;
+}
+
 void UpdateCounts()
 {
+    Windows();
+    g_stats.windowsProcessed.store(static_cast<uint32_t>(g_windowSet.FreshCount(GetTickCount64())), std::memory_order_relaxed);
+    g_stats.windowsMax.store(g_windowSet.Max(), std::memory_order_relaxed);
     uint32_t held = 0;
     for (size_t i = 0; i < kMaxSlots; ++i)
         held += g_slots.Slot(static_cast<int>(i)).Used() ? 1 : 0;
@@ -524,6 +543,7 @@ void FailSlot(int index, const char* why)
 {
     const uint64_t now = GetTickCount64();
     g_slots.MarkFailed(index, now); // released again after kFailedReleaseMs, so the preview can try again
+    g_windowStats.NoteSrFailure(index, g_slots.Slot(index).entry); // which window the failure belongs to (the failure window is session-wide)
     CountFallback();
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     if (!g.failureLogged)
@@ -546,35 +566,69 @@ bool SlotQueryDone(int i)
 }
 
 // ---- Pass bookkeeping ----------------------------------------------------------------------------------------------------
+// The jitter and the replay follow a pass only when the image it draws is processed. `key` is that image's output texture (0: the pass was
+// followed without being identified, which is what today's rule does); `follows` is the gate's answer. The phase is the image's own render
+// count when it is known, and the slot table's prediction otherwise (the rule before the budget existed).
+void FollowPass(const DrawView& view, uintptr_t key, bool follows)
+{
+    g_pass.live = g_slots.JitterLive(view.now) && follows;
+    if (!g_pass.live)
+        return;
+    const int slot = key != 0 ? g_slots.Find(key) : kNoSlot;
+    if (slot != kNoSlot)
+    {
+        if (g_slots.Slot(slot).everEvaluated && !g_slots.Slot(slot).failed)
+            g_pass.jitter = PassJitter(g_slots.Slot(slot).renders);
+    }
+    else if (g_slots.JitterApplies(view.now))
+        g_pass.jitter = PassJitter(g_slots.JitterPhase(g_pass.counter));
+    // The signed-motion target is ensured and cleared at the start of every pass.
+    if (!motion::EnsureTarget(g_device.Get(), g_pass.width, g_pass.height))
+    {
+        g_pass.live = false;
+        if (g_lines.ShouldLog(kLineMotionTarget, identify::BurstNumber()))
+            LOG_WARN("CharaView DLSS: the signed-motion target ({}x{}) could not be created; this pass is not followed", g_pass.width,
+                     g_pass.height);
+        return;
+    }
+    motion::ClearTarget(view.context);
+    ++g_stats.passesLive;
+    if (g_lines.ShouldLog(kLinePassLive, identify::BurstNumber()))
+        LOG_INFO("CharaView DLSS: pass {} ({}x{}) is followed: a preview slot exists, jitter {:.4f}/{:.4f}", g_pass.counter, g_pass.width,
+                 g_pass.height, g_pass.jitter.x, g_pass.jitter.y);
+}
+
+// The image this pass belongs to is named by the camera constant buffer binding of its first geometry draw: the binding is asked from the
+// context (the buffer object, its first constant and the pass size, camera::BoundBlock) and looked up among the bindings the finishers taught.
+// Nothing is read back from video memory, so naming a pass never waits for the GPU. A binding that names no processed image, or none at all,
+// leaves the pass untouched, so a render of a window outside the set is never shifted for an upscaler that will not run on it.
+void IdentifyPass(const DrawView& view)
+{
+    WindowSet& windows = Windows();
+    g_pass.identified = true;
+    const camera::Stage stage = camera::StageFor(view.kind == DrawKind::Prepass);
+    g_pass.cameraKey = camera::BoundBlock(view.context, stage, g_pass.width, g_pass.height);
+    const WindowSet::PassName name = windows.NamePass(g_pass.cameraKey, view.now);
+    g_pass.nameImage = name.image;
+    g_windowStats.NoteIdentity(name.name);
+    if (name.cleared)
+        g_windowStats.NoteIdentityCleared();
+    FollowPass(view, name.image, windows.FollowsPass(name.name));
+}
+
 void BeginPass(const DrawView& view)
 {
     g_pass = PassData {};
     g_pass.counter = view.pass != nullptr ? view.pass->counter : 0;
     g_pass.width = view.facts.targetWidth;
     g_pass.height = view.facts.targetHeight;
-    g_pass.live = g_slots.JitterLive(view.now);
-    if (g_pass.live)
-    {
-        if (g_slots.JitterApplies(view.now))
-            g_pass.jitter = PassJitter(g_slots.JitterPhase(g_pass.counter)); // the phase of the preview this render most likely is for
-        // The signed-motion target is ensured and cleared at the start of every pass.
-        if (!motion::EnsureTarget(g_device.Get(), g_pass.width, g_pass.height))
-        {
-            g_pass.live = false;
-            if (g_lines.ShouldLog(kLineMotionTarget, identify::BurstNumber()))
-                LOG_WARN("CharaView DLSS: the signed-motion target ({}x{}) could not be created; this pass is not followed", g_pass.width,
-                         g_pass.height);
-        }
-        else
-            motion::ClearTarget(view.context);
-    }
-    if (g_pass.live)
-    {
-        ++g_stats.passesLive;
-        if (g_lines.ShouldLog(kLinePassLive, identify::BurstNumber()))
-            LOG_INFO("CharaView DLSS: pass {} ({}x{}) is followed: a preview slot exists, jitter {:.4f}/{:.4f}", g_pass.counter, g_pass.width,
-                     g_pass.height, g_pass.jitter.x, g_pass.jitter.y);
-    }
+    // Several windows: with the budget on the pass is decided at its first geometry draw, where the camera constant buffer binding names the
+    // preview image it belongs to. Asking the binding costs two context calls and reads no video memory, so it happens for every pass and every
+    // finisher teaches its image; a window that opens later therefore costs the windows already on screen no render.
+    if (Windows().On())
+        return; // decided at the first geometry draw
+    g_pass.identified = true;
+    FollowPass(view, 0, true);
 }
 
 // The viewport shift of the jitter: viewport 0 only, restored when the scope ends.
@@ -879,6 +933,7 @@ void RunSlot(int index, const DrawView& view)
         context->End(g.query.Get());
     }
     g_slots.MarkEvaluated(index, view.now, g_pass.counter);
+    g_windowStats.NoteEvaluated(s.entry);
     g_lastEvaluatedSlot = index;
     const uint64_t n = g_evaluations.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n % kEvaluationLogEvery == 1 || n <= 3)
@@ -924,6 +979,7 @@ bool RunNrBringUpInner(const DrawView& view)
     request.native = texture;
     request.width = w;
     request.height = h;
+    request.entry = view.facts.rtv0Entry; // the window label every log line and the stream's own line use
     request.now = view.now;
     const nr::RunOutcome outcome = nr::RunBringUp(request);
     if (outcome == nr::RunOutcome::Ran)
@@ -988,6 +1044,7 @@ ProductionCall RunNrProductionInner(const DrawView& view, const SlotGpu& g, cons
     request.base.native = view.rtvTexture;
     request.base.width = outW;
     request.base.height = outH;
+    request.base.entry = view.facts.rtv0Entry;
     request.base.now = view.now;
     request.colour = g.output.texture.Get();
     request.depth = g.depth.texture.Get();
@@ -1042,6 +1099,7 @@ PreSrCall RunNrPreSrInner(const DrawView& view, const SlotGpu& g, const SlotStat
     request.base.native = view.rtvTexture;
     request.base.width = in.width;
     request.base.height = in.height;
+    request.base.entry = view.facts.rtv0Entry;
     request.base.now = view.now;
     request.colour = g.color.texture.Get();
     request.depth = g.depth.texture.Get();
@@ -1072,13 +1130,36 @@ PreSrCall RunNrPreSr(const DrawView& view, const SlotGpu& g, const SlotState& s,
                        });
 }
 
-// True when `key` is one of the preview renderer's output textures (table entries 0..7): only those can be replaced by an NR result.
-bool IsPreviewOutput(const DrawView& view, uintptr_t key)
+// The preview renderer's output entry (table entries 0..7) of `key`, or kEntryNone: the label every log line about one window uses.
+int EntryOfKey(const DrawView& view, uintptr_t key)
 {
-    if (view.table == nullptr)
-        return false;
+    if (view.table == nullptr || key == 0)
+        return kEntryNone;
     const int entry = table::IndexOfPointer(*view.table, key);
-    return entry >= 0 && entry <= 7;
+    return entry >= 0 && entry <= 7 ? entry : kEntryNone;
+}
+
+// True when `key` is one of the preview renderer's output textures (table entries 0..7): only those can be replaced by an NR result.
+bool IsPreviewOutput(const DrawView& view, uintptr_t key) { return EntryOfKey(view, key) != kEntryNone; }
+
+// A G-buffer draw the signed-motion replay refused, counted for the burst log. An untagged shader is recorded with its constant buffer
+// sizes and render target entries (once per distinct shape and burst): that is what tells a G-buffer draw of another shader from one of
+// the preview renderer's own whose camera block has another size.
+void NoteReplaySkip(const DrawView& view, const motion::ReplayResult& replay)
+{
+    if (replay.skip == motion::Skip::None)
+        return;
+    g_windowStats.NoteReplaySkip(replay.skip);
+    if (replay.skip != motion::Skip::UnknownShader)
+        return;
+    // The shape is recorded for the burst line (once per distinct shape); the line here would print it a second time for the same draw.
+    const ShaderInfo info = view.pixelShader != nullptr ? GetShaderInfo(view.pixelShader) : ShaderInfo {};
+    UnknownShape shape;
+    shape.crc = info.known ? info.crc : 0;
+    shape.vsCb0Bytes = replay.shape.vsCb0Bytes;
+    shape.psCb2Bytes = replay.shape.psCb2Bytes;
+    shape.rtvEntry = replay.shape.rtvEntry;
+    g_windowStats.NoteUnknownShape(shape);
 }
 
 void Finish(const DrawView& view)
@@ -1087,10 +1168,53 @@ void Finish(const DrawView& view)
     if (texture == nullptr)
         return;
     const uintptr_t key = reinterpret_cast<uintptr_t>(texture);
+    // The binding this render was drawn with names its image from now on: that is what the next pass asks to know what it is drawing. Every
+    // accepted finisher teaches it, so a window that opened while the set was full is named on its next pass instead of every window losing one
+    // render to an identity that was only filled when a block had to be read.
+    const WindowSet::Learned learned = Windows().NoteFinisher(key, g_pass.cameraKey, view.now);
+    if (learned.block)
+        g_windowStats.NoteIdentityLearned();
+    if (learned.cleared)
+        g_windowStats.NoteIdentityCleared();
+    // The pass was named for the image the binding showed at its first geometry draw; this finisher is the image that really drew. When the two
+    // differ the binding cannot tell them apart: it names no image for a while, so every pass drawn with it runs untouched. Nothing is cleared
+    // here: the image that was named is usually a window that is still drawing, and its own next pass clears its composed picture when that pass
+    // is not evaluated (a pass that is not followed does that at its own finish).
+    if (Windows().NoteMismatch(g_pass.cameraKey, g_pass.nameImage, key, view.now))
+        g_windowStats.NoteIdentityMismatch();
     g_slots.NoteRecent(key, view.now, g_pass.counter);
 
     const int index = g_slots.Find(key);
     g_slots.NoteFinishedRender(index); // an accepted finisher: the render counts for this preview's jitter phase
+    // An image the set no longer processes releases its slot and is never evaluated again: it must not flicker between the upscaled image and
+    // the game's own, and its slot (about 40 MB) must go. Only once its GPU work finished; until then the slot is left alone and the next
+    // finisher asks again.
+    if (Windows().On() && !Windows().Processed(key))
+    {
+        if (index != kNoSlot)
+        {
+            g_slots.ClearEvaluated(index);
+            if (g_slots.ReadyForRelease(index, SlotQueryDone))
+            {
+                ReleaseSlotGpu(index);
+                g_slots.Free(index);
+                UpdateCounts();
+            }
+        }
+        return;
+    }
+    // Two accepted finishers of one image in one game frame: two windows share one output texture and their histories would mix. With
+    // the budget on that image starts over; the detector counts the case either way (it is in the burst log).
+    if (index != kNoSlot && Windows().On() && g_windowStats.LastFinisherCollided())
+    {
+        g_slots.ClearEvaluated(index);
+        nr::Invalidate(key);
+        const uint64_t n = g_collisionResets.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || n % 100 == 0)
+            LOG_INFO("CharaView DLSS: preview image {} (output entry {}) finished twice in one game frame; two windows share this output "
+                     "texture, so its history starts over ({} such resets)",
+                     index, g_slots.Slot(index).entry, n);
+    }
     FinishFacts f;
     f.width = g_pass.width;
     f.height = g_pass.height;
@@ -1110,6 +1234,7 @@ void Finish(const DrawView& view)
     const FinishVerdict verdict = DecideFinish(f);
     g_lastFinishVerdict = verdict;
     ++g_stats.finishVerdict[static_cast<size_t>(verdict)];
+    g_windowStats.NoteFinishVerdict(view.facts.rtv0Entry, verdict);
     if (diag::TraceEnabled() && verdict != FinishVerdict::Proceed)
         diag::Trace(diag::TraceCategory::Finish, view.now,
                     std::format("finish verdict {} for pass {}x{} (slot {}, replayed {}, camera {})", static_cast<int>(verdict),
@@ -1238,11 +1363,23 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         ComPtr<ID3D11Resource> resource;
         original[i]->GetResource(&resource);
         const uintptr_t key = reinterpret_cast<uintptr_t>(resource.Get());
-        const bool previewOutput = nrOn && IsPreviewOutput(view, key); // only NR cares which images are preview outputs
+        const int entry = EntryOfKey(view, key);
+        const bool previewImage = entry != kEntryNone;
+        const bool previewOutput = nrOn && previewImage; // only NR cares which images are preview outputs
+        WindowSet& windows = Windows();
+        if (previewImage)
+        {
+            g_windowStats.NoteSample(key, entry, view.now); // the images on screen, whatever the other options say
+            windows.NoteDemand(key, entry, view.now);       // and which of them wants to be processed
+        }
         if (previewOutput)
             g_consumed.Record(key, view.now);
         int index = sr ? g_slots.Find(key) : kNoSlot;
-        if (sr && index == kNoSlot && g_slots.RecentContains(key, view.now))
+        // A window the set does not process keeps no slot: its slot may still exist for one render after its place was taken, and the draws
+        // that sample it must show the game's own picture.
+        if (index != kNoSlot && !windows.Processed(key))
+            index = kNoSlot;
+        if (sr && index == kNoSlot && g_slots.RecentContains(key, view.now) && windows.Processed(key))
         {
             ComPtr<ID3D11Texture2D> texture;
             D3D11_TEXTURE2D_DESC td {};
@@ -1250,8 +1387,23 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
             {
                 texture->GetDesc(&td);
                 index = g_slots.AcquireForConsumer(key, view.now, td.Width, td.Height);
+                if (index == kNoSlot && windows.On())
+                {
+                    // The slot table is full: the least recently used slot that is not live and whose GPU work is finished goes, so a
+                    // closed window does not block a new one. Only with the budget on (off: today's "no slot" answer).
+                    const int victim = g_slots.Evictable(view.now, key, [](int i) { return SlotQueryDone(i); });
+                    if (victim != kNoSlot && g_slots.ReadyForRelease(victim, SlotQueryDone))
+                    {
+                        LOG_INFO("CharaView DLSS: preview slot {} (output entry {}) released to make room for another window (not drawn lately)", victim,
+                                 g_slots.Slot(victim).entry);
+                        ReleaseSlotGpu(victim);
+                        g_slots.Free(victim);
+                        index = g_slots.AcquireForConsumer(key, view.now, td.Width, td.Height);
+                    }
+                }
                 if (index != kNoSlot)
                 {
+                    g_slots.Slot(index).entry = entry;
                     UpdateCounts();
                     ++g_stats.slotsAcquired;
                     if (g_lines.ShouldLog(kLineSlotAcquired, identify::BurstNumber()))
@@ -1296,6 +1448,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
         {
         case nr::ConsumerSource::ProductionResult: // the SR image made from the NR output: the alpha pass already tinted it (cyan)
             replaced[i] = g->composed.srv.Get();
+            g_windowStats.NoteProcessedDraw(entry);
             any = true;
             anyProduction = true;
             if (nr::MadeFromPostSrNr(g->composedFromNr, g->preSrColour))
@@ -1303,6 +1456,7 @@ bool Consume(const DrawView& view, DrawCall draw, bool sr, bool nrOn)
             break;
         case nr::ConsumerSource::SrResult: // SR wins over the bring-up NR result
             replaced[i] = g->composed.srv.Get();
+            g_windowStats.NoteProcessedDraw(entry);
             any = true;
             break;
         case nr::ConsumerSource::NrResult:
@@ -1400,8 +1554,7 @@ void Cleanup(uint64_t now, bool disabled)
                                     motion::SkipCount(motion::Skip::OwnDraw)));
         }
     }
-    g_slots.Cleanup(
-        now, disabled, [](int i) { return SlotQueryDone(i); }, [](int i) { ReleaseSlotGpu(i); });
+    g_slots.Cleanup(now, disabled, Windows().On(), [](int i) { return SlotQueryDone(i); }, [](int i) { ReleaseSlotGpu(i); });
     g_nrTint.Release(now, kNrTintUnusedMs); // cyan copies of bring-up results nobody asked for lately
     // With the SR path disabled and nothing left that uses them, the helper passes go too (they stay while the SR path is enabled).
     if (nr::ReleaseHelperPasses(disabled, g_slotsHeld.load(std::memory_order_relaxed), static_cast<uint32_t>(g_nrTint.Count()), g_passes.Ready()))
@@ -1509,6 +1662,12 @@ bool Around(const DrawView& view, DrawCall draw)
     if (sr && (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer) &&
         (view.passStarted || g_pass.counter != (view.pass != nullptr ? view.pass->counter : 0)))
         BeginPass(view);
+    // With the budget on the pass is decided at its first geometry draw: the camera constant buffer binding names the preview image the render
+    // belongs to. With the budget off nothing of the identity is asked, so a draw that is not a geometry draw (or the first draw after a start or
+    // a detach) costs nothing. Without the SR path no pass is started or finished, so the identity is not asked either: it would count passes that
+    // are never named for a render.
+    if (!g_pass.identified && sr && Windows().On() && (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer))
+        IdentifyPass(view);
 
     switch (view.kind)
     {
@@ -1540,11 +1699,19 @@ bool Around(const DrawView& view, DrawCall draw)
             }
         }
         const bool opaque = view.facts.rtv0Entry == 8;
-        if (opaque && (view.roles & RoleGeometry) != 0 && !g_pass.cameraCaptured)
-            CaptureGuideInputs(view);
         JitterScope shift(context, g_pass.jitter);
-        if (opaque && motion::Replay(view, draw).outcome == motion::Outcome::Replayed)
-            g_pass.replayed = true;
+        if (opaque)
+        {
+            const motion::ReplayResult replay = motion::Replay(view, draw);
+            if (replay.outcome == motion::Outcome::Replayed)
+                g_pass.replayed = true;
+            else
+                NoteReplaySkip(view, replay);
+            // The guides are taken from the draw the replay accepted, so a shader of the wider shape (replayed without being tagged, because
+            // only the exact camera block proves what it reads) still gives the pass its camera and the pass can finish.
+            if (motion::CapturesGuides((view.roles & RoleGeometry) != 0, replay.outcome == motion::Outcome::Replayed) && !g_pass.cameraCaptured)
+                CaptureGuideInputs(view);
+        }
         draw();
         return true;
     }
@@ -1647,6 +1814,7 @@ void Detach()
     for (size_t i = 0; i < kMaxSlots; ++i)
         ReleaseSlotGpu(static_cast<int>(i));
     g_slots.Clear();
+    g_windowSet.Reset(); // a rebuilt device may hand out the pointers the set remembers for another window
     g_nrTint.Clear();
     g_passes.Release();
     g_passesTried = false;

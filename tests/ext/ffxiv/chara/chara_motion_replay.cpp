@@ -5,11 +5,14 @@
 #include "pch.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaCamera.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/chara/CharaDlssRules.h"
 #include "ext/ffxiv/chara/CharaMotion.h"
 #include "ext/ffxiv/chara/CharaTags.h"
 
 #include <DirectXPackedVector.h>
+#include <d3d11_1.h>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -363,8 +366,129 @@ void Run()
     g_context->PSSetConstantBuffers(2, 1, &tiny);
     CHECK(motion::Replay(untagged, call).skip == motion::Skip::UnknownShader);
     CHECK((RoleOf(s.ps.Get()) & RoleGeometry) == 0);
-    ID3D11Buffer* exact = s.cb944.Get();
-    g_context->PSSetConstantBuffers(2, 1, &exact);
+
+    // The wider shape (PreviewReplayWideShape): a camera block that is a view into a larger buffer is refused while the key is off and
+    // replayed with it on. The key decides (an always-wide build fails the first check), and a size that only fits the camera range does
+    // not tag the shader: the exact block does, later below.
+    {
+        D3D11_BUFFER_DESC wideDesc {};
+        wideDesc.ByteWidth = 1024;
+        wideDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> wide;
+        Ok(g_device->CreateBuffer(&wideDesc, nullptr, &wide), "wide cb");
+        ID3D11Buffer* bound = wide.Get();
+        g_context->VSSetConstantBuffers(0, 1, &bound);
+        g_context->PSSetConstantBuffers(2, 1, &bound);
+        auto& cfg = ext::Cfg();
+        cfg.ffxiv.chara.previewReplayWideShape = false;
+        CHECK(motion::Replay(untagged, call).skip == motion::Skip::UnknownShader);
+        cfg.ffxiv.chara.previewReplayWideShape = true;
+        CHECK(motion::Replay(untagged, call).outcome == motion::Outcome::Replayed);
+        CHECK((RoleOf(s.ps.Get()) & RoleGeometry) == 0);
+        cfg.ffxiv.chara.previewReplayWideShape = false;
+        ID3D11Buffer* back = s.cb944.Get();
+        g_context->VSSetConstantBuffers(0, 1, &back);
+        g_context->PSSetConstantBuffers(2, 1, &back);
+    }
+
+    // The wider shape end to end: the replay accepts a camera block that is a view into a larger buffer and does not tag the shader, the guides
+    // are taken from that same draw, and the pass reaches the upscaler. Without the capture the same pass would stop at the camera, which is the
+    // state the wider shape used to be left in. The camera flag is the real capture's answer, which is what the G-buffer case stores; the depth
+    // facts are the only ones this test composes, because the depth view of a real preview draw lives in the dispatcher's view struct.
+    {
+        D3D11_BUFFER_DESC wideDesc {};
+        wideDesc.ByteWidth = 1024;
+        wideDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> wide;
+        Ok(g_device->CreateBuffer(&wideDesc, nullptr, &wide), "wide cb");
+        ID3D11Buffer* bound = wide.Get();
+        g_context->VSSetConstantBuffers(0, 1, &bound);
+        g_context->PSSetConstantBuffers(2, 1, &bound);
+        auto& cfg = ext::Cfg();
+        cfg.ffxiv.chara.previewReplayWideShape = true;
+        const motion::ReplayResult replay = motion::Replay(untagged, call);
+        CHECK(replay.outcome == motion::Outcome::Replayed);
+        CHECK((RoleOf(s.ps.Get()) & RoleGeometry) == 0); // replayed, and deliberately not tagged
+        const bool capture = motion::CapturesGuides((untagged.roles & RoleGeometry) != 0, replay.outcome == motion::Outcome::Replayed);
+        CHECK(capture); // the draw the replay accepted gives the pass its guides
+        const camera::Result captured = camera::Capture(g_context.Get());
+        CHECK(captured == camera::Result::Captured);
+        dlss::FinishFacts f;
+        f.width = kSize;
+        f.height = kSize;
+        f.slotFound = true;
+        f.now = 1000;
+        f.lastUse = 1000;
+        f.guides.replayed = replay.outcome == motion::Outcome::Replayed;
+        f.guides.depthTexture = true;
+        f.guides.depthView = true;
+        f.guides.cameraCaptured = captured == camera::Result::Captured; // what the guide capture of that draw stores
+        CHECK(dlss::DecideFinish(f) == dlss::FinishVerdict::Proceed);
+        f.guides.cameraCaptured = false;
+        CHECK(dlss::DecideFinish(f) == dlss::FinishVerdict::WaitingForCamera); // what the wider shape used to end in
+        cfg.ffxiv.chara.previewReplayWideShape = false;
+        camera::Release();
+        ID3D11Buffer* back = s.cb944.Get();
+        g_context->VSSetConstantBuffers(0, 1, &back);
+        g_context->PSSetConstantBuffers(2, 1, &back);
+    }
+
+    // The camera block binding of a pass, asked from the context alone: the draw's own stage, its first constant and the pass size. Nothing that
+    // cannot hold the camera block is accepted, and the other stage is never consulted (a stale binding there would name another window).
+    {
+        camera::Release();
+        ID3D11Buffer* none = nullptr;
+        g_context->VSSetConstantBuffers(0, 1, &none);
+        g_context->PSSetConstantBuffers(2, 1, &none);
+        CHECK(!camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960).Valid());
+        CHECK(!camera::BoundBlock(g_context.Get(), camera::Stage::Vertex, 576, 960).Valid());
+        ID3D11Buffer* tinyBound = tinyBuffer.Get(); // 0x100 bytes: cannot hold the camera block
+        g_context->PSSetConstantBuffers(2, 1, &tinyBound);
+        CHECK(!camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960).Valid());
+        // the block at the pixel stage only: the G-buffer draw is named, a prepass of the same pass is not
+        ID3D11Buffer* block = s.cb944.Get();
+        g_context->PSSetConstantBuffers(2, 1, &block);
+        camera::BlockKey key = camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960);
+        CHECK(key.Valid() && key.buffer == reinterpret_cast<uintptr_t>(block) && key.first == 0 && key.width == 576 && key.height == 960);
+        CHECK(!camera::BoundBlock(g_context.Get(), camera::Stage::Vertex, 576, 960).Valid());
+        // the same block at the vertex stage: the prepass is named, and the pixel stage is not consulted
+        g_context->VSSetConstantBuffers(0, 1, &block);
+        g_context->PSSetConstantBuffers(2, 1, &none);
+        const camera::BlockKey prepass = camera::BoundBlock(g_context.Get(), camera::Stage::Vertex, 576, 960);
+        CHECK(prepass.Valid() && prepass.buffer == reinterpret_cast<uintptr_t>(block));
+        CHECK(!camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960).Valid());
+        // a wider buffer that can hold the block is a valid binding, and it is a different key from the exact one
+        D3D11_BUFFER_DESC wideDesc {};
+        wideDesc.ByteWidth = 1024;
+        wideDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> wide;
+        Ok(g_device->CreateBuffer(&wideDesc, nullptr, &wide), "wide cb");
+        ID3D11Buffer* wideBuffer = wide.Get();
+        g_context->PSSetConstantBuffers(2, 1, &wideBuffer);
+        const camera::BlockKey view = camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960);
+        CHECK(view.Valid() && view.buffer == reinterpret_cast<uintptr_t>(wideBuffer) && !(view == key));
+        // A block bound as a view into the buffer: the first constant is part of the key. This software adapter keeps no constant buffer offsets
+        // (PSGetConstantBuffers1 answers 0 and the whole buffer), so the key is checked against what the context reports and nothing more: the
+        // claim that two windows that share one buffer get different identities is unverified on a runtime that keeps offsets.
+        ComPtr<ID3D11DeviceContext1> context1;
+        Ok(g_context.As(&context1), "ID3D11DeviceContext1");
+        UINT first = 4, count = camera::kVectors;
+        context1->PSSetConstantBuffers1(2, 1, &wideBuffer, &first, &count);
+        ComPtr<ID3D11Buffer> reported;
+        UINT reportedFirst = 0, reportedCount = 0;
+        context1->PSGetConstantBuffers1(2, 1, &reported, &reportedFirst, &reportedCount);
+        const camera::BlockKey offset = camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960);
+        CHECK(offset.Valid() && offset.buffer == reinterpret_cast<uintptr_t>(wideBuffer));
+        CHECK(offset.first == reportedFirst); // the key carries the first constant the context reports
+        if (reportedFirst == first)
+            CHECK(!(offset == view)); // a runtime that keeps the offset makes the view a different identity
+        // the same binding asked again is the same key
+        CHECK(camera::BoundBlock(g_context.Get(), camera::Stage::Pixel, 576, 960) == offset);
+        g_context->PSSetConstantBuffers(2, 1, &none);
+        camera::Release();
+    }
+
+    ID3D11Buffer* exact = s.cb944.Get();    g_context->PSSetConstantBuffers(2, 1, &exact);
     CHECK(motion::Replay(untagged, call).outcome == motion::Outcome::Replayed);
     CHECK((RoleOf(s.ps.Get()) & RoleGeometry) != 0);
 

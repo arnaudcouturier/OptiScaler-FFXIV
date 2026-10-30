@@ -138,6 +138,8 @@ struct Stream
     bool late = false;
     uint64_t doneOfBuffer[2] = { 0, 0 };
     std::vector<int> copy, run, read; // event ids per run index (read: per consumed run)
+    std::vector<uint64_t> ready;      // the ready fence value of each run (for the per-stream order checks)
+    std::vector<uint64_t> done;       // the done fence value of each run
 };
 
 struct Scenario
@@ -587,6 +589,370 @@ void TestWindowClosesAfterLateFrame()
         blocked += Check(BuildOld({ true }, frames)).drainFailures;
     CHECK(blocked > 0);
 }
+// ---- several streams in one frame -----------------------------------------------------------------------------------------------
+// Position of an operation in a queue (the first match), or -1.
+int WorkAt(const std::vector<Op>& q, int event)
+{
+    for (size_t i = 0; i < q.size(); ++i)
+    {
+        if (q[i].kind == Op::Work && q[i].event == event)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int SignalAt(const std::vector<Op>& q, int fence, uint64_t value)
+{
+    for (size_t i = 0; i < q.size(); ++i)
+    {
+        if (q[i].kind == Op::Signal && q[i].fence == fence && q[i].value == value)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int WaitAt(const std::vector<Op>& q, int fence, uint64_t value)
+{
+    for (size_t i = 0; i < q.size(); ++i)
+    {
+        if (q[i].kind == Op::Wait && q[i].fence == fence && q[i].value == value)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// `streams` post-SR streams run in every frame. The streams are returned for the per-stream order checks.
+void BuildManyStreams(Scenario& s, size_t streams, int frames, std::vector<Stream>& out)
+{
+    FenceCounter ready, done;
+    out.assign(streams, Stream {});
+    for (int k = 0; k < frames; ++k)
+    {
+        for (Stream& x : out)
+        {
+            x.copy.push_back(s.timeline.AddEvent());
+            x.run.push_back(s.timeline.AddEvent());
+            x.read.push_back(-1);
+            RecordingOps ops { s.timeline, done, x.copy.back(), x.run.back() };
+            const auto o = RunFrame(ops, ready, x.late, x.doneOfBuffer[k & 1]);
+            CHECK(o.ok);
+            x.doneOfBuffer[k & 1] = o.done;
+            x.ready.push_back(o.ready);
+            x.done.push_back(o.done);
+        }
+    }
+    for (const Stream& x : out)
+        AddDeps(s, x, frames);
+}
+
+void TestManyStreamsPerFrame()
+{
+    for (const size_t streams : { 1, 2, 3, 4 })
+    {
+        const int frames = 6;
+        Scenario s;
+        std::vector<Stream> st;
+        BuildManyStreams(s, streams, frames, st);
+        const Verdict v = Check(s);
+        CHECK(v.schedules == 403);
+        CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0 && v.hazards == 0);
+        const std::vector<Op>& q11 = s.timeline.Queue(kD3D11);
+        const std::vector<Op>& q12 = s.timeline.Queue(kD3D12);
+        // the done fence grows across streams and frames (one counter for all of them)
+        uint64_t lastDone = 0;
+        bool growing = true;
+        for (const Op& op : q12)
+        {
+            if (op.kind == Op::Signal && op.fence == kDone)
+            {
+                growing = growing && op.value > lastDone;
+                lastDone = op.value;
+            }
+        }
+        CHECK(growing);
+        size_t runs = 0;
+        for (const Op& op : q12)
+            runs += op.kind == Op::Work ? 1 : 0;
+        CHECK(runs == streams * static_cast<size_t>(frames));
+        // each stream's copy is queued before the ready signal that releases its own run
+        for (const Stream& x : st)
+        {
+            for (int k = 0; k < frames; ++k)
+            {
+                const int copy = WorkAt(q11, x.copy[static_cast<size_t>(k)]);
+                const int signal = SignalAt(q11, kReady, x.ready[static_cast<size_t>(k)]);
+                CHECK(copy >= 0 && signal >= 0 && copy < signal);
+            }
+        }
+    }
+}
+
+// The allocator ring of the module: four lists may be in flight, a list starts when the done value its allocator last carried is
+// complete, and a fifth call with nothing complete is refused before anything is queued or any fence value is taken.
+class AllocatorRing
+{
+  public:
+    static constexpr size_t kCount = 4;
+    // -1 when every allocator is still in flight
+    int Begin(uint64_t completed)
+    {
+        for (size_t i = 0; i < kCount; ++i)
+        {
+            if (!_inFlight[i] && (_value[i] == 0 || _value[i] <= completed))
+            {
+                _inFlight[i] = true;
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+    void Submitted(int index, uint64_t done)
+    {
+        _inFlight[static_cast<size_t>(index)] = false;
+        _value[static_cast<size_t>(index)] = done;
+    }
+
+  private:
+    uint64_t _value[kCount] {};
+    bool _inFlight[kCount] {};
+};
+
+void TestAllocatorExhaustion()
+{
+    Scenario s;
+    FenceCounter ready, done;
+    AllocatorRing ring;
+    Stream streams[5];
+    // Four runs start; each allocator keeps the done value of its list.
+    for (int i = 0; i < 4; ++i)
+    {
+        CHECK(ring.Begin(0) == i);
+        streams[i].copy.push_back(s.timeline.AddEvent());
+        streams[i].run.push_back(s.timeline.AddEvent());
+        RecordingOps ops { s.timeline, done, streams[i].copy.back(), streams[i].run.back() };
+        const auto o = RunFrame(ops, ready, false, 0);
+        CHECK(o.ok);
+        ring.Submitted(i, o.done);
+        streams[i].done.push_back(o.done);
+    }
+    // The fifth call finds no allocator free: it is refused before anything is queued and without taking a fence value.
+    const uint64_t readyBefore = ready.last, doneBefore = done.last;
+    const size_t q11 = s.timeline.Queue(kD3D11).size(), q12 = s.timeline.Queue(kD3D12).size();
+    CHECK(ring.Begin(0) == -1);
+    CHECK(ready.last == readyBefore && done.last == doneBefore);
+    CHECK(s.timeline.Queue(kD3D11).size() == q11 && s.timeline.Queue(kD3D12).size() == q12);
+    // Once the first list is complete its allocator is reused. The module checks the allocator's fence value on the CPU before it
+    // records; the model queues that wait, so the dependency on the run it waited for is visible.
+    const uint64_t firstDone = streams[0].done[0];
+    CHECK(ring.Begin(firstDone) == 0);
+    streams[4].copy.push_back(s.timeline.AddEvent());
+    streams[4].run.push_back(s.timeline.AddEvent());
+    s.timeline.Push(kD3D11, { Op::Wait, kDone, firstDone, 0 });
+    RecordingOps ops { s.timeline, done, streams[4].copy.back(), streams[4].run.back() };
+    const auto fifth = RunFrame(ops, ready, false, 0);
+    CHECK(fifth.ok);
+    const Verdict v = Check(s);
+    CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0);
+    const std::vector<Op>& q11after = s.timeline.Queue(kD3D11);
+    const int copy5 = WorkAt(q11after, streams[4].copy.back());
+    const int wait0 = WaitAt(q11after, kDone, firstDone);
+    CHECK(copy5 >= 0 && wait0 >= 0 && wait0 < copy5);
+    CHECK(SignalAt(s.timeline.Queue(kD3D12), kDone, firstDone) >= 0);
+}
+
+// A stream is released while another one is in flight: the release waits for the released stream's own done value on the D3D11 queue
+// and nothing waits for the other stream's work.
+void TestReleaseWhileAnotherStreamRuns()
+{
+    Scenario s;
+    FenceCounter ready, done;
+    Stream a, b;
+    for (int k = 0; k < 3; ++k)
+    {
+        for (Stream* x : { &a, &b })
+        {
+            x->copy.push_back(s.timeline.AddEvent());
+            x->run.push_back(s.timeline.AddEvent());
+            RecordingOps ops { s.timeline, done, x->copy.back(), x->run.back() };
+            const auto o = RunFrame(ops, ready, false, x->doneOfBuffer[k & 1]);
+            CHECK(o.ok);
+            x->doneOfBuffer[k & 1] = o.done;
+            x->done.push_back(o.done);
+        }
+    }
+    // Stream B runs on alone; stream A is released: the release waits on A's last done value only.
+    b.copy.push_back(s.timeline.AddEvent());
+    b.run.push_back(s.timeline.AddEvent());
+    {
+        RecordingOps ops { s.timeline, done, b.copy.back(), b.run.back() };
+        const auto o = RunFrame(ops, ready, false, b.doneOfBuffer[0]);
+        CHECK(o.ok);
+        b.doneOfBuffer[0] = o.done;
+        b.done.push_back(o.done);
+    }
+    const uint64_t aLast = a.done.back();
+    s.timeline.Push(kD3D11, { Op::Wait, kDone, aLast, 0 });
+    const int release = s.timeline.AddEvent();
+    s.timeline.Push(kD3D11, { Op::Work, 0, 0, release });
+    const Verdict v = Check(s);
+    CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0 && v.hazards == 0);
+    // the release runs after its own wait on A's value, and that value is A's (B's newest run has its own value)
+    const std::vector<Op>& q11 = s.timeline.Queue(kD3D11);
+    const int waitA = WaitAt(q11, kDone, aLast);
+    const int workA = WorkAt(q11, release);
+    CHECK(waitA >= 0 && workA > waitA);
+    CHECK(aLast != b.done.back());
+    // and it is satisfied by A's own signal, not by a later value of another stream
+    CHECK(SignalAt(s.timeline.Queue(kD3D12), kDone, aLast) >= 0);
+}
+
+// NR before the evaluate and NR after it run in the same frame, one stream each: three copies before the pre-SR ready signal, the
+// evaluate ordered after the run, and the post-SR stream's copy before its own ready signal.
+void TestPreSrAndPostSrTogether()
+{
+    Scenario s;
+    FenceCounter ready, done;
+    Stream post;
+    const int frames = 4;
+    std::vector<std::vector<int>> preCopies, postCopies;
+    std::vector<int> preRuns, preEvaluates, preDone, postRuns;
+    for (int k = 0; k < frames; ++k)
+    {
+        PreSrOps preOps { s.timeline, done, {}, 0 };
+        for (size_t i = 0; i < CopyPlanFor(Placement::PreSr).count; ++i)
+            preOps.copyEvents.push_back(s.timeline.AddEvent());
+        preOps.runEvent = s.timeline.AddEvent();
+        const auto o = RunFrame(preOps, ready, false, 0);
+        CHECK(o.ok);
+        preCopies.push_back(preOps.copyEvents);
+        preRuns.push_back(preOps.runEvent);
+        preDone.push_back(static_cast<int>(o.done));
+        preEvaluates.push_back(s.timeline.AddEvent());
+        s.timeline.Push(kD3D11, { Op::Work, 0, 0, preEvaluates.back() }); // the evaluate of this render, after the hand-off
+
+        post.copy.push_back(s.timeline.AddEvent());
+        post.run.push_back(s.timeline.AddEvent());
+        RecordingOps postOps { s.timeline, done, post.copy.back(), post.run.back() };
+        const auto p = RunFrame(postOps, ready, false, post.doneOfBuffer[k & 1]);
+        CHECK(p.ok);
+        post.doneOfBuffer[k & 1] = p.done;
+        postCopies.push_back({ post.copy.back() });
+        postRuns.push_back(post.run.back());
+    }
+    for (int k = 0; k < frames; ++k)
+    {
+        for (const int copy : preCopies[k])
+            s.deps.push_back({ copy, preRuns[k], kCopyBeforeRun });
+        s.deps.push_back({ preRuns[k], preEvaluates[k], kRunBeforeEvaluate });
+        s.deps.push_back({ postCopies[k][0], postRuns[k], kCopyBeforeRun });
+        if (k + 1 < frames)
+            for (const int copy : preCopies[k + 1])
+                s.deps.push_back({ preRuns[k], copy, kRunBeforeNextCopy });
+    }
+    const Verdict v = Check(s);
+    CHECK(v.schedules == 403);
+    CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0 && v.hazards == 0);
+    // the evaluate of each frame follows the wait on that frame's pre-SR run, and the three copies precede the run
+    const std::vector<Op>& q11 = s.timeline.Queue(kD3D11);
+    for (int k = 0; k < frames; ++k)
+    {
+        const int wait = WaitAt(q11, kDone, static_cast<uint64_t>(preDone[static_cast<size_t>(k)]));
+        const int evaluate = WorkAt(q11, preEvaluates[static_cast<size_t>(k)]);
+        const int copy = WorkAt(q11, preCopies[static_cast<size_t>(k)][0]);
+        CHECK(wait >= 0 && evaluate > wait && copy < evaluate);
+    }
+}
+
+// Bridge shutdown with several streams: each stream waits for its own last done value before its objects are released, and every queue
+// drains (nothing waits for a value no signal will ever satisfy).
+void TestBridgeShutdownWithSeveralStreams()
+{
+    Scenario s;
+    FenceCounter ready, done;
+    std::vector<Stream> st(3);
+    const int frames = 3;
+    for (int k = 0; k < frames; ++k)
+    {
+        for (Stream& x : st)
+        {
+            x.copy.push_back(s.timeline.AddEvent());
+            x.run.push_back(s.timeline.AddEvent());
+            RecordingOps ops { s.timeline, done, x.copy.back(), x.run.back() };
+            const auto o = RunFrame(ops, ready, false, x.doneOfBuffer[k & 1]);
+            CHECK(o.ok);
+            x.doneOfBuffer[k & 1] = o.done;
+            x.done.push_back(o.done);
+        }
+    }
+    std::vector<int> releases;
+    for (Stream& x : st)
+    {
+        s.timeline.Push(kD3D11, { Op::Wait, kDone, x.done.back(), 0 });
+        releases.push_back(s.timeline.AddEvent());
+        s.timeline.Push(kD3D11, { Op::Work, 0, 0, releases.back() });
+    }
+    const Verdict v = Check(s);
+    CHECK(v.schedules == 403);
+    CHECK(v.drainFailures == 0 && v.decreases == 0 && v.satisfiedByOther == 0 && v.hazards == 0);
+    const std::vector<Op>& q11 = s.timeline.Queue(kD3D11);
+    for (size_t i = 0; i < st.size(); ++i)
+    {
+        const int wait = WaitAt(q11, kDone, st[i].done.back());
+        const int work = WorkAt(q11, releases[i]);
+        CHECK(wait >= 0 && work > wait);
+        CHECK(SignalAt(s.timeline.Queue(kD3D12), kDone, st[i].done.back()) >= 0);
+    }
+}
+
+// The allocator ring the module's BeginList walks: the first allocator after the last one used whose earlier work finished, wrapping once, and
+// nothing at all while the ring is still in flight (the render then keeps the image it has). The production loop resets the allocators in the
+// order this returns.
+void TestAllocatorChoice()
+{
+    std::array<uint64_t, kAllocators> value { 10, 20, 30, 40 };
+    std::array<size_t, kAllocators> order {};
+    const auto doneUpTo = [](uint64_t limit) { return [limit](uint64_t v) { return v <= limit; }; };
+    // every allocator finished: the ring is walked from the one after the last used, then wraps
+    CHECK(FreeAllocators(value, 0, doneUpTo(100), order) == kAllocators);
+    CHECK(order[0] == 0 && order[1] == 1 && order[2] == 2 && order[3] == 3);
+    CHECK(FreeAllocators(value, 2, doneUpTo(100), order) == kAllocators);
+    CHECK(order[0] == 2 && order[1] == 3 && order[2] == 0 && order[3] == 1); // the wrap
+    // the first allocator is still in flight: the rest, in ring order
+    CHECK(FreeAllocators(value, 0, doneUpTo(30), order) == 3);
+    CHECK(order[0] == 0 && order[1] == 1 && order[2] == 2);
+    CHECK(FreeAllocators(value, 1, doneUpTo(20), order) == 2);
+    CHECK(order[0] == 1 && order[1] == 0); // from 1: 1, then the wrap finds 0
+
+    // nothing finished: no list is started (the render keeps its image)
+    CHECK(FreeAllocators(value, 0, doneUpTo(0), order) == 0);
+    const std::array<uint64_t, kAllocators> fresh {};
+    CHECK(FreeAllocators(fresh, 0, [](uint64_t v) { return v == 0; }, order) == kAllocators);
+}
+
+// The release path, as far as it is pure: the module's Maintain asks DecideStream with the stream's own facts (its last live time, whether it has
+// GPU work and whether that work finished), and the answer decides whether the objects go. A stream with pending work is never released.
+void TestStreamReleasePath()
+{
+    StreamState st;
+    st.key = 0xA000;
+    st.lastLive = 1000;
+    st.lastSubmitted = 7; // something was submitted: the release waits for the GPU
+    // the window is open: the stream stays whatever the GPU is doing
+    CHECK(DecideStream(FactsOf(st, false, 1100, LingerMs(5), false)) == StreamAction::Keep);
+    // the window closed, the linger is over, and the GPU still reads the stream's images: wait
+    CHECK(DecideStream(FactsOf(st, false, 7000, LingerMs(5), false)) == StreamAction::WaitGpu);
+    CHECK(DecideStream(FactsOf(st, false, 7000, LingerMs(5), true)) == StreamAction::Release);
+    // ... and once NR is switched off the same stream is released as soon as the GPU is done, without the linger
+    CHECK(DecideStream(FactsOf(st, true, 1100, LingerMs(5), false)) == StreamAction::WaitGpu);
+    CHECK(DecideStream(FactsOf(st, true, 1100, LingerMs(5), true)) == StreamAction::Release);
+    // a stream that never submitted anything has no GPU work to wait for
+    StreamState idle;
+    idle.key = 0xB000;
+    idle.lastLive = 1000;
+    CHECK(!idle.HasGpuWork());
+    CHECK(DecideStream(FactsOf(idle, false, 7000, LingerMs(5), false)) == StreamAction::Release);
+}
+
 } // namespace
 
 int main()
@@ -596,5 +962,12 @@ int main()
     TestOldPlanShowsTheDefects();
     TestPreSrHandoff();
     TestWindowClosesAfterLateFrame();
+    TestManyStreamsPerFrame();
+    TestAllocatorExhaustion();
+    TestAllocatorChoice();
+    TestReleaseWhileAnotherStreamRuns();
+    TestStreamReleasePath();
+    TestPreSrAndPostSrTogether();
+    TestBridgeShutdownWithSeveralStreams();
     return TEST_RESULT("chara_nr_timeline");
 }

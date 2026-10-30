@@ -22,6 +22,7 @@
 namespace ext::ffxiv::chara::nr
 {
 inline constexpr size_t kMaxStreams = 16; // one per preview slot (kMaxSlots in CharaSlots.h)
+inline constexpr size_t kAllocators = 4;  // the ring of D3D12 command allocators a list is recorded on
 inline constexpr int kNoStream = -1;
 inline constexpr uint32_t kDefaultLingerSeconds = 5;
 inline constexpr uint32_t kMaxLingerSeconds = 600;
@@ -235,6 +236,7 @@ constexpr bool LateVariantInUse(const StreamShape& shape) { return shape.late &&
 struct StreamState
 {
     uintptr_t key = 0; // the preview image (the finisher's output texture) the stream belongs to; 0 = free
+    int entry = -1;    // the preview renderer's output entry of that image, for the log lines (-1 = not known)
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t lastLive = 0;      // last time the stream's preview was drawn and run
@@ -440,8 +442,9 @@ class StreamTable
         return kNoStream;
     }
 
-    // The stream of `key`, claiming a free one when it has none. kNoStream when the table is full.
-    int Bind(uintptr_t key, uint32_t width, uint32_t height, uint64_t now)
+    // The stream of `key`, claiming a free one when it has none. kNoStream when the table is full. `entry` is the preview
+    // renderer's output entry of the image, kept for the log lines only.
+    int Bind(uintptr_t key, uint32_t width, uint32_t height, uint64_t now, int entry = -1)
     {
         const int existing = Find(key);
         if (existing != kNoStream)
@@ -454,6 +457,7 @@ class StreamTable
             {
                 _streams[i] = StreamState {};
                 _streams[i].key = key;
+                _streams[i].entry = entry;
                 _streams[i].width = width;
                 _streams[i].height = height;
                 _streams[i].lastLive = now;
@@ -461,6 +465,31 @@ class StreamTable
             }
         }
         return kNoStream;
+    }
+
+    // The least recently used stream that may be released for another image: its preview was not drawn within kLiveMs and its GPU
+    // work is finished. kNoStream when there is none. The caller releases its GPU objects and then calls Free.
+    template <class GpuDone> int Evictable(uint64_t now, GpuDone&& gpuDone) const
+    {
+        int best = kNoStream;
+        uint64_t bestIdle = 0;
+        for (size_t i = 0; i < kMaxStreams; ++i)
+        {
+            const StreamState& s = _streams[i];
+            if (!s.Used())
+                continue;
+            if (now >= s.lastLive && now - s.lastLive <= kLiveMs)
+                continue; // live: never evicted
+            if (s.HasGpuWork() && !gpuDone(s.lastSubmitted))
+                continue; // the GPU may still be reading the stream's images
+            const uint64_t idle = now >= s.lastLive ? now - s.lastLive : 0;
+            if (best == kNoStream || idle > bestIdle)
+            {
+                best = static_cast<int>(i);
+                bestIdle = idle;
+            }
+        }
+        return best;
     }
 
     StreamState& At(int index) { return _streams[static_cast<size_t>(index)]; }
@@ -552,6 +581,23 @@ inline StreamFacts FactsOf(const StreamState& st, bool disabled, uint64_t now, u
     f.hasGpuWork = st.HasGpuWork();
     f.gpuDone = gpuDone;
     return f;
+}
+
+// ---- The allocator ring --------------------------------------------------------------------------------------------------------
+// The allocators one attempt may use, in the order they are tried: starting after the last one used and wrapping, only those whose earlier
+// work reached the queue's completed value (a value is only ever `done.last + 1` when its allocator is reset). Returns how many there are;
+// 0 means the whole ring is still in flight and the render keeps the image it has.
+template <class Values, class Done>
+size_t FreeAllocators(const Values& value, size_t next, Done&& done, std::array<size_t, kAllocators>& out)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < kAllocators; ++i)
+    {
+        const size_t index = (next + i) % kAllocators;
+        if (done(value[index]))
+            out[n++] = index;
+    }
+    return n;
 }
 
 // ---- History reset ------------------------------------------------------------------------------------------------------------

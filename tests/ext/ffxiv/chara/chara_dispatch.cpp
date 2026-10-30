@@ -157,6 +157,7 @@ void Detach()
     d.events.push_back("nr.detach");
 }
 void OnBridgeInit() { d.events.push_back("nr.init"); }
+Status GetStatus() { return Status {}; } // the burst log reads it; the double has nothing to report
 } // namespace nr
 
 namespace probe

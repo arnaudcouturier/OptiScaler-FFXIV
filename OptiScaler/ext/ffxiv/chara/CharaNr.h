@@ -31,6 +31,7 @@
 //   Maintain      : releases streams (linger) and keeps the status current; call at least every 100 ms of draw activity
 //   OnBridgeShutdown / Detach : release everything
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -48,6 +49,7 @@ struct RunRequest
     ID3D11Texture2D* native = nullptr;      // the finisher's output (the preview image), B8G8R8A8_UNORM; also the key of the stream
     uint32_t width = 0;                     // the size NR works at: the native size (bring-up), twice the render size (production)
     uint32_t height = 0;
+    int entry = -1;                         // the preview renderer's output entry of that image (log lines only; -1 = not known)
     uint64_t now = 0;
 };
 
@@ -192,6 +194,15 @@ struct Status
     bool preSrLatched = false;        // the SR evaluate refused the NR image: NR before SR is off for the session
     uint64_t videoMemoryMb = 0; // video memory the streams' images and model instances added (measured around their creation, given back when a stream is released; 0 = not measured)
     bool late = false;         // a bring-up stream uses the late variant now (PreviewNRLate applies to the bring-up only; a production stream never does)
+    // Why calls were skipped, split by cause (each is a subset of the fallback count): the stream table was full, the wanted stream
+    // shape was still settling, or no command list / allocator was free. And the most streams that existed at once.
+    uint64_t skipTableFull = 0;
+    uint64_t skipSettling = 0;
+    uint64_t skipNoList = 0;
+    uint32_t streamsPeak = 0;
+    // Per stream, for the log lines: the preview renderer's output entry (-1 = not known) and the successful runs so far.
+    std::array<int, kMaxStreams> streamEntries {};
+    std::array<uint64_t, kMaxStreams> streamRuns {};
 };
 Status GetStatus();
 } // namespace ext::ffxiv::chara::nr

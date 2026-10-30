@@ -11,6 +11,7 @@
 #include "check.h"
 
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -257,6 +258,41 @@ const std::vector<Fragment> kDlss = {
     { "if (result.outcome != nr::RunOutcome::Paused && g_productionCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a missing image is logged as a production cause for every outcome but a pause" },
     { "if (result.outcome != nr::RunOutcome::Paused && g_preSrCauses.First(static_cast<unsigned>(result.outcome)))", 1, "a missing image is logged as a pre-SR cause for every outcome but a pause" },
     { "CountsAsFallback(result.outcome) && g_", 0, "the cause-log conditions do not use the counting predicate (Ran without an image would be silenced)" },
+    // The processed set's wiring: the pass is named by the camera constant buffer binding of its first geometry draw, every finisher teaches
+    // that binding, the guides come from the draw the replay accepted, an image outside the set keeps no slot, and every NR request carries the
+    // window label.
+    { "const camera::Stage stage = camera::StageFor(view.kind == DrawKind::Prepass);", 1, "the stage of the camera block follows the draw that starts the pass" },
+    { "g_pass.cameraKey = camera::BoundBlock(view.context, stage, g_pass.width, g_pass.height);", 1,
+      "the binding of the first geometry draw names the image of the pass (no video memory is read)" },
+    { "const WindowSet::PassName name = windows.NamePass(g_pass.cameraKey, view.now);", 1, "the pass asks the identity about the binding" },
+    { "g_pass.nameImage = name.image;", 1, "the pass remembers the image the binding named, so its finisher can prove whether the name was right" },
+    { "g_windowStats.NoteIdentity(name.name);", 1, "every pass the identity decided is counted, whatever the answer" },
+    { "FollowPass(view, name.image, windows.FollowsPass(name.name));", 1, "the pass is followed by the identity's answer, not by a prediction" },
+    { "if (!g_pass.identified && sr && Windows().On() && (view.kind == DrawKind::Prepass || view.kind == DrawKind::GBuffer))", 1,
+      "the identity is asked only while the SR path runs, only with the budget on, and only at a geometry draw" },
+    { "const WindowSet::Learned learned = Windows().NoteFinisher(key, g_pass.cameraKey, view.now);", 1,
+      "every accepted finisher teaches which camera block binding belongs to which preview image" },
+    { "if (Windows().NoteMismatch(g_pass.cameraKey, g_pass.nameImage, key, view.now))", 1,
+      "a finisher of another image than the binding named is a mismatch, and the binding is held for that image" },
+    { "g_windowStats.NoteIdentityMismatch();", 1, "a mismatch is counted, so the burst line says whether a pass was mis-named" },
+    { "g_windowStats.NoteIdentityLearned();", 1, "a binding learned at a finisher is counted" },
+    { "g_windowStats.NoteIdentityCleared();", 2, "an ambiguity that ended is counted where the pass saw it end and where the finisher did" },
+    { "g_slots.ClearEvaluated(followed);", 0, "a mismatch clears nothing: the image the binding named is usually an active window, and its own next pass clears its composed picture when that pass is not evaluated" },
+    { "if (motion::CapturesGuides((view.roles & RoleGeometry) != 0, replay.outcome == motion::Outcome::Replayed) && !g_pass.cameraCaptured)", 1,
+      "a draw the replay accepted gives the pass its guides, so a wider-shape pass can finish" },
+    { "g_slots.Cleanup(now, disabled, Windows().On(),", 1, "a cleanup forgets a slot's place in the render order only with the budget on" },
+    { "if (Windows().On() && !Windows().Processed(key))", 1, "an image the set no longer processes gives its slot back and is never evaluated again" },
+    { "if (index != kNoSlot && !windows.Processed(key))", 1, "a UI draw that samples an image outside the set is given the game's picture" },
+    { "request.entry = view.facts.rtv0Entry;", 1, "the bring-up request carries the window label" },
+    { "request.base.entry = view.facts.rtv0Entry;", 2, "the production and pre-SR requests carry the window label" },
+    { "g_windowSet.FreshCount(GetTickCount64())", 1, "the menu count is the windows that are on screen, not every member" },
+    { "g_windowSet.Reset();", 1, "a rebuilt device forgets the windows and bindings the set remembered" },
+    { "g_windowStats.NoteSample(key, entry, view.now); windows.NoteDemand(key, entry, view.now);", 1,
+      "demand is recorded right beside the sample count, for every sampled preview image and whatever the other options say" },
+    { "g_pass.live = g_slots.JitterLive(view.now) && follows;", 1, "the pass gate is the live-slot rule AND the processed set's answer" },
+    { "&& windows.Processed(key))", 1, "an image outside the set claims no slot" },
+    { "if (index != kNoSlot && Windows().On() && g_windowStats.LastFinisherCollided())", 1,
+      "the collision reset runs for a collided finisher only" },
 };
 
 // Order. Counts alone keep every fragment present when a statement is moved: each chain below occurs once per step, in this order, in the
@@ -329,6 +365,28 @@ const std::vector<Fragment> kNr = {
     { "RunCopiedImpl(request, Placement::PostSr)", 1, "the production entry runs the post-SR placement" },
     { "RunCopiedImpl(request, Placement::PreSr)", 1, "the pre-SR entry runs the pre-SR placement" },
     { "!ResultTextureServes(ResultKindOf(st))", 1, "the dump is not offered a result it cannot label" },
+    // The processed set: only an image the set processes owns a stream, the eviction and the shortened linger run only with the budget on,
+    // and the allocator of a list comes from the pure rule of the ring.
+    { "if (!g_windowSet.Processed(key))", 1, "an image outside the set gets no NR stream" },
+    { "if (index == kNoStream && g_windowSet.On())", 1, "a full stream table is only emptied with the budget on" },
+    { "const bool pressure = g_windowSet.On() && g_windowSet.HasWaitingCandidate(now);", 1, "the linger is shortened only under pressure and only with the budget on" },
+    { "const size_t free = FreeAllocators(m.allocatorValue, m.allocatorNext,", 1, "the allocator of the next list comes from the pure ring rule" },
+};
+
+// CharaIdentify.cpp: what the burst log reads and prints. The NR part of the line is built by NrBurstText from the module's counters.
+const std::vector<Fragment> kIdentify = {
+    { "const nr::Status nr = nr::GetStatus();", 2, "the burst start and the burst end read the NR counters" },
+    { "nrBurst.skipTableFull = nr.skipTableFull - g_state.startNrSkipTableFull;", 1, "the line prints why calls were skipped, per cause, for this burst" },
+    { "nrBurst.skipSettling = nr.skipSettling - g_state.startNrSkipSettling;", 1, "... settling" },
+    { "nrBurst.skipNoList = nr.skipNoList - g_state.startNrSkipNoList;", 1, "... no command list" },
+    { "nrBurst.streamsPeak = nr.streamsPeak;", 1, "... the stream peak" },
+    { "NrBurstText(nrBurst)", 1, "the line itself is the tested formatter" },
+    { "if (NrBurstWorthLogging(nrBurst))", 1, "the NR part is written only when it says something (preview NR off prints nothing)" },
+    { "IdentityBurstText(identity)", 1, "the identity part of the burst line is the tested formatter" },
+    { "identity.known = static_cast<uint32_t>(g_windowSet.KnownBlocks());", 1, "the line counts the camera blocks that name a window now" },
+    { "if (g_windowSet.On())", 1, "the identity part is written only with the limit on (off: nothing is learned or named)" },
+    { "g_windowStats.Reset();", 1, "the several-window counters belong to one burst and start at zero in the next one" },
+    { "s.startNrRuns = nr.runs;", 1, "the burst remembers the NR counters it started from, so the line shows that burst" },
 };
 
 // The edit of a negative control, made on the comment-free text (white space is not part of the match).
@@ -348,6 +406,34 @@ int PlanFieldAssignments(const std::string& code)
         n += static_cast<int>(AssignmentsTo(code, field));
     return n;
 }
+
+// A Map of a staging copy that waits for the GPU: a read without D3D11_MAP_FLAG_DO_NOT_WAIT returns only once every command queued before the copy
+// has executed, which drains the pipeline in the middle of a frame. The feature's readbacks retry on a later call instead, and a preview window is
+// identified by the constant buffer binding it draws with, never by the content of that buffer.
+bool BlockingReadback(const std::string& line)
+{
+    return line.find("D3D11_MAP_READ") != std::string::npos && line.find("D3D11_MAP_FLAG_DO_NOT_WAIT") == std::string::npos;
+}
+
+// How many lines of the preview sources map for read without DO_NOT_WAIT.
+int BlockingReadbacks(const std::string& folder)
+{
+    int n = 0;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+    {
+        if (!entry.is_regular_file(ec))
+            continue;
+        const std::filesystem::path& path = entry.path();
+        if (path.extension() != ".cpp" && path.extension() != ".h")
+            continue;
+        std::istringstream lines(ReadFile(path.string()));
+        std::string line;
+        while (std::getline(lines, line))
+            n += BlockingReadback(line) ? 1 : 0;
+    }
+    return n;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -356,12 +442,15 @@ int main(int argc, char** argv)
     const std::string dir = repo + "/OptiScaler/ext/ffxiv/chara/";
     const std::string dlssSource = ReadFile(dir + "CharaDlss.cpp");
     const std::string nrSource = ReadFile(dir + "CharaNr.cpp");
-    CHECK(!dlssSource.empty() && !nrSource.empty());
+    const std::string identifySource = ReadFile(dir + "CharaIdentify.cpp");
+    CHECK(!dlssSource.empty() && !nrSource.empty() && !identifySource.empty());
 
     const std::string dlss = Code(dlssSource);
     const std::string nr = Code(nrSource);
+    const std::string identify = Code(identifySource);
     Report("CharaDlss.cpp", dlss, kDlss);
     Report("CharaNr.cpp", nr, kNr);
+    Report("CharaIdentify.cpp", identify, kIdentify);
     CHECK(PlanFieldAssignments(nr) == 0);
     CHECK(WrongOrder(dlss, kDlssOrder, true) == 0);
     // The two slot flags are pinned by their number of assignments too, not only by fragment and order: an unconditional second `g.lastColour = ...;` or
@@ -369,7 +458,8 @@ int main(int argc, char** argv)
     CHECK(AssignmentsTo(dlss, "g.lastColour") == 1);   // the store after a successful evaluate
     CHECK(AssignmentsTo(dlss, "g.preSrColour") == 2);  // the clear before the slot step and the copy-back after the alpha pass
     // the stripper does not understand raw strings: none may appear in the files it reads
-    CHECK(dlssSource.find("R\"(") == std::string::npos && nrSource.find("R\"(") == std::string::npos);
+    CHECK(dlssSource.find("R\"(") == std::string::npos && nrSource.find("R\"(") == std::string::npos &&
+          identifySource.find("R\"(") == std::string::npos);
 
     // The stripper: a fragment inside a comment, after "//", in a string or character literal, or in an `#if 0` block does not count; a "//" inside a
     // string does not start a comment.
@@ -389,6 +479,14 @@ int main(int argc, char** argv)
     }
     CHECK(AssignmentsTo(Code("if (plan.colour == Tex::A) plan.colour = B;"), "plan.colour") == 1);
 
+    // No readback of the preview path waits for the GPU: a blocking Map on the immediate context is a pipeline drain, and the identity of a
+    // preview window is taken from the constant buffer binding alone (the negative control shows what the check catches).
+    CHECK(BlockingReadback("context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);"));
+    CHECK(!BlockingReadback("context->Map(staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);"));
+    CHECK(!BlockingReadback("context->Map(staging, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);"));
+    CHECK(!BlockingReadback("// a read back with D3D11_MAP_FLAG_DO_NOT_WAIT on a later call"));
+    CHECK(BlockingReadbacks(dir) == 0);
+
     // Negative control: each edit the guard exists for is reported.
     const std::string swapped = Replace(dlss, "AlphaColourFor<ID3D11ShaderResourceView*>(input, nrOutput.Get(), g.output.srv.Get())",
                                         "AlphaColourFor<ID3D11ShaderResourceView*>(input, g.output.srv.Get(), nrOutput.Get())");
@@ -403,6 +501,48 @@ int main(int argc, char** argv)
     CHECK(wrongSnapshot != dlss && Wrong(wrongSnapshot, kDlss) > 0);
     const std::string loosePlan = Replace(nr, "FramePlan plan = MakeFramePlan(st, planInputs, &reset);", "FramePlan plan; plan.reset = true;");
     CHECK(loosePlan != nr && (Wrong(loosePlan, kNr) > 0 || PlanFieldAssignments(loosePlan) > 0));
+    // The processed set: a prediction instead of the image of the pass, a deleted learn at the finisher, an unlabelled NR request, and an NR
+    // burst line that does not print the skip causes.
+    const std::string predicted = Replace(dlss, "FollowPass(view, name.image, windows.FollowsPass(name.name));", "FollowPass(view, 0, true);");
+    CHECK(predicted != dlss && Wrong(predicted, kDlss) > 0);
+    const std::string noLearn = Replace(dlss, "const WindowSet::Learned learned = Windows().NoteFinisher(key, g_pass.cameraKey, view.now);", "");
+    CHECK(noLearn != dlss && Wrong(noLearn, kDlss) > 0);
+    const std::string noLabel = Replace(dlss, "request.base.entry = view.facts.rtv0Entry;", "");
+    CHECK(noLabel != dlss && Wrong(noLabel, kDlss) > 0);
+    // The processed set's call sites: demand under the NR option, the slot gate, the pass gate and the collision reset.
+    const std::string noDemand = Replace(dlss, "g_windowStats.NoteSample(key, entry, view.now); windows.NoteDemand(key, entry, view.now);",
+                                         "g_windowStats.NoteSample(key, entry, view.now); if (previewOutput) windows.NoteDemand(key, entry, view.now);");
+    CHECK(noDemand != dlss && Wrong(noDemand, kDlss) > 0);
+    const std::string openSlot = Replace(dlss, "&& windows.Processed(key))", ")");
+    CHECK(openSlot != dlss && Wrong(openSlot, kDlss) > 0);
+    const std::string alwaysFollow = Replace(dlss, "g_pass.live = g_slots.JitterLive(view.now) && follows;", "g_pass.live = g_slots.JitterLive(view.now);");
+    CHECK(alwaysFollow != dlss && Wrong(alwaysFollow, kDlss) > 0);
+    const std::string resetEvery = Replace(dlss, "if (index != kNoSlot && Windows().On() && g_windowStats.LastFinisherCollided())",
+                                           "if (index != kNoSlot && Windows().On())");
+    CHECK(resetEvery != dlss && Wrong(resetEvery, kDlss) > 0);
+    const std::string noCause = Replace(identify, "nrBurst.skipTableFull = nr.skipTableFull - g_state.startNrSkipTableFull;", "");
+    CHECK(noCause != identify && Wrong(noCause, kIdentify) > 0);
+    // The identity's feed: the name the pass remembered, the mismatch, and the clearing of another window's picture the mismatch must not do.
+    // Deleting any of them leaves every pure rule green and makes the burst line lie about what happened.
+    const std::string noName = Replace(dlss, "g_pass.nameImage = name.image;", "");
+    CHECK(noName != dlss && Wrong(noName, kDlss) > 0);
+    const std::string noMismatch = Replace(dlss, "if (Windows().NoteMismatch(g_pass.cameraKey, g_pass.nameImage, key, view.now))", "if (false)");
+    CHECK(noMismatch != dlss && Wrong(noMismatch, kDlss) > 0);
+    const std::string noMismatchCount = Replace(dlss, "g_windowStats.NoteIdentityMismatch();", "");
+    CHECK(noMismatchCount != dlss && Wrong(noMismatchCount, kDlss) > 0);
+    const std::string noNameCount = Replace(dlss, "g_windowStats.NoteIdentity(name.name);", "");
+    CHECK(noNameCount != dlss && Wrong(noNameCount, kDlss) > 0);
+    const std::string noLearnedCount = Replace(dlss, "g_windowStats.NoteIdentityLearned();", "");
+    CHECK(noLearnedCount != dlss && Wrong(noLearnedCount, kDlss) > 0);
+    const std::string noClearedCount = Replace(dlss, "g_windowStats.NoteIdentityCleared();", "");
+    CHECK(noClearedCount != dlss && Wrong(noClearedCount, kDlss) > 0); // both sites count
+    const std::string identifyWithoutSr = Replace(dlss, "if (!g_pass.identified && sr && Windows().On()", "if (!g_pass.identified && Windows().On()");
+    CHECK(identifyWithoutSr != dlss && Wrong(identifyWithoutSr, kDlss) > 0);
+    const std::string clearFollowed = Replace(dlss, "g_windowStats.NoteIdentityMismatch();",
+                                             "g_windowStats.NoteIdentityMismatch(); const int followed = g_slots.Find(g_pass.nameImage); if (followed != kNoSlot) g_slots.ClearEvaluated(followed);");
+    CHECK(clearFollowed != dlss && Wrong(clearFollowed, kDlss) > 0); // a mismatch must not clear another window's picture
+    const std::string noSetReset = Replace(dlss, "g_windowSet.Reset();", "");
+    CHECK(noSetReset != dlss && Wrong(noSetReset, kDlss) > 0);
 
     // Depth and motion swapped in one of the three requests (each is a separate edit; a swap keeps the file compiling and every pure test green).
     const std::string swapPre = Replace(dlss, "request.colour = g.color.texture.Get(); request.depth = g.depth.texture.Get(); request.motion = g.motion.texture.Get();",

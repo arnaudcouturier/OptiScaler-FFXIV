@@ -23,6 +23,9 @@ struct CharaConfig
     CustomOptional<bool> previewNrBeforeSr { false };   // [FFXIV] PreviewNRBeforeSR: run NR before the DLSS evaluate instead of after it (experimental; needs PreviewDLSS and PreviewNR)
     CustomOptional<bool> previewProbe { false };        // [FFXIV] PreviewProbe: debug probe that traces how the preview reaches the screen
     CustomOptional<bool> previewDebugFlood { false };   // [FFXIV] PreviewDebugFlood: replaces the sampled preview by solid magenta (debug aid)
+    CustomOptional<bool> previewReplayWideShape { false }; // [FFXIV] PreviewReplayWideShape: the motion replay also takes a camera block that is a view into a larger buffer
+    CustomOptional<bool> previewBudget { false };      // [FFXIV] PreviewBudget: only PreviewMaxWindows preview windows are processed
+    CustomOptional<uint32_t> previewMaxWindows { 2 };  // [FFXIV] PreviewMaxWindows: how many preview windows are processed (1 to 8, read while PreviewBudget is on)
 
     template <class Binder> void Bind(Binder& b)
     {
@@ -38,6 +41,9 @@ struct CharaConfig
         b.Add("FFXIV", "PreviewNRBeforeSR", previewNrBeforeSr);
         b.Add("FFXIV", "PreviewProbe", previewProbe);
         b.Add("FFXIV", "PreviewDebugFlood", previewDebugFlood);
+        b.Add("FFXIV", "PreviewReplayWideShape", previewReplayWideShape);
+        b.Add("FFXIV", "PreviewBudget", previewBudget);
+        b.Add("FFXIV", "PreviewMaxWindows", previewMaxWindows);
     }
 };
 } // namespace ext::ffxiv::chara

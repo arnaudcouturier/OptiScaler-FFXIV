@@ -46,6 +46,9 @@ void TestDefaultsAndBinding()
     CHECK(!defaults.previewNrBeforeSr.value_or_default()); // experimental, off unless asked for
     CHECK(!defaults.previewProbe.value_or_default());
     CHECK(!defaults.previewDebugFlood.value_or_default());
+    CHECK(!defaults.previewReplayWideShape.value_or_default());
+    CHECK(!defaults.previewBudget.value_or_default());           // the budget is off by default
+    CHECK(defaults.previewMaxWindows.value_or_default() == 2u);  // ... and its count is inert while it is off
 
     config::Binder binder;
     defaults.Bind(binder);
@@ -67,9 +70,12 @@ void TestDefaultsAndBinding()
         { "FFXIV", "PreviewNRBeforeSR", &defaults.previewNrBeforeSr },
         { "FFXIV", "PreviewProbe", &defaults.previewProbe },
         { "FFXIV", "PreviewDebugFlood", &defaults.previewDebugFlood },
+        { "FFXIV", "PreviewReplayWideShape", &defaults.previewReplayWideShape },
+        { "FFXIV", "PreviewBudget", &defaults.previewBudget },
+        { "FFXIV", "PreviewMaxWindows", &defaults.previewMaxWindows },
     };
-    CHECK(binder.Table().size() == 12);
-    for (size_t i = 0; i < 12 && i < binder.Table().size(); ++i)
+    CHECK(binder.Table().size() == 15);
+    for (size_t i = 0; i < 15 && i < binder.Table().size(); ++i)
     {
         CHECK(std::string(binder.Table()[i].section) == expected[i].section);
         CHECK(std::string(binder.Table()[i].key) == expected[i].key);
@@ -93,6 +99,9 @@ void TestRoundTrip()
     ini.SetValue("FFXIV", "PreviewNRBeforeSR", "true");
     ini.SetValue("FFXIV", "PreviewProbe", "true");
     ini.SetValue("FFXIV", "PreviewDebugFlood", "true");
+    ini.SetValue("FFXIV", "PreviewReplayWideShape", "true");
+    ini.SetValue("FFXIV", "PreviewBudget", "true");
+    ini.SetValue("FFXIV", "PreviewMaxWindows", "5");
     config::Load(ini);
 
     const auto& c = Cfg().ffxiv.chara;
@@ -106,6 +115,9 @@ void TestRoundTrip()
     CHECK(c.previewDebugTint.value_or_default());
     CHECK(c.previewProbe.value_or_default());
     CHECK(c.previewDebugFlood.value_or_default());
+    CHECK(c.previewReplayWideShape.value_or_default());
+    CHECK(c.previewBudget.value_or_default());
+    CHECK(c.previewMaxWindows.value_or_default() == 5u);
 
     // saving writes the non-default values back under the same section and key names
     CSimpleIniA out;
@@ -122,7 +134,9 @@ void TestRoundTrip()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewNRBeforeSR", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewProbe", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugFlood", "")) == "true");
-
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewReplayWideShape", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewBudget", "")) == "true");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewMaxWindows", "")) == "5");
 }
 
 void TestUnsetKeysStayDefault()
@@ -140,6 +154,9 @@ void TestUnsetKeysStayDefault()
     CHECK(!fresh.previewProbe.value_or_default());
     CHECK(!fresh.previewNrBeforeSr.value_or_default());
     CHECK(!fresh.previewDebugFlood.value_or_default());
+    CHECK(!fresh.previewReplayWideShape.value_or_default());
+    CHECK(!fresh.previewBudget.value_or_default());
+    CHECK(fresh.previewMaxWindows.value_or_default() == 2u);
 
     CSimpleIniA out;
     for (const auto& b : binder.Table())
@@ -149,13 +166,16 @@ void TestUnsetKeysStayDefault()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewProbe", "")) == "auto");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewNRBeforeSR", "")) == "auto");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugFlood", "")) == "auto");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewReplayWideShape", "")) == "auto");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewBudget", "")) == "auto");
+    CHECK(std::string(out.GetValue("FFXIV", "PreviewMaxWindows", "")) == "auto");
 }
 
 void TestFragments(const std::string& repo)
 {
     const std::string ffxiv = ReadFile(repo + "/OptiScaler/ext/ini/FFXIV.ini");
     CHECK(!ffxiv.empty());
-    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint", "PreviewNR", "PreviewNRLingerSeconds", "PreviewNRLate", "PreviewNRBeforeSR", "PreviewProbe", "PreviewDebugFlood" })
+    for (const char* key : { "PreviewDLSS", "PreviewAA", "PreviewUpscale", "PreviewGuideCapture", "PreviewDebugTint", "PreviewNR", "PreviewNRLingerSeconds", "PreviewNRLate", "PreviewNRBeforeSR", "PreviewProbe", "PreviewDebugFlood", "PreviewReplayWideShape", "PreviewBudget", "PreviewMaxWindows" })
         CHECK(HasKeyLine(ffxiv, key));
     CHECK(!HasKeyLine(ffxiv, "PreviewNRTrace"));
     CHECK(ffxiv.find("[FFXIV]") == std::string::npos || ffxiv.find("[FFXIV]") == 0); // a leading header would be dropped by the packager

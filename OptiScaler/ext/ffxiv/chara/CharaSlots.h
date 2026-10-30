@@ -42,6 +42,7 @@ struct RecentEntry
 struct SlotState
 {
     uintptr_t key = 0; // the finisher output texture the slot belongs to; 0 = free
+    int entry = -1;    // the preview renderer's output entry of that texture, for the log lines (-1 = not known)
     uint32_t width = 0;
     uint32_t height = 0;
     bool reversedZ = false; // depth convention at feature creation
@@ -136,10 +137,53 @@ class SlotTable
         return kNoSlot;
     }
 
+    // The least recently used slot that may be released for another image: it is not live (unused for more than 250 ms), its GPU work
+    // is finished, and it is not the slot of `keep` (the image that asks for the place). kNoSlot when there is none. The caller
+    // releases its GPU objects and then calls Free.
+    template <class QueryDone> int Evictable(uint64_t now, uintptr_t keep, QueryDone&& queryDone) const
+    {
+        int best = kNoSlot;
+        uint64_t bestIdle = 0;
+        for (size_t i = 0; i < kMaxSlots; ++i)
+        {
+            const SlotState& s = _slots[i];
+            if (!s.Used() || s.key == keep)
+                continue;
+            if (now >= s.lastUse && now - s.lastUse <= kLiveMs)
+                continue; // live: a window that is drawn now is never evicted
+            if (s.queryPending && !queryDone(static_cast<int>(i)))
+                continue; // the GPU is still using its objects
+            const uint64_t idle = now >= s.lastUse ? now - s.lastUse : 0;
+            if (best == kNoSlot || idle > bestIdle)
+            {
+                best = static_cast<int>(i);
+                bestIdle = idle;
+            }
+        }
+        return best;
+    }
+
+    // A slot's state by index (0 to kMaxSlots - 1); the caller only passes indices Find, AcquireForConsumer or Evictable answered.
     SlotState& Slot(int index) { return _slots[static_cast<size_t>(index)]; }
     const SlotState& Slot(int index) const { return _slots[static_cast<size_t>(index)]; }
 
     void Touch(int index, uint64_t now) { Slot(index).lastUse = now; }
+
+    // Frees a slot whose GPU objects were released (the eviction path, an image that left the processed set, cleanup): the next image starts
+    // from nothing, and the order of the renders forgets this index both ways, so a reused index can neither inherit another image's
+    // successor nor stay the successor of a live one.
+    void Free(int index)
+    {
+        _slots[static_cast<size_t>(index)] = SlotState {};
+        _successor[static_cast<size_t>(index)] = kNoSlot;
+        if (_lastFinished == index)
+            _lastFinished = kNoSlot;
+        for (int& successor : _successor)
+        {
+            if (successor == index)
+                successor = kNoSlot;
+        }
+    }
 
     // A slot is rebuilt (feature recreated) when the image size or the depth convention changed.
     bool NeedsRebuild(int index, uint32_t width, uint32_t height, bool reversedZ) const
@@ -227,9 +271,12 @@ class SlotTable
     // Periodic cleanup. A slot is released when it has been unused for more than 2000 ms, or when `disabled`, and
     // `queryDone(index)` reports that its last GPU work finished (a slot with no pending query releases at once).
     // `release(index)` frees the slot's resources before the slot is cleared. Recent entries older than 250 ms are dropped.
+    // `forgetOrder` decides whether the slot's place in the render order goes with it (Free) or the slot state alone is cleared: the order
+    // behind JitterPhase and PredictPassSlot belongs to the processed-window rules, which are off by default, and the path before those rules
+    // existed only emptied the slot.
     // Returns the number of slots released.
     template <class QueryDone, class Release>
-    size_t Cleanup(uint64_t now, bool disabled, QueryDone&& queryDone, Release&& release)
+    size_t Cleanup(uint64_t now, bool disabled, bool forgetOrder, QueryDone&& queryDone, Release&& release)
     {
         size_t released = 0;
         for (size_t i = 0; i < kMaxSlots; ++i)
@@ -244,7 +291,10 @@ class SlotTable
             if (!ReadyForRelease(static_cast<int>(i), queryDone))
                 continue;
             release(static_cast<int>(i));
-            s = SlotState {};
+            if (forgetOrder)
+                Free(static_cast<int>(i));
+            else
+                s = SlotState {};
             ++released;
         }
         for (auto& r : _recent)

@@ -67,7 +67,8 @@ std::vector<std::string> Problems(const std::string& text)
     const std::string dbg = Squash(BodyOf(stripped, "void DrawDebugSection(CharaConfig& cfg, bool inert)"));
     const std::string toggles = Squash(BodyOf(stripped, "void DrawNrToggles(CharaConfig& cfg)"));
     const std::string counters = Squash(BodyOf(stripped, "void DrawNrCounters(const CharaConfig& cfg)"));
-    if (card.empty() || dbg.empty() || toggles.empty() || counters.empty())
+    const std::string budget = Squash(BodyOf(stripped, "void DrawWindowBudget(CharaConfig& cfg)"));
+    if (card.empty() || dbg.empty() || toggles.empty() || counters.empty() || budget.empty())
     {
         bad("a function of the card is missing");
         return p;
@@ -114,7 +115,8 @@ std::vector<std::string> Problems(const std::string& text)
     for (const std::string& needle : { Squash("ImGui::Checkbox(\"Preview DLSS (2x output, experimental)\""),
                                        Squash("ImGui::Checkbox(\"Preview spatial AA\""),
                                        Squash("ImGui::Checkbox(\"2x preview upscaling\""), std::string("DrawNrToggles(cfg);"),
-                                       std::string("DrawNrStatusLine(cfg);"), Squash("table::InertReason()"),
+                                       std::string("DrawNrStatusLine(cfg);"), std::string("DrawWindowBudget(cfg);"),
+                                       Squash("table::InertReason()"),
                                        Squash("\"Character preview is off for this session: %s.\"") })
     {
         const size_t at = card.find(needle);
@@ -145,6 +147,11 @@ std::vector<std::string> Problems(const std::string& text)
             bad("a fallback figure of the NR counters does not say that focus pauses are not counted: " + label);
     if (Count(all, "DrawNrCounters(cfg);") != 1 || Count(dbg, "DrawNrCounters(cfg);") != 1)
         bad("DrawNrCounters is not called exactly once, from the fold section");
+    // the processed-window state line is shown with the user switches, and only while the limit is on
+    if (Count(budget, Squash("ImGui::Checkbox(\"Limit the number of processed preview windows (experimental)\"")) != 1 ||
+        Count(budget, Squash("\"Processed preview windows: %u of %u (the others keep the game's picture)\"")) != 1 ||
+        Count(card, "DrawWindowBudget(cfg);") != 1)
+        bad("the processed-window controls are not in DrawWindowBudget, drawn once from the card");
     if (Count(dbg, "if(!inert&&aa&&") != 1)
         bad("the AA lines no longer respect the 'feature is off' state");
 
@@ -164,6 +171,9 @@ std::vector<std::string> Problems(const std::string& text)
         { "cfg.previewDebugTint=", "cfg.previewDebugTint=tint;", &dbg },
         { "cfg.previewDebugFlood=", "cfg.previewDebugFlood=flood;", &dbg },
         { "cfg.previewProbe=", "cfg.previewProbe=probeOn;", &dbg },
+        { "cfg.previewReplayWideShape=", "cfg.previewReplayWideShape=wideShape;", &dbg },
+        { "cfg.previewBudget=", "cfg.previewBudget=budget;", &budget },
+        { "cfg.previewMaxWindows=", "cfg.previewMaxWindows=static_cast<uint32_t>(maxWindows);", &budget },
     };
     for (const Key& k : keys)
         if (Count(all, k.prefix) != 1 || Count(*k.where, k.full) != 1)
