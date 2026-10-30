@@ -169,9 +169,10 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if (shouldHookSl && (CheckDllNameW(&libName, &slDlssNamesW) ||
                          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_dlss_0"))))
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookDlss);
-
         auto dlssModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+
+        // The plugin mutexes are taken only for the hook, never across the loader call
+        std::scoped_lock lock(StreamlineHooks::mutexHookDlss);
 
         if (dlssModule != nullptr)
         {
@@ -189,10 +190,10 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if ((CheckDllNameW(&libName, &slDlssgNamesW) ||
          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_dlss_g_"))))
     {
+        auto dlssgModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+
         std::scoped_lock lock1(StreamlineHooks::mutexHookDlssg);
         std::scoped_lock lock2(StreamlineHooks::mutexHookLocalDlssg);
-
-        auto dlssgModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (dlssgModule != nullptr)
         {
@@ -215,9 +216,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if (shouldHookSl && (CheckDllNameW(&libName, &slReflexNamesW) ||
                          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_reflex_"))))
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookReflex);
-
         auto reflexModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+
+        std::scoped_lock lock(StreamlineHooks::mutexHookReflex);
 
         if (reflexModule != nullptr && reflexModule != State::Instance().optiSlReflex)
         {
@@ -235,9 +236,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if (shouldHookSl && (CheckDllNameW(&libName, &slPclNamesW) ||
                          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_pcl_"))))
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookPcl);
-
         auto pclModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+
+        std::scoped_lock lock(StreamlineHooks::mutexHookPcl);
 
         if (pclModule != nullptr && pclModule != State::Instance().optiSlPCL)
         {
@@ -255,9 +256,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     if (shouldHookSl && (CheckDllNameW(&libName, &slCommonNamesW) ||
                          (normalizedPath.contains(L"\\versions\\") && normalizedPath.contains(L"\\sl_common_"))))
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookCommon);
-
         auto commonModule = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+
+        std::scoped_lock lock(StreamlineHooks::mutexHookCommon);
 
         if (commonModule != nullptr && commonModule != State::Instance().optiSlCommon)
         {
@@ -1003,6 +1004,8 @@ HMODULE LibraryLoadHooks::LoadNvngxDlss(std::wstring originalPath)
 //     return nullptr;
 // }
 
+// A busy plugin mutex means another thread is loading or hooking that plugin right now, so this catch-up skips it and the
+// next load that matches no branch retries. It must never wait here: the caller may hold the loader lock.
 void LibraryLoadHooks::CheckModulesInMemory()
 {
     const auto isLocalStreamlineModule = [](HMODULE module) -> bool
@@ -1039,8 +1042,8 @@ void LibraryLoadHooks::CheckModulesInMemory()
     }
 
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookDlss);
-        if (!StreamlineHooks::isDlssHooked())
+        std::unique_lock lock(StreamlineHooks::mutexHookDlss, std::try_to_lock);
+        if (lock.owns_lock() && !StreamlineHooks::isDlssHooked())
         {
             HMODULE slDlss = nullptr;
             slDlss = GetDllNameWModule(&slDlssNamesW);
@@ -1054,9 +1057,9 @@ void LibraryLoadHooks::CheckModulesInMemory()
 
     // DLSS-G
     {
-        std::scoped_lock lock1(StreamlineHooks::mutexHookDlssg);
-        std::scoped_lock lock2(StreamlineHooks::mutexHookLocalDlssg);
-        if (!StreamlineHooks::isDlssgHooked() || !StreamlineHooks::isLocalDlssgHooked())
+        std::unique_lock lock1(StreamlineHooks::mutexHookDlssg, std::try_to_lock);
+        std::unique_lock lock2(StreamlineHooks::mutexHookLocalDlssg, std::try_to_lock);
+        if (lock1.owns_lock() && lock2.owns_lock() && (!StreamlineHooks::isDlssgHooked() || !StreamlineHooks::isLocalDlssgHooked()))
         {
             HMODULE slDlssg = GetDllNameWModule(&slDlssgNamesW);
 
@@ -1083,8 +1086,8 @@ void LibraryLoadHooks::CheckModulesInMemory()
 
     // Reflex
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookReflex);
-        if (!StreamlineHooks::isReflexHooked())
+        std::unique_lock lock(StreamlineHooks::mutexHookReflex, std::try_to_lock);
+        if (lock.owns_lock() && !StreamlineHooks::isReflexHooked())
         {
             HMODULE slReflex = GetDllNameWModule(&slReflexNamesW);
 
@@ -1107,8 +1110,8 @@ void LibraryLoadHooks::CheckModulesInMemory()
 
     // PCL
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookPcl);
-        if (!StreamlineHooks::isPclHooked())
+        std::unique_lock lock(StreamlineHooks::mutexHookPcl, std::try_to_lock);
+        if (lock.owns_lock() && !StreamlineHooks::isPclHooked())
         {
             HMODULE slPcl = GetDllNameWModule(&slPclNamesW);
 
@@ -1130,8 +1133,8 @@ void LibraryLoadHooks::CheckModulesInMemory()
     }
 
     {
-        std::scoped_lock lock(StreamlineHooks::mutexHookCommon);
-        if (!StreamlineHooks::isCommonHooked())
+        std::unique_lock lock(StreamlineHooks::mutexHookCommon, std::try_to_lock);
+        if (lock.owns_lock() && !StreamlineHooks::isCommonHooked())
         {
             HMODULE slCommon = nullptr;
             slCommon = GetDllNameWModule(&slCommonNamesW);
