@@ -12,13 +12,14 @@
 // This does not call slInit -- it only needs to exercise LoadLibraryCheckW's dispatch, not a
 // working Streamline session, so it has no dependency on sl.h / a device / a window.
 //
-// The recipe is manual: this test hangs on the current lock order (see its Note and
-// docs/notes/streamline-loader-lock-hazard.md), so build and run it by hand under a timeout. By hand: run in an isolated directory with an OptiScaler.ini containing [Log] LogToFile=true (LogLevel
-// left at its default 0/trace, which already includes LOG_ERROR) and OptiDllPath pointed at a
-// harmless FGInput/FGOutput so hookDlss/hookDlssg actually run (shouldHookSl just needs the
-// plugin directory below to not be OptiScaler's own private Streamline path, which an ad hoc
-// directory satisfies automatically):
-//   streamline_detours_race_stress.exe <OptiScaler DLL> <Streamline plugin dir> [iterations] [threads]
+// The recipe stages an isolated folder next to an OptiScaler.ini with [Log] LogToFile=true
+// (LogLevel left at its default 0/trace, which already includes LOG_ERROR) and the Streamline
+// plugins named by OPTISCALER_SL_PLUGIN_DIR, and runs this exe as a child of an out-of-process
+// watchdog launcher: a hang is exit 3 with every thread stack and the owner of the loader lock,
+// so the suite can never be left waiting (docs/notes/streamline-loader-lock-hazard.md).
+// By hand: streamline_detours_race_stress.exe <OptiScaler DLL> <Streamline plugin dir>
+// [iterations] [threads] (shouldHookSl only needs that directory to not be OptiScaler's own
+// private Streamline path, which an ad hoc directory satisfies automatically).
 //
 // After the threads finish, this reads OptiScaler.log itself (written next to the DLL) for any
 // "Failed to hook" / "Failed to unhook" line -- hookDlss et al. are not exported, so the log is

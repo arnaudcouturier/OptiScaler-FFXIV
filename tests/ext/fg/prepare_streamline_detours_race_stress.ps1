@@ -1,11 +1,11 @@
 # Test prepare step (tools\test.ps1 `Prepare`) for streamline_detours_race_stress: stages an isolated folder <Out>\stage with
-#   - the product OptiScaler.dll built in this worktree (x64\Release\a\OptiScaler.dll),
+#   - the product OptiScaler.dll built in this worktree (x64\Release\a\OptiScaler.dll) or the DLL named by -ProductDll,
 #   - an OptiScaler.ini that turns the file log on (the test reads OptiScaler.log next to the DLL),
 #   - a copy of the real Streamline plugins from the folder named by OPTISCALER_SL_PLUGIN_DIR (<Out>\stage\plugins),
 # so the run reads and writes nothing outside <Out>.
-param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out)
+param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Out, [string]$ProductDll = '')
 $ErrorActionPreference = 'Stop'
-$dll = Join-Path $Repo 'x64\Release\a\OptiScaler.dll'
+$dll = if ($ProductDll) { $ProductDll } else { Join-Path $Repo 'x64\Release\a\OptiScaler.dll' }
 if (-not (Test-Path $dll)) { Write-Error "no product build here: $dll"; exit 1 }
 $plugins = $env:OPTISCALER_SL_PLUGIN_DIR
 if (-not $plugins -or -not (Test-Path $plugins)) { Write-Error 'OPTISCALER_SL_PLUGIN_DIR is not set'; exit 1 }
