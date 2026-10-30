@@ -194,6 +194,8 @@ void MenuStyleConfig::Bind(config::Binder& b) { b.Add("Menu", "Style", look); }
 
 void NgxReleaseConfig::Bind(config::Binder& b) { b.Add("NgxRelease", "SkipReleaseSleep", skipReleaseSleep); }
 
+void BridgeConfig::Bind(config::Binder& b) { b.Add("Bridge", "FlushAfterSignal", flushAfterSignal); }
+
 void FramePacingConfig::Bind(config::Binder& b)
 {
     b.Add("FramePacing", "Trace", trace);
@@ -216,6 +218,7 @@ void ExtConfig::Bind(config::Binder& b)
     window.Bind(b);
     menuStyle.Bind(b);
     ngxRelease.Bind(b);
+    bridge.Bind(b);
     framePacing.Bind(b);
     status.Bind(b);
 }
@@ -232,6 +235,7 @@ void ExtConfig::PostLoad()
     upscaler.PostLoad();
     window.PostLoad();
     ffxiv.PostLoad();
+    bridge.PostLoad();
 }
 
 ExtConfig& Cfg()

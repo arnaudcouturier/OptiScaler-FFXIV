@@ -116,6 +116,14 @@ Group for the D3D11-to-D3D12 bridge (`Dx11wDx12SC`, `IFeature_Dx11wDx12`, `NVNGX
 
 **Lock order (ADOPT-REL).** The DX11 upscaler table lock and the in-flight registry's mutex are leaf locks, never nested with each other and never held across NGX, the driver, a GPU drain, the FG mutex, an NR lock or a feature destructor. NR's `g_nrMutex` and the `DlssNrNative` mutex are only taken inside NGX calls, which run with no table lock held, and `ext/nr` and `ext/fg` never name the table or the DX11 NGX entry points (pinned by the `ngx_lock_order_pins` test). The only edge that exists is NR lock -> table lock.
 
+## bridge
+
+Group for the D3D11 -> D3D12 hand-over itself (`with_dx12/dx11_with_dx12.cpp`), as opposed to `dx11bridge` above, which owns the bridge swapchain, the NGX lifecycle and the private state of `Dx11wDx12SC` / `IFeature_Dx11wDx12`. Per-frame sync calls only; the state is one cached key (`ext/bridge/BridgeSeams.h`).
+
+| Seam | Form | Host file(s) and function | Owner IDs | Frequency | Notes |
+|---|---|---|---|---|---|
+| `ext::bridge::FlushAfterSignal() -> bool` | decision -> bool, inline-guarded | `with_dx12/dx11_with_dx12.cpp` `SyncDx11ToDx12`, right after the accepted fence `Signal` and its error check, before the D3D12 `Wait` | BRIDGE | per-frame | `[Bridge] FlushAfterSignal` (bool, default false, ini only): a true answer flushes the D3D11 immediate context at that point, so the commands it recorded are submitted before the D3D12 side waits for the signal; false is exactly upstream's call sequence (upstream's own commented-out `Flush()` line stays where it is). The key is cached, so the cost is one relaxed atomic load and one branch; the config load publishes it (`ext/bridge/BridgeConfig.h`, `BridgeSeams.h`), and an on value logs one startup line. One upstream line (the call) plus the `#include "ext/Seams.h"` the file needs to see it. Pinned by `tests/ext/bridge/bridge_upstream_pin`. |
+
 ## nr
 
 Native DLSS Neural Rendering (A*, B*, E4 AMD PreSR). All internals live in `ext/nr`; these are the upstream attachment points.
@@ -352,6 +360,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | menu | 15 (1 provisional) | 0 |
 | upscaler | 5 | 0 |
 | dx11bridge | 20 | 2 RAII |
+| bridge | 1 | 1 inline-guarded |
 | nr | 10 | 2 RAII |
 | fg | 29 | 0 |
 | present | 11 | 1 RAII |
@@ -364,7 +373,7 @@ No seam names FFXIV. Everything that must stay FFXIV-visible in an upstream file
 | game | 2 (+6 interface contracts) | 0 |
 | core | 2 | 1 inline-guarded |
 | ffxiv-in-upstream | 0 (3 inline items) | 0 |
-| **Total** | **131** | |
+| **Total** | **132** | |
 
 ## (a) `[UP]` fix list
 

@@ -177,6 +177,12 @@ Code: `ext/present/` (`FramePacingCore.h`, `FramePacingTrace.cpp`, `FramePacingC
 
 Seams: present `PacingScope`, `HiddenPresent`, `NativeBegin`/`NativeEnd`, `FgDispatchBegin`/`FgDispatchEnd`, `RecordSample`. Upstream lines: 3 (`wrapped/wrapped_swapchain.cpp`, `hooks/FG_Hooks.cpp`, `with_dx12/dx11_with_dx12_sc.cpp`).
 
+## Bridge flush after signal
+
+Code: `ext/bridge/` (`BridgeSeams.h` is the cached key and the seam, `BridgeConfig.h` the `[Bridge] FlushAfterSignal` key, `BridgeSeams.cpp` the one startup line, called from `ext/core/Banner.cpp`).
+
+Seams: bridge `FlushAfterSignal`. Upstream lines: 2 in `with_dx12/dx11_with_dx12.cpp` (the `#include "ext/Seams.h"` and the call in `SyncDx11ToDx12`, right after the accepted fence `Signal`); upstream's own commented-out `Flush()` stays.
+
 ## Automatic mipmap bias, bind-time mode
 
 **Code:** `ext/upscaler/MipBind.h` (target, eligibility, add/replace detector, gate, texts), `ext/upscaler/MipBindEngine.h` (sampler table, variants, bind path), `ext/upscaler/MipBindControl.h` (controller and install plan), `ext/upscaler/MipBindHooks.cpp` (attaches it to the game).

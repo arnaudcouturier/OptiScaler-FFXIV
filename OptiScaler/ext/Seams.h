@@ -4,6 +4,7 @@
 // Hot-path seams are inline wrappers testing a feature bit, see ExtFeatures.h.
 
 #include "ext/ExtFeatures.h"
+#include "ext/bridge/BridgeSeams.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/core/MenuRegistry.h"
 #include "ext/dx11bridge/BridgeExt.h"
@@ -162,6 +163,9 @@ namespace game
 void OnD3D11DeviceHooked(ID3D11Device* device);
 void OnD3D11Unhook();
 } // namespace game
+
+// ext::bridge ([Bridge] keys, ext/bridge/BridgeSeams.h) is included above: `FlushAfterSignal()` is one relaxed atomic
+// load and is called by the D3D11 -> D3D12 hand-over (with_dx12/dx11_with_dx12.cpp).
 
 // ext::upscaler (EffectivePerfQuality, OnOptimalSettings, LastQualityAnswer, ApplyForcedQuality) is declared in
 // ext/upscaler/UpscalerSeams.h, included above.

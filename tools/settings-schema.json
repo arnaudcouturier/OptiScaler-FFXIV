@@ -1652,6 +1652,24 @@
       ]
     },
     {
+      "name": "Bridge",
+      "fragment": "OptiScaler/ext/ini/Bridge.ini",
+      "keys": [
+        {
+          "key": "[Bridge] FlushAfterSignal",
+          "section": "Bridge",
+          "name": "FlushAfterSignal",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false (today's hand-over)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "experiment switch of the D3D11 to D3D12 hand-over, set in the ini only" },
+          "description": "Flush the D3D11 context right after the fence Signal of the D3D11 to D3D12 hand-over, so its commands reach the driver then instead of at the game's own flush. An experiment: the cost is a driver flush and less batching, the possible gain is a shorter wait before the D3D12 side picks the frame up, and which side wins has not been measured. Off gives exactly the old hand-over.",
+          "flags": [ "experimental" ]
+        }
+      ]
+    },
+    {
       "name": "DLSSG",
       "fragment": "OptiScaler/ext/ini/DLSSG.ini",
       "keys": [

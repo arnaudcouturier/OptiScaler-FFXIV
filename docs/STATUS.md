@@ -40,6 +40,7 @@ What has been played in game and what has not, for every feature of this fork. T
 | NR frame rate governor (`[DlssNr] Governor`, steps 100-50% to hold `[DlssNr] GovernorTargetFps`) | experimental, off by default; new; unit-tested, not tried in game |
 | Status file (`[Status] Enabled`, `status.json` beside the DLL for bug reports; no paths or names) | diagnostic, off by default; new; unit-tested, not tried in game |
 | Settings schema and reference (`tools/settings-schema.json`, generated `docs/SETTINGS.md`) | developer reference; new; the generator refuses any drift (`tools/gen-settings.ps1 -Check`) |
+| Bridge flush after signal (`[Bridge] FlushAfterSignal`: flush the D3D11 context right after the fence signal of the D3D11 to D3D12 hand-over) | experiment, off by default; new; unit-tested; not measured yet, so whether the flush shortens or lengthens the frame is unknown |
 | NR ViT capture (`[DlssNr] VitCapture`) | diagnostic only, off by default |
 | AMD HIP pre-SR | untested / community |
 | XeFG / XeMFG | untested / community |

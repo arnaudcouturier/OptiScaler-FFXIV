@@ -5,6 +5,7 @@
 
 #include <State.h>
 #include <Util.h>
+#include "ext/Seams.h"
 
 #define ASSIGN_DESC(dest, src)                                                                                         \
     dest.Width = src.Width;                                                                                            \
@@ -225,6 +226,7 @@ bool Dx11WithDx12::SyncDx11ToDx12()
         return false;
     }
 
+    if (ext::bridge::FlushAfterSignal()) Dx11DeviceContext->Flush(); // ext: opt-in flush experiment
     // Games flush should be enough, so disabled for now
     // Dx11DeviceContext->Flush();
 

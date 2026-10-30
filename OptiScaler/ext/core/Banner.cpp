@@ -28,5 +28,9 @@ void Banner()
 
     // The status file session (start time, pid, DLL folder); its worker thread still starts on the first present.
     ext::status::OnStartup();
+
+    // One line when [Bridge] FlushAfterSignal is on. The config load ran before this point and already published the
+    // key, but it ran before the logger existed, so the line belongs here.
+    ext::bridge::LogStartupState();
 }
 } // namespace ext::core

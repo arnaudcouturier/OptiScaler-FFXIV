@@ -28,6 +28,7 @@
 
 #include <Config.h>
 
+#include "ext/bridge/BridgeConfig.h"
 #include "ext/dx11bridge/NgxReleaseConfig.h"
 #include "ext/fg/FgConfig.h"
 #include "ext/ffxiv/FfxivConfig.h"
@@ -180,6 +181,7 @@ struct ExtConfig
     WindowConfig window; // ext/window
     MenuStyleConfig menuStyle; // ext/menu: [Menu] Style
     NgxReleaseConfig ngxRelease; // ext/dx11bridge: [NgxRelease] SkipReleaseSleep
+    BridgeConfig bridge; // ext/bridge: [Bridge] FlushAfterSignal
     FramePacingConfig framePacing; // ext/present: [FramePacing] Trace, HiddenPresentDoNotWait
     StatusConfig status; // ext/status: [Status] Enabled
 

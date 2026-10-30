@@ -52,6 +52,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [Preview Neural Rendering](#preview-neural-rendering), including NR before DLSS | fork (different mechanism from v6.0) | opt-in, off by default; tested (RTX 4090) on the 2026-10-18/19 builds with one preview window: spatial AA, DLSS 2x, NR, NR before DLSS; not re-checked on this release; several preview windows and the D3D12 debug layer not checked |
 | [Frame pacing trace and hidden-present `DO_NOT_WAIT`](#frame-pacing-trace) | follows SirenBrink's approach, fork code | new; unit-tested, untested in game |
 | [Frame-pacing GPU stage timers](#frame-pacing-gpu-stage-timers) (`[FramePacing] GpuTimers`, menu rows and 10 s log lines) | fork | new; off unless the frame-pacing trace is on; unit-tested, not tried in game |
+| [Bridge flush after signal](#bridge-flush-after-signal) (`[Bridge] FlushAfterSignal`) | fork | experiment, off by default; not measured yet |
 | [Automatic mipmap bias, bind-time mode](#bind-time-mode-ffxiv) | follows SirenBrink's approach, fork code | on by default for FFXIV; ran in game (RTX 4090) on 2026-10-20, 21 and 23; no fps loss measured (comparison across sessions, not a same-session A/B); look not compared |
 | [Automatic mipmap bias, create-time mode](#create-time-mode) | fork | opt-in, off by default; ran in game on 2026-10-19; the bind-time mode replaced it as the default |
 | [DLSS presets L and M](#dlss-presets-l-and-m) | upstream OptiScaler; forwarding origin not determined | check recipe only |
@@ -575,6 +576,18 @@ Fail-open means today's behaviour: a mismatch of the executable, a failed hook i
 **Config.** `[FramePacing] GpuTimers` (`auto` = on only together with the frame-pacing trace above; `true` forces the timers on, `false` forces them off; FFXIV only; ini only). **Menu.** Four rows under "Per shader GPU times" while frame generation is active: `present copy-in`, `ReShade effects`, `interop copy`, `Bridge excl. NR`; the upstream `Interop` row is unchanged.
 
 **Code and seams.** `ext/present/GpuBridgeTimers.cpp` (capture, reads, rows) and `ext/present/GpuTimerStats.h` (the pure rules). Seams: present (`PresentScope` begin and end, `BeforeSharedCopy` / `AfterSharedCopy`, `ConvertCopySource` / `PrepareScreenshot`), the ReShade begin/finish-effects events from the built-in add-on, and a call guard around the fork's live preset pass (`ext/reshade/ReShadeBoundaryCore`). `kMaxTimeRows` (`ext/core/MenuRegistry.h`) rises from 4 to 10.
+
+## Bridge flush after signal
+
+**Origin.** Fork code. The call site is upstream OptiScaler's own, where the flush after the fence signal sits commented out ("Games flush should be enough, so disabled for now").
+
+**What it does.** Every frame the D3D11 side copies the frame into a shared texture and signals a fence; the D3D12 side waits for that signal before it runs the upscaler and NR. The D3D11 context hands its recorded commands to the driver at the game's own flush, so the D3D12 wait can start before any of that work was submitted. With `[Bridge] FlushAfterSignal=true` the fork flushes the D3D11 context itself, right after the signal was accepted and before the D3D12 wait is recorded. With the key off, the hand-over is exactly upstream's call sequence: the seam costs one relaxed atomic load per frame (the key is cached, the config load publishes it) and the branch is not taken. One log line at startup says the key is on: `Bridge FlushAfterSignal on: the D3D11 context is flushed after each D3D11 -> D3D12 fence Signal (experiment, off in the ini by default)`; nothing is logged when it is off.
+
+**Status.** experiment, off by default; not measured yet. The config key, the cached seam and the source pin on the hand-over are unit-tested; whether the flush shortens or lengthens the frame has to be measured with the frame-pacing GPU stage timers or a GPU capture (key on versus off, same scene, display pacing known). Expected cost: a driver flush and less command batching per frame.
+
+**Config.** `[Bridge] FlushAfterSignal` (ini only, default false; fragment `ext/ini/Bridge.ini`). **Menu.** None: an experiment switch, read from the ini.
+
+**Code and seams.** `ext/bridge/` (`BridgeSeams.h` is the cached key and the seam, `BridgeConfig.h` the config key, `BridgeSeams.cpp` the startup line). Seam: `ext::bridge::FlushAfterSignal()`, one upstream line in `with_dx12/dx11_with_dx12.cpp` (`SyncDx11ToDx12`, right after the accepted fence signal). Tests: `tests/ext/bridge/bridge_config`, `bridge_upstream_pin`.
 
 ## Automatic mipmap bias
 
