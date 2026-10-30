@@ -60,10 +60,14 @@ Assert-Settings ($r.Text.Contains("line $($hit + 1) generated:")) 'case drift: n
 # An added line fails with exit code exactly 1, prints the first differing
 # lines, and leaves no temp file behind.
 $c = New-Case
-$tmpDir = [IO.Path]::GetTempPath()
+# The generator gets a temp folder of its own, so files other programs create in the shared one are not counted.
+$tmpDir = Join-Path $c.Fake 'gen-temp'
+New-Item -ItemType Directory -Path $tmpDir | Out-Null
 $before = @(Get-ChildItem -LiteralPath $tmpDir -File -Filter 'tmp*.tmp' | ForEach-Object { $_.Name })
 Add-Content -LiteralPath (Join-Path $c.Fake 'docs/SETTINGS.md') -Value '<!-- probe -->' -Encoding utf8
-$r = Invoke-SettingsGen -Fake $c.Fake -Check
+$savedTemp, $savedTmp = $env:TEMP, $env:TMP
+$env:TEMP = $env:TMP = $tmpDir
+try { $r = Invoke-SettingsGen -Fake $c.Fake -Check } finally { $env:TEMP, $env:TMP = $savedTemp, $savedTmp }
 Assert-Settings ($r.Code -eq 1) 'added line: -Check exits exactly 1' "code $($r.Code): $($r.Text)"
 Assert-Settings ($r.Text.Contains('First differing lines')) 'added line: prints the first differing lines' $r.Text
 Assert-Settings ($r.Text.Contains('committed:') -and $r.Text.Contains('generated:')) 'added line: shows both sides' $r.Text
