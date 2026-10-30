@@ -331,7 +331,7 @@ struct DrawLine
     bool operator==(const DrawLine&) const = default;
 };
 
-struct PresentDrawLine // a draw issued while the bridge's Present was running (ReShade inner, Dalamud, HDR/NR/Companion work)
+struct PresentDrawLine // a draw issued while the bridge's Present was running (ReShade inner, Dalamud, HDR/NR work)
 {
     uint32_t seq = 0;
     std::string id;     // shader id as in shaders.csv

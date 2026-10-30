@@ -20,13 +20,11 @@
 //     can attach and the chain is Present-tracked; the chain is never replaced by a frame-generation swapchain.
 //   - ResolveCompositionHandle: the wrapper-side seam (Present / Present1 of a composition chain), see above.
 //
-// Companion (FFXIV nameplate layer): ext/ffxiv/companion/replay/FfxivNameplateLive.h Run() creates its own composition
-// swapchain with an ordinary CreateSwapChainForComposition call on a factory from CreateDXGIFactory1, all under an
-// ext::core::BypassScope on that thread. Detours rewrites the function body in dxgi.dll that every factory's slot 24
-// points to, so once the GAME's factory is hooked the Companion's call enters this hook too -- the bypass in
-// Dxgi_Hooks.cpp (hkCreateDXGIFactory*) only keeps the Companion's factory from being wrapped or hooked; it does not
-// keep its calls out of an already-installed detour. What keeps the Companion's chain unwrapped is the
-// HooksBypassed() input of CompositionPassThrough below (the 8th and last HooksBypassed site, SEAMS.md 3.9).
+// Fork code that issues its own native draws runs under an ext::core::BypassScope on that thread. Detours rewrites
+// the function body in dxgi.dll that every factory's slot 24 points to, so once the GAME's factory is hooked such a call
+// enters this hook too -- the bypass in Dxgi_Hooks.cpp (hkCreateDXGIFactory*) only keeps that factory from being wrapped
+// or hooked; it does not keep its calls out of an already-installed detour. What keeps such a chain unwrapped is the
+// HooksBypassed() input of CompositionPassThrough below (SEAMS.md 3.9).
 
 namespace
 {

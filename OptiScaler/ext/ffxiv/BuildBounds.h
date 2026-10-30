@@ -49,23 +49,6 @@ inline bool DlaaRequiredFromSnapshot(const unsigned char* snapshot, std::size_t 
     return snapshot[q.settingsModeOffset] == 2 && snapshot[q.settingsDlaaOffset] == 0;
 }
 
-// ---- companion: the batch header and the queue entry ----
-// Every index into the 64-byte batch header and into the two-pointer queue entry, as the consumers use them (Packets::Supported, Capture, the
-// nameplate replay, the GPU copy), must stay inside. The sizes are Constants of the build (never resolved).
-inline bool CompanionOffsetsInBounds(const CompanionBuild& c)
-{
-    const std::uint64_t header = c.nativeBatchHeaderSize;
-    return header != 0 && header <= 0x1000 && static_cast<std::uint64_t>(c.batchKindOffset) + 4 <= header &&
-           static_cast<std::uint64_t>(c.batchExtensionOffset) + 2 <= header && static_cast<std::uint64_t>(c.batchCountOffset) + 4 <= header &&
-           static_cast<std::uint64_t>(c.batchVerticesOffset) + 8 <= header && static_cast<std::uint64_t>(c.batchFormatOffset) + 4 <= header &&
-           static_cast<std::uint64_t>(c.batchWrapperOffset) + 8 <= header && c.entryPointerOffset == sizeof(std::uintptr_t);
-}
-
-// The sizes of the two byte arrays the companion code declares. They are Constants of the build (FieldKind::Constant: no seam resolves them, a test
-// pins that), so a fixed maximum is exact on every build; the offsets that index them are Offset fields and are bounds-checked above.
-inline constexpr std::size_t kNativeBatchHeaderBytes = CompanionBuild {}.nativeBatchHeaderSize;
-inline constexpr std::size_t kDrawCommandBytes = CompanionBuild {}.drawCommandSize;
-
 // `size` bytes at `offset` inside a buffer of `bytes` bytes (no wrap-around).
 inline bool RangeInside(std::uint64_t offset, std::uint64_t size, std::uint64_t bytes) { return size <= bytes && offset <= bytes - size; }
 } // namespace ext::ffxiv

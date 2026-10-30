@@ -52,70 +52,6 @@ struct NativeQualityBuild
     std::uint32_t rendererSceneSizeOffset = 0x428;
 };
 
-struct CompanionBuild
-{
-    std::uint32_t batch16Rva = 0x6e56d0;
-    std::uint32_t batch32Rva = 0x6e6270;
-    std::array<std::uint8_t, 16> batchInstructions {
-        0x88, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x53, 0x56, 0x41, 0x54, 0x41, 0x55
-    };
-    std::uint32_t enqueueRva = 0x240b80;
-    std::array<std::uint8_t, 16> enqueueInstructions {
-        0x48, 0x63, 0x41, 0x0c, 0x4c, 0x8b, 0xda, 0x4c, 0x8d, 0x04, 0x40, 0x8b, 0x41, 0x08, 0x42, 0x83
-    };
-    std::uint32_t bindStateRva = 0x22d750;
-    std::array<std::uint8_t, 16> bindStateInstructions {
-        0x40, 0x56, 0x41, 0x56, 0x48, 0x83, 0xec, 0x48, 0x80, 0x7a, 0x49, 0x00, 0x4c, 0x8b, 0xf2, 0x48
-    };
-
-    // The module global is supported by reference-chain evidence, not an instruction guard (medium confidence).
-    std::uint32_t nameplateModulePointerRva = 0x2ab8650;
-    std::uint32_t layoutSlotTableRva = 0x217c760;
-
-    std::uint32_t rendererBatchListOffset = 0x580;
-    std::uint32_t rendererBatchCountOffset = 0x588;
-    std::uint32_t rendererIndexBufferOffset = 0x1e0;
-    std::uint32_t rendererVertexAllocationOffset = 0x570;
-    std::uint32_t rendererVertexStrideOffset = 0x500;
-    std::uint32_t rendererVertexOffsetOffset = 0x504;
-    std::uint32_t rendererQueuesOffset = 0x590;
-    std::uint32_t rendererQueueCount = 16;
-    std::uint32_t rendererQueueStride = 0x100;
-    std::uint32_t moduleStatePointerOffset = 0x08;
-    std::uint32_t stateQueuePointerOffset = 0x08;
-    std::uint32_t resourceWrapperOffset = 0x68;
-    std::uint32_t nativeContextOffset = 0x17b8;
-    std::uint32_t drawStateFlagOffset = 0x49;
-    std::uint32_t drawStateCommandBackPointerOffset = 0x20;
-
-    std::uint32_t indexBufferCapacityOffset = 0x38;
-    std::uint32_t indexBufferFlagsOffset = 0x40;
-    std::uint32_t indexBufferCpuStartOffset = 0x60;
-    std::uint32_t indexBufferCpuEndOffset = 0x68;
-    std::uint32_t queueHeadOffset = 0x50;
-    std::uint32_t queueRemainingOffset = 0x68;
-    std::uint32_t queueBlocksOffset = 0x6c;
-    std::uint32_t queueStridesOffset = 0x34;
-    std::uint32_t queueNextBlockOffset = 0x3f0;
-    std::uint32_t batchKindOffset = 0x00;
-    std::uint32_t batchWrapperOffset = 0x10;
-    std::uint32_t batchCountOffset = 0x20;
-    std::uint32_t batchVerticesOffset = 0x28;
-    std::uint32_t batchFormatOffset = 0x30;
-    std::uint32_t batchExtensionOffset = 0x04;
-    std::uint32_t entryPointerOffset = 0x08;
-    std::uint32_t baseVertexOffset = 0x08;
-    std::uint32_t startIndexOffset = 0x14;
-    std::uint32_t indexCountOffset = 0x18;
-    std::uint32_t drawCommandType = 6;
-    std::uint32_t drawCommandTypeOffset = 0x00;
-    std::uint32_t drawCommandSize = 0xb0;
-    std::uint32_t nativeBatchEntrySize = 16;
-    std::uint32_t nativeBatchHeaderSize = 64;
-    std::uint32_t rendererVertexSlotStride = 0x10;
-    std::uint32_t layoutSlotEntrySize = 8;
-};
-
 // The character preview renderer's render-target table (ext/ffxiv/chara). The table is reached through a tiny accessor
 // function of the executable; the code pattern below finds it without an RVA, and the RVAs are the values of the
 // current build, kept as documentation and as a cross-check of the scan (docs/RECONSTRUCTION-REFERENCE.md, CharaView).
@@ -259,7 +195,6 @@ struct GameBuild
     std::uint32_t timeDateStamp = 0x6ad10bfd;
     std::uint32_t sizeOfImage = 0x381f000;
     NativeQualityBuild nativeQuality {};
-    CompanionBuild companion {};
     CharaViewBuild charaView {};
     JitterBuild jitter {};
     JitterSourceBuild jitterSource {};
@@ -272,9 +207,8 @@ const GameBuild* MatchBuild(std::uint32_t timeDateStamp, std::uint32_t sizeOfIma
 // Walks the CURRENT process's own module headers (GetModuleHandleW(nullptr)) and checks them
 // against MatchBuild: the "is this the matched FFXIV build" in-process identity gate. Shared by
 // every site that needs this before ext::game::Current() may have run --
-// ext::ffxiv::quality::FfxivNativeQualityHooks::MatchedBuildOnce and
-// ext::ffxiv::companion::Native::Install both used to re-walk the DOS/NT headers themselves and
-// now call this instead. ext::game::SelectGame (ext/game/Game.cpp) has its own equivalent walk;
+// ext::ffxiv::quality::FfxivNativeQualityHooks::MatchedBuildOnce used to re-walk the DOS/NT headers itself and
+// now calls this instead. ext::game::SelectGame (ext/game/Game.cpp) has its own equivalent walk;
 // it is pre-existing, already working, and intentionally left alone here -- a future cleanup
 // could have it call this too for consistency.
 const GameBuild* MatchCurrentProcess();

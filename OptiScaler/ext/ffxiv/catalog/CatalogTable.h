@@ -4,12 +4,12 @@
 // Shaders are identified by the CRC-32 of the bytecode passed to CreatePixelShader (nameplate: the vertex shader bytecode passed to
 // CreateInputLayout), see ext/core/Crc32.h. A game patch that recompiles a shader changes its CRC and the feature silently goes
 // off. This table is what the health accounting (CatalogLedger.h) counts against; it never replaces the owners' own matching
-// (UiShaderCatalog.h, FfxivSceneHdr.h, FfxivLightingCapture.h, CharaTags.h, CompanionGpu.h, FfxivNameplateRenderer.h): no CRC is
+// (UiShaderCatalog.h, FfxivSceneHdr.h, FfxivLightingCapture.h, CharaTags.h, PlateLayoutTag.h): no CRC is
 // changed here and no catalog membership is decided by anything but the CRC.
 //
 // Pure and dependency free apart from the two light owner headers it mirrors (UiShaderCatalog.h, CharaTags.h): UI and chara entries are
-// BUILT from the owner's constants, the scene stages are checked against SceneStageOfCrc and the companion set against the UI set at
-// compile time. The lighting, companion and nameplate literals live in heavy headers and are mirrored here; the test
+// BUILT from the owner's constants, the scene stages are checked against SceneStageOfCrc at
+// compile time. The lighting and nameplate literals live in heavy headers and are mirrored here; the test
 // tests/ext/ffxiv/catalog/catalog_wiring_pins.cpp checks every one of them against the owner's source text.
 //
 // refFingerprint: 0 = unknown. It is the structural fingerprint (ShaderFingerprint.h) of the shader as it was when the CRC was recorded,
@@ -31,10 +31,9 @@ enum class Catalog : uint8_t
     Scene,    // 5 pixel shaders, scene/post stages 1..5 (FfxivSceneHdr::Stage)
     Lighting, // 9 pixel shaders of the native exposure scan (FfxivLightingCapture::shaders)
     Chara,    // 9 pixel shaders of the character preview: 7 geometry, finisher, equipment display (CharaTags.h)
-    Companion, // 4 pixel shaders, inside the UI set (CompanionGpu.h)
-    Nameplate, // 3 VERTEX shaders hashed in CreateInputLayout (FfxivNameplateRenderer.h)
+    Nameplate, // 3 VERTEX shaders hashed in CreateInputLayout (PlateLayoutTag.h)
 };
-inline constexpr size_t kCatalogCount = 6;
+inline constexpr size_t kCatalogCount = 5;
 
 struct Entry
 {
@@ -90,13 +89,7 @@ inline constexpr Entry kChara[] = {
 };
 static_assert(sizeof(kChara) / sizeof(kChara[0]) == chara::kGeometryCrcs.size() + 2);
 
-// CompanionGpu.h Identify(): "native layout" 0, 4, 5, 6. All four are UI shaders.
-inline constexpr Entry kCompanion[] = {
-    { 3865947726u, "layout0" }, { 1823062889u, "layout4" }, { 3759127293u, "layout5" }, { 2966694105u, "layout6" },
-};
-static_assert(ui::IsUiCrc(kCompanion[0].crc) && ui::IsUiCrc(kCompanion[1].crc) && ui::IsUiCrc(kCompanion[2].crc) && ui::IsUiCrc(kCompanion[3].crc));
-
-// FfxivNameplateRenderer::TagLayout: vertex shader CRCs of variant 0, 4 and 5/6.
+// PlateLayoutTag::TagLayout: vertex shader CRCs of variant 0, 4 and 5/6.
 inline constexpr Entry kNameplate[] = {
     { 2964264238u, "vs-layout0" }, { 1445359818u, "vs-layout4" }, { 3153679471u, "vs-layout5-6" },
 };
@@ -114,7 +107,6 @@ inline constexpr CatalogInfo kInfo[kCatalogCount] = {
     { "scene", table::kScene, sizeof(table::kScene) / sizeof(table::kScene[0]), 0, false },
     { "lighting", table::kLighting, sizeof(table::kLighting) / sizeof(table::kLighting[0]), 0, false },
     { "chara", table::kChara, sizeof(table::kChara) / sizeof(table::kChara[0]), 0, false },
-    { "companion", table::kCompanion, sizeof(table::kCompanion) / sizeof(table::kCompanion[0]), 0, false },
     { "nameplate", table::kNameplate, sizeof(table::kNameplate) / sizeof(table::kNameplate[0]), 0, true },
 };
 

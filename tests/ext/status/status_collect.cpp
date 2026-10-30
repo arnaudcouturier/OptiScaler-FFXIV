@@ -71,7 +71,6 @@ static void ResetStubs()
 {
     ext::g_cfg = ext::ExtConfig();
     ext::g_activeFeatures = 0;
-    ext::ffxiv::companion::g_installed = false;
     ext::hudless::g_mode = ext::hudless::Mode::Off;
     ext::hudless::g_status = ext::hudless::Status();
     ext::hudless::g_statusLine = "Active";
@@ -92,11 +91,10 @@ static void CheckAllOff()
     CHECK(snap.sessionId == "session-id");
     CHECK(snap.pid == 1234);
     CHECK(snap.startUtc == "2026-10-29T20:00:00Z");
-    CHECK(snap.features.size() == 7);
+    CHECK(snap.features.size() == 6);
     CheckFeature(snap, "gameModule", "off", "no-match");
     CHECK(!snap.gameMatched);
     CheckFeature(snap, "nativeQuality", "off", "no-game-module");
-    CheckFeature(snap, "companion", "off", "disabled");
     CheckFeature(snap, "nr", "off", "disabled");
     CheckFeature(snap, "frameGeneration", "off", "disabled");
     const status::Feature* fg = FindFeature(snap, "frameGeneration");
@@ -144,7 +142,6 @@ static void CheckEngaged()
     ext::game::g_game.hudless = &g_marker;
     g_quality.live = true;
     g_quality.dlaa = false;
-    ext::ffxiv::companion::g_installed = true;
     ext::g_cfg.nr.enabled.value = true;
     ext::g_activeFeatures = static_cast<uint64_t>(ext::F::Nr) | static_cast<uint64_t>(ext::F::Hdr);
     State::Instance().activeFgInput = FGInput::Upscaler;
@@ -164,7 +161,6 @@ static void CheckEngaged()
     CheckFeature(snap, "nativeQuality", "engaged", "live");
     const status::Feature* quality = FindFeature(snap, "nativeQuality");
     CHECK(quality != nullptr && quality->detail == "preset");
-    CheckFeature(snap, "companion", "engaged", "installed");
     CheckFeature(snap, "nr", "engaged", "evaluating");
     CHECK(snap.nrEnabled && snap.nrActive);
     CheckFeature(snap, "frameGeneration", "engaged", "active");
@@ -190,16 +186,6 @@ static void CheckPending()
     CHECK(quality != nullptr && quality->detail == "dlaa-required");
 
     ResetStubs();
-    ext::g_cfg.ffxiv.companionHudReplacement.value = true; // asked for, not installed
-    CheckFeature(CollectDefault(), "companion", "pending", "configured-not-installed");
-    const status::Snapshot both = CollectDefault();
-    const status::Feature* companion = FindFeature(both, "companion");
-    CHECK(companion != nullptr && companion->detail == "replacement");
-    ext::g_cfg.ffxiv.companionHudInterpolation.value = true;
-    const status::Snapshot bothSnap = CollectDefault(); // named: the pointers below stay valid
-    const status::Feature* bothOn = FindFeature(bothSnap, "companion");
-    CHECK(bothOn != nullptr && bothOn->detail == "replacement+interpolation");
-
     ResetStubs();
     ext::g_cfg.nr.enabled.value = true; // armed, no model ran
     CheckFeature(CollectDefault(), "nr", "pending", "armed-no-evaluate");

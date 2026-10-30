@@ -1,6 +1,6 @@
 // Consumer conversion, pinned on the sources: every reader of the compile-time table (kCurrentBuild), of the exact-build match (MatchBuild,
 // MatchCurrentProcess) and every consumer of the gate is one of the files listed here; a new reader, or a converted consumer that goes back to the
-// table, fails this test. (The behaviour of the converted code is covered by gate_rules, gate_real_exe, companion_active_build, jitter_source_constants
+// table, fails this test. (The behaviour of the converted code is covered by gate_rules, gate_real_exe, jitter_source_constants
 // and chara_accessor; the product build compiles the files the unit tests cannot include.)
 //
 // The decisions of the startup and of the game selector are PURE functions with behaviour tests (startup_flow, gate_rules, gate_keys):
@@ -172,7 +172,6 @@ int main(int argc, char** argv)
         "ffxiv/resolve/ResolveTypes.h",       // the resolver's own docs / types
         "ffxiv/resolve/Entry.h",
         "ffxiv/resolve/AnchorsJitter.h",
-        "ffxiv/resolve/AnchorsCompanion.h",
     };
     std::set<std::string> found;
     for (const auto& entry : fs::recursive_directory_iterator(ext))
@@ -213,15 +212,6 @@ int main(int argc, char** argv)
         { "ffxiv/resolve/StartupDecision.h",
           { "settings.forceUnknownBuild ? nullptr : &kCurrentBuild", "MakeGateInput(", "DecideStartup(", "FailedStartup(", "env.publish(" } },
         { "ffxiv/jitter/FfxivJitterProbe.cpp", { "ext::ffxiv::BuildFor(" } },
-        { "ffxiv/companion/CompanionNative.cpp", { "ActiveBuild()", "Feature::CompanionNative", "CompanionOffsetsInBounds" } },
-        { "ffxiv/companion/CompanionPackets.h", { "ActiveBuild()", "CompanionOffsetsInBounds", "kNativeBatchHeaderBytes", "UiModuleGlobalRva()", "VertexSlotTableRva()" } },
-        { "ffxiv/companion/CompanionVisibilityQueue.h", { "ActiveBuild()", "kDrawCommandBytes" } },
-        { "ffxiv/companion/CompanionGpu.h", { "ActiveBuild()" } },
-        { "ffxiv/companion/CompanionLayer.cpp", { "ActiveBuild()" } },
-        { "ffxiv/companion/replay/FfxivNameplateLive.h", { "ActiveBuild()", "kNativeBatchHeaderBytes" } },
-        { "ffxiv/companion/replay/FfxivNameplatePackets.h", { "ActiveBuild()", "kNativeBatchHeaderBytes", "UiModuleGlobalRva()" } },
-        { "ffxiv/companion/replay/FfxivNameplateRenderer.h", { "ActiveBuild()" } },
-        { "ffxiv/companion/replay/FfxivNameplateGpu.h", { "ActiveBuild()" } },
         { "ffxiv/chara/CharaTable.cpp", { "ext::ffxiv::BuildFor(", "ActiveGate()", "ActiveStarted()" } },
     };
     for (const Consumer& c : consumers)
@@ -295,13 +285,6 @@ int main(int argc, char** argv)
                  {});
         const std::string once = BodyOf(startup, "void StartOnce()");
         CHECK(Has(once, "RunStartup(env);") && Has(once, "static const StartupEnv env = MakeProductEnv();"));
-        const std::string companion = Code(ReadFile(ext / "ffxiv/companion/CompanionNative.cpp"));
-        CHECK(!Has(companion, "MAX_PATH"));
-        PinLines(companion, "CompanionNative.cpp", "void Install()",
-                 { "const std::wstring executable = ext::ffxiv::resolve::ReadModulePath([](wchar_t* buffer, std::uint32_t size) { return GetModuleFileNameW(nullptr, buffer, size); });",
-                   "if (!ext::ffxiv::resolve::IsFfxivExeName(std::wstring_view(executable))) return;",
-                   "if (!ext::ffxiv::FeatureEnabled(ext::ffxiv::resolve::Feature::CompanionNative))" },
-                 { "CompanionNative" });
     }
 
     // ---- 2d. the published state is read ONCE: BuildFor(feature) takes the gate and the build from the same state. ActiveGate() and ActiveBuild() are two
@@ -327,15 +310,9 @@ int main(int argc, char** argv)
     const std::size_t hook = seams.find("void OnD3D11DeviceHooked(ID3D11Device* device)");
     const std::size_t start = seams.find("StartOnce()");
     const std::size_t lightingInstall = seams.find("lighting::OnDeviceHooked(device)");
-    const std::size_t companionInstall = seams.find("companion::Install(device)");
-    CHECK(hook != std::string::npos && start != std::string::npos && lightingInstall != std::string::npos && companionInstall != std::string::npos);
-    CHECK(hook < start && start < lightingInstall && start < companionInstall);
+    CHECK(hook != std::string::npos && start != std::string::npos && lightingInstall != std::string::npos);
+    CHECK(hook < start && start < lightingInstall);
     CHECK(seams.find("StartOnce()", start + 1) == std::string::npos); // exactly one call
-    // companion::Install is Group 2: guarded by the gate's decision for it
-    {
-        const std::size_t guard = seams.rfind("Feature::CompanionNative", companionInstall);
-        CHECK(guard != std::string::npos && companionInstall - guard < 160);
-    }
     int callSites = 0;
     for (const auto& entry : fs::recursive_directory_iterator(repo / "OptiScaler"))
     {
@@ -367,8 +344,7 @@ int main(int argc, char** argv)
 
     // ---- 5. the constants that stay compile-time are Constant rows of the field table (never resolved)
     const std::string table = ReadFile(ext / "ffxiv" / "resolve" / "FieldTable.h");
-    for (const char* row : { "FFXIV_U32(companion, CompanionBuild, nativeBatchHeaderSize, Constant)", "FFXIV_U32(companion, CompanionBuild, drawCommandSize, Constant)",
-                             "FFXIV_U32(jitterSource, JitterSourceBuild, strengthFloorBits, Constant)", "FFXIV_U32(jitterSource, JitterSourceBuild, ndcSignMaskBits, Constant)" })
+    for (const char* row : { "FFXIV_U32(jitterSource, JitterSourceBuild, strengthFloorBits, Constant)", "FFXIV_U32(jitterSource, JitterSourceBuild, ndcSignMaskBits, Constant)" })
         CHECK(table.find(row) != std::string::npos);
     return TEST_RESULT("gate_consumer_pins");
 }

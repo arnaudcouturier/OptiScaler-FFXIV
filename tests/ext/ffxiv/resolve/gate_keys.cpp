@@ -188,6 +188,28 @@ void TestFragmentAndManifest(const std::string& repo)
     // the rollback key says what it restores
     CHECK(fragment.find("exactly the behaviour before the address search existed") != std::string::npos);
 }
+
+void TestRetiredCompanionKeysIgnored()
+{
+    using ext::ffxiv::resolve::GateSettings;
+    using ext::ffxiv::resolve::ReadSettings;
+    // The retired [Companion] keys (the plugin is no longer supported) load without error and change nothing:
+    // an existing user ini that still carries them behaves like a default ini.
+    FfxivConfig loaded;
+    config::Binder b;
+    loaded.Bind(b);
+    for (const auto& entry : b.Table())
+        CHECK(std::string(entry.section) != "Companion"); // no [Companion] row is bound anymore
+    CSimpleIniA ini;
+    ini.SetValue("Companion", "HudReplacement", "true");
+    ini.SetValue("Companion", "HudInterpolation", "true");
+    for (const auto& entry : b.Table())
+        entry.load(entry, ini);
+    CHECK(!loaded.jitterProbe.value_or_default() && !loaded.jitterProbe.has_value());
+    CHECK(!loaded.legacyGameBuild.value_or_default() && !loaded.unknownBuildHooks.value_or_default() && !loaded.forceUnknownBuild.value_or_default());
+    const GateSettings s = ReadSettings(loaded);
+    CHECK(!s.legacyGameBuild && !s.unknownBuildHooks && !s.forceUnknownBuild);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -196,6 +218,7 @@ int main(int argc, char** argv)
     TestDefaultsAndBinding();
     TestRoundTrip();
     TestReadSettingsMapsEachKeyToItsOwnFlag();
+    TestRetiredCompanionKeysIgnored();
     TestFragmentAndManifest(repo);
     return TEST_RESULT("gate_keys");
 }

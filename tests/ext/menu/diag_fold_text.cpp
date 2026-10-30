@@ -4,7 +4,6 @@
 // its picker name:
 //   hudless_diag         ext/ffxiv/ui/UiMenu.cpp          "HUD-less diagnostics"
 //   reshade_addon_probe  ext/reshade/ReShadeMenu.cpp      "ReShade built-in add-on (diagnostics)"
-//   ffxiv_companion      ext/ffxiv/companion/Companion.cpp "FFXIV Companion (nameplates)" (its diagnostics TreeNode stays closed)
 //   fg_hudless           ext/hudless/HudlessMenu.cpp      "HUD-less (UI-free frame generation)" (Advanced fold stays closed)
 //   ffxiv_hdr            ext/hdr/menu/HdrMenu.cpp         "FFXIV HDR10 output"
 #include "menu_scan.h"
@@ -77,8 +76,6 @@ const Case kCases[] = {
     { "reshade/ReShadeMenu.cpp", "reshade_addon_probe", "Compatibility", "ReShade built-in add-on (diagnostics)",
       "void DrawReShadeCard(ext::menu::Ctx&)", "DrawReShadeBody", "Show probe details##reshade_probe", "CardSideEffects();",
       "void CardSideEffects()", "ext::reshade::EnsureReportStarted();|session->Note(\"[F1] WARNING|LOG_WARN(\"ReShade built-in add-on: registered but ReShade has delivered no event\")" },
-    { "ffxiv/companion/Companion.cpp", "ffxiv_companion", "FFXIV", "FFXIV Companion (nameplates)",
-      "void DrawCompanionCard(ext::menu::Ctx&)", "", "" },
     { "hudless/HudlessMenu.cpp", "fg_hudless", "FFXIV", "HUD-less (UI-free frame generation)", "void DrawHudless(ext::menu::Ctx&)", "",
       "" },
     { "hdr/menu/HdrMenu.cpp", "ffxiv_hdr", "FFXIV", "FFXIV HDR10 output", "void DrawHdrCard(ext::menu::Ctx& ctx)", "", "" },
@@ -207,21 +204,11 @@ int main(int argc, char** argv)
         }
     }
 
-    // the diagnostics TreeNode of the companion card and the Advanced fold of the HUD-less card stay plain TreeNodes
-    for (const char* file : { "ffxiv/companion/Companion.cpp", "hudless/HudlessMenu.cpp" })
+    // the Advanced fold of the HUD-less card stays a plain TreeNode
     {
-        const std::string text = menuscan::StripComments(menuscan::ReadFile(repo + std::string("/OptiScaler/ext/") + file));
+        const std::string text = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/ext/hudless/HudlessMenu.cpp"));
         CHECK(Count(text, "ImGui::TreeNode(\"") >= 1);
         CHECK(text.find("TreeNodeEx") == std::string::npos);
-    }
-    {
-        const std::string text = menuscan::StripComments(menuscan::ReadFile(repo + "/OptiScaler/ext/ffxiv/companion/Companion.cpp"));
-        // WP4 item 8: the card title is the only heading (no second collapsed header below it); the settings draw at once
-        CHECK(text.find("CollapsingHeader") == std::string::npos);
-        CHECK(text.find("FFXIV OptiScaler Companion") == std::string::npos);
-        CHECK(Count(Squash(text), "voidDrawSettings(){Snapshotsnapshot;Statusstatus;constboolfresh=mailbox.Read(snapshot,status,Now());") == 1);
-        CHECK(Count(Squash(text), "ImGui::TreeNode(\"Companiondiagnostics\")") == 1);
-        CHECK(Count(Squash(text), "if(!DiagnosticsEnabled()||!ImGui::TreeNode(\"Companiondiagnostics\"))return;") == 1);
     }
 
     if (failures)

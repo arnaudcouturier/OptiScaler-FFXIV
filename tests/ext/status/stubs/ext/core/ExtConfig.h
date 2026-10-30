@@ -19,8 +19,6 @@ struct IntKey
 
 struct FfxivConfig
 {
-    BoolKey companionHudReplacement;
-    BoolKey companionHudInterpolation;
 };
 
 struct NrConfig

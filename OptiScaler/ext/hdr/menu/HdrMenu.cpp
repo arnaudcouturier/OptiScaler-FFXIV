@@ -102,7 +102,7 @@ void DrawHdrCard(ext::menu::Ctx& ctx)
         hdr.screenshotFormat = screenshotFormat;
     ResetHdr("FfxivHDRScreenshotFormat", hdr.screenshotFormat);
     ext::menu::Tooltip("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\n"
-                       "The separate Companion nameplate window is not captured. FFXIV's original screenshot function is unchanged.");
+                       "FFXIV's original screenshot function is unchanged.");
 
     ImGui::BeginDisabled(screenshotFormat != 1);
     bool screenshotMenu = hdr.screenshotMenu.value_or_default();
@@ -110,7 +110,7 @@ void DrawHdrCard(ext::menu::Ctx& ctx)
         hdr.screenshotMenu = screenshotMenu;
     ResetHdr("FfxivHDRScreenshotMenu", hdr.screenshotMenu);
     ext::menu::Tooltip("HDR PNG: capture the presented image after drawing the visible OptiScaler menu, including its HDR colours. Useful for settings comparisons.\n"
-                       "With the menu hidden, screenshots use the normal clean capture. Requires the overlay menu. SDR PNG captures remain unchanged. The separate Companion window is not captured.");
+                       "With the menu hidden, screenshots use the normal clean capture. Requires the overlay menu. SDR PNG captures remain unchanged.");
     bool screenshotIccOnly = hdr.screenshotIccOnly.value_or_default();
     if (ImGui::Checkbox("HDR PNG: ICC only (sharing)", &screenshotIccOnly))
         hdr.screenshotIccOnly = screenshotIccOnly;

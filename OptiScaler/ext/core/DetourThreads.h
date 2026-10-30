@@ -8,8 +8,7 @@
 // to sit inside a patched prologue when the transaction commits. Extracted from the pattern in
 // ext::ffxiv::quality::FfxivNativeQualityHooks (its thread snapshot now lives in
 // ext/ffxiv/quality/NativeQualityTransaction.h, which keeps its own copy because it must also skip exited threads;
-// this is shared with the sites in ext::ffxiv::companion::Native and
-// ext::ffxiv::lighting::FfxivLightingCapture, which patch the same widely-shared D3D11 vtable
+// this is shared with ext::ffxiv::lighting::FfxivLightingCapture, which patches the same widely-shared D3D11 vtable
 // slots while the game runs with multiple live threads).
 //
 // Usage: construct BEFORE DetourTransactionBegin(), check Ok(), then call Update() in place of

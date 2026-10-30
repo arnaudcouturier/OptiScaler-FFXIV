@@ -51,7 +51,7 @@ const Row kRows[] = {
       { "\"Quality Preset\"" },
       { { "Draw", "Draw", "SectionTitle(\"Forced quality level\")" } } },
     // Frame generation unlocks: titled, and the RTX 20/30 runtime says "frame-generation runtime" ("Companion" means only
-    // the FFXIV nameplates). The Ampere tuning keys are not part of this step.
+    // the RTX 20/30 frame-generation runtime). The Ampere tuning keys are not part of this step.
     { "fg/MenuFgUnlocks.cpp",
       { "{ \"fg_unlocks\", \"Frame Gen\", \"Frame generation unlocks\", DrawFgUnlocks," },
       { "SM86/SM75", "ompanion" },

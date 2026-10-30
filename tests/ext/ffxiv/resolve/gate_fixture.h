@@ -110,7 +110,7 @@ inline GateReport Run(const ResolvedBuild* rb, const GateSettings& s, bool exe =
 }
 
 inline constexpr Feature kGroup2[] = { Feature::QualityRead,  Feature::QualityHooks,    Feature::JitterProbe,
-                                Feature::JitterSource, Feature::CompanionNative, Feature::CharaViewAccessor };
+                                Feature::JitterSource, Feature::CharaViewAccessor };
 
 inline bool AllGroup1(const GateReport& g, bool on)
 {

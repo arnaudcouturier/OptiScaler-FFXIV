@@ -1,1 +1,0 @@
-@{ Class = 'warp'; Sources = @('companion_visibility_test.cpp'); Std = 'c++20' }

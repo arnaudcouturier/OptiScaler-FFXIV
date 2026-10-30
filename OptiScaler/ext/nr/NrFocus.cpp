@@ -13,7 +13,7 @@ namespace
 {
 constexpr ULONGLONG kWindowRetryMs = 1000; // how often a missing window handle is looked for again
 
-// The game window the way the companion layer finds it: this process' visible, unowned top-level window with the
+// The game window: this process' visible, unowned top-level window with the
 // largest client area. EnumWindows runs only when the cached handle is missing or stale, never per frame.
 HWND FindGameWindow()
 {
@@ -73,7 +73,7 @@ struct WindowSampler
         if (window == nullptr)
             return { true, false };
 
-        // Same test the companion layer uses: the foreground window belongs to this process. A game dialog or a
+        // The foreground window belongs to this process. A game dialog or a
         // helper window of ours counts as the game having focus; another application does not.
         DWORD foreground = 0;
         GetWindowThreadProcessId(GetForegroundWindow(), &foreground);

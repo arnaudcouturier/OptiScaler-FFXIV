@@ -18,7 +18,7 @@
 //   * legacy mode ([FFXIV] FfxivLegacyGameBuild): ActiveBuild() stays the compile-time table and the gate says "Group 2 iff the exact known
 //     build", i.e. exactly the legacy path.
 
-// relative includes: the companion test recipes put only their own folders on the include path
+// relative includes: some test recipes put only their own folders on the include path
 #include "GameBuild.h"
 #include "resolve/GateTypes.h"
 

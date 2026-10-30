@@ -1,8 +1,8 @@
 // E5: pure pass-through decision of the CreateSwapChainForComposition hook (ext/present/CompositionPassThrough.h).
 // No DXGI, no upstream types: a standalone unit test. The hook (ext/present/CompositionSwapchain.cpp) calls the
 // trampoline unconditionally and returns right after it whenever this function says true, so "true" is exactly
-// "trampoline only, nothing wrapped" -- the structure that keeps the Companion nameplate layer's own composition
-// swapchain (FfxivNameplateLive.h Run(), created under ext::core::BypassScope) out of the wrapper.
+// "trampoline only, nothing wrapped" -- the structure that keeps fork code issuing its own native draws
+// (running under ext::core::BypassScope) out of the wrapper.
 #include "ext/core/HooksBypass.h"
 #include "ext/present/CompositionPassThrough.h"
 
@@ -38,7 +38,7 @@ int main()
     // A normal, large composition swapchain with no guard active is wrapped: not a pass-through.
     assert(!Eval(Inputs {}));
 
-    // The Companion case, in isolation: every other input is the normal wrapped case, only the bypass is active.
+    // The bypass case, in isolation: every other input is the normal wrapped case, only the bypass is active.
     {
         Inputs in;
         in.hooksBypassed = true;
@@ -123,8 +123,7 @@ int main()
     }
 
     // The bypass flag the hook feeds in is the real ext::core one: false by default, true inside a BypassScope on
-    // this thread, restored on exit, and nested scopes restore the outer state (the Companion's Run() holds one scope
-    // for its whole body). Wiring check of the actual input, not just of the boolean function.
+    // this thread, restored on exit, and nested scopes restore the outer state. Wiring check of the actual input, not just of the boolean function.
     {
         assert(!ext::core::HooksBypassed());
         Inputs in;
@@ -145,6 +144,6 @@ int main()
         assert(!Eval(in));
     }
 
-    std::puts("PASS: composition pass-through decision, including the Companion bypass case");
+    std::puts("PASS: composition pass-through decision, including the bypass case");
     return 0;
 }

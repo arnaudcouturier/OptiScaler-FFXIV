@@ -123,8 +123,6 @@ void TestRoundTrip()
     CHECK(std::string(out.GetValue("FFXIV", "PreviewProbe", "")) == "true");
     CHECK(std::string(out.GetValue("FFXIV", "PreviewDebugFlood", "")) == "true");
 
-    // the pre-existing FFXIV-companion keys keep working next to them
-    CHECK(Cfg().ffxiv.companionHudReplacement.value_or_default() == false);
 }
 
 void TestUnsetKeysStayDefault()

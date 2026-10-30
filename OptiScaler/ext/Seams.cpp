@@ -5,16 +5,11 @@
 #include "ext/game/Game.h"
 #include "ext/ffxiv/lighting/FfxivLighting.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
-#include "ext/ffxiv/companion/Companion.h"
-#include "ext/ffxiv/companion/CompanionCallbackMap.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
-#include "ext/ffxiv/ActiveBuild.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/resolve/ResolveStartup.h"
 #include "ext/upscaler/MipBindHooks.h"
 #include "ext/upscaler/NgxThreadTrace.h"
-
-#include <atomic>
 
 namespace ext::game
 {
@@ -24,7 +19,7 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
         return;
 
     // Pattern search (ext/ffxiv/resolve/ResolveStartup.h): resolve the game executable ONCE, before the first Detour of the fork over it
-    // (companion::Install below, the native-quality and jitter-source hooks later) and before the game selector's answer is used. Idempotent; a
+    // (the native-quality and jitter-source hooks later) and before the game selector's answer is used. Idempotent; a
     // non-FFXIV executable returns at once.
     ext::ffxiv::resolve::StartOnce();
 
@@ -41,24 +36,6 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
                  ext::ffxiv::lighting::FfxivLightingCapture::installed.load());
     }
 
-    if (Current().hdr != nullptr)
-    {
-        // Companion has no dedicated Game interface slot (unlike lighting); gate on the same hdr != nullptr
-        // idiom Companion.cpp's own menu-card visibility uses. Set once: the six mapped pointers never change
-        // across devices, and re-assigning the destination struct on every call is needless, non-atomic churn
-        // while the lighting draw hooks may already be reading it.
-        static std::atomic<bool> companionCallbacksSet {false};
-        if (!companionCallbacksSet.exchange(true))
-        {
-            // Callbacks must be set before the lighting and companion hooks fire (docs/SEAMS-catalog.md):
-            // this runs before both the lighting dispatch below (which installs FfxivLightingCapture's hooks)
-            // and ext::ffxiv::companion::Install further below.
-            ext::ffxiv::lighting::FfxivLightingCapture::SetCompanionCallbacks(
-                ext::ffxiv::companion::MapCaptureCallbacks<ext::ffxiv::lighting::FfxivLightingCapture::CompanionCallbacks>(
-                    ext::ffxiv::companion::GetCaptureCallbacks()));
-        }
-    }
-
     if (Current().lighting != nullptr)
     {
         ext::ffxiv::lighting::OnDeviceHooked(device);
@@ -66,12 +43,6 @@ void OnD3D11DeviceHooked(ID3D11Device* device)
                  (size_t) ext::ffxiv::lighting::FfxivLightingCapture::context,
                  ext::ffxiv::lighting::FfxivLightingCapture::installed.load());
     }
-
-    // The native hooks read game addresses: Group 2 of the gate (ext/ffxiv/resolve/Gate.h). Known build: as before (Install still compares the
-    // live bytes with the guard of the build). Unknown build: only with [FFXIV] FfxivUnknownBuildHooks and every companion seam usable. The
-    // gate's own [ffxiv-gate] line says why it is off, so a refusal is logged once instead of once per device.
-    if (Current().hdr != nullptr && ext::ffxiv::FeatureEnabled(ext::ffxiv::resolve::Feature::CompanionNative))
-        ext::ffxiv::companion::Install(device);
 
     // Bind-time mip bias (ext/upscaler/MipBindHooks.h): sampler hooks on this device and its immediate context; FFXIV only.
     if (Current().geometry != nullptr)
@@ -85,9 +56,6 @@ void OnD3D11Unhook()
 
     if (Current().lighting != nullptr)
         ext::ffxiv::lighting::OnUnhook();
-
-    if (Current().hdr != nullptr)
-        ext::ffxiv::companion::Unhook();
 }
 } // namespace ext::game
 
@@ -117,8 +85,6 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target)
 {
     ext::present::GpuTimersEndCopyIn(context); // closes the present copy-in timestamp pair
-    if (game::Current().hdr != nullptr)
-        ext::ffxiv::companion::AfterSharedCopy(context, target);
 
     // Once per presented frame: the character preview feature only counts frames here (the draw thread consumes it).
     if (game::Current().lighting != nullptr)

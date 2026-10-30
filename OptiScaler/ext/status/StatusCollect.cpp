@@ -5,7 +5,6 @@
 #include "ext/core/Banner.h"
 #include "ext/core/ExtConfig.h"
 #include "ext/ExtFeatures.h"
-#include "ext/ffxiv/companion/Companion.h"
 #include "ext/fg/dlssg/AmpereMfgLoader.h"
 #include "ext/fg/dlssg/MfgUnlock.h"
 #include "ext/core/HooksBypass.h"
@@ -491,33 +490,6 @@ Feature CollectNativeQuality(const ext::game::Game& game)
     return f;
 }
 
-Feature CollectCompanion()
-{
-    Feature f;
-    f.name = "companion";
-    if (ext::ffxiv::companion::IsInstalled())
-    {
-        f.state = kEngaged;
-        f.reason = "installed";
-        return f;
-    }
-    const auto& cfg = ext::Cfg().ffxiv;
-    const bool replacement = cfg.companionHudReplacement.value_or_default();
-    const bool interpolation = cfg.companionHudInterpolation.value_or_default();
-    if (replacement || interpolation)
-    {
-        f.state = kPending;
-        f.reason = "configured-not-installed";
-        f.detail = replacement && interpolation ? "replacement+interpolation"
-                   : replacement                ? "replacement"
-                                                : "interpolation";
-        return f;
-    }
-    f.state = kOff;
-    f.reason = "disabled";
-    return f;
-}
-
 Feature CollectNr()
 {
     Feature f;
@@ -768,13 +740,6 @@ Snapshot Collect(uint64_t seq, const std::string& sessionId, unsigned long pid, 
     {
         snap.features.push_back(game != nullptr ? CollectNativeQuality(*game)
                                                 : Feature { "nativeQuality", kOff, "no-game-module" });
-    }
-    catch (...)
-    {
-    }
-    try
-    {
-        snap.features.push_back(CollectCompanion());
     }
     catch (...)
     {

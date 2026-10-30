@@ -6,7 +6,7 @@
 //     ResolveImage run where a table-filled location still yields an unusable shape);
 //   * quality: the `entry` anchor, plain Found for contextCacheOffset, every bound seam, the snapshot bound;
 //   * jitter source: sites, the three globals (a table-filled Conflict global refuses), strengthFloor / ndcSignMask / cameraGlobal, zero fields;
-//   * companion: location + shape, batch32Shape directly, callerEpilogue and nativeContextOffset on an unknown build, header all-or-nothing + bounds;
+
 //   * CharaView, EntryPatched (distinct from NotFound), the four cross-group checks, the not-self-healing line, the log block.
 // The gate runs on synthetic ResolvedBuilds with every seam Found (AllFound) that a test then breaks one seam at a time.
 #include "gate_fixture.h"
@@ -141,7 +141,7 @@ void TestFailOpen()
     ResolvedBuild failed = AllFound(false);
     failed.registryErrors.push_back("resolver exception: bad_alloc");
     const GateReport f = Run(&failed, Settings(false, true), true, false);
-    CHECK(AllGroup1(f, true) && AllGroup2(f, false) && Contains(f.Reason(Feature::CompanionNative), "bad_alloc"));
+    CHECK(AllGroup1(f, true) && AllGroup2(f, false) && Contains(f.Reason(Feature::JitterSource), "bad_alloc"));
     // an empty result (no seams at all)
     ResolvedBuild empty;
     CHECK(AllGroup2(Run(&empty, Settings(false, true), true, false), false));
@@ -180,7 +180,7 @@ void TestFailOpen()
     const GateReport gt = Decide(in, Settings(false, true));
     CHECK(AllGroup1(gt, true) && AllGroup2(gt, false) && Contains(gt.Reason(Feature::JitterSource), "boom"));
     // and the published state of such a failure keeps the game unaffected: the build the consumers read has every Rva / Guard field zero
-    CHECK(thrown.build.jitterSource.generatorRva == 0 && thrown.build.nativeQuality.querySizeRva == 0 && thrown.build.companion.batch16Rva == 0);
+    CHECK(thrown.build.jitterSource.generatorRva == 0 && thrown.build.nativeQuality.querySizeRva == 0);
 }
 
 // ---- the registry-driven rules ------------------------------------------------------------------------------------------------------------
@@ -192,7 +192,7 @@ struct Site
 };
 
 // The hook sites as LITERALS (location, shape): a test that read them from the tables under test would follow a mutation of those tables. The
-// tables kQualitySites / kJitterHookSites / kCompanionSites are pinned equal to these below (TestSiteTablesAreLiteral).
+// tables kQualitySites / kJitterHookSites are pinned equal to these below (TestSiteTablesAreLiteral).
 std::vector<Site> AllSites()
 {
     return {
@@ -205,16 +205,12 @@ std::vector<Site> AllSites()
         { Feature::JitterSource, "jitterSource.cameraHead", "jitterSource.cameraHeadShape" },
         { Feature::JitterSource, "jitterSource.phases", "jitterSource.phasesShape" },
         { Feature::JitterSource, "jitterSource.strength", "jitterSource.strengthShape" },
-        { Feature::CompanionNative, "companion.batch16", "companion.batch16Shape" },
-        { Feature::CompanionNative, "companion.batch32", "companion.batch32Shape" },
-        { Feature::CompanionNative, "companion.enqueue", "companion.enqueueShape" },
-        { Feature::CompanionNative, "companion.bindState", "companion.bindStateShape" },
     };
 }
 
 // The seams that stay STRICT (plain Usable, never filled from the table) on a KNOWN build too, as a LITERAL set (a list read from Gate.h would follow
-// a mutation of it, so the set is written out): every hook site, location AND shape (13 pairs plus the jitter deviceSize that is its own shape), and these, from
-// the hook-site rules of the three Anchors headers: the quality write path (AnchorsQuality.h item 2: managerPointer, managerContextOffset,
+// a mutation of it, so the set is written out): every hook site, location AND shape (9 pairs plus the jitter deviceSize that is its own shape), and these, from
+// the hook-site rules of the two Anchors headers: the quality write path (AnchorsQuality.h item 2: managerPointer, managerContextOffset,
 // contextFlagsOffset, settingsPointer, the settings mode offset, contextCacheOffset) and the settings read path's own shape (item 3), the three
 // jitter globals, strengthFloor, ndcSignMask and the camera global (AnchorsJitter.h). Every other seam a feature reads is table-fillable on a known
 // build: a foreign hook over a helper function must not turn a feature off when the verified table value is at hand.
@@ -240,21 +236,20 @@ const std::set<std::string>& StrictOnKnownLiteral()
 }
 
 // Seams a feature needs as PLAIN Found (one anchor does not pin them): quality.contextCacheOffset on every build except where a KNOWN build
-// takes it single-anchor through a weak dependency (tested separately); companion.nativeContextOffset on an unknown build only.
+// takes it single-anchor through a weak dependency (tested separately).
 std::vector<std::string> PlainFoundOnly(Feature f, bool knownBuild)
 {
     std::vector<std::string> v;
     if (f == Feature::QualityHooks)
         v.push_back("quality.contextCacheOffset");
-    if (f == Feature::CompanionNative && !knownBuild)
-        v.push_back("companion.nativeContextOffset");
+    (void)knownBuild;
     return v;
 }
 
 void TestEveryRequiredSeam()
 {
     std::size_t total = 0;
-    CHECK(StrictOnKnownLiteral().size() == 40);
+    CHECK(StrictOnKnownLiteral().size() == 32);
     for (const Feature f : kGroup2)
     {
         const std::vector<std::string> seams = RequiredSeams(f, Reg());
@@ -301,25 +296,25 @@ void TestEveryRequiredSeam()
     CHECK(RequiredSeams(Feature::QualityHooks, Reg()).size() == 19);
     CHECK(RequiredSeams(Feature::JitterProbe, Reg()).size() == 3);
     CHECK(RequiredSeams(Feature::JitterSource, Reg()).size() == 25);
-    CHECK(RequiredSeams(Feature::CompanionNative, Reg()).size() == 27);
+
     CHECK(RequiredSeams(Feature::CharaViewAccessor, Reg()).size() == 3);
-    CHECK(total == 83);
+    CHECK(total == 56);
 }
 
 // a seam of one feature's list does not switch off an unrelated feature (the groups are independent)
 void TestFeaturesAreIndependent()
 {
     ResolvedBuild rb = AllFound(true);
-    SetStatus(rb, "companion.layoutSlotTable", SeamStatus::NotFound);
+    SetStatus(rb, "jitterSource.cameraGlobal", SeamStatus::NotFound);
     const GateReport g = Run(&rb, Settings());
-    CHECK(!g.Enabled(Feature::CompanionNative));
-    CHECK(g.Enabled(Feature::QualityRead) && g.Enabled(Feature::QualityHooks) && g.Enabled(Feature::JitterProbe) && g.Enabled(Feature::JitterSource) &&
+    CHECK(!g.Enabled(Feature::JitterSource));
+    CHECK(g.Enabled(Feature::QualityRead) && g.Enabled(Feature::QualityHooks) && g.Enabled(Feature::JitterProbe) &&
           g.Enabled(Feature::CharaViewAccessor));
     CHECK(AllGroup1(g, true));
     ResolvedBuild q = AllFound(true);
     SetStatus(q, "quality.managerContextOffset", SeamStatus::Conflict);
     const GateReport gq = Run(&q, Settings());
-    CHECK(!gq.Enabled(Feature::QualityHooks) && gq.Enabled(Feature::QualityRead) && gq.Enabled(Feature::CompanionNative) && gq.Enabled(Feature::JitterSource));
+    CHECK(!gq.Enabled(Feature::QualityHooks) && gq.Enabled(Feature::QualityRead) && gq.Enabled(Feature::JitterSource) && gq.Enabled(Feature::CharaViewAccessor));
 }
 
 // ---- the one rule for hook sites ----------------------------------------------------------------------------------------------------------
@@ -332,8 +327,6 @@ void TestSiteTablesAreLiteral()
     for (const JitterHookSite& s : kJitterHookSites)
         if (std::string(s.location) != s.shape)
             fromTables.emplace_back(s.location, s.shape);
-    for (const SitePair& s : kCompanionSites)
-        fromTables.emplace_back(s.location, s.shape);
     std::vector<std::pair<std::string, std::string>> literal;
     for (const Site& s : AllSites())
         literal.emplace_back(s.location, s.shape);
@@ -366,21 +359,13 @@ void TestRequiredSeamListsAreLiteral()
                             "rendererExtentOffset", "deviceOutputSizeOffset" })
         source.insert(std::string("jitterSource.") + id);
     CHECK(set(RequiredSeams(Feature::JitterSource, Reg())) == source);
-    std::set<std::string> companion;
-    for (const char* id : { "batch16", "batch16Shape", "batch32", "batch32Shape", "enqueue", "enqueueShape", "bindState", "bindStateShape", "nameplateModulePointer",
-                            "layoutSlotTable", "nativeContextOffset", "rendererBatchListOffset", "rendererBatchCountOffset", "rendererIndexBufferOffset",
-                            "rendererVertexAllocationOffset", "rendererVertexStrideOffset", "rendererVertexOffsetOffset", "batchFormatOffset", "batchExtensionOffset",
-                            "drawStateFlagOffset", "moduleStatePointerOffset", "stateQueuePointerOffset", "indexBufferCapacityOffset", "indexBufferFlagsOffset",
-                            "indexBufferCpuStartOffset", "indexBufferCpuEndOffset", "entryPointerOffset" })
-        companion.insert(std::string("companion.") + id);
-    CHECK(set(RequiredSeams(Feature::CompanionNative, Reg())) == companion);
     CHECK(set(RequiredSeams(Feature::CharaViewAccessor, Reg())) == std::set<std::string>({ "chara.accessor", "chara.managerPointer", "chara.targetsOffset" }));
 }
 
 void TestOneRuleForEverySite()
 {
     const std::vector<Site> sites = AllSites();
-    CHECK(sites.size() == 3 + 6 + 4); // deviceSize is its own shape (location == shape) and is covered by the seam loop above
+    CHECK(sites.size() == 3 + 6); // deviceSize is its own shape (location == shape) and is covered by the seam loop above
     for (const bool known : { true, false })
     {
         for (const Site& s : sites)
@@ -445,7 +430,7 @@ void TestTableFilledLocationYieldsUnusableShape()
     Registry jr = JitterRegistry();
     in.registry = &jr;
     const GateReport g = Decide(in, Settings());
-    CHECK(g.Enabled(Feature::JitterSource) && !g.Enabled(Feature::CompanionNative));
+    CHECK(g.Enabled(Feature::JitterSource) && !g.Enabled(Feature::QualityHooks)); // the jitter-only registry has no quality seams
     // and the same image as an UNKNOWN build with the key: the same verdict from resolver values only
     auto unknownImg = MakeJitterImage(0x6bbbbbbbu);
     const ResolvedBuild un = ResolveImage(*unknownImg, JitterRegistry(), o);
@@ -573,95 +558,6 @@ void TestJitterRules()
     SetStatus(rb, "jitterSource.generator", SeamStatus::NotFound);
     const GateReport g = Run(&rb, Settings(false, true));
     CHECK(!g.Enabled(Feature::JitterSource) && g.Enabled(Feature::JitterProbe));
-}
-
-// ---- companion ----------------------------------------------------------------------------------------------------------------------------
-
-void TestCompanionRules()
-{
-    // batch32 is gated on its own shape (batchInstructions is bound at batch16 only)
-    for (const bool known : { true, false })
-    {
-        ResolvedBuild rb = AllFound(known);
-        SetStatus(rb, "companion.batch32Shape", SeamStatus::NotFound);
-        const GateReport g = Run(&rb, Settings(false, true));
-        CHECK(!g.Enabled(Feature::CompanionNative) && Contains(g.Reason(Feature::CompanionNative), "companion.batch32Shape"));
-    }
-    // enqueue on an UNKNOWN build needs the caller-side anchor Unique (not the hit sum); a known build does not
-    {
-        ResolvedBuild rb = AllFound(false);
-        SeamResult& e = Mut(rb, "companion.enqueue");
-        e.status = SeamStatus::FoundSingleAnchor;
-        for (AnchorResult& a : e.anchors)
-            if (a.name == "callerEpilogue")
-                a.outcome = AnchorOutcome::Zero;
-        e.hits = 5; // the SUM would suggest evidence: the rule looks at the anchor
-        const GateReport g = Run(&rb, Settings(false, true));
-        CHECK(!g.Enabled(Feature::CompanionNative) && Contains(g.Reason(Feature::CompanionNative), "callerEpilogue"));
-        for (AnchorResult& a : e.anchors)
-            if (a.name == "callerEpilogue")
-                a.outcome = AnchorOutcome::Multiple;
-        CHECK(!Run(&rb, Settings(false, true)).Enabled(Feature::CompanionNative));
-        ResolvedBuild kn = AllFound(true);
-        SeamResult& ek = Mut(kn, "companion.enqueue");
-        ek.status = SeamStatus::FoundSingleAnchor;
-        for (AnchorResult& a : ek.anchors)
-            if (a.name == "callerEpilogue")
-                a.outcome = AnchorOutcome::Zero;
-        CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-    }
-    // bindState: on an unknown build the native context offset must be plain Found (it is dereferenced as a COM pointer)
-    {
-        ResolvedBuild rb = AllFound(false);
-        SetStatus(rb, "companion.nativeContextOffset", SeamStatus::FoundSingleAnchor);
-        const GateReport g = Run(&rb, Settings(false, true));
-        CHECK(!g.Enabled(Feature::CompanionNative) && Contains(g.Reason(Feature::CompanionNative), "plain Found"));
-        ResolvedBuild kn = AllFound(true);
-        SetStatus(kn, "companion.nativeContextOffset", SeamStatus::FoundSingleAnchor);
-        CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-        // No hook-site rule names it for a known build, whose table value is verified offline: table-filled it stays usable; not filled, refused
-        SetStatus(kn, "companion.nativeContextOffset", SeamStatus::NotFound, true);
-        CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-        SetStatus(kn, "companion.nativeContextOffset", SeamStatus::NotFound, false);
-        CHECK(!Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-        ResolvedBuild un = AllFound(false);
-        SetStatus(un, "companion.nativeContextOffset", SeamStatus::NotFound, true); // an unknown build never table-fills (the flag cannot be set there)
-        CHECK(!Run(&un, Settings(false, true)).Enabled(Feature::CompanionNative));
-    }
-    // the header group heals only format and extension: all or nothing, and every index stays inside the 64-byte header / the queue entry
-    {
-        const CompanionBuild d {};
-        CHECK(CompanionOffsetsInBounds(d));
-        struct Case
-        {
-            std::uint32_t CompanionBuild::*field;
-            std::uint32_t okValue, badValue;
-        };
-        const Case cases[] = {
-            { &CompanionBuild::batchFormatOffset, 0x3c, 0x3d },    { &CompanionBuild::batchExtensionOffset, 0x3e, 0x3f },
-            { &CompanionBuild::batchKindOffset, 0x3c, 0x3d },      { &CompanionBuild::batchCountOffset, 0x3c, 0x3d },
-            { &CompanionBuild::batchVerticesOffset, 0x38, 0x39 },  { &CompanionBuild::batchWrapperOffset, 0x38, 0x39 },
-            { &CompanionBuild::entryPointerOffset, 8, 16 },
-        };
-        for (const Case& c : cases)
-        {
-            CompanionBuild ok = d, bad = d;
-            ok.*(c.field) = c.okValue;
-            bad.*(c.field) = c.badValue;
-            CHECK(CompanionOffsetsInBounds(ok));
-            CHECK(!CompanionOffsetsInBounds(bad));
-            ResolvedBuild rb = AllFound(false);
-            rb.build.companion = bad;
-            const GateReport g = Run(&rb, Settings(false, true));
-            CHECK(!g.Enabled(Feature::CompanionNative) && Contains(g.Reason(Feature::CompanionNative), "header"));
-        }
-        CompanionBuild unaligned = d;
-        unaligned.entryPointerOffset = 4;
-        CHECK(!CompanionOffsetsInBounds(unaligned));
-        CompanionBuild noHeader = d;
-        noHeader.nativeBatchHeaderSize = 0;
-        CHECK(!CompanionOffsetsInBounds(noHeader));
-    }
 }
 
 void TestCharaRules()
@@ -805,18 +701,16 @@ void TestNotSelfHealing()
     CHECK(list.size() == unboundOffsets && !list.empty());
     auto has = [&](const std::string& key) { return std::any_of(list.begin(), list.end(), [&](const std::string& s) { return s.rfind(key + "=0x", 0) == 0; }); };
     for (const char* key : { "nativeQuality.settingsRendererOffset", "nativeQuality.settingsAdditionalOffset", "charaView.transparentOffset", "charaView.depthOffset0",
-                             "charaView.entryWidthOffset", "jitter.jitterXOffset", "jitter.counterOffset", "companion.queueHeadOffset", "companion.queueNextBlockOffset",
-                             "companion.batchKindOffset", "companion.resourceWrapperOffset", "companion.indexCountOffset" })
+                             "charaView.entryWidthOffset", "jitter.jitterXOffset", "jitter.jitterYOffset", "jitter.counterOffset" })
         CHECK(has(key));
-    for (const char* key : { "companion.nativeContextOffset", "companion.batchFormatOffset", "nativeQuality.managerContextOffset", "jitterSource.settingsModeOffset" })
+    for (const char* key : { "nativeQuality.managerContextOffset", "jitterSource.settingsModeOffset" })
         CHECK(!has(key));
-    CHECK(has("companion.queueHeadOffset") && std::any_of(list.begin(), list.end(), [](const std::string& s) { return s == "companion.queueHeadOffset=0x50"; }));
     // a bound offset whose seam is down joins the list, marked
     ResolvedBuild down = AllFound(false);
-    SetStatus(down, "companion.nativeContextOffset", SeamStatus::NotFound);
+    SetStatus(down, "camera.cameraOffset", SeamStatus::NotFound);
     const std::vector<std::string> list2 = UnhealedOffsets(down, Reg());
     CHECK(list2.size() == list.size() + 1);
-    CHECK(std::any_of(list2.begin(), list2.end(), [](const std::string& s) { return s.rfind("companion.nativeContextOffset=0x17b8", 0) == 0 && Contains(s, "(seam unusable)"); }));
+    CHECK(std::any_of(list2.begin(), list2.end(), [](const std::string& s) { return s.rfind("jitter.cameraOffset=0x3028", 0) == 0 && Contains(s, "(seam unusable)"); }));
     // the line: one line, names the build kind
     const std::string line = FormatNotSelfHealing(rb, Reg());
     CHECK(line.find('\n') == std::string::npos && line.rfind("[ffxiv-gate] not self-healing: ", 0) == 0 && Contains(line, "UNKNOWN build"));
@@ -832,8 +726,8 @@ void TestLogBlock()
     CHECK(lines[0].text ==
           "[ffxiv-gate] build stamp=0x6ad10bfd size=0x381f000 known=yes forced_unknown=no legacy=no unknown_build_hooks=off exe=ffxiv_dx11.exe resolve_ms=1.500");
     CHECK(lines[0].level == LogLevel::Info);
-    // bounded: head + group1 + 6 features + 4 checks (+ the not-self-healing line on an unknown build)
-    CHECK(lines.size() == 1 + 1 + 6 + 4);
+    // bounded: head + group1 + 5 features + 4 checks (+ the not-self-healing line on an unknown build)
+    CHECK(lines.size() == 1 + 1 + 5 + 4);
     for (const GateLine& l : lines)
     {
         CHECK(l.text.rfind("[ffxiv-gate] ", 0) == 0 && l.text.find('\n') == std::string::npos);
@@ -845,7 +739,7 @@ void TestLogBlock()
     const ResolvedBuild unknown = AllFound(false);
     const GateReport u = Run(&unknown, Settings());
     const auto ul = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 2.0, "ffxiv_dx11.exe");
-    CHECK(ul.size() == 1 + 1 + 6 + 4 + 1);
+    CHECK(ul.size() == 1 + 1 + 5 + 4 + 1);
     CHECK(ul[0].text.find("known=no") != std::string::npos && ul[0].text.find("unknown_build_hooks=off") != std::string::npos);
     CHECK(ul[2].level == LogLevel::Warn && Contains(ul[2].text, "feature qualityRead OFF"));
     CHECK(ul.back().level == LogLevel::Warn && Contains(ul.back().text, "not self-healing"));
@@ -867,12 +761,12 @@ void TestLogBlock()
     // the legacy block names the key and has no not-self-healing line
     const GateReport leg = Run(nullptr, Settings(true), true, true);
     const auto ll = FormatGateBlock(leg, nullptr, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-    CHECK(Contains(ll[0].text, "legacy=yes") && ll.size() == 1 + 1 + 6 + 0);
+    CHECK(Contains(ll[0].text, "legacy=yes") && ll.size() == 1 + 1 + 5 + 0);
 }
 
 // ---- The known build's table fill, the quality cache offset -------------------------------------------------------------
 
-// A third party hooks a helper function the fork never touches (companion.indexBufferMap, camera.getter): the seams whose anchors sit in that
+// A third party hooks a helper function the fork never touches (camera.getter): the seams whose anchors sit in that
 // helper go NotFound and the resolver fills their fields from the table. On the KNOWN build the table value is verified offline and no contract names
 // those seams, so the feature stays on; the same loss on an unknown build refuses it. (The real-exe version is in gate_real_exe.)
 // ---- the log block on every gate state ----------------------------------------------------------------------------------------------------
@@ -891,12 +785,12 @@ void TestGateBlockSixStates()
                 return true;
         return false;
     };
-    // ordinary known build: head, group1, 6 features, 4 checks; everything on and agreeing, no warning anywhere
+    // ordinary known build: head, group1, 5 features, 4 checks; everything on and agreeing, no warning anywhere
     {
         const ResolvedBuild known = AllFound(true);
         const GateReport k = Run(&known, def);
         const auto lines = FormatGateBlock(k, &known, Reg(), 0x6ad10bfd, 0x381f000, 1.5, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 6 + 4);
+        CHECK(lines.size() == 1 + 1 + 5 + 4);
         for (const GateLine& l : lines)
             CHECK(l.level == LogLevel::Info);
         CHECK(!hasLine(lines, "falling back") && !hasLine(lines, "not self-healing"));
@@ -906,7 +800,7 @@ void TestGateBlockSixStates()
         const ResolvedBuild unknown = AllFound(false);
         const GateReport u = Run(&unknown, def);
         const auto lines = FormatGateBlock(u, &unknown, Reg(), 0x6bbbbbbb, 0x381f000, 2.0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 6 + 4 + 1);
+        CHECK(lines.size() == 1 + 1 + 5 + 4 + 1);
         CHECK(lines.back().level == LogLevel::Warn && Contains(lines.back().text, "not self-healing"));
         CHECK(Contains(lines.back().text, "UNKNOWN build") && lines.back().text.find("known build, table verified offline") == std::string::npos);
     }
@@ -918,11 +812,11 @@ void TestGateBlockSixStates()
         const GateReport g = Run(&exception, def, true, true);
         REQUIRE(g.legacyFallback && g.known);
         const auto lines = FormatGateBlock(g, &exception, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 1 + 6 + 1);
+        CHECK(lines.size() == 1 + 1 + 1 + 5 + 1);
         CHECK(lines[1].level == LogLevel::Warn &&
               Contains(lines[1].text, "resolver infrastructure failure on the exact known build (resolver exception: bad_alloc)") &&
               Contains(lines[1].text, "falling back to the legacy decision"));
-        for (std::size_t i = 3; i < 3 + 6; ++i)
+        for (std::size_t i = 3; i < 3 + 5; ++i)
             CHECK(lines[i].level == LogLevel::Info && Contains(lines[i].text, "falling back to the legacy decision") &&
                   Contains(lines[i].text, "the exact known build runs on the compile-time table"));
         CHECK(lines.back().level == LogLevel::Warn && Contains(lines.back().text, "not self-healing"));
@@ -934,21 +828,21 @@ void TestGateBlockSixStates()
         const GateReport g = Run(&known, Settings(false, false, true), true, true);
         CHECK(g.known && !g.legacyFallback);
         const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 6 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+        CHECK(lines.size() == 1 + 1 + 5 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
     }
     // the rollback key on the exact build: no not-self-healing line even with a resolve result in hand
     {
         const ResolvedBuild known = AllFound(true);
         const GateReport g = Run(nullptr, Settings(true), true, true);
         const auto lines = FormatGateBlock(g, &known, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
+        CHECK(lines.size() == 1 + 1 + 5 + 0 && !hasLine(lines, "not self-healing") && !hasLine(lines, "falling back"));
     }
     // no resolve ran on an unknown build: fail open, no not-self-healing line without a result
     {
         const GateReport g = Run(nullptr, def, true, false);
         CHECK(!g.known && !g.legacyFallback);
         const auto lines = FormatGateBlock(g, nullptr, Reg(), 0x6ad10bfd, 0x381f000, 0, "ffxiv_dx11.exe");
-        CHECK(lines.size() == 1 + 1 + 6 + 0 && !hasLine(lines, "not self-healing"));
+        CHECK(lines.size() == 1 + 1 + 5 + 0 && !hasLine(lines, "not self-healing"));
     }
 }
 
@@ -981,32 +875,6 @@ void TestGroup1ReasonNamesIdentity()
 
 void TestHelperHookOnKnownBuild()
 {
-    const char* const indexBuffer[] = { "companion.indexBufferCapacityOffset", "companion.indexBufferFlagsOffset", "companion.indexBufferCpuStartOffset",
-                                        "companion.indexBufferCpuEndOffset" };
-    ResolvedBuild known = AllFound(true);
-    for (const char* id : indexBuffer)
-        SetStatus(known, id, SeamStatus::NotFound, true);
-    const GateReport k = Run(&known, Settings());
-    CHECK(AllGroup2(k, true));
-    ResolvedBuild unknown = AllFound(false);
-    for (const char* id : indexBuffer)
-        SetStatus(unknown, id, SeamStatus::NotFound);
-    const GateReport u = Run(&unknown, Settings(false, true), true, false);
-    CHECK(!u.Enabled(Feature::CompanionNative) && Contains(u.Reason(Feature::CompanionNative), "indexBuffer"));
-    CHECK(u.Enabled(Feature::QualityHooks) && u.Enabled(Feature::JitterSource));
-    // one of them lost WITHOUT the table fill (the resolver found a Conflict and the table did not win): refused on the known build as well
-    ResolvedBuild lost = AllFound(true);
-    SetStatus(lost, indexBuffer[0], SeamStatus::Conflict, false);
-    CHECK(!Run(&lost, Settings()).Enabled(Feature::CompanionNative));
-    // EntryPatched is never filled from the table (the resolver cannot produce the combination; the gate refuses it anyway): a relaxed seam stays down
-    ResolvedBuild patched = AllFound(true);
-    {
-        SeamResult& s = Mut(patched, "companion.indexBufferFlagsOffset");
-        s.status = SeamStatus::EntryPatched;
-        s.hasValue = false;
-        s.fellBackToTable = true;
-    }
-    CHECK(!Run(&patched, Settings()).Enabled(Feature::CompanionNative));
     // camera.getter hooked: camera.jitterPointerOffset down, table-filled: the probe stays on on the known build, off on an unknown one
     ResolvedBuild cam = AllFound(true);
     SetStatus(cam, "camera.jitterPointerOffset", SeamStatus::NotFound, true);
@@ -1017,7 +885,7 @@ void TestHelperHookOnKnownBuild()
     // the strict seams keep refusing a table fill on the known build: a jitter global, the camera global of the world tie, strengthFloor, a quality
     // write-path seam, a site location
     for (const char* id : { "jitterSource.settingsPointer", "jitterSource.cameraGlobal", "jitterSource.strengthFloor", "quality.managerContextOffset",
-                            "quality.settingsModeOffset", "companion.batch16", "jitterSource.generator" })
+                            "quality.settingsModeOffset", "jitterSource.generator" })
     {
         ResolvedBuild rb = AllFound(true);
         SetStatus(rb, id, SeamStatus::NotFound, true);
@@ -1139,7 +1007,7 @@ void TestInfrastructureFailureFallsBack()
             CHECK(Contains(l.text, "falling back") && Contains(l.text, "image"));
         }
     }
-    CHECK(warnings == 1 && lines.size() == 1 + 1 + 1 + 6);
+    CHECK(warnings == 1 && lines.size() == 1 + 1 + 1 + 5);
 
     // the REAL resolver: an unreadable live image (every read fails) and a throwing reader, on the table's build and on another one
     auto known = jt::MakeJitterImage();
@@ -1236,100 +1104,6 @@ void TestUnknownBuildCrossCheckNeedsBothSides()
     }
 }
 
-// ---- entryPointerOffset is exactly 8 (the consumers index entry[1] of {key, pointer}) ----------------------------------------------
-
-void TestEntryPointerOffsetIsEight()
-{
-    CompanionBuild c {};
-    CHECK(c.entryPointerOffset == 8 && CompanionOffsetsInBounds(c));
-    for (const std::uint32_t v : { 0u, 4u, 16u, 24u, 0x40u })
-    {
-        c.entryPointerOffset = v;
-        CHECK(!CompanionOffsetsInBounds(c));
-        ResolvedBuild rb = AllFound(false);
-        rb.build.companion = c;
-        const GateReport g = Run(&rb, Settings(false, true), true, false);
-        CHECK(!g.Enabled(Feature::CompanionNative) && Contains(g.Reason(Feature::CompanionNative), "queue entry"));
-    }
-}
-
-// ---- An offset group with unhealed members -------------------------------------------------------------------------------------
-
-// The batch header: format and extension are healed (decoded from instructions), kind, wrapper, count and vertices keep their table values. On an
-// UNKNOWN build, if a healed member moved away from its table default the struct layout moved and the unhealed siblings are suspect: the consumer
-// (CompanionNative) is refused with a reason naming the group.
-void TestUnhealedSiblingsOfAMovedMember()
-{
-    // the group table as LITERALS
-    CHECK(sizeof(kOffsetGroups) / sizeof(kOffsetGroups[0]) == 1);
-    const OffsetGroup& g = kOffsetGroups[0];
-    CHECK(std::string(g.name) == "companion batch header" && g.feature == Feature::CompanionNative);
-    std::vector<std::string> healed, unhealed;
-    for (const char* k : g.healed)
-        if (k != nullptr)
-            healed.push_back(k);
-    for (const char* k : g.unhealed)
-        if (k != nullptr)
-            unhealed.push_back(k);
-    CHECK((healed == std::vector<std::string> { "companion.batchFormatOffset", "companion.batchExtensionOffset" }));
-    CHECK((unhealed == std::vector<std::string> { "companion.batchKindOffset", "companion.batchWrapperOffset", "companion.batchCountOffset",
-                                                  "companion.batchVerticesOffset" }));
-    // every healed member has a seam, every unhealed one has none (the split the offset group reports)
-    for (const std::string& k : healed)
-    {
-        bool bound = false;
-        for (const Binding& b : Reg().bindings)
-            bound = bound || b.key == k;
-        CHECK(bound);
-    }
-    for (const std::string& k : unhealed)
-    {
-        bool bound = false;
-        for (const Binding& b : Reg().bindings)
-            bound = bound || b.key == k;
-        CHECK(!bound);
-    }
-    struct Move
-    {
-        std::uint32_t CompanionBuild::*field;
-        std::uint32_t value;
-        const char* key;
-    };
-    const Move moves[] = { { &CompanionBuild::batchFormatOffset, 0x2c, "companion.batchFormatOffset" },
-                           { &CompanionBuild::batchExtensionOffset, 6, "companion.batchExtensionOffset" } };
-    // control: nothing moved, an unknown build with the key: on
-    const ResolvedBuild calm = AllFound(false);
-    CHECK(AllGroup2(Run(&calm, Settings(false, true), true, false), true));
-    for (const Move& m : moves)
-    {
-        ResolvedBuild rb = AllFound(false);
-        rb.build.companion.*(m.field) = m.value;
-        CHECK(CompanionOffsetsInBounds(rb.build.companion)); // the bounds rule alone would pass it: the group rule is what refuses
-        const GateReport r = Run(&rb, Settings(false, true), true, false);
-        CHECK(!r.Enabled(Feature::CompanionNative));
-        CHECK(Contains(r.Reason(Feature::CompanionNative), "companion batch header") && Contains(r.Reason(Feature::CompanionNative), m.key));
-        for (const Feature f : kGroup2)
-            if (f != Feature::CompanionNative)
-                CHECK(r.Enabled(f)); // only the consumer that reads the group is refused
-        // one WARN line names the group
-        const auto lines = FormatGateBlock(r, &rb, Reg(), 1, 2, 0, "x");
-        bool named = false;
-        for (const GateLine& l : lines)
-            if (l.level == LogLevel::Warn && Contains(l.text, "companionNative OFF") && Contains(l.text, "companion batch header"))
-                named = true;
-        CHECK(named);
-        // the rule is for an unknown build: on the known build the table is verified offline, nothing is refused
-        ResolvedBuild kn = AllFound(true);
-        kn.build.companion.*(m.field) = m.value;
-        CHECK(Run(&kn, Settings()).Enabled(Feature::CompanionNative));
-    }
-    // both moved: still one refusal naming the group
-    ResolvedBuild both = AllFound(false);
-    both.build.companion.batchFormatOffset = 0x2c;
-    both.build.companion.batchExtensionOffset = 6;
-    CHECK(!Run(&both, Settings(false, true), true, false).Enabled(Feature::CompanionNative));
-}
-
 // ---- The build a consumer reads is asked per feature -----------------------------------------------------------------------------
 
 void TestBuildForIsPerFeature()
@@ -1382,9 +1156,7 @@ void TestRegistryFacts()
     // every Rva / Guard field is bound: nothing a consumer reads through ActiveBuild() stays zero on a build that resolved every seam
     CHECK(UnboundFields(Reg()).empty());
     // the sizes the consumers keep as compile-time array bounds are Constants: never resolved, identical on every build
-    for (const char* key : { "companion.nativeBatchHeaderSize", "companion.drawCommandSize", "companion.nativeBatchEntrySize", "companion.rendererQueueCount",
-                             "companion.rendererQueueStride", "companion.layoutSlotEntrySize", "companion.rendererVertexSlotStride", "companion.drawCommandType",
-                             "jitterSource.strengthFloorBits", "jitterSource.ndcSignMaskBits" })
+    for (const char* key : { "jitterSource.strengthFloorBits", "jitterSource.ndcSignMaskBits" })
     {
         const FieldRow* row = FindField(key);
         REQUIRE(row != nullptr);
@@ -1416,7 +1188,7 @@ void TestRegistryFacts()
     std::memcpy(&f, &bits, sizeof(f));
     CHECK(f == 0.001f);
     // the product registry the gate was written against
-    CHECK(Reg().seams.size() == 81 && Reg().bindings.size() == 77); // the brief said "78 seams": the registry has 81 (the three shape seams counted)
+    CHECK(Reg().seams.size() == 53 && Reg().bindings.size() == 51);
     std::printf("registry: %zu seams, %zu bindings\n", Reg().seams.size(), Reg().bindings.size());
 }
 
@@ -1439,7 +1211,7 @@ void TestActiveBuild()
     const GateReport g = Run(&rb, Settings());
     CHECK(PublishActive(build, g));
     CHECK(ActiveStarted() && &ActiveBuild() != &kCurrentBuild);
-    CHECK(ActiveBuild().jitterSource.generatorRva == 0x123456 && ActiveBuild().companion.batch16Rva == kCurrentBuild.companion.batch16Rva);
+    CHECK(ActiveBuild().jitterSource.generatorRva == 0x123456 && ActiveBuild().nativeQuality.querySizeRva == kCurrentBuild.nativeQuality.querySizeRva);
     CHECK(ActiveGate().started && FeatureEnabled(Feature::QualityHooks) && FeatureEnabled(Feature::CharaViewAccessor));
     // the one-state read hands out the published build itself, for the features its gate enabled
     CHECK(BuildFor(Feature::QualityHooks) == &ActiveBuild() && BuildFor(Feature::CharaViewAccessor) == &ActiveBuild());
@@ -1463,7 +1235,6 @@ int main()
     TestTableFilledLocationYieldsUnusableShape();
     TestQualityRules();
     TestJitterRules();
-    TestCompanionRules();
     TestCharaRules();
     TestEntryPatchedIsDistinct();
     TestCrossChecks();
@@ -1475,8 +1246,6 @@ int main()
     TestContextCacheOffsetRule();
     TestInfrastructureFailureFallsBack();
     TestUnknownBuildCrossCheckNeedsBothSides();
-    TestEntryPointerOffsetIsEight();
-    TestUnhealedSiblingsOfAMovedMember();
     TestBuildForIsPerFeature();
     TestBuildForStateIsOneState(); // before TestActiveBuild: it needs the process state unpublished
     TestRegistryFacts();

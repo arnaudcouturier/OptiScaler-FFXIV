@@ -293,7 +293,6 @@ const wchar_t* StageRange(GpuStage stage)
         return L"ReShade effects";
     case GpuStage::InteropCopy:
         return L"interop copy";
-    case GpuStage::BridgeExclNr:
     case GpuStage::Count:
         break;
     }

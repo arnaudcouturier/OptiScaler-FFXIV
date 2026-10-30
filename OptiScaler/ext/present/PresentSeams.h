@@ -19,7 +19,7 @@ namespace ext::present
 // (returns at once when already hooked or when `factory` has no IDXGIFactory2), failure leaves it unhooked. `factory`
 // is the real factory HookToFactory just hooked. The hook wraps composition swapchains of at least 100x100 in
 // WrappedIDXGISwapChain4 (composition flag), and passes everything else through untouched, including every call made
-// while ext::core::HooksBypassed() is true (the Companion nameplate layer's own swapchain).
+// while ext::core::HooksBypassed() is true (fork code drawing under its own bypass scope).
 void HookFactoryComposition(IDXGIFactory* factory);
 
 // WrappedIDXGISwapChain4::Present / Present1, only when the wrapper's `_composition` flag is set (a swapchain made

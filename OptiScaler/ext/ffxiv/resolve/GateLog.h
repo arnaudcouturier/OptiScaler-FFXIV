@@ -4,7 +4,7 @@
 //
 //   [ffxiv-gate] build stamp=0x6ad10bfd size=0x381f000 known=yes forced_unknown=no legacy=no unknown_build_hooks=off exe=ffxiv_dx11.exe resolve_ms=97.123
 //   [ffxiv-gate] feature qualityHooks ON  all 41 required checks pass
-//   [ffxiv-gate] feature jitterSource OFF companion... (reason)
+//   [ffxiv-gate] feature jitterSource OFF unknown build and FfxivUnknownBuildHooks is off (...)
 //   [ffxiv-gate] cross-check chara.managerPointer == jitterSource.rendererPointer: agree (0x290e490)
 //   [ffxiv-gate] not self-healing: ...
 //

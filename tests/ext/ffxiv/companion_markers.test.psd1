@@ -1,1 +1,0 @@
-@{ Class = 'warp'; Sources = @('companion_markers_test.cpp'); Std = 'c++20' }

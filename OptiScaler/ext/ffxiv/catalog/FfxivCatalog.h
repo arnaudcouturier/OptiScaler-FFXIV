@@ -1,14 +1,14 @@
 #pragma once
 // The process-wide shader catalog ledger and the entry points the hooks call (see CatalogLedger.h for what it records and logs).
 //
-// Included by FfxivLightingCapture.h (the CreatePixelShader hook), FfxivNameplateRenderer.h (the CreateInputLayout tagging) and
+// Included by FfxivLightingCapture.h (the CreatePixelShader hook), PlateLayoutTag.h (the CreateInputLayout tagging) and
 // FfxivUiBoundary.cpp (the partial-UI-catalog guard and the Present tick), so it stays light: everything here is inline except OnPresent(),
 // which logs and lives in FfxivCatalog.cpp.
 //
 // Where each call runs:
 //   OnPixelShaderCreated  every DXBC pixel shader the creation hook sees, whether or not the HUD-less detector is armed (the same always-run
 //                         place as the boundary stamp; NOT the D1 registry, which runs only while armed). Lock free, allocation free, no log.
-//   OnNameplateVertexShader / OnLayoutSeen   CreateInputLayout tagging of the nameplate renderer (reached when the companion callbacks are set).
+//   OnNameplateVertexShader / OnLayoutSeen   CreateInputLayout tagging of the nameplate probe (PlateLayoutTag.h, written by the lighting hooks).
 //   OnPresent             bridge Present entry (ui::OnPresentBegin, BEFORE its Armed() test: default-ini sessions have to get the catalog line too).
 //   UiBoundaryUsable      UiBoundaryProvider::Take() / LastReason(), on every frame, never latched.
 

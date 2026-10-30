@@ -187,8 +187,7 @@ void StageNames()
     CHECK(std::string(GpuStageName(GpuStage::PresentCopyIn)) == "present copy-in");
     CHECK(std::string(GpuStageName(GpuStage::ReshadeEffects)) == "ReShade effects");
     CHECK(std::string(GpuStageName(GpuStage::InteropCopy)) == "interop copy");
-    CHECK(std::string(GpuStageName(GpuStage::BridgeExclNr)) == "Bridge excl. NR");
-    CHECK(static_cast<unsigned>(GpuStage::Count) == 4);
+    CHECK(static_cast<unsigned>(GpuStage::Count) == 3);
     CHECK(GpuStageName(GpuStage::Count)[0] == '?');
 }
 

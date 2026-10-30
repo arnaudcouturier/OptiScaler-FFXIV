@@ -10,10 +10,9 @@
 //
 // Inputs, in the order of the oracle's passThrough expression (hooks/DxgiFactory_Hooks.cpp at the pinned
 // ref-nightly-merge SHA, `FfxivNameplateLiveScope::active || ...`):
-//   hooksBypassed      ext::core::HooksBypassed(): the calling thread is inside an ext::core::BypassScope. This is
-//                      the Companion case: the nameplate layer (ext/ffxiv/companion/replay/FfxivNameplateLive.h Run())
-//                      creates its own composition swapchain under that scope, and it must never get wrapped, have
-//                      the overlay attached, or become State::currentSwapchain.
+//   hooksBypassed      ext::core::HooksBypassed(): the calling thread is inside an ext::core::BypassScope.
+//                      Fork code that issues its own native draws runs under that scope, and its chains
+//                      must never get wrapped, have the overlay attached, or become State::currentSwapchain.
 //   vulkanCreatingSC   State::vulkanCreatingSC: Vulkan's DXGI interop is building the chain.
 //   skipFgSwapChain    DxgiFactoryHooks::_skipFGSwapChainCreation: the upstream recursion guard of the FG swapchain.
 //   hasDevice          pDevice != nullptr

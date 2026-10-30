@@ -30,7 +30,7 @@ struct FfxivQuirks final : INgxLifecycle, INrQuirks
 // scene HDR, lighting, the HUD-less boundary, geometry, markers, mip bias and the quirks off. The exact known build is identified by its PE stamp
 // and size, whatever the file is called; the name only decides on a build the table does not know. The rollback key [FFXIV] FfxivLegacyGameBuild
 // restores the old rule (the exact stamp and size, nothing else), which is what the pre-pattern-search build did.
-// The features that read game addresses (Group 2: native quality, jitter, companion hooks, CharaView) are NOT decided here: they ask
+// The features that read game addresses (Group 2: native quality, jitter, CharaView) are NOT decided here: they ask
 // ext::ffxiv::ActiveGate() (ActiveBuild.h), filled once by ext::ffxiv::resolve::StartOnce() at the first device hook.
 const Game& SelectGame()
 {

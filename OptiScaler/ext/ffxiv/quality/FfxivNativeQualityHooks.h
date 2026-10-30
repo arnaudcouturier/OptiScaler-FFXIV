@@ -23,10 +23,10 @@
 
 namespace ext::ffxiv::quality::FfxivNativeQualityHooks
 {
-// Canonical implementation lives in ext::core::ReadProcessBytes (ext/core/ProcessMemory.h, also
-// used by ext::ffxiv::companion::Packets); kept as a named forwarder since this module calls
-// ReadMemory(const void*, ...) throughout and deliberately does not include a companion header
-// to get the shared helper (see ProcessMemory.h's own comment on why it lives in ext/core).
+// Canonical implementation lives in ext::core::ReadProcessBytes (ext/core/ProcessMemory.h);
+// kept as a named forwarder since this module calls
+// ReadMemory(const void*, ...) throughout.
+
 inline bool ReadMemory(const void* address, void* output, size_t bytes)
 {
     return ext::core::ReadProcessBytes(reinterpret_cast<uintptr_t>(address), output, bytes);
@@ -247,7 +247,7 @@ inline uintptr_t ObserveQuery(const unsigned int* display, unsigned int* optimal
 // allocate nothing (they only free with operator delete). Deliberately not restructured: the allocations happen inside Detours
 // and the window lasts a few milliseconds (the game log shows the whole first install in 58 ms). The same note applies to
 // ext::core::DetourThreadScope (ext/core/DetourThreads.h), which shares this enlistment pattern with the two other call
-// sites that patch D3D11 vtable slots (ext::ffxiv::companion::Native and ext::ffxiv::lighting::FfxivLightingCapture).// One install attempt. The guards below are deterministic for a given exe, so a refusal there is Permanent (never retried)
+// site that patches D3D11 vtable slots (ext::ffxiv::lighting::FfxivLightingCapture).// One install attempt. The guards below are deterministic for a given exe, so a refusal there is Permanent (never retried)
 // and keeps the one warning it always logged. The Detours half (thread snapshot + one hook transaction) is
 // transaction::AttemptHooks (NativeQualityTransaction.h), whose failures it classifies as transient or permanent. Nothing
 // is logged between a transaction's begin and end; the retry logging happens in InstallLog, after the threads run again.

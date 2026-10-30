@@ -12,7 +12,6 @@ namespace ext::hudless::plate
 {
 // The probes are on: the key is set and no write has failed so far (a failure clears the feature bit).
 inline bool Enabled() { return ext::Active(ext::F::PlateProbe); }
-bool OverlayWanted(); // PlateOverlay with the probes on
 
 // Queued for the probe's own writer thread, which creates the run folder <game>\OptiScaler\plate-probe\<run>\ on first use and keeps the
 // five newest runs. A failed write turns the probes off with one warning. Any thread; never blocks on the disk.

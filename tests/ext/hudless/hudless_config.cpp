@@ -30,7 +30,7 @@ int main()
     assert(defaults.hdrPaste.value_or_default() == "off" && !defaults.HdrPasteOn()); // the HDR paste is opt-in: untried in a game
     assert(defaults.guardMode.value_or_default() == "legacy" && defaults.GetGuardPolicy() == hudless::GuardPolicy::Legacy);
     // the developer probes are off by default (and the seam bit that serves them starts clear)
-    assert(!defaults.plateDiagnostics.value_or_default() && !defaults.plateOverlay.value_or_default());
+    assert(!defaults.plateDiagnostics.value_or_default());
     assert(!ext::Active(F::PlateProbe));
 
     // Exactly the documented keys of section 11 (Diagnostics is bound by package A), in the documented order.
@@ -38,7 +38,7 @@ int main()
     defaults.Bind(binder);
     const std::vector<std::string> expectedKeys { "Mode",         "MaskThreshold", "MaskDilation", "PasteCleanup",
                                                   "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "HdrPaste",
-                                                  "PlateDiagnostics", "PlateOverlay" };
+                                                  "PlateDiagnostics" };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
     {
@@ -131,15 +131,22 @@ int main()
     cfg.coverageGuard = 3.0f;
     assert(cfg.CoverageLimit() == 1.0f);
 
-    // PlateDiagnostics publishes its own seam bit at load; unset or false clears it again. The overlay key is stored as written.
+    // PlateDiagnostics publishes its own seam bit at load; unset or false clears it again.
     assert(!cfg.plateDiagnostics.value_or_default() && !ext::Active(F::PlateProbe));
     CSimpleIniA probe;
     probe.SetValue("HudLess", "PlateDiagnostics", "true");
-    probe.SetValue("HudLess", "PlateOverlay", "true");
+    probe.SetValue("HudLess", "PlateOverlay", "true"); // retired: an existing user ini that still carries it loads without error and changes nothing
     config::Load(probe);
-    assert(cfg.plateDiagnostics.value_or_default() && cfg.plateOverlay.value_or_default() && ext::Active(F::PlateProbe));
+    assert(cfg.plateDiagnostics.value_or_default() && ext::Active(F::PlateProbe));
+    {
+        config::Binder binder;
+        Cfg().hudless.Bind(binder);
+        for (const auto& entry : binder.Table())
+            assert(std::string(entry.key) != "PlateOverlay"); // no row is bound for it anymore
+    }
     config::Save(out);
     assert(std::string(out.GetValue("HudLess", "PlateDiagnostics", "")) == "true");
+    assert(out.GetValue("HudLess", "PlateOverlay", nullptr) == nullptr); // and it is not written back
     CSimpleIniA none;
     cfg.plateDiagnostics = false; // a CustomOptional takes the first value only, so the menu-style assignment is what switches it off
     config::Load(none);

@@ -28,11 +28,10 @@ enum class GpuStage : unsigned
     PresentCopyIn, // the backbuffer copy into the shared texture (BeforeSharedCopy .. AfterSharedCopy)
     ReshadeEffects, // ReShade's own end-of-frame pass (begin_effects .. finish_effects, the fork's own calls left out)
     InteropCopy, // the shared texture into the FG backbuffer (ConvertCopySource .. PrepareScreenshot)
-    BridgeExclNr, // derived: upstream "Interop" minus NR's own time (menu row only: no queries, no log line)
     Count
 };
 
-inline constexpr const char* kGpuStageNames[] = { "present copy-in", "ReShade effects", "interop copy", "Bridge excl. NR" };
+inline constexpr const char* kGpuStageNames[] = { "present copy-in", "ReShade effects", "interop copy" };
 
 inline const char* GpuStageName(GpuStage s)
 {

@@ -3,7 +3,7 @@
 //
 // OWNER: the quality seams. This is the ONLY resolver file that seam work edits (plus its own tests under tests/ext/ffxiv/resolve/).
 // It must NOT edit: ResolveTypes.h, ImageView.h, DenseImage.h, LiveImage.h, Pattern.h, Scan.h, Unwind.h, Resolver.h, ResolveLog.h,
-// Entry.h, ResolveCache.h, FieldTable.h, Registry.h, AnchorsCompanion.h, AnchorsJitter.h, GameBuild.h, CharaTable.h, Game.cpp.
+// Entry.h, ResolveCache.h, FieldTable.h, Registry.h, AnchorsJitter.h, GameBuild.h, CharaTable.h, Game.cpp.
 //
 // The fields of GameBuild this group covers (FieldTable.h keys, each bound below to the seam that finds it):
 //   nativeQuality.settingsInstructionsRva / settingsInstructions        nativeQuality.querySizeRva / querySizeInstructions

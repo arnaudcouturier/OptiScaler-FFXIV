@@ -76,32 +76,6 @@ void TestNativeQuality()
           q.rendererSceneSizeOffset == 0x428);
 }
 
-void TestCompanion()
-{
-    const CompanionBuild& c = kCurrentBuild.companion;
-    CHECK(c.batch16Rva == 0x6e56d0 && c.batch32Rva == 0x6e6270);
-    CHECK(c.enqueueRva == 0x240b80 && c.bindStateRva == 0x22d750);
-    CHECK(c.nameplateModulePointerRva == 0x2ab8650);
-    CHECK(c.layoutSlotTableRva == 0x217c760);
-
-    static const std::uint8_t batch[] = {0x88, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x53, 0x56, 0x41, 0x54, 0x41, 0x55};
-    static const std::uint8_t enqueue[] = {0x48, 0x63, 0x41, 0x0c, 0x4c, 0x8b, 0xda, 0x4c, 0x8d, 0x04, 0x40, 0x8b, 0x41, 0x08, 0x42, 0x83};
-    static const std::uint8_t bind[] = {0x40, 0x56, 0x41, 0x56, 0x48, 0x83, 0xec, 0x48, 0x80, 0x7a, 0x49, 0x00, 0x4c, 0x8b, 0xf2, 0x48};
-    CHECK(SameBytes(c.batchInstructions, batch));
-    CHECK(SameBytes(c.enqueueInstructions, enqueue));
-    CHECK(SameBytes(c.bindStateInstructions, bind));
-
-    // structure offsets re-read in the 2026.10.16 executable
-    CHECK(c.rendererBatchListOffset == 0x580 && c.rendererBatchCountOffset == 0x588 && c.rendererIndexBufferOffset == 0x1e0 &&
-          c.rendererVertexAllocationOffset == 0x570 && c.rendererVertexStrideOffset == 0x500 && c.rendererVertexOffsetOffset == 0x504 &&
-          c.rendererVertexSlotStride == 0x10);
-    CHECK(c.indexBufferCapacityOffset == 0x38 && c.indexBufferFlagsOffset == 0x40 && c.indexBufferCpuStartOffset == 0x60 && c.indexBufferCpuEndOffset == 0x68);
-    CHECK(c.nativeContextOffset == 0x17b8 && c.drawStateFlagOffset == 0x49 && c.drawStateCommandBackPointerOffset == 0x20);
-    CHECK(c.batchKindOffset == 0 && c.batchCountOffset == 0x20 && c.batchVerticesOffset == 0x28 && c.batchFormatOffset == 0x30 && c.entryPointerOffset == 0x08 &&
-          c.nativeBatchEntrySize == 16 && c.nativeBatchHeaderSize == 64);
-    CHECK(c.drawCommandType == 6 && c.drawCommandSize == 0xb0 && c.layoutSlotEntrySize == 8);
-}
-
 void TestCharaView()
 {
     const CharaViewBuild& v = kCurrentBuild.charaView;
@@ -123,7 +97,6 @@ int main()
 {
     TestIdentity();
     TestNativeQuality();
-    TestCompanion();
     TestCharaView();
     TestJitter();
     return TEST_RESULT("game_build");

@@ -314,8 +314,6 @@ void Push(const Event& e)
 }
 } // namespace
 
-bool OverlayWanted() { return Enabled() && ext::Cfg().hudless.plateOverlay.value_or_default(); }
-
 // After a failure the writer loop has ended and nobody consumes the job queue: a config reload can set the feature bit again, and a job queued
 // then would stay for good (0.5 MB per 1800 frames, no bound). So both entry points return first thing once the probe has failed.
 void AppendFile(const char* name, std::string text)

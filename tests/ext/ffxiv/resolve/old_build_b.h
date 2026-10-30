@@ -8,7 +8,7 @@
 // by construction, so they prove nothing about B.
 //
 // Rows are per group so that the groups do not share a file: old_build_b_quality.h (CharaView) came first, and each group adds
-// old_build_b_companion.h / old_build_b_jitter.h next to their own tests.
+// old_build_b_jitter.h next to its own tests.
 //
 // The B section table: the start VAs and the .text size are recorded; the other virtual sizes are NOT, so each is chosen to fit before the
 // next section. The one that matters, `.data`, has the recorded initialized end 0x28f2800 (raw size 0x56800): the B globals lie above it,

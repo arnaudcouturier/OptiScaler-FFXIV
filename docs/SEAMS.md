@@ -40,7 +40,7 @@ OptiScaler/ext/
   hdr/                     C8 OptiHDR, C9 HDR PNG + ICC, C10 RenoDX scene HDR (+ NOTICE), F3, F4
   hudless/                 C11 + G: HudlessEngine, HudlessSource
   ffxiv/                   GameBuild.h (all RVAs + byte guards), FfxivModule (implements game/
-                           interfaces), C1–C5, C7 companion, B6 lighting scan, F5 CharaView,
+                           interfaces), C1–C5, B6 lighting scan, F5 CharaView,
                            G FfxivUiBoundary
   ini/                     ini template fragments per section (merged into OptiScaler.ini by tools/package.ps1)
   ext.props                imported once by OptiScaler.vcxproj
@@ -137,7 +137,7 @@ When fork state must live per upstream object (e.g. per `IFGFeature_Dx12`), the 
 
 ### 3.9 Hook bypass scope
 
-`ext::core::HooksBypassed()` is an inline `thread_local` test. It replaces the `FfxivNameplateLiveScope::active` guards of the import base: 8 occurrences, all ported. Seven are in C7 (`D3D11_Hooks.cpp` x2, `Dxgi_Hooks.cpp` x3, `FG_Hooks.cpp` x2). The eighth is the pass-through condition of the `CreateSwapChainForComposition` hook in `ext/present/CompositionSwapchain.cpp` (E5); the catalog's `HooksBypassed` row says how it keeps the Companion nameplate layer's own composition swapchain unwrapped. Any fork code that issues its own native draws or device calls wraps them in `ext::core::BypassScope`. It is not FFXIV-specific.
+`ext::core::HooksBypassed()` is an inline `thread_local` test: 8 occurrences. Seven are in C7 (`D3D11_Hooks.cpp` x2, `Dxgi_Hooks.cpp` x3, `FG_Hooks.cpp` x2). The eighth is the pass-through condition of the `CreateSwapChainForComposition` hook in `ext/present/CompositionSwapchain.cpp` (E5); the catalog's `HooksBypassed` row says how it keeps fork-issued native draws unwrapped. Any fork code that issues its own native draws or device calls wraps them in `ext::core::BypassScope`. It is not FFXIV-specific.
 
 ### 3.10 Logging and version
 
@@ -156,7 +156,7 @@ The catalog is in [SEAMS-catalog.md](SEAMS-catalog.md), one table per group: `co
 |---|---|
 | `ResTrack_dx12` `Reset` hooked twice (nightly `hkReset` + `o_LateReset` of the import base), wrong detach order, leaked `ExecuteCommandLists` detour | **One** `hkReset` with an `ext::restrack::OnCommandListReset` callback. Installed when `persistentBindings` or `ext::restrack::WantsCommandListReset()` is true, through one idempotent `EnsureResetHook(device)` for late devices (replacing `HookLateNrQueue`). Detached once, in reverse order of attach. The fork's `ExecuteCommandLists` hook is owned by `ext/gpu` and always detached |
 | `isHdrActive` (import base) vs `hdrOutputActive`/`outputColorSpace` (nightly) | **Nightly's fields are the single truth.** The D3D11 bridge fills them through `ext::dx11bridge::SetColorSpace`. `Hdr10::Active()` reads them. `isHdrActive` and its logs are deleted |
-| NR and Companion cards bypassing `RenderCard` (so filtering and pinning skipped them) | Fixed by `MenuRegistry` (section 3.6) |
+| NR card bypassing `RenderCard` (so filtering and pinning skipped it) | Fixed by `MenuRegistry` (section 3.6) |
 | Nightly's Present removed the DXVK early return | D6 is covered by nightly (`State::frameCount` is the epoch). Not carried |
 | `IFeature_Dx11wDx12::Evaluate` raw-pointer state backup | Take nightly's ComPtr version (the fork's raw version predates it) |
 | `DLSSG_Common` has no extension points | Free-function seams called from `DLSSG_Common.cpp`. No virtuals are added to the header |

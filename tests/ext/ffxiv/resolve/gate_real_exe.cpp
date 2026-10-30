@@ -8,7 +8,7 @@
 //      cross-group checks compare and agree, Group 2 is OFF with the key off and enables exactly the set of the known path with the key on, and the
 //      resolved build equals the table field by field (Rva, Guard and Offset rows).
 //   3. LEGACY: the rollback key enables the same set on the exact build and nothing on an unknown one.
-//   4. Third-party hooks over helper functions the fork never touches (a 14-byte FF25 over companion.indexBufferMap; a 5-byte E9
+//   4. Third-party hooks over helper functions the fork never touches (a 5-byte E9
 //      over quality.cacheCompare; a hook over camera.getter), each on the known build and on the forced-unknown path; a resolver INFRASTRUCTURE failure
 //      on the real image (an unreadable window, an unreadable image) falls back to the legacy decision; and the whole startup (RunStartup, a fake
 //      environment around the REAL resolver) publishes the table row by row on the known build and after the fallback.
@@ -176,7 +176,7 @@ int main(int argc, char** argv)
     in.rb = &known;
     const GateReport knownGate = Decide(in, GateSettings {});
     const std::string kAll = "sceneHdr,lighting,uiHudless,geometry,markers,mipBind,quirkIsolatesShutdown,quirkBridgedNativeDx11,catalogHealth,qualityRead,"
-                             "qualityHooks,jitterProbe,jitterSource,companionNative,charaViewAccessor";
+                             "qualityHooks,jitterProbe,jitterSource,charaViewAccessor";
     CHECK(EnabledSet(knownGate) == kAll);
     if (EnabledSet(knownGate) != kAll)
     {
@@ -272,10 +272,9 @@ int main(int argc, char** argv)
         CHECK(s != nullptr && s->hasValue);
         return s != nullptr ? s->rva : 0u;
     };
-    const std::uint32_t indexMap = seamRva("companion.indexBufferMap");
     const std::uint32_t cameraGetter = seamRva("camera.getter");
     const std::uint32_t cacheCompare = seamRva("quality.cacheCompare");
-    CHECK(indexMap == 0x21eb50 && cameraGetter == 0x25f610 && cacheCompare == 0x374f10);
+    CHECK(cameraGetter == 0x25f610 && cacheCompare == 0x374f10);
     const std::vector<std::uint8_t> ff25 = { 0xff, 0x25, 0, 0, 0, 0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11 }; // jmp [rip+0]: 14 bytes
     const std::vector<std::uint8_t> e9 = { 0xe9, 0x00, 0x10, 0x00, 0x00 };                                              // jmp rel32: 5 bytes
     GateInput knownIn = in;
@@ -291,35 +290,6 @@ int main(int argc, char** argv)
         return ResolveImage(*image, registry, o);
     };
 
-    // A third party hooks companion.indexBufferMap (FF25). Its four index-buffer Offset seams cannot be found, the resolver fills them from the
-    // table; the known build keeps the native companion (the table value is verified offline), the forced-unknown path (no table) refuses it.
-    WithBytes(img, indexMap, ff25,
-              [&]
-              {
-                  const ResolvedBuild k = resolveWith(true);
-                  int down = 0;
-                  for (const char* id : { "companion.indexBufferCapacityOffset", "companion.indexBufferFlagsOffset", "companion.indexBufferCpuStartOffset",
-                                          "companion.indexBufferCpuEndOffset" })
-                  {
-                      const SeamResult* s = k.Find(id);
-                      CHECK(s != nullptr);
-                      if (s != nullptr && !IsUsable(s->status) && s->fellBackToTable)
-                          ++down;
-                  }
-                  CHECK(down == 4);
-                  knownIn.rb = &k;
-                  const GateReport g = Decide(knownIn, GateSettings {});
-                  if (EnabledSet(g) != kAll)
-                      std::printf("FAIL: a foreign FF25 over companion.indexBufferMap turned off: %s\n", g.Reason(Feature::CompanionNative).c_str());
-                  CHECK(EnabledSet(g) == kAll && !g.legacyFallback);
-                  CHECK(DifferingRows(k.build, table, false, nullptr) == 0); // the build the consumers read is still the table, row by row
-                  const ResolvedBuild u = resolveWith(false);
-                  GateInput unknownIn = in;
-                  unknownIn.rb = &u;
-                  unknownIn.exactKnownBuild = true;
-                  const GateReport gu = Decide(unknownIn, forcedOn);
-                  CHECK(EnabledSet(gu) == Without(kAll, "companionNative") && Contains(gu.Reason(Feature::CompanionNative), "indexBuffer"));
-              });
     // A 5-byte E9 over quality.cacheCompare: contextCacheOffset becomes a single anchor through a weak dependency
     WithBytes(img, cacheCompare, e9,
               [&]
@@ -349,7 +319,7 @@ int main(int argc, char** argv)
                   const ResolvedBuild k = resolveWith(true);
                   knownIn.rb = &k;
                   const GateReport g = Decide(knownIn, GateSettings {});
-                  CHECK(g.Enabled(Feature::JitterProbe) && g.Enabled(Feature::QualityHooks) && g.Enabled(Feature::CompanionNative));
+                  CHECK(g.Enabled(Feature::JitterProbe) && g.Enabled(Feature::QualityHooks) && g.Enabled(Feature::CharaViewAccessor));
                   if (g.Enabled(Feature::JitterSource))
                       std::printf("note: jitterSource stays on with a hook over camera.getter\n");
                   CHECK(!g.Enabled(Feature::JitterSource) && Contains(g.Reason(Feature::JitterSource), "foreign hook"));
@@ -422,7 +392,7 @@ int main(int argc, char** argv)
         // the same failure on a build that is not the exact one: off, and zeros are published, not the table
         const Run other = startup(windowed, false, GateSettings {});
         CHECK(other.publishes == 1 && !other.gate.legacyFallback && !other.gate.Enabled(Feature::QualityHooks) && other.gate.Enabled(Feature::Lighting));
-        CHECK(other.published.jitterSource.generatorRva == 0 && other.published.nativeQuality.querySizeRva == 0 && other.published.companion.batch16Rva == 0);
+        CHECK(other.published.jitterSource.generatorRva == 0 && other.published.nativeQuality.querySizeRva == 0);
     }
 
     return TEST_RESULT("gate_real_exe");

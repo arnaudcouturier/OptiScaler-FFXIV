@@ -59,8 +59,6 @@ percentiles. It never holds a path, a drive letter, a user name or a character n
     `quality`, `lighting`, `hdr`, `fgMarkers`, `ngx`, `nrQuirks`, `hudless`), else `off`/`no-match`.
   - `nativeQuality`: `off`/`no-game-module` without the interface, `pending`/`not-live` before the first reading,
     `engaged`/`live` after (detail `dlaa-required` or `preset`).
-  - `companion`: `engaged`/`installed` when the native module is installed, `pending`/`configured-not-installed`
-    when the ini asks for it but it is not (detail `replacement`, `interpolation` or both), else `off`/`disabled`.
   - `nr`: `off`/`disabled` when the key is off, `engaged`/`evaluating` once an evaluate ran, else
     `pending`/`armed-no-evaluate`.
   - `frameGeneration`: from the upstream input/output state: both `NoFG` gives `off`/`disabled`, an output gives

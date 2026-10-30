@@ -70,7 +70,7 @@ void OutputsCsv()
     none.qpc = 900;
     EXPECT_EQ(OutputsRow(none, 1000, 1000.0), "900,0.000,0,-1,0,0,0,0,-1,-1,0.000,-1\n"); // before the run's zero: 0, no batch: -1
     EXPECT(OutputsHeaderText().find(kOutputsHeader) != std::string::npos, "header text carries the header");
-    EXPECT(OutputsHeaderText().find("format 2") != std::string::npos && kFormatVersion == 2, "the column added to outputs.csv bumped the format");
+    EXPECT(OutputsHeaderText().find("format 3") != std::string::npos && kFormatVersion == 3, "the draws.csv column removal bumped the format");
 }
 
 void Association()
@@ -305,8 +305,6 @@ DrawRow SampleRow()
     DrawRow r;
     r.frame = 700;
     r.draw = 42;
-    r.batch = 3;
-    r.batchDraw = 2;
     r.vs = "0x11223344";
     r.ps = "0xE6A2D0CE";
     r.stage = 6;
@@ -331,70 +329,29 @@ DrawRow SampleRow()
     r.srcAlpha = 2;
     r.dstAlpha = 6;
     r.srvs = "7/512x512/28";
-    r.qkey = "0x1A2B";
-    r.entries = 2;
-    r.hasBox = true;
-    r.box[0] = 100.5f;
-    r.box[1] = 50.0f;
-    r.box[2] = 260.5f;
-    r.box[3] = 74.0f;
-    r.boxSource = "vtx";
     return r;
 }
 
 void DrawsCsv()
 {
-    EXPECT(Columns(kDrawsHeader) == kDrawsColumns && kDrawsColumns == 38, "header columns %zu", Columns(kDrawsHeader));
+    EXPECT(Columns(kDrawsHeader) == kDrawsColumns && kDrawsColumns == 31, "header columns %zu", Columns(kDrawsHeader));
     const DrawRow r = SampleRow();
     EXPECT_EQ(DrawsRow(r),
-              "700,42,N,3,2,0x11223344,0xE6A2D0CE,6,I,36,1,120,-4,4,32,BB,3840,2160,28,3840,2160,1,1,0,7,0,1,5,6,1,2,6,7/512x512/28,0x1A2B,2,"
-              "100.5:50:260.5:74,vtx,1\n");
+              "700,42,0x11223344,0xE6A2D0CE,6,I,36,1,120,-4,4,32,BB,3840,2160,28,3840,2160,1,1,0,7,0,1,5,6,1,2,6,7/512x512/28,1\n");
     EXPECT(Columns(DrawsRow(r)) == kDrawsColumns, "row columns");
 
     DrawRow other = r;
-    other.intercepted = true;
     other.rt = RtClass::Other;
-    other.hasBox = false;
-    other.boxSource = "-";
-    other.qkey = "-";
-    other.entries = 0;
     other.srvs = "a,b";
     const std::string text = DrawsRow(other);
-    EXPECT(text.find(",I,3,2,") != std::string::npos, "intercepted draws say I");
     EXPECT(text.find(",OTHER,") != std::string::npos, "other target");
-    EXPECT(text.find(",\"a,b\",-,0,-,-,0\n") != std::string::npos, "a field with a comma is quoted, no box is -: %s", text.c_str());
-    EXPECT(Columns(kDrawsHeader) == 38, "a quoted field does not change the header");
+    EXPECT(text.find(",\"a,b\",0\n") != std::string::npos, "a field with a comma is quoted: %s", text.c_str());
+    EXPECT(Columns(kDrawsHeader) == kDrawsColumns, "a quoted field does not change the header");
     EXPECT(DrawsHeaderText().find(kDrawsHeader) != std::string::npos, "header text carries the header");
     // r0 is computed from the recorded state, not stored
     DrawRow w = r;
     w.depth.depthWrite = true;
     EXPECT(DrawsRow(w).back() == '\n' && DrawsRow(w).substr(DrawsRow(w).size() - 3) == ",0\n", "r0 follows the depth write");
-}
-
-void BoxText()
-{
-    // the box is printed with six significant digits whatever the unit: fractions stay fractions, big numbers stay whole
-    DrawRow r = SampleRow();
-    auto boxOf = [&](float a, float b, float c, float d)
-    {
-        r.box[0] = a;
-        r.box[1] = b;
-        r.box[2] = c;
-        r.box[3] = d;
-        const std::string row = DrawsRow(r);
-        const size_t end = row.rfind(",vtx,");
-        const size_t begin = row.rfind(',', end - 1);
-        return row.substr(begin + 1, end - begin - 1);
-    };
-    EXPECT_EQ(boxOf(0.25f, 0.5f, 0.75f, 1.0f), "0.25:0.5:0.75:1");
-    EXPECT_EQ(boxOf(-1.0f, -0.5f, 0.125f, 0.9f), "-1:-0.5:0.125:0.9");
-    EXPECT_EQ(boxOf(1920.0f, 1080.0f, 3840.0f, 2160.0f), "1920:1080:3840:2160");
-    EXPECT_EQ(boxOf(100.5f, 50.25f, 260.5f, 74.125f), "100.5:50.25:260.5:74.125");
-    EXPECT_EQ(boxOf(-3.0e38f, -3.0e38f, 3.0e38f, 3.0e38f), "-3e+38:-3e+38:3e+38:3e+38");
-    EXPECT_EQ(boxOf(0.0f, 0.0f, 0.0f, 0.0f), "0:0:0:0");
-    EXPECT(Columns(DrawsRow(r)) == kDrawsColumns, "a box of any size is still one column set");
-    r.hasBox = false;
-    EXPECT(DrawsRow(r).find(",0x1A2B,2,-,vtx,1\n") != std::string::npos, "no box is -");
 }
 
 void Schedules()
@@ -481,7 +438,7 @@ void RowCaps()
     for (int i = 0; i < 3; ++i)
         marked.Admit(true);
     EXPECT_EQ(CapMarker(1000, marked), "# frame 1000 capped at 400 rows, 38 draws dropped\n"
-                                       "# frame 1000 priority limit 1200 reached, 3 r0 or intercepted draws dropped\n");
+                                       "# frame 1000 priority limit 1200 reached, 3 r0 draws dropped\n");
     EXPECT(CapMarker(1, marked).rfind("# frame 1 capped at 400 rows,", 0) == 0, "the marker starts with a comment sign");
     // draws.csv explains the marker
     EXPECT(DrawsHeaderText().find("# frame N capped at 400 rows, M draws dropped") != std::string::npos, "the header says what the marker is");
@@ -581,7 +538,7 @@ void RunFolders()
 }
 
 // ---- literal pins found missing by the mutation checks ---------------------------------------------------------------
-static_assert(kKeepRuns == 5 && kMaxShaderRows == 5000 && kEarlyFrames == 600 && kFormatVersion == 2, "the numbers are written out on purpose");
+static_assert(kKeepRuns == 5 && kMaxShaderRows == 5000 && kEarlyFrames == 600 && kFormatVersion == 3, "the numbers are written out on purpose");
 static_assert(kOutputsBytes == (48ull << 20) && kEarlyDrawBytes == (6ull << 20) && kWorldDrawBytes == (40ull << 20), "byte caps");
 static_assert(kMaxDrawRowsPerFrame == 400 && kMaxPriorityRowsPerFrame == 1200, "row caps");
 
@@ -613,8 +570,8 @@ void TextPins()
     EXPECT_EQ(RtName(RtClass::BackbufferLike), "BBLIKE");
     EXPECT_EQ(RtName(RtClass::Other), "OTHER");
     EXPECT_EQ(kDrawsHeader,
-              "frame,draw,via,batch,batch_draw,vs,ps,stage,kind,index_count,instance_count,start_index,base_vertex,topology,stride,rt,rt_w,rt_h,"
-              "rt_fmt,vp_w,vp_h,dsv,depth,depth_write,depth_func,stencil,blend,src,dst,op,src_a,dst_a,srvs,qkey,entries,box_raw,box_src,r0");
+              "frame,draw,vs,ps,stage,kind,index_count,instance_count,start_index,base_vertex,topology,stride,rt,rt_w,rt_h,"
+              "rt_fmt,vp_w,vp_h,dsv,depth,depth_write,depth_func,stencil,blend,src,dst,op,src_a,dst_a,srvs,r0");
     EXPECT_EQ(kShadersHeader,
               "ps,vs_set,stage,first_frame,early_draws,early_r0,world_draws,world_r0,world_frames,world_r0_frames,world_max_per_frame,"
               "world_r0_max_per_frame,rt_none,rt_bb,rt_bblike,rt_other");
@@ -632,16 +589,9 @@ void TextPins()
     };
     EXPECT_EQ(field("frame"), "700");
     EXPECT_EQ(field("draw"), "42");
-    EXPECT_EQ(field("via"), "N");
-    EXPECT_EQ(field("batch"), "3");
-    EXPECT_EQ(field("batch_draw"), "2");
     EXPECT_EQ(field("vs"), "0x11223344");
     EXPECT_EQ(field("ps"), "0xE6A2D0CE");
     EXPECT_EQ(field("stage"), "6");
-    EXPECT_EQ(field("qkey"), "0x1A2B");
-    EXPECT_EQ(field("entries"), "2");
-    EXPECT_EQ(field("box_raw"), "100.5:50:260.5:74");
-    EXPECT_EQ(field("box_src"), "vtx");
     EXPECT_EQ(field("r0"), "1");
 
     // the outputs.csv row of an output exactly on its batch's Post: zero lag is 0.000, not the "no batch" -1
@@ -652,14 +602,6 @@ void TextPins()
     zero.sinceLastTicks = 0;
     zero.ticksSincePost = 0;
     EXPECT_EQ(OutputsRow(zero, 1000, 1000.0), "5000,4.000,0,-1,0,0,0,0,0,0.000,0.000,0\n");
-
-    // six significant digits, not five
-    DrawRow r = SampleRow();
-    r.box[0] = 1234.56f;
-    r.box[1] = 0.5f;
-    r.box[2] = 65432.1f;
-    r.box[3] = 7.0f;
-    EXPECT(DrawsRow(r).find(",1234.56:0.5:65432.1:7,vtx,") != std::string::npos, "six digits: %s", DrawsRow(r).c_str());
 
     // both shader names are escaped like the other text fields
     DrawRow q = SampleRow();
@@ -775,7 +717,6 @@ int main()
     Summary_();
     RuleR0();
     DrawsCsv();
-    BoxText();
     Schedules();
     Caps();
     RowCaps();

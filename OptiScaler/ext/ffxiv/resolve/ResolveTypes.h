@@ -273,7 +273,7 @@ using LogSink = std::function<void(LogLevel, const std::string&)>;
 // ---- The resolved build -----------------------------------------------------------------------------------------------
 
 // What replaces the constexpr kCurrentBuild reads. `build` has the same field names and types as the table: build.nativeQuality,
-// build.companion, build.charaView, build.jitter, build.jitterSource. Every Rva and Guard field starts at 0 and is filled only by a
+// build.charaView, build.jitter, build.jitterSource. Every Rva and Guard field starts at 0 and is filled only by a
 // seam that resolved with a usable status (and by the table when the cross-check disagrees); fixed offsets and constants keep the
 // table defaults ("not self-healing") unless a bound Offset seam fills them. Check the seam before trusting a field.
 struct ResolvedBuild

@@ -10,7 +10,7 @@
 // THE DESIGN:
 //   Group 1 = features that identify by exe name or shader CRC and read no address of the executable (scene HDR, lighting, UI / HUD-less
 //     boundary, geometry, markers, MipBind, the FFXIV quirks, the catalog health). They run on ANY ffxiv_dx11.exe.
-//   Group 2 = features that read or hook addresses of the executable (native quality, jitter probe and source, companion native hooks, the
+//   Group 2 = features that read or hook addresses of the executable (native quality, jitter probe and source, the
 //     CharaView accessor). KNOWN build: they run when the seams say so. UNKNOWN build: only with FfxivUnknownBuildHooks AND usable seams.
 //   FfxivLegacyGameBuild (rollback): EXACTLY the legacy rules. Exact stamp and size, the compile-time table and its old byte guards, no resolve,
 //     Group 2 only on the exact known build, Group 1 only on the exact known build too, nothing from the other two keys.
@@ -34,10 +34,9 @@
 // values).
 //
 // The exact build is identified by its PE stamp and size, whatever the file is called (the legacy selector matched stamp and size only, and so does the
-// rollback key); the name ffxiv_dx11.exe only decides on a build the table does not know (MakeGateInputT, StartupDecision.h). The companion Install(),
-// the frame pacing trace and the automatic ReShade depth still check the name, as before. The consumers still need
-// ActiveStarted() (the first device hook) before any hook, DLAA read or CharaView works; the companion header bounds are an extra refusal that the old
-// path did not have.
+// rollback key); the name ffxiv_dx11.exe only decides on a build the table does not know (MakeGateInputT, StartupDecision.h).
+// The frame pacing trace and the automatic ReShade depth still check the name, as before. The consumers still need
+// ActiveStarted() (the first device hook) before any hook, DLAA read or CharaView works.
 
 #include "AnchorsJitter.h"
 #include "../BuildBounds.h"
@@ -125,13 +124,6 @@ inline constexpr const char* kQualityHookSeams[] = {
     "quality.rendererSceneSizeOffset", "quality.contextFlagsOffset", "quality.contextCacheOffset",
 };
 inline constexpr const char* kJitterProbeSeams[] = { "camera.global", "camera.cameraOffset", "camera.jitterPointerOffset" };
-inline constexpr SitePair kCompanionSites[] = {
-    { "companion.batch16", "companion.batch16Shape" },
-    { "companion.batch32", "companion.batch32Shape" }, // batch32Shape is bound to no field (the table keeps one batch guard): tested directly
-    { "companion.enqueue", "companion.enqueueShape" },
-    { "companion.bindState", "companion.bindStateShape" },
-};
-inline constexpr const char* kCompanionSeams[] = { "companion.nameplateModulePointer", "companion.layoutSlotTable", "companion.nativeContextOffset" };
 inline constexpr const char* kCharaSeams[] = { "chara.accessor", "chara.managerPointer", "chara.targetsOffset" };
 
 struct CrossPair
@@ -159,38 +151,11 @@ inline constexpr const char* kStrictOnKnownBuild[] = {
     "jitterSource.cameraGlobal",
 };
 
-// An offset struct whose members are read by ONE consumer while only some of them are healed from the executable (the others keep their table
-// default: "not self-healing"). On an UNKNOWN build, if a healed member differs from its table default the struct layout moved and the unhealed
-// siblings are suspect: the consumer is refused, with a reason that names the group. Keys are FieldTable keys, nullptr-terminated.
-// Only groups whose unhealed members a consumer really reads: the batch header (CompanionPackets Capture / Supported, the nameplate replay). Looked at
-// and left out on purpose: the settings struct (settingsRenderer / settingsAdditional are only counted in the snapshot size, never indexed), the
-// renderer struct (rendererQueuesOffset has no consumer), drawState (drawStateFlagOffset has no consumer), the queue block layout (no healed member
-// lives in it: moduleStatePointer / stateQueuePointer index the module and state objects, entryPointerOffset is required == 8 by the bounds rule),
-// the CharaView manager (targetsOffset is pinned in the accessor pattern, a moved value is NotFound already; CharaTable reads Layout defaults) and the
-// jitter object (cameraOffset / jitterPointerOffset index the camera and the pointer holder, not the 20-byte object).
-struct OffsetGroup
-{
-    const char* name;
-    Feature feature;
-    const char* healed[4];
-    const char* unhealed[8];
-};
-inline constexpr OffsetGroup kOffsetGroups[] = {
-    { "companion batch header",
-      Feature::CompanionNative,
-      { "companion.batchFormatOffset", "companion.batchExtensionOffset", nullptr, nullptr },
-      { "companion.batchKindOffset", "companion.batchWrapperOffset", "companion.batchCountOffset", "companion.batchVerticesOffset", nullptr, nullptr, nullptr,
-        nullptr } },
-};
-
 namespace gate_detail
 {
 inline bool IsSiteSeam(std::string_view id)
 {
     for (const SitePair& s : kQualitySites)
-        if (id == s.location || id == s.shape)
-            return true;
-    for (const SitePair& s : kCompanionSites)
         if (id == s.location || id == s.shape)
             return true;
     for (const JitterHookSite& s : kJitterHookSites)
@@ -215,7 +180,7 @@ inline void AddUnique(std::vector<std::string>& v, const std::string& id)
         v.push_back(id);
 }
 
-// Every seam a binding of `group` (a FieldTable group: "nativeQuality", "companion", "charaView", "jitter", "jitterSource") fills a field from:
+// Every seam a binding of `group` (a FieldTable group: "nativeQuality", "charaView", "jitter", "jitterSource") fills a field from:
 // the Rva, the Guard and the Offset fields alike. Deduplicated, registry order. This is how "every bound seam of the group must be usable"
 // follows the registry instead of a hand-copied list: a resolver change that binds one more field shows up here (and in a test that pins the count).
 inline std::vector<std::string> BoundSeams(const Registry& reg, std::string_view group)
@@ -290,35 +255,6 @@ class Checks
         if (!ok)
             _faults.push_back(s == nullptr ? id + " is not in the registry"
                                            : id + " is " + StatusName(s->status) + ", plain Found (or, on the known build, a single anchor through a weak dependency) is required");
-    }
-    // The offset groups of `feature` (kOffsetGroups): a healed member that moved away from its table default refuses the consumer. Unknown build only.
-    void OffsetGroups(Feature feature)
-    {
-        static const GameBuild defaults {};
-        for (const OffsetGroup& g : kOffsetGroups)
-        {
-            if (g.feature != feature)
-                continue;
-            ++_checked;
-            for (const char* key : g.healed)
-            {
-                const FieldRow* row = key != nullptr ? FindField(key) : nullptr;
-                if (row == nullptr)
-                    continue;
-                const std::uint32_t* now = FieldU32(_rb.build, *row);
-                const std::uint32_t* def = FieldU32(defaults, *row);
-                if (now == nullptr || def == nullptr || *now == *def)
-                    continue;
-                char numbers[80];
-                std::snprintf(numbers, sizeof(numbers), " is 0x%x, its table default is 0x%x", *now, *def);
-                std::string siblings;
-                for (const char* u : g.unhealed)
-                    if (u != nullptr)
-                        siblings += (siblings.empty() ? "" : ", ") + std::string(u);
-                _faults.push_back(std::string("offset group '") + g.name + "': " + key + numbers + "; the unhealed siblings (" + siblings +
-                                  ") keep their table values on this build and are suspect");
-            }
-        }
     }
     // a hook site: location AND shape, on every build
     void Site(const std::string& location, const std::string& shape)
@@ -453,31 +389,6 @@ inline Checks JitterSourceChecks(const ResolvedBuild& rb, const Registry& reg)
     return c;
 }
 
-inline Checks CompanionChecks(const ResolvedBuild& rb, const Registry& reg)
-{
-    Checks c(rb);
-    for (const SitePair& s : kCompanionSites)
-        c.Site(s.location, s.shape);
-    for (const char* id : kCompanionSeams)
-        c.Seam(id);
-    // every bound seam of the group: the header offsets heal only format and extension, the rest keep table values (logged as not self-healing),
-    // so the header group is all-or-nothing: one unusable offset seam refuses the whole feature
-    for (const std::string& id : BoundSeams(reg, "companion"))
-        c.Seam(id);
-    c.Require(CompanionOffsetsInBounds(rb.build.companion), "a companion header offset is outside the 64-byte header or the queue entry");
-    if (!rb.knownBuild)
-    {
-        // a healed member of an offset group that moved: the unhealed siblings (kind, wrapper, count, vertices) are suspect
-        c.OffsetGroups(Feature::CompanionNative);
-        // enqueue is a leaf: only the caller-side anchor pins its ENTRY, the head and tail anchors shift together (NOT the SeamResult::hits sum)
-        c.AnchorUnique("companion.enqueue", "callerEpilogue");
-        // the consumer dereferences [context + nativeContextOffset] as a COM pointer: only plain Found (both anchors, the second one pins the
-        // vtable call that proves a D3D11 context) is accepted on a build nobody verified offline
-        c.PlainFound("companion.nativeContextOffset");
-    }
-    return c;
-}
-
 inline Checks CharaChecks(const ResolvedBuild& rb, const Registry& reg)
 {
     Checks c(rb);
@@ -522,12 +433,6 @@ inline std::vector<std::string> RequiredSeams(Feature f, const Registry& reg)
             AddUnique(out, g.seam);
         AddSeams(out, kJitterGateSeams);
         for (const std::string& id : BoundSeams(reg, "jitterSource"))
-            AddUnique(out, id);
-        break;
-    case Feature::CompanionNative:
-        AddSites(out, kCompanionSites);
-        AddSeams(out, kCompanionSeams);
-        for (const std::string& id : BoundSeams(reg, "companion"))
             AddUnique(out, id);
         break;
     case Feature::CharaViewAccessor:
@@ -665,14 +570,12 @@ inline GateReport Decide(const GateInput& in, const GateSettings& s)
     const Checks qualityHooks = QualityHookChecks(*rb, reg);
     const Checks probe = JitterProbeChecks(*rb, reg);
     const Checks source = JitterSourceChecks(*rb, reg);
-    const Checks companion = CompanionChecks(*rb, reg);
     const Checks chara = CharaChecks(*rb, reg);
     auto put = [&](Feature f, const Checks& c) { c.Ok() ? SetOn(r.At(f), c.Reason()) : SetOff(r.At(f), c.Reason()); };
     put(Feature::QualityRead, quality);
     put(Feature::QualityHooks, qualityHooks);
     put(Feature::JitterProbe, probe);
     put(Feature::JitterSource, source);
-    put(Feature::CompanionNative, companion);
     put(Feature::CharaViewAccessor, chara);
 
     // ---- the cross-group consistency checks: a mismatch turns off the features of both sides

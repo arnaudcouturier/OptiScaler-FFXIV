@@ -373,7 +373,7 @@ KNOWN LIMITS
   * 5x and 6x multi frame generation on RTX 40 are experimental; one GPU hang happened at 6x. Use 4x or lower.
   * After a game patch, the FFXIV features that go by program name or shader (scene HDR, lighting, HUD-less, geometry, markers, the mipmap
     bias) keep running, and so do DLSS-G, XeFG and Neural Rendering. The features that read or hook the game's code (native quality, the
-    jitter probe and jitter source, the Companion native hooks, the character preview lookup) are tied to one game build: they stay off until
+    jitter probe and jitter source, the nameplate native hooks, the character preview lookup) are tied to one game build: they stay off until
     the fork is updated (the log says which), unless you set [FFXIV] FfxivUnknownBuildHooks=true, which runs each of them if the fork
     found every address it needs.
 

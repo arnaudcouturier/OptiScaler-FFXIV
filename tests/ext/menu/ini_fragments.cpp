@@ -479,12 +479,11 @@ int main(int argc, char** argv)
                 return true;
         return false;
     };
-    CHECK(bound.size() >= 140);
-    CHECK(has("Companion", "HudReplacement") && has("Companion", "HudInterpolation"));
+    CHECK(bound.size() >= 138);
     CHECK(has("HudLess", "Diagnostics") && has("HudLess", "ReShadeProbe") && has("HudLess", "ReShadePresets"));
     CHECK(has("DLSSG", "UIRecomposition") && has("XeFG", "UnlockMFG") && has("DlssNr", "ScanExposure"));
     CHECK(has("DlssNr", "ScaleUpKey") && has("DlssNr", "ScaleDownKey") && has("DlssNr", "TransferToggleKey"));
-    CHECK(frags.count("Companion") == 1 && frags.count("HudLess") == 1 && frags.count("DlssNr") == 1);
+    CHECK(frags.count("HudLess") == 1 && frags.count("DlssNr") == 1);
 
     // the two ini-only developer keys of the HUD-less guard and the HDR paste ship as auto (the code default applies) and say which default
     // that is (string keys: the comparison below does not read them)
@@ -493,7 +492,8 @@ int main(int argc, char** argv)
         auto hasLine = [&](const std::string& text)
         { return hudlessIni.find("\n" + text + "\r\n") != std::string::npos || hudlessIni.find("\n" + text + "\n") != std::string::npos; };
         CHECK(hasLine("GuardMode=auto") && hasLine("HdrPaste=auto"));
-        // the two developer probes ship switched off: the key line of each is there once, and it says auto (the code default is false)
+        // the developer probe ships switched off: its key line is there once, and it says auto (the code default is false).
+        // the retired overlay key ships no line: an existing ini that still carries it loads ignored.
         auto keyLines = [&](const std::string& key)
         {
             std::vector<std::string> found;
@@ -506,8 +506,8 @@ int main(int argc, char** argv)
             return found;
         };
         CHECK(keyLines("PlateDiagnostics") == std::vector<std::string> { "PlateDiagnostics=auto" });
-        CHECK(keyLines("PlateOverlay") == std::vector<std::string> { "PlateOverlay=auto" });
-        CHECK(hasLine("PlateDiagnostics=auto") && hasLine("PlateOverlay=auto"));
+        CHECK(keyLines("PlateOverlay").empty());
+        CHECK(hasLine("PlateDiagnostics=auto") && !hasLine("PlateOverlay=auto"));
         CHECK(frags.at("HudLess").at("GuardMode").find("legacy or density - Default (auto) is legacy") != std::string::npos);
         CHECK(frags.at("HudLess").at("HdrPaste").find("off or on - Default (auto) is off") != std::string::npos);
     }
@@ -596,33 +596,15 @@ int main(int argc, char** argv)
         std::printf("  %s\n", s.c_str());
     CHECK(problems.empty());
 
-    // the new fragment documents both Companion keys with their default and their requirement
-    {
-        auto doc = [&](const char* s, const char* k) -> std::string
-        {
-            const auto f = frags.find(s);
-            if (f == frags.end())
-                return {};
-            const auto d = f->second.find(k);
-            return d == f->second.end() ? std::string {} : d->second;
-        };
-        const auto companion = frags.find("Companion");
-        CHECK(companion != frags.end() && companion->second.size() == 2);
-        CHECK(doc("Companion", "HudReplacement").find("OptiFG DLSS-G or XeFG") != std::string::npos);
-        CHECK(doc("Companion", "HudReplacement").find("Default (auto) is false") != std::string::npos);
-        CHECK(doc("Companion", "HudInterpolation").find("Requires HudReplacement") != std::string::npos);
-        CHECK(doc("Companion", "HudInterpolation").find("Default (auto) is false") != std::string::npos);
-    }
-
     // negative controls: each rule complains about its own breakage
     {
         Fragments broken = frags;
-        broken["Companion"].erase("HudInterpolation");
+        broken["DlssNr"].erase("ScanExposure");
         CHECK(!Problems(bound, broken).empty()); // a bound key lost its ini line
     }
     {
         Fragments broken = frags;
-        broken.erase("Companion");
+        broken.erase("DlssNr");
         CHECK(!Problems(bound, broken).empty()); // a section lost its fragment
     }
     {
@@ -642,7 +624,7 @@ int main(int argc, char** argv)
     }
     {
         auto more = bound;
-        more.push_back({ "Companion", "NoSuchKey", "test" });
+        more.push_back({ "HudLess", "NoSuchKey", "test" });
         CHECK(!Problems(more, frags).empty()); // a new bound key without a line
     }
 

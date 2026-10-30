@@ -3,16 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 
-// Shared "safe ReadProcessMemory on our own process" wrapper. Three sites independently
-// hand-wrote this pair: ext::ffxiv::companion::Packets::Read/ReadBytes (CompanionPackets.h),
-// ext::ffxiv::companion::replay::FfxivNameplatePackets's own former copy, and
-// ext::ffxiv::quality::FfxivNativeQualityHooks::ReadMemory. All three now forward to this pair;
+// Shared "safe ReadProcessMemory on our own process" wrapper. Two sites independently
+// hand-wrote this pair: the removed nameplate packet reader and
+// ext::ffxiv::quality::FfxivNativeQualityHooks::ReadMemory. Only the quality hooks forward to this pair now;
 // this is the only place left with the actual ReadProcessMemory call.
 //
-// Lives in ext/core rather than under ext/ffxiv/companion so the quality module does not have
-// to include a companion header to get it -- ext::ffxiv::lighting::FfxivLightingCapture already
-// avoids the same kind of cross-feature include on its own CompanionCallbacks (see the comment
-// there), keeping every ext::ffxiv::* submodule independently usable. Dependency-free besides
+// Lives in ext/core so every ext/ffxiv::* submodule stays independently usable without a cross-feature
+// include. Dependency-free besides
 // <windows.h> so it can be pulled into a header a tests/ext recipe builds standalone.
 namespace ext::core
 {

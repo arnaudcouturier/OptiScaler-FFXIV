@@ -72,7 +72,7 @@ struct Snapshot
     std::string gpuName;
     uint64_t gpuVramMB = 0;
     std::vector<Runtime> runtimes; // dlss, dlssg, nr, streamline, in that order
-    std::vector<Feature> features; // gameModule, nativeQuality, companion, nr, frameGeneration, hudless, hdr
+    std::vector<Feature> features; // gameModule, nativeQuality, nr, frameGeneration, hudless, hdr
     std::string fgInput;           // closed vocabulary ("NoFG", "Upscaler", "DLSSG", ...)
     std::string fgOutput;          // closed vocabulary ("NoFG", "FSRFG", "DLSSG", ...)
     bool nrEnabled = false;

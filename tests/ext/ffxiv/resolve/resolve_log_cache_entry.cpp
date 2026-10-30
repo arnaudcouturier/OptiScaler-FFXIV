@@ -238,7 +238,7 @@ void TestResolvedBuildFields()
     CHECK(b.timeDateStamp == 0x6ad10bfd && b.sizeOfImage == kImageSize);
 
     // every Rva and Guard field no seam filled is ZERO, not the C table value (the 0x25f610 reuse trap)
-    CHECK(b.nativeQuality.querySizeRva == 0 && b.nativeQuality.settingsPointerRva == 0 && b.companion.batch16Rva == 0 && b.companion.layoutSlotTableRva == 0);
+    CHECK(b.nativeQuality.querySizeRva == 0 && b.nativeQuality.settingsPointerRva == 0 && b.jitterSource.cameraGetterRva == 0 && b.jitterSource.generatorRva == 0);
     CHECK(b.jitter.cameraGlobalRva == 0 && b.jitterSource.cameraGetterRva == 0 && b.jitterSource.generatorRva == 0 && b.jitterSource.deviceSizeRva == 0);
     bool guardsZero = true;
     for (std::uint8_t v : b.jitterSource.strengthInstructions)
@@ -249,7 +249,7 @@ void TestResolvedBuildFields()
     // offsets and constants keep the table defaults (not self-healing) unless a seam fills them
     const GameBuild table {};
     CHECK(b.charaView.depthOffset0 == table.charaView.depthOffset0 && b.charaView.entryCount == table.charaView.entryCount);
-    CHECK(b.nativeQuality.settingsModeOffset == table.nativeQuality.settingsModeOffset && b.companion.drawCommandSize == table.companion.drawCommandSize);
+    CHECK(b.nativeQuality.settingsModeOffset == table.nativeQuality.settingsModeOffset && b.jitterSource.strengthFloorBits == table.jitterSource.strengthFloorBits);
     CHECK(b.charaView.pattern == table.charaView.pattern);
 
     // a guard read at an offset from the seam's value (guardOffset) reads there, with the length of the table array
@@ -341,7 +341,7 @@ void TestEntryAndCoverage()
         rvaGuard += (row.kind == FieldKind::Rva || row.kind == FieldKind::Guard) ? 1 : 0;
     CHECK(unbound.size() == rvaGuard - 4);
     auto has = [&](const char* key) { return std::find(unbound.begin(), unbound.end(), key) != unbound.end(); };
-    CHECK(!has("charaView.accessorRva") && !has("nativeQuality.resizeCallbacksInstructions") && has("companion.batch16Rva") && has("jitterSource.strengthInstructions"));
+    CHECK(!has("charaView.accessorRva") && !has("nativeQuality.resizeCallbacksInstructions") && has("nativeQuality.querySizeRva") && has("jitterSource.strengthInstructions"));
     CHECK(!has("charaView.targetsOffset")); // offsets are never "unbound": they keep defaults
     CHECK(UnboundFields(Registry {}).size() == rvaGuard);
 }

@@ -49,7 +49,6 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "GuardMode", guardMode);
     b.Add("HudLess", "HdrPaste", hdrPaste);
     b.Add("HudLess", "PlateDiagnostics", plateDiagnostics);
-    b.Add("HudLess", "PlateOverlay", plateOverlay);
 }
 
 void HudlessConfig::PostLoad()

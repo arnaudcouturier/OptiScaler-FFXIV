@@ -9,7 +9,7 @@
 //     (consulting it would arm ReShade at a boundary that is wrong when the catalog is partial); LastReason() agrees; the guard is\n//     pinned as the exact statement if (!UiBoundaryUsable()) + eturn NotThisFrame; (whitespace and comments normalised), so a dropped\n//     ! fails here;
 //   * the Present tick runs before the Armed() test of OnPresentBegin (default-ini sessions must get the catalog line);
 //   * the time base is set before the creation detour is committed;
-//   * the CRC literals the table mirrors from the heavy headers (lighting, companion, nameplate) are still the owners' values.
+//   * the CRC literals the table mirrors from the heavy headers (lighting, nameplate) are still the owners' values.
 // It also runs the inline glue (FfxivCatalog.h) against the global ledger.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -193,25 +193,12 @@ void MirroredLiterals()
         }
     }
 
-    // companion: CompanionGpu::Identify, four `case <crc>u:`
-    const std::string companion = ReadText("OptiScaler/ext/ffxiv/companion/CompanionGpu.h");
-    const std::string identify = Between(companion, "inline UINT Identify(", "inline void TagShader", "companion Identify");
-    CHECK_EQ(CountOf(identify, "case "), Info(Catalog::Companion).count);
-    for (size_t i = 0; i < Info(Catalog::Companion).count; ++i)
-        CHECK(identify.find("case " + std::to_string(Info(Catalog::Companion).entries[i].crc) + "u:") != std::string::npos);
 
-    // nameplate: FfxivNameplateRenderer::TagLayout membership and the variant check in CaptureMaterial
-    const std::string nameplate = ReadText("OptiScaler/ext/ffxiv/companion/replay/FfxivNameplateRenderer.h");
+    // nameplate: PlateLayoutTag::TagLayout membership
+    const std::string nameplate = ReadText("OptiScaler/ext/ffxiv/ui/PlateLayoutTag.h");
     const auto& np = Info(Catalog::Nameplate);
     CHECK(nameplate.find("crc!=" + std::to_string(np.entries[0].crc) + "u && crc!=" + std::to_string(np.entries[1].crc) + "u && crc!=" +
                          std::to_string(np.entries[2].crc) + "u") != std::string::npos);
-    CHECK(nameplate.find("variant==0?" + std::to_string(np.entries[0].crc) + "u:variant==4?" + std::to_string(np.entries[1].crc) + "u:" +
-                         std::to_string(np.entries[2].crc) + "u") != std::string::npos);
-    // ... and the UI/companion CRCs of Variant()
-    const std::string variant = Between(nameplate, "inline int Variant(", "inline constexpr GUID layoutTag", "nameplate Variant");
-    CHECK_EQ(CountOf(variant, "case "), Info(Catalog::Companion).count);
-    for (size_t i = 0; i < Info(Catalog::Companion).count; ++i)
-        CHECK(variant.find("case " + std::to_string(Info(Catalog::Companion).entries[i].crc) + "u:") != std::string::npos);
 }
 
 void CreationHook()
@@ -244,16 +231,16 @@ void CreationHook()
 
 void NameplateTagging()
 {
-    const std::string text = ReadText("OptiScaler/ext/ffxiv/companion/replay/FfxivNameplateRenderer.h");
-    const std::string tag = Between(text, "inline void TagLayout(", "struct Material", "TagLayout");
+    const std::string text = ReadText("OptiScaler/ext/ffxiv/ui/PlateLayoutTag.h");
+    const std::string tag = Between(text, "inline void TagLayout(", "} // namespace", "TagLayout");
     const size_t seen = Pos(tag, "ext::ffxiv::catalog::OnLayoutSeen()", "layout seen");
-    const size_t crc = Pos(tag, "const auto crc=Crc(code,size);", "crc");
+    const size_t crc = Pos(tag, "ext::core::Crc32(code,size)", "crc"); // the shared helper, not a second local hash
     const size_t membership = Pos(tag, "crc!=3153679471u) return;", "membership");
     const size_t note = Pos(tag, "ext::ffxiv::catalog::OnNameplateVertexShader(code,size,crc)", "note");
     const size_t layout = Pos(tag, "Layout layout;", "layout");
     CHECK(seen < crc);                      // counted for every layout, whatever the early outs below do
     CHECK(crc < membership && membership < note && note < layout); // only the catalog members reach the note; before the element validation that can return
-    CHECK_EQ(CountOf(tag, "Crc(code,size)"), 1u); // no second hash of the bytecode
+    CHECK_EQ(CountOf(tag, "Crc32(code,size)"), 1u); // no second hash of the bytecode
 }
 
 void UiProvider()

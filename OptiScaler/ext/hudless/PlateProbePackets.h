@@ -701,8 +701,8 @@ inline CommandFields ParseCommand(std::span<const unsigned char> bytes, const Co
 // A draw command worth looking at: whole triangles, and not more indices than the visibility layer accepts either.
 inline bool UsableIndexCount(uint32_t count) { return count != 0 && count % 3 == 0 && count <= 256 * 1024; }
 
-// ---- the overlay ------------------------------------------------------------------------------------------------------
-// The raw boxes are in the game's own vertex units, which nobody has measured against pixels yet, so the overlay can read them three ways.
+// ---- box units (the removed overlay read them three ways) -----------------------------------------------------------------
+// The raw boxes are in the game's own vertex units, which nobody has measured against pixels yet. No product code reads them anymore; the mapping stays unit-tested.
 enum class OverlayUnits : uint8_t
 {
     Pixels = 0, // pixels of the viewport the draw was made with

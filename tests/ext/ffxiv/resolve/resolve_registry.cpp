@@ -27,7 +27,7 @@ struct Member
     std::uint32_t size = 0;
 };
 
-// The members of the five table structs, parsed from the text of GameBuild.h.
+// The members of the four table structs, parsed from the text of GameBuild.h.
 std::vector<Member> ParseGameBuild(const std::string& path, bool& ok)
 {
     ok = false;
@@ -36,8 +36,7 @@ std::vector<Member> ParseGameBuild(const std::string& path, bool& ok)
     if (!in)
         return out;
     const std::map<std::string, std::string> groups = { { "NativeQualityBuild", "nativeQuality" },
-                                                        { "CompanionBuild", "companion" },
-                                                        { "CharaViewBuild", "charaView" },
+                                                                                                                { "CharaViewBuild", "charaView" },
                                                         { "JitterBuild", "jitter" },
                                                         { "JitterSourceBuild", "jitterSource" } };
     std::string group;
@@ -96,7 +95,7 @@ void TestProductRegistry()
         std::printf("registry error: %s\n", e.c_str());
     CHECK(errors.empty());
 
-    // CharaView is registered (the first worked example); the companion and jitter skeletons register nothing until their anchors are written
+    // CharaView is registered (the first worked example); the jitter skeleton registers nothing until its anchors are written
     CHECK(std::any_of(reg.seams.begin(), reg.seams.end(), [](const SeamSpec& s) { return std::string_view(s.id) == "chara.accessor"; }));
 
     // every seam id is "group.name", every anchor has a name and a parseable pattern (ValidateRegistry parsed them; this pins the style)
@@ -109,15 +108,12 @@ void TestProductRegistry()
     }
 
     // the three group files each add through their own function: calling one alone must not touch the seams of another
-    Registry quality, companion, jitter;
+    Registry quality, jitter;
     AddQualityAnchors(quality);
-    AddCompanionAnchors(companion);
     AddJitterAnchors(jitter);
-    CHECK(quality.seams.size() + companion.seams.size() + jitter.seams.size() == reg.seams.size());
-    CHECK(quality.bindings.size() + companion.bindings.size() + jitter.bindings.size() == reg.bindings.size());
-    // seam id prefixes keep three parallel writers from colliding: companion.*, jitterSource.*, everything else belongs to quality
-    for (const SeamSpec& s : companion.seams)
-        CHECK(std::string_view(s.id).rfind("companion.", 0) == 0);
+    CHECK(quality.seams.size() + jitter.seams.size() == reg.seams.size());
+    CHECK(quality.bindings.size() + jitter.bindings.size() == reg.bindings.size());
+    // seam id prefixes keep two parallel writers from colliding: jitterSource.*, everything else belongs to quality
     for (const SeamSpec& s : jitter.seams)
         CHECK(std::string_view(s.id).rfind("jitterSource.", 0) == 0);
     for (const SeamSpec& s : quality.seams)
@@ -183,8 +179,7 @@ void TestFieldTable(const std::string& repo)
     GameBuild b;
     *FieldU32(b, *FindField("charaView.accessorRva")) = 0x1234;
     *FieldU32(b, *FindField("jitterSource.deviceSizeRva")) = 0x5678;
-    *FieldU32(b, *FindField("companion.nativeContextOffset")) = 0x9abc;
-    CHECK(b.charaView.accessorRva == 0x1234 && b.jitterSource.deviceSizeRva == 0x5678 && b.companion.nativeContextOffset == 0x9abc);
+    CHECK(b.charaView.accessorRva == 0x1234 && b.jitterSource.deviceSizeRva == 0x5678);
     FieldBytes(b, *FindField("nativeQuality.querySizeInstructions"))[27] = 0x77;
     CHECK(b.nativeQuality.querySizeInstructions[27] == 0x77 && FindField("nativeQuality.querySizeInstructions")->size == 28);
     FieldBytes(b, *FindField("jitterSource.strengthInstructions"))[156] = 0x66;
@@ -200,7 +195,7 @@ void TestFieldTable(const std::string& repo)
         rva += row.kind == FieldKind::Rva ? 1 : 0;
         guard += row.kind == FieldKind::Guard ? 1 : 0;
     }
-    CHECK(rva == 28 && guard == 14);
+    CHECK(rva == 22 && guard == 11); // the companion block (6 Rva, 3 Guard) is gone
 }
 } // namespace
 

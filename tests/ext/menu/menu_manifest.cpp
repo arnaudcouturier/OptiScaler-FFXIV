@@ -7,7 +7,7 @@
 // registered tab is the layout tab and a real tab of the menu; the FFXIV tab row exists once; FFXIV-only cards are
 // exactly the cards of the FFXIV tab and their files test the game; every anchor resolves; every card appears once in
 // the final order, every tab is one run of it, and none sits between two upstream boxes of one shared function; every
-// id that was ever released resolves (live or alias); aliases are sane; ini-only keys are real. Budget: the `// ext:` seam lines of the upstream
+// id that was ever released resolves (live, alias or retired); aliases and retirements are sane; ini-only keys are real. Budget: the `// ext:` seam lines of the upstream
 // menu files stay at the agreed number.
 //
 // Each rule is also run against a deliberately broken model and must complain: that is the mutation check of the rule.
@@ -53,7 +53,7 @@ struct Model
     std::vector<std::string> tabLabels;
     std::vector<Reg> regs;
     std::vector<Slot> slots;
-    std::vector<std::string> ffxivOnly, persisted, iniOnly, titleExceptions;
+    std::vector<std::string> ffxivOnly, persisted, retired, iniOnly, titleExceptions;
     std::vector<std::pair<std::string, std::string>> aliases;
     std::string extText; // squashed ext sources: where the ini keys are defined
 };
@@ -264,13 +264,24 @@ Violations Check(const Model& m)
     for (const char* id : kShippedForkIds)
         if (!Contains<std::string>(m.persisted, id))
             add("persisted", std::string(id) + " was shipped but is missing from the persisted id list");
-    // every id that was ever released still resolves
+    // every id that was ever released still resolves: a live card, an alias, or a retired id (a stale pin is ignored)
     for (const std::string& id : m.persisted)
     {
         const bool live = FindSlot(m, id) != nullptr || IsUpstream(m, id);
         const bool aliased = std::any_of(m.aliases.begin(), m.aliases.end(), [&](const auto& a) { return a.first == id; });
-        if (!live && !aliased)
-            add("persisted", id + " has no card and no alias");
+        const bool retired = Contains<std::string>(m.retired, id);
+        if (!live && !aliased && !retired)
+            add("persisted", id + " has no card, no alias and is not retired");
+    }
+    // retired ids: released once, not live, not aliased
+    for (const std::string& id : m.retired)
+    {
+        if (!Contains<std::string>(m.persisted, id))
+            add("retired", id + " was never released: only a released card id may retire");
+        if (FindSlot(m, id) != nullptr || IsUpstream(m, id))
+            add("retired", id + " is retired but still a live card");
+        if (std::any_of(m.aliases.begin(), m.aliases.end(), [&](const auto& a) { return a.first == id; }))
+            add("retired", id + " is retired and aliased: pick one");
     }
     // aliases
     for (size_t i = 0; i < m.aliases.size(); i++)
@@ -365,6 +376,8 @@ Model Build(const std::string& repo, std::string& menuCppRaw, std::string& menuH
         m.iniOnly.push_back(k);
     for (const auto& a : manifest::kAliases)
         m.aliases.push_back({ a.oldId, a.newId });
+    for (const char* id : manifest::kRetiredIds)
+        m.retired.push_back(id);
 
     for (const auto& e : fs::recursive_directory_iterator(fs::path(repo) / "OptiScaler" / "ext"))
         if (e.is_regular_file() && e.path().extension() == ".cpp")
@@ -378,12 +391,22 @@ void Report(const char* what, const Violations& v)
         std::printf("  %s: %s\n", what, s.c_str());
 }
 
+// ---- a stale Custom Tab pin is ignored, never a crash ------------------------------------------------------------------
+// The Custom Tab matches pins against the live boxes only (an unknown id never matches), an all-stale list is covered by
+// the "None of the picked boxes are available" text, and the picker rebuilds the list from the live boxes on the next change.
+void StalePinsIgnored(const std::string& cppRaw)
+{
+    const std::string code = menuscan::Squash(menuscan::StripComments(cppRaw));
+    CHECK(code.find("if(!boxes[i].pinnable||!IsBoxPinned(pinned,boxes[i].id))continue;") != std::string::npos);
+    CHECK(code.find("Noneofthepickedboxesareavailablerightnow") != std::string::npos);
+}
+
 // ---- the real menu ----------------------------------------------------------------------------------------------------
 void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw)
 {
     CHECK(m.upstream.size() >= 40);
-    CHECK(m.slots.size() == 15);
-    CHECK(m.regs.size() == 15);
+    CHECK(m.slots.size() == 14); // was 15 with the retired companion card
+    CHECK(m.regs.size() == 14); // was 15 with the retired companion card
 
     const Violations v = Check(m);
     Report("manifest", v);
@@ -395,12 +418,16 @@ void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw
 
     // facts the manifest test relies on, so a broken scanner cannot make the rules vacuous
     CHECK(Contains<std::string>(m.tabLabels, "FFXIV") && Contains<std::string>(m.tabLabels, "Frame Gen"));
-    CHECK(m.ffxivOnly.size() == 9);
+    CHECK(m.ffxivOnly.size() == 8); // was 9 with the retired companion card
     CHECK(m.persisted.size() == 15);
     bool anyShared = false;
     for (const auto& b2 : m.upstream)
         anyShared = anyShared || b2.source == "RenderFrameGenerationRuntimeSettings";
     CHECK(anyShared);
+    // the retired companion card: no live card, but in the persisted and retired lists, so a stale pin resolves nowhere
+    CHECK(FindSlot(m, "ffxiv_companion") == nullptr && !IsUpstream(m, "ffxiv_companion"));
+    CHECK(Contains<std::string>(m.persisted, "ffxiv_companion") && Contains<std::string>(m.retired, "ffxiv_companion"));
+    StalePinsIgnored(cppRaw);
 }
 
 // ---- the registration scanner: which cards test the game build in THEIR OWN visible predicate -----------------------------
@@ -627,6 +654,25 @@ void Broken(const Model& real)
         Model m = real;
         m.aliases.push_back({ "never_shipped", "fg_unlocks" });
         CHECK(Has(Check(m), "alias"));
+    }
+    { // retiring also fixes a released id with no card; a retired id must have been released, must not be live, must not be aliased
+        Model m = real;
+        m.slots.erase(std::remove_if(m.slots.begin(), m.slots.end(), [](const Slot& s) { return std::string(s.id) == "reshade_addon_probe"; }),
+                      m.slots.end());
+        m.regs.erase(std::remove_if(m.regs.begin(), m.regs.end(), [](const Reg& r) { return r.id == "reshade_addon_probe"; }), m.regs.end());
+        CHECK(Has(Check(m), "persisted"));
+        m.retired.push_back("reshade_addon_probe");
+        CHECK(!Has(Check(m), "persisted"));
+        CHECK(!Has(Check(m), "retired"));
+        m = real;
+        m.retired.push_back("never_shipped");
+        CHECK(Has(Check(m), "retired"));
+        m = real;
+        m.retired.push_back("fg_hudless");
+        CHECK(Has(Check(m), "retired"));
+        m = real;
+        m.aliases.push_back({ "ffxiv_companion", "fg_hudless" });
+        CHECK(Has(Check(m), "retired"));
     }
     { // ini-only keys: format, duplicate, not defined
         Model m = real;

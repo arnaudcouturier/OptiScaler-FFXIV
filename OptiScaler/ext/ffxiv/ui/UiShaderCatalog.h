@@ -18,7 +18,7 @@ inline constexpr uint8_t kStageNone = 0;
 inline constexpr uint8_t kUiStage = 6;
 inline constexpr uint8_t kStageUnknown = 255;
 
-// The seven CRCs of the HDR "UI only" stage (FfxivHdrPreview::Tag). The Companion's four are a subset. They are
+// The seven CRCs of the HDR "UI only" stage (FfxivHdrPreview::Tag). They are
 // transmittance-related and may not cover every UI draw: D1 measures that.
 inline constexpr std::array<uint32_t, 7> kUiCrcs {
     3865947726u, 2966694105u, 3759127293u, 1898885941u, 4076256744u, 3915247300u, 1823062889u,

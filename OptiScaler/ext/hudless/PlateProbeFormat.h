@@ -22,7 +22,7 @@
 
 namespace ext::hudless::plate
 {
-inline constexpr int kFormatVersion = 2; // 2: outputs.csv gained ticks_since_post, draws.csv may hold '#' marker rows between its rows
+inline constexpr int kFormatVersion = 3; // 3: draws.csv lost its packet columns (the probe reads no packets); 2: outputs.csv gained ticks_since_post
 inline constexpr size_t kKeepRuns = 5;
 
 // ---- caps ----------------------------------------------------------------------------------------------------------
@@ -30,7 +30,7 @@ inline constexpr uint64_t kOutputsBytes = 48ull << 20;   // outputs.csv; the sum
 inline constexpr uint64_t kEarlyDrawBytes = 6ull << 20;  // draws.csv rows of frames 1..600 (title and loading screens)
 inline constexpr uint64_t kWorldDrawBytes = 40ull << 20; // draws.csv rows of the sampled frames after 600 (in the world)
 inline constexpr size_t kMaxDrawRowsPerFrame = 400;      // rows of one frame in draws.csv
-inline constexpr size_t kMaxPriorityRowsPerFrame = 1200; // the same count for rule r0 and intercepted rows, which must not be the ones dropped
+inline constexpr size_t kMaxPriorityRowsPerFrame = 1200; // the higher limit for rule r0 rows, so the rows the probe is about are not the ones dropped
 inline constexpr size_t kMaxShaderRows = 5000;
 inline constexpr uint64_t kEarlyFrames = 600;
 
@@ -66,7 +66,7 @@ struct DrawBudget
 };
 
 // The row cap of one frame of draws.csv. `kept` counts every row written in the frame, normal or priority. A normal row is admitted while
-// fewer than kMaxDrawRowsPerFrame rows are kept; a priority row (a rule r0 candidate, or a draw the visibility layer intercepted: the rows the
+// fewer than kMaxDrawRowsPerFrame rows are kept; a priority row (a rule r0 candidate: the rows the
 // probe exists for, and nameplates are drawn late in a frame) while fewer than kMaxPriorityRowsPerFrame are kept. Whatever is refused is counted,
 // per frame here and per run by the caller, so a frame that lost rows says so (a missing r0 row is then not read as "r0 never fires").
 struct RowCap
@@ -101,7 +101,7 @@ inline std::string CapMarker(uint64_t frame, const RowCap& cap)
                        std::to_string(cap.dropped) + " draws dropped\n";
     if (cap.priorityDropped)
         text += "# frame " + std::to_string(frame) + " priority limit " + std::to_string(kMaxPriorityRowsPerFrame) + " reached, " +
-                std::to_string(cap.priorityDropped) + " r0 or intercepted draws dropped\n";
+                std::to_string(cap.priorityDropped) + " r0 draws dropped\n";
     return text;
 }
 
@@ -397,9 +397,6 @@ struct DrawRow
 {
     uint64_t frame = 0;             // Present counter
     uint32_t draw = 0;              // ordinal of the draw among the frame's counted draws
-    bool intercepted = false;       // the nameplate visibility layer took this draw (state read before it did)
-    uint32_t batch = 0;             // ordinal of the game's UI batch call in the frame (0 = outside one)
-    uint32_t batchDraw = 0;         // ordinal of the draw inside that batch call
     std::string vs = "-", ps = "-"; // 0xCRC32 of the bytecode, pre#N for a shader created before the hook, - unknown
     int stage = -1;                 // catalog stage of the pixel shader, -1 unknown
     char kind = 'I';                // D draw, I indexed, N instanced, X indexed instanced, Y indirect
@@ -413,30 +410,21 @@ struct DrawRow
     bool blend = false;
     uint32_t srcBlend = 0, dstBlend = 0, blendOp = 0, srcAlpha = 0, dstAlpha = 0;
     std::string srvs = "-";         // bound pixel shader textures: id/WxH/format, '|' between slots
-    std::string qkey = "-";         // queue-entry key of the first packet the draw uses
-    uint32_t entries = 0;           // packets the draw uses
-    bool hasBox = false;            // raw vertex box of the packets
-    float box[4] = { 0, 0, 0, 0 }; // x0 y0 x1 y1 in the vertex units of the game's packets
-    std::string boxSource = "-";    // what the raw box was read as: vtx (the vertices, with the stride and the position offset of their input layout), - none
 };
 
 inline constexpr const char* kDrawsHeader =
-    "frame,draw,via,batch,batch_draw,vs,ps,stage,kind,index_count,instance_count,start_index,base_vertex,topology,stride,rt,rt_w,"
-    "rt_h,rt_fmt,vp_w,vp_h,dsv,depth,depth_write,depth_func,stencil,blend,src,dst,op,src_a,dst_a,srvs,qkey,entries,box_raw,box_src,r0";
-inline constexpr size_t kDrawsColumns = 38;
+    "frame,draw,vs,ps,stage,kind,index_count,instance_count,start_index,base_vertex,topology,stride,rt,rt_w,"
+    "rt_h,rt_fmt,vp_w,vp_h,dsv,depth,depth_write,depth_func,stencil,blend,src,dst,op,src_a,dst_a,srvs,r0";
+inline constexpr size_t kDrawsColumns = 31;
 
 inline std::string DrawsHeaderText()
 {
     return std::string("# plate probe draws.csv, format ") + std::to_string(kFormatVersion) +
            ". One row per recorded draw: every draw of a logged frame (frames 1..600, then every 100th) that is a UI-stage draw or comes\n"
-           "# after the first UI draw of the frame, plus on any frame every draw that satisfies r0. via: N normal, I intercepted by the\n"
-           "# nameplate visibility layer. rt: BB backbuffer, BBLIKE same size and format, OTHER, NONE. depth_func: D3D11 comparison\n"
-           "# (2 LESS, 4 LESS_EQUAL, 5 GREATER, 7 GREATER_EQUAL, 8 ALWAYS). depth_write 1 = writes on. src/dst/op/src_a/dst_a: blend factors\n"
-           "# of render target 0. batch, batch_draw: the game's UI batch call the draw was submitted in (1-based, counted per frame of\n"
-           "# submission) and the draw's place in it; 0 = no packet record. qkey: queue key of the packet holding the draw's first vertex;\n"
-           "# entries: packets the draw's indices reach. box_raw: x0:y0:x1:y1 of the vertices the draw uses (six significant digits), in the vertex's own units (not\n"
-           "# converted to pixels: that needs the vertex shader's constants, which sit in a GPU buffer; compare with vp_w and vp_h). box_src:\n"
-           "# vtx = read from the vertices with the position offset of the draw's input layout, - = no box. r0 = 1: depth tested\n"
+           "# after the first UI draw of the frame, plus on any frame every draw that satisfies r0. The probe reads no game packets:\n"
+           "# there are no packet columns (no batch, queue key, vertex box or interception marker). rt: BB backbuffer, BBLIKE same size\n"
+           "# and format, OTHER, NONE. depth_func: D3D11 comparison (2 LESS, 4 LESS_EQUAL, 5 GREATER, 7 GREATER_EQUAL, 8 ALWAYS).\n"
+           "# depth_write 1 = writes on. src/dst/op/src_a/dst_a: blend factors of render target 0. r0 = 1: depth tested\n"
            "# GREATER_EQUAL, no depth write, no stencil, drawn into the backbuffer or a texture of its size and format. A line that starts\n"
            "# with # between the rows is a marker, not a row: '# frame N capped at 400 rows, M draws dropped' says that frame lost M draws to the row cap.\n" +
            kDrawsHeader + "\n";
@@ -444,24 +432,16 @@ inline std::string DrawsHeaderText()
 
 inline std::string DrawsRow(const DrawRow& r)
 {
-    // %g with six digits: the raw units may be pixels (hundreds), 0..1 or -1..1 (fractions), so no fixed number of decimals fits all of them,
-    // and four floats of any size fit the buffer (at most 13 characters each)
-    char box[128];
-    if (r.hasBox)
-        snprintf(box, sizeof box, "%.6g:%.6g:%.6g:%.6g", r.box[0], r.box[1], r.box[2], r.box[3]);
-    else
-        snprintf(box, sizeof box, "-");
     using detail::Num;
-    std::string line = Num(r.frame) + ',' + Num(r.draw) + ',' + (r.intercepted ? 'I' : 'N') + ',' + Num(r.batch) + ',' +
-                       Num(r.batchDraw) + ',' + CsvField(r.vs) + ',' + CsvField(r.ps) + ',' + std::to_string(r.stage) + ',' + r.kind +
-                       ',' + Num(r.indexCount) + ',' + Num(r.instanceCount) + ',' + Num(r.startIndex) + ',' +
-                       std::to_string(r.baseVertex) + ',' + Num(r.topology) + ',' + Num(r.stride) + ',' + RtName(r.rt) + ',' +
-                       Num(r.rtWidth) + ',' + Num(r.rtHeight) + ',' + Num(r.rtFormat) + ',' + Num(r.vpWidth) + ',' + Num(r.vpHeight) + ',' +
-                       (r.depth.dsvBound ? '1' : '0') + ',' + (r.depth.depthEnable ? '1' : '0') + ',' + (r.depth.depthWrite ? '1' : '0') +
-                       ',' + Num(r.depth.depthFunc) + ',' + (r.depth.stencilEnable ? '1' : '0') + ',' + (r.blend ? '1' : '0') + ',' +
-                       Num(r.srcBlend) + ',' + Num(r.dstBlend) + ',' + Num(r.blendOp) + ',' + Num(r.srcAlpha) + ',' + Num(r.dstAlpha) +
-                       ',' + CsvField(r.srvs) + ',' + CsvField(r.qkey) + ',' + Num(r.entries) + ',' + box + ',' + CsvField(r.boxSource) +
-                       ',' + (IsCandidate(r.depth, r.rt) ? '1' : '0') + '\n';
+    std::string line = Num(r.frame) + ',' + Num(r.draw) + ',' + CsvField(r.vs) + ',' + CsvField(r.ps) + ',' +
+                       std::to_string(r.stage) + ',' + r.kind + ',' + Num(r.indexCount) + ',' + Num(r.instanceCount) + ',' +
+                       Num(r.startIndex) + ',' + std::to_string(r.baseVertex) + ',' + Num(r.topology) + ',' + Num(r.stride) + ',' +
+                       RtName(r.rt) + ',' + Num(r.rtWidth) + ',' + Num(r.rtHeight) + ',' + Num(r.rtFormat) + ',' + Num(r.vpWidth) + ',' +
+                       Num(r.vpHeight) + ',' + (r.depth.dsvBound ? '1' : '0') + ',' + (r.depth.depthEnable ? '1' : '0') + ',' +
+                       (r.depth.depthWrite ? '1' : '0') + ',' + Num(r.depth.depthFunc) + ',' + (r.depth.stencilEnable ? '1' : '0') + ',' +
+                       (r.blend ? '1' : '0') + ',' + Num(r.srcBlend) + ',' + Num(r.dstBlend) + ',' + Num(r.blendOp) + ',' +
+                       Num(r.srcAlpha) + ',' + Num(r.dstAlpha) + ',' + CsvField(r.srvs) + ',' +
+                       (IsCandidate(r.depth, r.rt) ? '1' : '0') + '\n';
     return line;
 }
 

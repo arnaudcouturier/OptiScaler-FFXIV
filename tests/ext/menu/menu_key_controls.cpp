@@ -250,7 +250,7 @@ int main(int argc, char** argv)
     CHECK(has("DlssNr", "ScanExposure") && has("DlssNr", "AutoCapture") && has("DlssNr", "VitCapture") && has("HudLess", "ReShadePresets"));
     CHECK(has("DlssNr", "ToggleKey") && has("DlssNr", "ScaleUpKey") && has("DlssNr", "ScaleDownKey") && has("DlssNr", "TransferToggleKey"));
     CHECK(has("FFXIV", "PreviewNRLingerSeconds") && has("FFXIV", "PreviewNRLate") && has("FFXIV", "PreviewGuideCapture") && has("HDR", "PreviewNRTrace"));
-    CHECK(has("Hotfix", "RenderSizeFromWidthHeight") && has("XeFG", "ResetOnUpscalerChange") && has("Companion", "HudReplacement"));
+    CHECK(has("Hotfix", "RenderSizeFromWidthHeight") && has("XeFG", "ResetOnUpscalerChange"));
     CHECK(has("LowLatency", "Input") && has("HDR", "Mode") && has("HudLess", "Mode") && has("Window", "Mode"));
     for (const Bound& b : bound)
         if (b.section == "LowLatency")

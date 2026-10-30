@@ -3,25 +3,20 @@
 #include "ext/ffxiv/ui/PlateDraws.h"
 
 #include "ext/core/Crc32.h"
-#include "ext/ffxiv/companion/replay/FfxivNameplateRenderer.h"
-#include "ext/ffxiv/ui/PlatePackets.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
 #include "ext/hudless/PlateAssocCounters.h"
 #include "ext/hudless/PlateProbeFormat.h"
-#include "ext/hudless/PlateProbePackets.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
 #include <string>
-#include <string.h>
 #include <unordered_map>
-#include <vector>
 
 // What the draw probe reads per draw is the D3D11 state of the immediate context (shaders, depth-stencil, blend, render target, viewport,
 // bound textures) through the Get* calls: CPU side only, no map, no readback, nothing bound or drawn.
 //
-// Threads: OnGameDraw, InterceptedDraw and OnFrameEnd share the state in `Probe` (rows, row cap, overlay boxes, shader table) WITHOUT a lock.
+// Threads: OnGameDraw and OnFrameEnd share the state in `Probe` (rows, row cap, shader table) WITHOUT a lock.
 // That is sound only because the draw hooks and the frame end (the bridge Present) run on the same thread, which is what the boundary detector
 // that calls them already assumes for its own state. The writer thread never touches `Probe`: rows reach it as text through AppendFile, and
 // the counters it prints are atomics.
@@ -42,7 +37,6 @@ struct Probe
     pf::DrawBudget budget;
     std::string rows;
     pf::RowCap cap; // the row cap of the frame in progress (draws.csv)
-    std::vector<OverlayBox> overlay; // boxes of the candidate rows of the frame in progress, for the overlay
     uint64_t frame = 1;
     bool headerSent = false;
     bool truncatedSent[2] = { false, false };
@@ -186,108 +180,12 @@ void FillRow(ID3D11DeviceContext* c, pf::DrawRow& row)
         row.srvs = srvs;
 }
 
-// The POSITION element of the input layout the draw is bound with. Only the layouts of the three nameplate vertex shaders carry the tag that
-// says where it is (the nameplate renderer puts it on them when they are created, FfxivNameplateRenderer.h); any other layout reads as unknown.
-bool PositionOfBoundLayout(ID3D11DeviceContext* c, pf::VertexLayout& out)
-{
-    namespace rend = ext::ffxiv::companion::replay::FfxivNameplateRenderer;
-    ComPtr<ID3D11InputLayout> input;
-    c->IAGetInputLayout(&input);
-    if (!input)
-        return false;
-    rend::Layout layout;
-    UINT size = sizeof layout;
-    if (FAILED(input->GetPrivateData(rend::layoutTag, &size, &layout)) || size != sizeof layout || layout.count == 0 || layout.count > 16)
-        return false;
-    for (UINT i = 0; i < layout.count; ++i)
-    {
-        const auto& e = layout.elements[i];
-        if (e.index != 0 || _stricmp(e.semantic, "POSITION") != 0)
-            continue;
-        const uint32_t floats = e.format == DXGI_FORMAT_R32G32_FLOAT         ? 2
-                                : e.format == DXGI_FORMAT_R32G32B32_FLOAT    ? 3
-                                : e.format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 4
-                                                                              : 0;
-        if (floats == 0)
-            return false;
-        out.posOffset = e.offset;
-        out.posFloats = floats;
-        return true;
-    }
-    return false;
-}
-
-// Stride of the first vertex buffer bound at the input assembler. The game binds the buffer of the layout it draws, but which input slot it
-// uses is not assumed here.
-uint32_t BoundStride(ID3D11DeviceContext* c)
-{
-    ID3D11Buffer* buffers[4] {};
-    UINT strides[4] {}, offsets[4] {};
-    c->IAGetVertexBuffers(0, 4, buffers, strides, offsets);
-    uint32_t stride = 0;
-    for (UINT i = 0; i < 4; ++i)
-    {
-        if (buffers[i] == nullptr)
-            continue;
-        if (stride == 0)
-            stride = strides[i];
-        buffers[i]->Release();
-    }
-    return stride;
-}
-
-// What the packet side found for a row, and, for an associated row, why it has no box.
-struct Applied
-{
-    pf::RowOutcome outcome = pf::RowOutcome::NoPacket;
-    pf::BoxReason box = pf::BoxReason::Ok;
-};
-
-// Fills the packet columns of a row from what the packet side found for the draw. The box is read from the vertices the record copied at
-// enqueue time, with the position offset of the input layout the draw is bound with, and only when the strides of the packets, the renderer's
-// slot and the bound vertex buffer agree. Returns what happened to the row (for the counters).
-Applied ApplyPacket(ID3D11DeviceContext* c, pf::DrawRow& row, const PacketInfo& packet)
-{
-    const pf::DrawRecord* record = packet.record;
-    if (record == nullptr)
-        return { packet.outcome };
-    row.batch = record->batch;
-    row.batchDraw = record->batchDraw;
-    if (packet.outcome != pf::RowOutcome::Associated)
-        return { packet.outcome };
-    row.qkey = pf::detail::Hex(record->qkey);
-    row.entries = record->entries;
-    pf::VertexLayout layout;
-    const bool tagged = !record->run.empty() && PositionOfBoundLayout(c, layout);
-    pf::Box box;
-    const pf::BoxReason reason = pf::ResolveBox(record->run, record->stride, tagged, layout, tagged ? BoundStride(c) : 0, record->used, box);
-    if (reason == pf::BoxReason::Ok)
-    {
-        row.hasBox = true;
-        row.box[0] = box.x0;
-        row.box[1] = box.y0;
-        row.box[2] = box.x1;
-        row.box[3] = box.y1;
-        row.boxSource = "vtx";
-    }
-    return { pf::RowOutcome::Associated, reason };
-}
-
-// The row has been admitted by the frame's row cap (RowCap::Admit) before it was built.
-void AddRow(Probe& p, const pf::DrawRow& row, const Applied& applied)
+// The row has been admitted by the frame's row cap (RowCap::Admit) before it was built. The probe reads no game
+// packets, so every row counts as no-packet (an indexed draw) or not-indexed.
+void AddRow(Probe& p, const pf::DrawRow& row)
 {
     p.rows += pf::DrawsRow(row);
-    pf::Counters().NoteRow(applied.outcome, applied.box);
-    if (row.hasBox && pf::IsCandidate(row.depth, row.rt))
-    {
-        OverlayBox box;
-        std::copy(row.box, row.box + 4, box.box);
-        box.rtWidth = row.rtWidth;
-        box.rtHeight = row.rtHeight;
-        box.vpWidth = row.vpWidth;
-        box.vpHeight = row.vpHeight;
-        p.overlay.push_back(box);
-    }
+    pf::Counters().NoteRow(row.kind == 'I' ? pf::RowOutcome::NoPacket : pf::RowOutcome::NotIndexed, pf::BoxReason::Ok);
 }
 
 void SetTarget(pf::DrawRow& row, const RtInfo& rt)
@@ -316,7 +214,7 @@ void SetArgs(pf::DrawRow& row, const DrawArgs& args)
 }
 } // namespace
 
-// Runs on the thread of the draw hooks. It shares the unlocked state in `Probe` with OnFrameEnd and InterceptedDraw, which is sound because the draw
+// Runs on the thread of the draw hooks. It shares the unlocked state in `Probe` with OnFrameEnd, which is sound because the draw
 // hooks and the frame end (the bridge Present) are on the same thread, as the boundary detector that calls them already assumes.
 void OnGameDraw(ID3D11DeviceContext* c, Core& core, uint32_t ordinal, uint8_t stage, uint32_t firstUiOrdinal)
 {
@@ -372,16 +270,15 @@ void OnGameDraw(ID3D11DeviceContext* c, Core& core, uint32_t ordinal, uint8_t st
         SetTarget(row, rt);
         row.depth = depth;
         FillRow(c, row);
-        const Applied applied = ApplyPacket(c, row, CurrentPacket());
         p.table.NoteVertexShader(index, row.vs);
-        AddRow(p, row, applied);
+        AddRow(p, row);
     }
     catch (...)
     {
     }
 }
 
-// Runs on the Present thread, which is the thread of the draw hooks (see OnGameDraw): the rows, the row cap and the overlay boxes of the frame
+// Runs on the Present thread, which is the thread of the draw hooks (see OnGameDraw): the rows and the row cap of the frame
 // are read and reset here without a lock. The writer thread only ever sees the text this hands to AppendFile and the atomic counters.
 void OnFrameEnd(uint64_t frame)
 {
@@ -414,18 +311,6 @@ void OnFrameEnd(uint64_t frame)
             }
         }
         p.rows.clear();
-        // the packet side reads game memory only around the frames this probe logs: the frame being drawn next is frame + 1
-        SetFrameHint(frame + 1);
-        if (pf::LogThisFrame(frame))
-        {
-            OverlayFrame shown;
-            shown.frame = frame;
-            shown.boxes = std::move(p.overlay);
-            PublishOverlay(std::move(shown));
-        }
-        p.overlay.clear();
-        if (ext::hudless::plate::OverlayWanted())
-            CheckOverlaySlot();
         if (pf::RewriteShadersThisFrame(frame))
             pf::RewriteFile("shaders-plate.csv", p.table.Csv());
     }
@@ -442,34 +327,6 @@ void VertexShaderCreated(ID3D11VertexShader* shader, const void* code, size_t si
         return;
     const uint32_t crc = ext::core::Crc32(code, size);
     shader->SetPrivateData(kVsTag, sizeof crc, &crc);
-}
-
-void InterceptedDraw(ID3D11DeviceContext* c)
-{
-    try
-    {
-        Probe& p = S();
-        if (p.core == nullptr || !pf::LogThisFrame(p.frame))
-            return;
-        if (!p.cap.Admit(true)) // an intercepted draw is a priority row
-            return;
-        ComPtr<ID3D11RenderTargetView> rtv;
-        ComPtr<ID3D11DepthStencilView> dsv;
-        c->OMGetRenderTargets(1, &rtv, &dsv);
-        pf::DrawRow row;
-        row.frame = p.frame;
-        row.intercepted = true;
-        SetArgs(row, g_args);
-        row.depth = ReadDepth(c, dsv != nullptr);
-        SetTarget(row, p.core->ClassifyRt(c));
-        SetShader(row, p.core->PixelShaderRec(c));
-        FillRow(c, row);
-        const Applied applied = ApplyPacket(c, row, CurrentPacket());
-        AddRow(p, row, applied);
-    }
-    catch (...)
-    {
-    }
 }
 } // namespace detail
 } // namespace ext::ffxiv::ui::plate

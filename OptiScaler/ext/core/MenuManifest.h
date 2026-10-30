@@ -6,7 +6,7 @@
 // in users' configs, the ids that were retired, and the config keys that deliberately have no control.
 //
 // Adding a card: register it, add its slot to kSlots, and (when it needs the FFXIV build match) its id to kFfxivOnlyIds;
-// the manifest test fails until all of those agree. Retiring a card: remove its slot and add an alias.
+// the manifest test fails until all of those agree. Retiring a card: remove its slot and add its id to kRetiredIds (a stale pin is then ignored); only a card with a real successor keeps an alias.
 
 #include "ext/core/MenuLayout.h"
 
@@ -20,7 +20,7 @@ inline constexpr const char* kFfxivTab = "FFXIV";
 // Fork cards that need the FFXIV build match: they live in the FFXIV tab, and only they do. Their visible predicates are
 // the build match (`ext::game::Current()`), so the card hides itself even when it is pinned to the Custom Tab.
 inline constexpr const char* kFfxivOnlyIds[] = {
-    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless", "ffxiv_companion",
+    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless",
     "hudless_diag", "ffxiv_advanced",
 };
 
@@ -42,6 +42,13 @@ struct Alias
 };
 inline constexpr std::array<Alias, 0> kAliases {};
 
+// Retired card ids with no successor. A persisted pin of one of these matches no live box, so the Custom Tab
+// ignores it (an all-stale list shows "None of the picked boxes are available right now"); the next pin change
+// drops it, because the picker rebuilds the list from the live boxes only.
+inline constexpr const char* kRetiredIds[] = {
+    "ffxiv_companion",
+};
+
 // Config keys ("[Section] Key") that stay without a control on purpose: developer gates and the menu style, read from the ini only.
 inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] Diagnostics", // shows the HUD-less diagnostics card
@@ -49,7 +56,6 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[HudLess] HdrPaste", // opt-in for a GPU path no HDR user has confirmed yet: kept out of the menu until one does
     "[HudLess] GuardMode", // opt-in guard policy that has not been tried in a game: kept out of the menu until it has
     "[HudLess] PlateDiagnostics", // developer probes (log only) of the output stream and the UI draws
-    "[HudLess] PlateOverlay", // developer outline of the probe's suspected nameplate rectangles
     "[Menu] Style", // the Ember menu look: a theme preference read from the ini when the menu opens
     "[DlssNr] ReplayCapture", // developer key: the capture triggers write a full replay set of the pass
     "[NgxRelease] SkipReleaseSleep", // kill switch of the release-path sleep skip

@@ -25,8 +25,8 @@
 // log of every session (builds\game-logs-*) shows that moment about 8 s after the DLL loaded and before the first Present (about 9.5 s): the
 // game's startup thread creating its device, not DllMain (no loader lock) and not a frame-loop thread (no frame exists yet; a one-time pause of
 // about 100 to 300 ms in Release, measured in the golden tests, lands in the loading phase). Everything the fork installs before it
-// patches D3D11 vtables or system DLL functions, never the executable's code; the Detours over the executable (companion::Install, a few lines
-// below the call in Seams.cpp, and the native-quality / jitter-source hooks, installed lazily by the upscaler's per-evaluate path) all come
+// patches D3D11 vtables or system DLL functions, never the executable's code; the Detours over the executable
+// (the native-quality / jitter-source hooks, installed lazily by the upscaler's per-evaluate path) all come
 // after it. It is not called from the game selector (Game.cpp): Group 1 must not depend on the resolver, and the legacy path must never
 // construct a LiveImage.
 //

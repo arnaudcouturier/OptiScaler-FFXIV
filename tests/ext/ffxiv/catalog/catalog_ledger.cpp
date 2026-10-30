@@ -2,7 +2,7 @@
 // summary/first-seen/fingerprint/near-miss log lines say.
 //
 // What this pins:
-//   * every catalog entry sets exactly its own bit (UI 7, scene 5, lighting 9 with the size check, chara 9, companion 4, nameplate 3
+//   * every catalog entry sets exactly its own bit (UI 7, scene 5, lighting 9 with the size check, chara 9, nameplate 3
 //     as vertex shaders), a CRC that belongs to two catalogs sets both bits, the pixel and the vertex namespaces stay apart;
 //   * the first creation of an entry records time (ms since hook install), the Present count and the creation order ONCE, and its
 //     fingerprint; repeats change nothing and compute nothing;
@@ -132,7 +132,7 @@ void CountsPerCatalog()
         }
         CHECK_EQ(l.Mask(cat), (1u << Info(cat).count) - 1);
     }
-    // One catalog at a time: noting every UI entry does not move the scene, lighting, chara or nameplate masks (companion is inside UI).
+    // One catalog at a time: noting every UI entry does not move the scene, lighting, chara or nameplate masks.
     Ledger l;
     NoteAll(l, Catalog::Ui, 5);
     CHECK_EQ(l.Count(Catalog::Ui), 7u);
@@ -140,7 +140,6 @@ void CountsPerCatalog()
     CHECK_EQ(l.Count(Catalog::Lighting), 0u);
     CHECK_EQ(l.Count(Catalog::Chara), 0u);
     CHECK_EQ(l.Count(Catalog::Nameplate), 0u);
-    CHECK_EQ(l.Count(Catalog::Companion), 4u); // all four companion shaders are UI shaders
 }
 
 void Overlaps()
@@ -160,14 +159,12 @@ void Overlaps()
     CHECK_EQ(m.Mask(Catalog::Scene), 1u);
     CHECK_EQ(m.Mask(Catalog::Lighting), 0u);
 
-    // Companion layouts are UI shaders: companion layout0 = UI #0, layout4 = UI #6, layout5 = UI #2, layout6 = UI #1.
+    // Former replacement-layer shaders are UI shaders: layout4 = UI #6.
     Ledger u;
     u.NotePixelShader(g_zeros.data(), 100, 1823062889u, 1); // layout4 = ui6
     CHECK_EQ(u.Mask(Catalog::Ui), 1u << 6);
-    CHECK_EQ(u.Mask(Catalog::Companion), 1u << 1);
-    u.NotePixelShader(g_zeros.data(), 100, 1898885941u, 2); // ui3: a UI shader that is not a companion shader
+    u.NotePixelShader(g_zeros.data(), 100, 1898885941u, 2); // ui3
     CHECK_EQ(u.Mask(Catalog::Ui), (1u << 6) | (1u << 3));
-    CHECK_EQ(u.Mask(Catalog::Companion), 1u << 1);
 }
 
 void Namespaces()
@@ -179,7 +176,6 @@ void Namespaces()
     // A UI CRC seen as a vertex shader counts nowhere.
     l.NoteVertexShader(g_zeros.data(), 100, Info(Catalog::Ui).entries[0].crc, 2);
     CHECK_EQ(l.Count(Catalog::Ui), 0u);
-    CHECK_EQ(l.Count(Catalog::Companion), 0u);
     // (As a pixel shader it is just a shader in no catalog: it is in the uncatalogued sample.) Vertex shaders that are in no catalog do not even
     // reach the sample.
     CHECK_EQ(l.UncatalogedRecorded(), 1u);
@@ -343,7 +339,7 @@ void Settling()
 void LogLines()
 {
     Ledger l;
-    // Pixel shaders created over time: the pinned six UI entries (0,1,2,3,4,6, missing only ui5: the healthy state), all scene stages, all chara; companion 4 = 3 + ...
+    // Pixel shaders created over time: the pinned six UI entries (0,1,2,3,4,6, missing only ui5: the healthy state), all scene stages, all chara
     for (size_t i = 0; i < 6; ++i)
     {
         Presents(l, 10);
@@ -360,17 +356,17 @@ void LogLines()
     const auto first = l.Poll(40000);
     const std::string text = Joined(first);
     // one summary line with every catalog
-    CHECK_HAS(text, "[ffxiv-catalog] UI 6/7 scene 5/5 lighting 9/9 chara 9/9 companion 4/4 nameplate 3/3");
+    CHECK_HAS(text, "[ffxiv-catalog] UI 6/7 scene 5/5 lighting 9/9 chara 9/9 nameplate 3/3");
     CHECK_HAS(text, "UI boundary ok");
     CHECK_EQ(CountLines(first, "[ffxiv-catalog] UI 6/7 "), 1u);
-    // one first-seen line per entry that was seen (6 + 5 + 9 + 9 + 4 + 3 companion = 36; 6 CRCs are in two catalogs and still get a line per catalog)
-    CHECK_EQ(CountLines(first, "first seen crc=0x"), 6u + 5u + 9u + 9u + 4u + 3u);
+    // one first-seen line per entry that was seen (6 + 5 + 9 + 9 + 3 = 32; 2 CRCs are in two catalogs and still get a line per catalog)
+    CHECK_EQ(CountLines(first, "first seen crc=0x"), 6u + 5u + 9u + 9u + 3u);
     CHECK_HAS(text, "first seen crc=0xe66dae4e name=UI:ui0 t=1000ms present=10 order=1");
     CHECK_HAS(text, "first seen crc=0xb0d428d9 name=UI:ui1 t=1100ms present=20 order=2");
     CHECK_HAS(text, "first seen crc=0x85e777ef name=scene:tonemap");
     CHECK_HAS(text, "first seen crc=0x85e777ef name=lighting:ToneMapping");
     CHECK_HAS(text, "first seen crc=0xb0af152e name=nameplate:vs-layout0");
-    // one fingerprint line per distinct CRC: 6 UI + 5 scene + (9 lighting - 2 shared with scene) + 9 chara + 3 nameplate = 30 (companion shares with UI)
+    // one fingerprint line per distinct CRC: 6 UI + 5 scene + (9 lighting - 2 shared with scene) + 9 chara + 3 nameplate = 30
     CHECK_EQ(CountLines(first, "fingerprint crc=0x"), 6u + 5u + 7u + 9u + 3u);
     CHECK_HAS(text, "fingerprint crc=0xe66dae4e name=UI:ui0 fp=0x");
     CHECK_HAS(text, " size=");
@@ -378,7 +374,7 @@ void LogLines()
     CHECK_HAS(text, "model=ps_5_0");
     // the one missing UI shader (ui5) is listed, as within the baseline; every other catalog has all its entries
     CHECK_HAS(text, "UI #5 (ui5) crc=0xe95deec4 missing (within the healthy baseline of 6)");
-    CHECK(text.find("companion #") == std::string::npos); // companion is complete (all four are UI shaders of the pinned six)
+    CHECK(text.find("companion") == std::string::npos); // no companion catalog anymore
     CHECK_EQ(CountLines(first, " missing"), 1u); // only the ui5 line
     // healthy: no uncatalogued dump
     CHECK_EQ(CountLines(first, "uncatalogued #"), 0u);
@@ -391,10 +387,10 @@ void LogLines()
     l.NotePixelShader(late.data(), late.size(), Info(Catalog::Ui).entries[5].crc, 45000); // the late ui5 completes the set
     const auto second = l.Poll(46000);
     const std::string text2 = Joined(second);
-    CHECK_HAS(text2, "[ffxiv-catalog] UI 7/7 scene 5/5 lighting 9/9 chara 9/9 companion 4/4 nameplate 3/3");
-    CHECK_EQ(CountLines(second, "first seen crc=0x"), 1u); // only ui5 (companion was already complete)
+    CHECK_HAS(text2, "[ffxiv-catalog] UI 7/7 scene 5/5 lighting 9/9 chara 9/9 nameplate 3/3");
+    CHECK_EQ(CountLines(second, "first seen crc=0x"), 1u); // only ui5
     CHECK_HAS(text2, "first seen crc=0xe95deec4 name=UI:ui5 t=45000ms");
-    CHECK_EQ(CountLines(second, "name=companion:"), 0u); // no companion entry is new
+    CHECK_EQ(CountLines(second, "name=companion:"), 0u); // no companion catalog anymore
     CHECK_EQ(CountLines(second, "fingerprint crc=0x"), 1u);
     CHECK_EQ(CountLines(second, " missing"), 0u);
     CHECK(l.Poll(47000).empty());
@@ -607,12 +603,12 @@ void SlotCapacity()
     CHECK(real.Fits());
 
     // The rule, from both sides.
-    const size_t exact[kCatalogCount] { 8, 8, 8, 8, 8, 8 };       // 48 = the capacity
-    const size_t over[kCatalogCount] { 9, 8, 8, 8, 8, 8 };        // 49
-    const size_t wide[kCatalogCount] { 32, 16, 0, 0, 0, 0 };      // 32 in one catalog (a full mask word) and 48 in all
-    const size_t tooWide[kCatalogCount] { 33, 1, 1, 1, 1, 1 };    // 38 in all, but a 33 entry catalog has no bit for its last entry
-    const size_t tooWide2[kCatalogCount] { 1, 1, 1, 1, 1, 40 };
-    const size_t empty[kCatalogCount] { 0, 0, 0, 0, 0, 0 };
+    const size_t exact[kCatalogCount] { 8, 8, 8, 8, 8 };          // 40 of the 48 slots
+    const size_t over[kCatalogCount] { 9, 8, 8, 8, 16 };          // 49: one more than the 48 slots
+    const size_t wide[kCatalogCount] { 32, 16, 0, 0, 0 };         // 32 in one catalog (a full mask word) and 48 in all
+    const size_t tooWide[kCatalogCount] { 33, 1, 1, 1, 1 };       // 37 in all, but a 33 entry catalog has no bit for its last entry
+    const size_t tooWide2[kCatalogCount] { 1, 1, 1, 1, 40 };
+    const size_t empty[kCatalogCount] { 0, 0, 0, 0, 0 };
     CHECK(LedgerFits(SynthTables(exact).info));
     CHECK(!LedgerFits(SynthTables(over).info));
     CHECK(LedgerFits(SynthTables(wide).info));
@@ -620,7 +616,7 @@ void SlotCapacity()
     CHECK(!LedgerFits(SynthTables(tooWide2).info));
     CHECK(LedgerFits(SynthTables(empty).info));
 
-    // A table that fits exactly is fully usable: every entry of the last slot gets its record and its bit.
+    // A table that fits is fully usable: every noted entry gets its record and its bit.
     {
         const SynthTables t(exact);
         Ledger l(t.info);
@@ -1006,7 +1002,6 @@ void Threads()
     CHECK_EQ(l.Count(Catalog::Scene), 5u);
     CHECK_EQ(l.Count(Catalog::Lighting), 9u);
     CHECK_EQ(l.Count(Catalog::Chara), 9u);
-    CHECK_EQ(l.Count(Catalog::Companion), 4u);
     CHECK_EQ(l.Count(Catalog::Nameplate), 3u);
     CHECK_EQ(l.UncatalogedRecorded(), kUncatalogedCap);
     CHECK_EQ(l.Present(), 12u);

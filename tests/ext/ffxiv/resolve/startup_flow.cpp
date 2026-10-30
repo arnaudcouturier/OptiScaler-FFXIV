@@ -401,7 +401,7 @@ void TestKnownBuild()
 void TestUnknownBuildAndForcedUnknown()
 {
     ResolvedBuild rb = AllFound(false);
-    rb.build.companion.batch16Rva = 0x777777;
+    rb.build.jitterSource.generatorRva = 0x777777;
     // an unknown build, the key off: Group 1 on, Group 2 off; the published build is still the resolved one (consumers may read it, the gate says no)
     {
         Fake f;
@@ -410,7 +410,7 @@ void TestUnknownBuildAndForcedUnknown()
         f.Run();
         CHECK(f.offered == &kCurrentBuild && f.resolveCalls == 1 && f.publishCalls == 1);
         CHECK(AllGroup1(f.publishedGate, true) && AllGroup2(f.publishedGate, false) && !f.publishedGate.known);
-        CHECK(f.published.companion.batch16Rva == 0x777777 && SameBuild(f.published, rb.build));
+        CHECK(f.published.jitterSource.generatorRva == 0x777777 && SameBuild(f.published, rb.build));
         CHECK(f.logStamp == rb.timeDateStamp);
     }
     // the key on: Group 2 on

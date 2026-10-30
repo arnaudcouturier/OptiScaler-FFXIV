@@ -1,10 +1,10 @@
-// The catalog table (six shader catalogs, names, reference fingerprints) and the partial-UI-catalog health rule.
+// The catalog table (five shader catalogs, names, reference fingerprints) and the partial-UI-catalog health rule.
 //
 // What this pins:
-//   * the sizes the brief names (UI 7, scene stages 5, lighting 9, chara 9, companion 4, nameplate 3) and that every entry has a name;
+//   * the sizes the brief names (UI 7, scene stages 5, lighting 9, chara 9, nameplate 3) and that every entry has a name;
 //   * the CRC values themselves, written out here independently of the production tables (a changed catalog constant must fail here);
 //   * the mirrors against their owners: UI and chara are built FROM the owner's constants, the scene stages are checked against
-//     SceneStageOfCrc, companion against the UI set (the lighting, companion and nameplate literals are checked in catalog_wiring_pins);
+//     SceneStageOfCrc (the lighting and nameplate literals are checked in catalog_wiring_pins);
 //   * UiCatalogHealthy: a healthy build creates the pinned six UI shaders (ui0, ui1, ui2, ui3, ui4, ui6; ui5 is scene-dependent), so the rule is the set, not a count
 //     healthy exactly when every required bit is set, evaluated per call (no latch), and an explicit mask or count can replace the pinned set;
 //   * refFingerprint is optional (0 = unknown) and is not part of CRC identity.
@@ -40,9 +40,8 @@ void Sizes()
     CHECK_EQ(Info(Catalog::Scene).count, 5u);
     CHECK_EQ(Info(Catalog::Lighting).count, 9u);
     CHECK_EQ(Info(Catalog::Chara).count, 9u);
-    CHECK_EQ(Info(Catalog::Companion).count, 4u);
     CHECK_EQ(Info(Catalog::Nameplate).count, 3u);
-    CHECK_EQ(kCatalogCount, 6u);
+    CHECK_EQ(kCatalogCount, 5u);
 
     for (size_t c = 0; c < kCatalogCount; ++c)
     {
@@ -103,9 +102,6 @@ void Values()
     for (size_t i = 0; i < 9; ++i)
         CHECK_EQ(Info(Catalog::Chara).entries[i].crc, chara[i]);
 
-    const uint32_t companion[4] { 3865947726u, 1823062889u, 3759127293u, 2966694105u };
-    for (size_t i = 0; i < 4; ++i)
-        CHECK_EQ(Info(Catalog::Companion).entries[i].crc, companion[i]);
 
     const uint32_t nameplate[3] { 2964264238u, 1445359818u, 3153679471u };
     for (size_t i = 0; i < 3; ++i)
@@ -121,17 +117,14 @@ void Owners()
         CHECK_EQ(ext::ffxiv::chara::RoleOfCrc(Info(Catalog::Chara).entries[i].crc), uint32_t(ext::ffxiv::chara::RoleGeometry));
     CHECK_EQ(Info(Catalog::Chara).entries[7].crc, ext::ffxiv::chara::kFinisherCrc);
     CHECK_EQ(Info(Catalog::Chara).entries[8].crc, ext::ffxiv::chara::kEquipDisplayCrc);
-    // Companion shaders are UI shaders (CompanionGpu.h: a subset of the UI seven).
-    for (size_t i = 0; i < 4; ++i)
-        CHECK(ext::ffxiv::ui::IsUiCrc(Info(Catalog::Companion).entries[i].crc));
 }
 
-// A CRC can belong to several catalogs: ToneMapping/ToneAdjust are lighting entries AND scene stages 1/5, companion is inside UI.
+// A CRC can belong to several catalogs: ToneMapping/ToneAdjust are lighting entries AND scene stages 1/5.
 void Overlaps()
 {
     CHECK(Find(Catalog::Scene, 0x85e777efu) && Find(Catalog::Lighting, 0x85e777efu));
     CHECK(Find(Catalog::Scene, 0xf6e81a1bu) && Find(Catalog::Lighting, 0xf6e81a1bu));
-    CHECK(Find(Catalog::Ui, 3865947726u) && Find(Catalog::Companion, 3865947726u));
+    CHECK(Find(Catalog::Ui, 3865947726u)); // a former replacement-layer shader stays a UI shader
     CHECK(!Find(Catalog::Ui, 0x85e777efu));
     CHECK(!Find(Catalog::Scene, 3865947726u));
     CHECK(!Find(Catalog::Nameplate, 3865947726u)); // nameplate CRCs are vertex-shader CRCs, a separate namespace
@@ -144,7 +137,7 @@ void Overlaps()
 //     and was not in the draws of a D1 frame (S10-E2-LOG), so a healthy build probably reaches 4 of 5, not 5;
 //   * chara: the finisher shader is created when the lobby starts (+16..20 s in 26 runs), which can be after the 30 s settle point, so 9 of 9
 //     is timing dependent, not a baseline;
-//   * lighting, companion, nameplate: never measured against a healthy log.
+//   * lighting, nameplate: never measured against a healthy log.
 // A baseline is added here only after a real log shows it.
 void Baselines()
 {
@@ -152,7 +145,6 @@ void Baselines()
     CHECK_EQ(Info(Catalog::Scene).healthyMin, 0u);
     CHECK_EQ(Info(Catalog::Chara).healthyMin, 0u);
     CHECK_EQ(Info(Catalog::Lighting).healthyMin, 0u);
-    CHECK_EQ(Info(Catalog::Companion).healthyMin, 0u);
     CHECK_EQ(Info(Catalog::Nameplate).healthyMin, 0u);
     // UI is the only catalog with a baseline, and it is never above the catalog size.
     for (size_t c = 0; c < kCatalogCount; ++c)

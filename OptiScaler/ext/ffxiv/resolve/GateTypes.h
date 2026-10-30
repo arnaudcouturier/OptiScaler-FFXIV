@@ -31,7 +31,6 @@ enum class Feature : std::uint8_t
     QualityHooks,    // the two Detours (query size, renderer update), the direct resize call and the 8-byte display-size cache write
     JitterProbe,     // read-only camera jitter object probe (and the correction that rides on it)
     JitterSource,    // the two Detours of the source-level jitter fix
-    CompanionNative, // the four Detours of the companion / nameplate native hooks, the queue snapshot and the layout table
     CharaViewAccessor,
     Count
 };
@@ -71,8 +70,6 @@ inline const char* FeatureName(Feature f)
         return "jitterProbe";
     case Feature::JitterSource:
         return "jitterSource";
-    case Feature::CompanionNative:
-        return "companionNative";
     case Feature::CharaViewAccessor:
         return "charaViewAccessor";
     case Feature::Count:

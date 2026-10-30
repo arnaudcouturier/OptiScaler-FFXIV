@@ -139,7 +139,7 @@ class Ledger
     // ---- feeding (any thread; lock free, allocation free) --------------------------------------------------------------------------
     // A DXBC pixel shader was created: `crc` is the CRC-32 of the `size` bytes at `code` (computed once by the hook), `nowMs` the time since
     // the hooks were installed. Sets the bit of every catalog the shader belongs to (a CRC can be in two: ToneMapping is a lighting entry and
-    // scene stage 1; companion is inside UI). A shader in no catalog goes to the uncatalogued sample.
+    // scene stage 1). A shader in no catalog goes to the uncatalogued sample.
     void NotePixelShader(const void* code, size_t size, uint32_t crc, uint32_t nowMs) noexcept
     {
         if (!_fits)

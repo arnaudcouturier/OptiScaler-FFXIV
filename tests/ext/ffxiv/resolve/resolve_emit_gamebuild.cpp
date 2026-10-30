@@ -218,7 +218,7 @@ void TestIdempotence()
     CheckSame("the idempotent emit", r.text, g_header); // byte for byte, including the CRLF of the checkout
     CHECK(r.changed.empty() && r.marked.empty() && r.staleMentions.empty());
     CHECK(r.boundFields == reg.bindings.size() && r.confirmed.size() == reg.bindings.size());
-    CHECK(r.boundFields > 70); // the 77 bindings of the registry (a registry that lost its bindings would pass idempotence trivially)
+    CHECK(r.boundFields > 45); // the 51 bindings of the registry (a registry that lost its bindings would pass idempotence trivially)
 }
 
 void TestRoundTrip()
@@ -226,12 +226,12 @@ void TestRoundTrip()
     const Registry reg = BuildRegistry();
     const ResolvedBuild rb = TableBuild(reg);
     std::string h = g_header;
-    // three RVAs (one of them in the struct that shares a member name with another), an offset, a guard byte, the stamp and the size
+    // five literals, two guard bytes, the stamp and the size
     h = SetLiteral(h, "NativeQualityBuild", "querySizeRva", "0x352351");
-    h = SetLiteral(h, "CompanionBuild", "batch16Rva", "0x6e56d1");
+    h = SetLiteral(h, "CharaViewBuild", "accessorRva", "0x26abd1"); // the header spells it 0x26abd0
     h = SetLiteral(h, "JitterSourceBuild", "settingsPointerRva", "0x290e471");
-    h = SetLiteral(h, "CompanionBuild", "moduleStatePointerOffset", "0x09"); // the header spells it 0x08
-    h = SetLiteral(h, "CompanionBuild", "batchExtensionOffset", "0x0b");     // the header spells it 0x04 (a bound offset)
+    h = SetLiteral(h, "JitterBuild", "cameraGlobalRva", "0x290dba1"); // the header spells it 0x290dba0
+    h = SetLiteral(h, "NativeQualityBuild", "managerPointerRva", "0x290e499"); // the header spells it 0x290e498
     h = SetGuardByte(h, "JitterSourceBuild", "strengthInstructions", 100, "0xaa");
     h = SetGuardByte(h, "NativeQualityBuild", "settingsInstructions", 0, "0x00");
     h = SetLiteral(h, "GameBuild", "timeDateStamp", "0x6ac3dc96");
@@ -242,8 +242,8 @@ void TestRoundTrip()
     const EmitResult r = EmitGameBuild(h, rb, reg, false);
     REQUIRE(r.outcome == EmitResult::Outcome::Emitted);
     CheckSame("the restored header", r.text, g_header); // restored exactly, `0x08` and `0x00` included
-    const std::set<std::string> want = { "nativeQuality.querySizeRva", "companion.batch16Rva", "jitterSource.settingsPointerRva",
-                                         "companion.moduleStatePointerOffset", "companion.batchExtensionOffset", "jitterSource.strengthInstructions",
+    const std::set<std::string> want = { "nativeQuality.querySizeRva", "charaView.accessorRva", "jitterSource.settingsPointerRva", "nativeQuality.managerPointerRva",
+                                         "jitter.cameraGlobalRva", "jitterSource.strengthInstructions",
                                          "nativeQuality.settingsInstructions", "timeDateStamp", "sizeOfImage" };
     CHECK(KeysOf(r.changed) == want);
     CHECK(r.confirmed.size() == reg.bindings.size() - 7); // seven bound fields changed; the stamp and the size are not bindings
@@ -257,8 +257,6 @@ const char* TypeOfGroup(const std::string& group)
 {
     if (group == "nativeQuality")
         return "NativeQualityBuild";
-    if (group == "companion")
-        return "CompanionBuild";
     if (group == "charaView")
         return "CharaViewBuild";
     if (group == "jitter")
@@ -358,7 +356,7 @@ void TestShapePreserved()
             ++literals;
         CHECK(literals == row.size);
     }
-    CHECK(guards == 14); // 4 native quality, 3 companion, 7 jitter source
+    CHECK(guards == 11); // 4 native quality, 7 jitter source
     // the first byte changed in every guard
     CHECK(Contains(r.text, std::string("0x") + "12")); // 0x48 ^ 0x5a, e.g. the first byte of querySizeInstructions
 }
@@ -397,9 +395,9 @@ void TestHeaderDoesNotFit()
     }
     // an initialiser that is an expression, not a literal
     {
-        const std::string h = SetLiteral(g_header, "CompanionBuild", "batch32Rva", "0x6e6270 + 1");
+        const std::string h = SetLiteral(g_header, "NativeQualityBuild", "rendererUpdateRva", "0x290e491 + 1");
         const EmitResult r = EmitGameBuild(h, rb, reg, false);
-        CHECK(r.outcome == EmitResult::Outcome::Error && r.text.empty() && !r.errors.empty() && Contains(r.errors[0], "companion.batch32Rva"));
+        CHECK(r.outcome == EmitResult::Outcome::Error && r.text.empty() && !r.errors.empty() && Contains(r.errors[0], "nativeQuality.rendererUpdateRva"));
     }
     // a member declared twice in its struct
     {
@@ -426,7 +424,7 @@ void TestHeaderDoesNotFit()
     // text with no structs at all
     {
         const EmitResult r = EmitGameBuild("// nothing here\n", rb, reg, false);
-        CHECK(r.outcome == EmitResult::Outcome::Error && r.text.empty() && r.errors.size() > 70);
+        CHECK(r.outcome == EmitResult::Outcome::Error && r.text.empty() && r.errors.size() > 45); // one error per binding that has no struct to read
     }
 }
 
@@ -551,7 +549,7 @@ void TestUnusableSeamsRefuse()
     // the registry names a seam the result does not have: unresolved, status "missing"
     {
         ResolvedBuild rb = TableBuild(reg);
-        const std::string id = SeamOf(reg, "companion.batch32Rva");
+        const std::string id = SeamOf(reg, "nativeQuality.querySizeRva");
         rb.seams.erase(std::remove_if(rb.seams.begin(), rb.seams.end(), [&](const SeamResult& s) { return s.id == id; }), rb.seams.end());
         const EmitResult r = EmitGameBuild(g_header, rb, reg, false);
         CHECK(r.outcome == EmitResult::Outcome::Refused && !r.unresolved.empty() && r.unresolved[0].status == "missing");
@@ -743,7 +741,7 @@ void TestReportText()
 {
     const Registry reg = BuildRegistry();
     ResolvedBuild rb = TableBuild(reg);
-    SeamResult* s = Seam(rb, SeamOf(reg, "companion.nameplateModulePointerRva"));
+    SeamResult* s = Seam(rb, SeamOf(reg, "jitterSource.settingsPointerRva"));
     REQUIRE(s != nullptr);
     s->status = SeamStatus::NotFound;
     const EmitResult r = EmitGameBuild(g_header, rb, reg, false);
@@ -754,7 +752,7 @@ void TestReportText()
     for (std::size_t c = 0; c < ext::ffxiv::catalog::kCatalogCount; ++c) // the catalog sizes come from the table, not from a literal here
         CHECK(Contains(rep, std::string(ext::ffxiv::catalog::kInfo[c].name) + " n/" + std::to_string(ext::ffxiv::catalog::kInfo[c].count)));
     CHECK(Contains(rep, "UI 6/7 and 'UI boundary ok'"));
-    CHECK(Contains(rep, "companion.nameplateModulePointerRva  <- seam companion.nameplateModulePointer: NotFound"));
+    CHECK(Contains(rep, "jitterSource.settingsPointerRva  <- seam jitterSource.settingsPointer: NotFound"));
     CHECK(Contains(rep, "-- Offset fields (") && Contains(rep, "-- Constant fields (") && Contains(rep, "-- Pattern fields (2) --"));
     CHECK(Contains(rep, "-- seam status table"));
     // every not-re-verified key appears with its value

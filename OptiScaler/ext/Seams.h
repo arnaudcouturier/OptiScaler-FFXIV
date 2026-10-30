@@ -117,9 +117,8 @@ namespace dx11bridge
 void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
                        NVSDK_NGX_Parameter* parameters);
 // _CopyDx11BackBufferToShared, right after the backbuffer copy (before the source texture is released): C7
-// dispatches to the FFXIV Companion module's source-copy diagnostics (DrawSourceMarkers). `target` is the shared
-// copy's destination texture, the same image the copy just wrote. Dispatch only; Companion's own entry point is
-// already safe to call unconditionally (noexcept, try/catches internally).
+// per-frame callback (GPU timer copy-in close, character preview frame count). `target` is the shared
+// copy's destination texture, the same image the copy just wrote.
 void AfterSharedCopy(ID3D11DeviceContext* context, ID3D11Texture2D* target);
 // NVSDK_NGX_D3D11_Shutdown, replaces the legacy proxy Shutdown call. True = handled (`out` holds the result): the
 // game isolates NGX shutdown (ext::game INgxLifecycle) and the bridge is up, so only the device-specific Shutdown1 runs

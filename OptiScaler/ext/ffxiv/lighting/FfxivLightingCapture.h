@@ -15,6 +15,7 @@
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
+#include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the native plate probe
 #include "ext/hdr/FfxivHdrPreview.h"
 #include "ext/hdr/scene/FfxivSceneHdr.h"
 
@@ -24,23 +25,8 @@
 namespace ext::ffxiv::lighting::FfxivLightingCapture
 {
 using Microsoft::WRL::ComPtr;
-using IndexedOriginal = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
-using DrawCall = void (*)(void* state);
-
-// Companion observation is supplied by C7 when its module is selected. Keeping
-// these callbacks optional lets the native lighting hooks remain independently
-// usable and avoids an allocation or cross-feature include on draw paths.
-struct CompanionCallbacks
-{
-    void (*tagShader)(ID3D11PixelShader*, const void*, SIZE_T) = nullptr;
-    void (*tagPixel)(ID3D11PixelShader*, const void*, SIZE_T) = nullptr;
-    void (*tagLayout)(ID3D11InputLayout*, const D3D11_INPUT_ELEMENT_DESC*, UINT, const void*, SIZE_T) = nullptr;
-    void (*observeDraw)(ID3D11DeviceContext*) = nullptr;
-    bool (*interceptVisibilityIndexed)(ID3D11DeviceContext*, UINT, UINT, INT, IndexedOriginal) = nullptr;
-    void (*aroundIndexed)(ID3D11DeviceContext*, UINT, UINT, DrawCall, void*) = nullptr;
-};
-inline CompanionCallbacks companionCallbacks {};
-inline void SetCompanionCallbacks(CompanionCallbacks callbacks) noexcept { companionCallbacks = callbacks; }
+// Input-layout tags for the native plate probe live beside the probe itself
+// (ext/ffxiv/ui/PlateLayoutTag.h) and are written directly, with no plugin callback.
 
 struct Shader { const char* name; UINT bytes, crc; std::array<unsigned char,16> checksum; };
 inline constexpr std::array<Shader,9> shaders {{
@@ -76,8 +62,8 @@ inline CreateLayout createLayout=nullptr;
 inline HRESULT STDMETHODCALLTYPE OnCreateLayout(ID3D11Device* d,const D3D11_INPUT_ELEMENT_DESC* desc,UINT count,const void* code,SIZE_T size,ID3D11InputLayout** out)
 {
     auto hr=createLayout(d,desc,count,code,size,out);
-    if(SUCCEEDED(hr) && out && *out && companionCallbacks.tagLayout)
-        companionCallbacks.tagLayout(*out,desc,count,code,size);
+    if(SUCCEEDED(hr) && out && *out)
+        ext::ffxiv::ui::plate::TagLayout(*out,desc,count,code,size);
     return hr;
 }
 using Draw = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
@@ -159,10 +145,6 @@ inline const ext::ffxiv::chara::probe::ResolveHookControl resolveControl { &Atta
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
     auto hr=create(d,code,size,link,out);
-    if (SUCCEEDED(hr) && out && *out && companionCallbacks.tagShader)
-        companionCallbacks.tagShader(*out, code, size);
-    if (SUCCEEDED(hr) && out && *out && companionCallbacks.tagPixel)
-        companionCallbacks.tagPixel(*out, code, size);
     if (SUCCEEDED(hr) && out && *out)
         if (auto id=Identify(code,size))
         {
@@ -181,7 +163,6 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
     if(ext::ffxiv::ui::Armed() && !inside){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
-    if(c==context && !inside && companionCallbacks.observeDraw) companionCallbacks.observeDraw(c);
     const bool wanted=ext::Cfg().nr.whitePointSource.value_or_default()==2;
     if (!inside && c==context && ext::hdr::FfxivSceneHdr::Requested()) {
         struct HdrGuard { HdrGuard(){inside=true;} ~HdrGuard(){inside=false;} } guard;
@@ -213,21 +194,15 @@ inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) {
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
     ext::ffxiv::ui::plate::NoteDraw('I',n,1,start,b); // ext: developer probe (one atomic test while PlateDiagnostics is off)
-    if(c==context && !inside && companionCallbacks.interceptVisibilityIndexed &&
-       companionCallbacks.interceptVisibilityIndexed(c,n,start,b,indexed)){ext::ffxiv::ui::plate::OnInterceptedDraw(c);return;}
     auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{indexed(c,n,start,b);});}); };
-    if (c == context && !inside && companionCallbacks.aroundIndexed)
-        companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
-    else normal();
+    normal();
 }
 inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { ext::ffxiv::ui::plate::NoteDraw('N',n,i,start,0); Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{instanced(c,n,i,start,f);});}); }
 inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
 {
     ext::ffxiv::ui::plate::NoteDraw('X',n,i,start,b);
     auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstanced,[&]{indexedInstanced(c,n,i,start,b,f);});}); };
-    if (c == context && !inside && i && companionCallbacks.aroundIndexed)
-        companionCallbacks.aroundIndexed(c,n,start,[](void* state){ (*static_cast<decltype(normal)*>(state))(); },&normal);
-    else normal();
+    normal();
 }
 inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{indirect(c,b,o);});}); }
 inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{indexedIndirect(c,b,o);});}); }

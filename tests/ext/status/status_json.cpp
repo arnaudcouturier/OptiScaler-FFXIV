@@ -589,7 +589,6 @@ static status::Snapshot HostileSnapshot()
                                "CJK\xE6\xBC\xA2\xE5\xAD\x97 emoji\xF0\x9F\x98\x80 end";
     snap.features.push_back(MakeFeature("gameModule", status::kEngaged, "matched", "geometry+quality+hudless"));
     snap.features.push_back(MakeFeature("nativeQuality", status::kEngaged, "live", "preset"));
-    snap.features.push_back(MakeFeature("companion", status::kPending, "configured-not-installed", "replacement"));
     snap.features.push_back(MakeFeature("nr", status::kPending, "armed-no-evaluate", ""));
     snap.features.push_back(MakeFeature("frameGeneration", status::kEngaged, "active", "Upscaler-in/DLSSG-out"));
     snap.features.push_back(MakeFeature("hudless", status::kPending, "fallback", tricky));
@@ -662,7 +661,7 @@ static void CheckFull()
     const JsonValue* runtimes = Find(doc, "runtimes");
     CHECK(runtimes != nullptr && runtimes->fields.size() == 4);
     const JsonValue* features = Find(doc, "features");
-    CHECK(features != nullptr && features->fields.size() == 7);
+    CHECK(features != nullptr && features->fields.size() == 6); // six features since the plugin HUD replacement was removed
     if (features != nullptr)
         for (const auto& entry : features->fields)
         {
@@ -724,7 +723,7 @@ static void CheckSlimRender()
         return;
     CHECK(IsBool(Find(doc, "truncated"), true));
     const JsonValue* features = Find(doc, "features");
-    CHECK(features != nullptr && features->fields.size() == 7);
+    CHECK(features != nullptr && features->fields.size() == 6); // six features since the plugin HUD replacement was removed
     if (features != nullptr)
         for (const auto& entry : features->fields)
             CHECK(IsText(Find(entry.second, "detail"), "")); // every free-text detail dropped
@@ -789,7 +788,7 @@ static void CheckSlimSelected()
         return;
     CHECK(IsBool(Find(doc, "truncated"), true));
     const JsonValue* features = Find(doc, "features");
-    CHECK(features != nullptr && features->fields.size() == 7);
+    CHECK(features != nullptr && features->fields.size() == 6); // six features since the plugin HUD replacement was removed
     if (features != nullptr)
         for (const auto& entry : features->fields)
             CHECK(IsText(Find(entry.second, "detail"), ""));

@@ -159,12 +159,6 @@ Code: `ext/ffxiv/lighting/`.
 
 Seams: game `OnD3D11DeviceHooked`, `OnD3D11Unhook`; dx11bridge `OnUpscaleBoundary`.
 
-## Companion nameplates
-
-Code: `ext/ffxiv/companion/` (native hooks in `CompanionNative.cpp`, layer in `CompanionLayer.cpp`, replay in `replay/`).
-
-Seams: game `OnD3D11DeviceHooked`, `OnD3D11Unhook`; dx11bridge `AfterSharedCopy`; core `HooksBypassed` (lets the layer's own device and swapchain calls pass the fork's hooks).
-
 ## Composition swapchain hook
 
 Code: `ext/present/CompositionSwapchain.cpp`, `CompositionPassThrough.h`, `CompositionWindow.h`.
