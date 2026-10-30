@@ -133,6 +133,23 @@ int main()
         ExpectState(false, "", "both closed out of order");
     }
 
+    // With three windows open the newest one decides the name, also once the middle one has ended.
+    {
+        const UINT oldest = State::GetOwner();
+        const UINT middle = State::GetOwner();
+        const UINT newest = State::GetOwner();
+        State::DisableChecks(oldest, "sl.");
+        State::DisableChecks(middle, "dxgi");
+        State::DisableChecks(newest, "sl.interposer");
+        ExpectState(true, "sl.interposer", "three windows");
+        State::EnableChecks(middle);
+        ExpectState(true, "sl.interposer", "the middle window closed");
+        State::EnableChecks(newest);
+        ExpectState(true, "sl.", "the newest closed, the oldest remains");
+        State::EnableChecks(oldest);
+        ExpectState(false, "", "all three closed");
+    }
+
     // Closing an owner id that opened nothing changes nothing.
     {
         const UINT owner = State::GetOwner();
@@ -145,8 +162,8 @@ int main()
 
     // The owner id keys the windows, so the ids handed out on different threads at the same time must all differ.
     {
-        const int threads = 4;
-        const int ids = 20000;
+        const int threads = 8;
+        const int ids = 50000;
         std::vector<std::vector<UINT>> perThread(threads);
         std::vector<std::thread> workers;
 
