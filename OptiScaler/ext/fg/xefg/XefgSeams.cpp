@@ -15,6 +15,7 @@
 #include <proxies/XeFG_Proxy.h>
 
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 
 // D3: the XeFG seams (XeFG_Dx12::Dispatch, XeFG_Proxy.h, the XeFG menu card). Provider unlock and pacing are
@@ -27,6 +28,9 @@ void OnXefgProviderLoaded(HMODULE provider)
     // Patch the provider in memory before anything calls into it - the MFG gate is evaluated during swapchain init,
     // so it has to happen here. A failure just leaves the provider as Intel shipped it.
     XeFGUnlock::Apply(provider);
+    wchar_t path[MAX_PATH] = {}; // recorder: the module by file name only, never a path
+    if (GetModuleFileNameW(provider, path, static_cast<DWORD>(std::size(path))) != 0)
+        ext::fgrec::OnModule(path);
 }
 
 int XefgSelectFactor(IFGFeature_Dx12* fg, int current, int maxInterpolation, XefgFactorInfo& info)
@@ -62,6 +66,7 @@ int XefgSelectFactor(IFGFeature_Dx12* fg, int current, int maxInterpolation, Xef
 
     info.dynamic = dynamic;
     info.target = target;
+    ext::fgrec::OnXeFactor(current, requested); // recorder: skips when unchanged
     return requested;
 }
 

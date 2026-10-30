@@ -55,6 +55,7 @@ class PacingScope
     Phase _phase;
     int64_t _startUs;
     bool _active;
+    LARGE_INTEGER _recQpc {}; // recorder: the Reflex-sleep begin (QPC), zero when not armed
 };
 
 // An externally measured duration (microseconds) for `phase`, into the same windows. CharaNr.cpp feeds the preview NR recording time.

@@ -193,7 +193,7 @@ struct ExtConfig
     MenuStyleConfig menuStyle; // ext/menu: [Menu] Style
     NgxReleaseConfig ngxRelease; // ext/dx11bridge: [NgxRelease] SkipReleaseSleep
     BridgeConfig bridge; // ext/bridge: [Bridge] FlushAfterSignal
-    FramePacingConfig framePacing; // ext/present: [FramePacing] Trace, HiddenPresentDoNotWait
+    FramePacingConfig framePacing; // ext/present: [FramePacing] Trace, HiddenPresentDoNotWait, FgRecorder, TickProbe
     StatusConfig status; // ext/status: [Status] Enabled
 
     void Bind(config::Binder& b);

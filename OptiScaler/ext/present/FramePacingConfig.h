@@ -25,6 +25,10 @@ struct FramePacingConfig
     // chain skips that present instead of blocking. Off = exactly the old call. Default false.
     CustomOptional<bool> hiddenPresentDoNotWait { false };
 
+    // FgRecorder: the FG event recorder (ext/fgrec): one JSONL file per session in fg-recordings\ next to the DLL.
+    // Off = no thread, no allocation, no file. Default false.
+    CustomOptional<bool> fgRecorder { false };
+
     // TickProbe: lease the game's simulation tick (the Framework vtable slot, ext/latency) and record its timing to OptiScaler.log every
     // 10 seconds. With it off nothing is installed and no line is written. Default false.
     CustomOptional<bool> tickProbe { false };

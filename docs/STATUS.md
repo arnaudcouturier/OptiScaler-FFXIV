@@ -12,6 +12,7 @@ What has been played in game and what has not, for every feature of this fork. T
 |---|---|
 | DLSS Neural Rendering with pre-SR multipass | tested (RTX 4090) |
 | DLSS-G MFG unlock, RTX 40 | tested (RTX 4090) at 2x to 4x; 5x and 6x are experimental (one GPU hang seen at 6x) |
+| FG event recorder | [PR: FramePacing] FgRecorder=auto (FgRecorder=true records). Needs a started session: the key on while the game presents (FFXIV with frame generation running is the supported setup). Writes one JSON line per event to `fg-recordings\`; `session.end` marks a clean stop. Off unless asked for. | ---- |
 | OptiHDR (HDR10 output) | tested (RTX 4090) |
 | RenoDX scene HDR | tested (RTX 4090) |
 | Continuous scene HDR composition (`[HDR] LegacyComposition = false`, `[HDR] UiExpansion`) | experimental, opt-in; untested on an HDR display |

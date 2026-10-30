@@ -443,8 +443,8 @@ void StalePinsIgnored(const std::string& cppRaw)
 void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw)
 {
     CHECK(m.upstream.size() >= 40);
-    CHECK(m.slots.size() == 14); // was 15 with the retired companion card
-    CHECK(m.regs.size() == 14); // was 15 with the retired companion card
+    CHECK(m.slots.size() == 15); // 15, +1 for the frame_pacing card and -1 for the retired companion card
+    CHECK(m.regs.size() == 15);  // MenuFramePacing.cpp registers it, the companion card is gone
 
     const Violations v = Check(m);
     Report("manifest", v);

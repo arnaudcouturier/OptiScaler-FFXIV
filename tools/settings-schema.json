@@ -1702,6 +1702,18 @@
           "flags": [ "ffxivOnly", "diagnostic" ]
         },
         {
+          "key": "[FramePacing] FgRecorder",
+          "section": "FramePacing",
+          "name": "FgRecorder",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": "Frame Gen", "card": "frame_pacing", "cardTitle": "Frame pacing" },
+          "description": "FG event recorder: one JSONL file per session in fg-recordings beside the DLL (presents with HRESULT, Reflex sleeps, AutoMFG lines, NR rebuilds, provider events). Bounded queue, rotation and session cap; off means no thread and no file.",
+          "flags": [ "diagnostic" ]
+        },
+        {
           "key": "[FramePacing] TickProbe",
           "section": "FramePacing",
           "name": "TickProbe",

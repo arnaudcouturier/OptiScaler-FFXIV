@@ -1191,6 +1191,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 #endif
     }
 
+    ext::fgrec::FgPresentBegin(willPresent, SyncInterval, Flags); // ext: FG recorder present begin
     IFGFeature* fg = state.currentFG;
 
     if (fg != nullptr && willPresent && fg->IsActive() && !fg->IsPaused())
@@ -1426,6 +1427,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
     LOG_DEBUG("Present finished");
 
+    ext::fgrec::FgPresentEnd(willPresent, result); // ext: FG recorder present end with HRESULT
     return result;
 }
 

@@ -222,6 +222,7 @@ void FramePacingConfig::Bind(config::Binder& b)
     b.Add("FramePacing", "Trace", trace);
     b.Add("FramePacing", "GpuTimers", gpuTimers);
     b.Add("FramePacing", "HiddenPresentDoNotWait", hiddenPresentDoNotWait);
+    b.Add("FramePacing", "FgRecorder", fgRecorder);
     b.Add("FramePacing", "TickProbe", tickProbe);
 }
 

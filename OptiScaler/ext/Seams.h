@@ -14,6 +14,7 @@
 #include "ext/dx11bridge/ReleaseDrain.h"
 #include "ext/fg/Dx12Ext.h"
 #include "ext/fg/FgSeams.h"
+#include "ext/fgrec/FgRecSeams.h"
 #include "ext/hdr/HdrSeams.h"
 #include "ext/gpu/Gpu.h"
 #include "ext/gpu/Restrack.h"

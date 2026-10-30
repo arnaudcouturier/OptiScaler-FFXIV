@@ -6,6 +6,10 @@
 #include "ext/game/Game.h"
 #include "ext/hdr/HdrFg.h"
 
+#include <State.h>
+
+#include <framegen/dlssg/DLSSG_Dx12.h>
+#include <framegen/xefg/XeFG_Dx12.h>
 #include <proxies/Streamline_Proxy.h>
 
 // B5/C5 (FG side): the seams around the provider-neutral guide matcher (GuideMatcher.cpp) and the scene-paired history
@@ -121,6 +125,17 @@ void ReleaseGuides(IFGFeature_Dx12* fg) { Access::FgDx12::ReleaseGuides(*fg); }
 
 void OnDeactivating(IFGFeature* fg)
 {
+    if (fg != nullptr && fg->IsActive())
+    {
+        // Once per real teardown, labeled by the provider being torn down (the
+        // activation cast): this tap runs before the _isActive check in every
+        // Deactivate body and on the preset-switch path, so no-op calls are
+        // filtered here instead of recorded.
+        if (dynamic_cast<XeFG_Dx12*>(fg) != nullptr)
+            ext::fgrec::OnProviderOff("xefg"); // recorder: a teardown ends the generation
+        else if (dynamic_cast<DLSSG_Dx12*>(fg) != nullptr)
+            ext::fgrec::OnProviderOff("dlssg"); // recorder: a teardown ends the generation
+    }
     auto* dx12 = AsDx12(fg);
     if (dx12 == nullptr)
         return;

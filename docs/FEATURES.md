@@ -34,6 +34,7 @@ What this repository bundles on top of OptiScaler, where each piece comes from a
 | [Dynamic MFG readout and RTX 50 behaviour](#dynamic-mfg-on-rtx-50) | upstream OptiScaler keys; readout origin not determined | untested |
 | [Automatic multiplier (dynamic MFG) on RTX 40](#dynamic-mfg-on-rtx-40-automatic-multiplier) | fork (selector rules follow SirenBrink's XeFG selector) | opt-in, off by default; tested (RTX 4090), 2x to 4x, stall rule seen working; the self-test has not passed in game |
 | [Frame pacing, Reflex and Streamline hardening](#pacing-markers-and-hardening) | ported from SirenBrink's fork | runs inside the tested DLSS-G path |
+| [FG event recorder](#fg-event-recorder) (`[FramePacing] FgRecorder`) | fork | diagnostic, off by default; new; unit-tested, not tried in game |
 | [XeFG / XeMFG](#xefg-and-xemfg) | ported from SirenBrink's fork (Citrus333's base) | untested |
 | [HUD-less frame generation](#hud-less-frame-generation) | adapted from byunjoe's code in SirenBrink's fork; native capture and engine layers are fork code | opt-in; SDR with DLSS-G 2x-4x tested, HDR untested |
 | [ReShade built-in add-on](#reshade-built-in-add-on) | fork | tested as part of HUD-less, ReShade 6.8.0 only |
@@ -322,6 +323,10 @@ It never goes above 4x, is off by default, and is inert on RTX 50 (use Force Dyn
 **Config.** `[LowLatency] Input`, `Output` (menu selection saved). **Menu.** None of its own.
 
 **Code and seams.** `ext/fg/` (`FrameInterval.cpp`, `GuideMatcher.cpp`, `MarkerSeams.cpp`), `ext/ffxiv/markers/`, `ext/gpu/`. Seams: present, fg, gpu.
+
+### FG event recorder
+
+**What it does.** Records frame-generation activity as one JSON object per line in `fg-recordings\` beside the DLL: `session.begin` (version, exe file name, build match, settings summary) names the run, then the kinds from `OptiScaler/ext/fgrec/FgRecorder.h` (`fg.present.begin/end`, `out.present.begin/end`, `sleep`, `hidden.present`, `automfg`, `nr.rebuild`, `provider.activated/deactivating/module`, `dlssg.preset.switch`, `xefg.factor`, `records_dropped`), with `session.end` closing a clean stop. A recording without it is unfinished. The `Frame Gen` card checkbox turns it on; when it is on, every present runs through the recorder tap, otherwise one relaxed load plus a thread-local counter, with a config re-read every 16th tap per thread. The directory itself is never emitted and the exe and module names are file names only, so no record carries a path, a user name or a machine name. `tools\analyze-fg-recording.ps1` turns a session into per-provider percentiles, per-second means, multiplier switches, NR rebuild hitches and a verdict (exit 0 = clean, 2 = the session is cut, rotated wrongly, dropped records or has a bad line, 3 = the session is still open, 1 = usage).
 
 ## XeFG and XeMFG
 

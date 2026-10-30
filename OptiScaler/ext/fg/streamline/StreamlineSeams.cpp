@@ -46,6 +46,8 @@ bool OnDlssgModuleLoad(const std::wstring& normalizedPath, LPCWSTR fullPath, HMO
     module = NtdllProxy::LoadLibraryExW_Ldr(fullPath, NULL, 0);
     if (module)
         MfgUnlock::TryApply(module);
+    if (module != nullptr)
+        ext::fgrec::OnModule(normalizedPath.c_str()); // recorder: file name only, never a path
 
     return true;
 }

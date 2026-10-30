@@ -195,7 +195,9 @@ int main(int argc, char** argv)
     CHECK(Has(rawFile, "unreachable once the worker runs")); // the pin makes this branch dead
     CHECK(Has(decl, "void OnShutdown(bool freeLibrary) noexcept;"));
     CHECK(Has(decl, "void OnScopeBegin(ext::present::Phase phase) noexcept;"));
-    CHECK(Has(detach, "ext::status::OnShutdown(lpReserved == nullptr);")); // the one upstream line
+    CHECK(Count(detach, "ext::status::OnShutdown(lpReserved == nullptr);") == 1); // the status detach line, once
+    CHECK(Count(detach, "ext::fgrec::Shutdown(lpReserved == nullptr);") == 1); // the neighbouring recorder line, once
+    CHECK(Has(detach, "ext::status::OnShutdown(lpReserved == nullptr); ext::fgrec::Shutdown(lpReserved == nullptr);")); // status first, recorder next
 
     // ---- present path: ignored phases first, gaps are not frame times -------
     CHECK(Has(file, "if (phase != ext::present::Phase::NativePresent && "

@@ -112,10 +112,12 @@ int main(int argc, char** argv)
     // read and the report hook, opens the scope first, and makes no swapchain call of its own --------------------------------------------
     CHECK(Has(trace, "bool KeyOn() const { return ext::Cfg().framePacing.hiddenPresentDoNotWait.value_or_default(); }"));
     CHECK(Count(trace, "hiddenPresentDoNotWait.value_or_default()") == 2); // KeyOn and the "skipped k" column of the hidden-present line
-    // ONE contiguous statement sequence: nothing can be inserted between the scope, the hooks and the call (a changed flags or swapchain
+    // ONE contiguous statement sequence: the scope opens, the hooks are built, and the recorder arms and times around the single seam call (a changed flags or swapchain
     // argument computed in between would defeat "key off = exactly Present(0, callerFlags)", which the seam test checks only for the
-    // template). Whitespace and comments are normalised away, nothing else may sit between the pieces.
-    CHECK(Has(trace, "HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags) { PacingScope scope(Phase::HiddenPresent); HiddenHooks hooks { scope }; return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); }"));
+    // template; key off still takes the same call with the same arguments, only without the timing). Whitespace and
+    // comments are normalised away, nothing else may sit between the pieces.
+    CHECK(Has(trace, "HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags) { PacingScope scope(Phase::HiddenPresent); HiddenHooks hooks { scope }; LARGE_INTEGER begin {}, end {}; const bool rec = ext::fgrec::RecArmed(); if (rec) QueryPerformanceCounter(&begin); const HRESULT hr = hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks); if (rec) { QueryPerformanceCounter(&end); ext::fgrec::OnHiddenPresent(hr, end.QuadPart - begin.QuadPart); } return hr; }"));
+    CHECK(Count(trace, "hidden::SeamPresent(") == 1); // still exactly one call on the hidden chain
     CHECK(!Has(trace, "->Present(")); // the only swapchain call lives in the (tested) template
     CHECK(!Has(trace, ".Present(")); // nor through a dereference spelled another way
 
@@ -145,6 +147,18 @@ int main(int argc, char** argv)
         CHECK(Count(fgHooks, "ext::present::PacingScope") == 1);
         CHECK(Has(fgHooks, "ext::present::PacingScope reflexSleep(ext::present::Phase::ReflexSleep); StreamlineProxy::ReflexSleep()(*localToken); ext::fg::MarkersNextFrame("));
     }
+
+    // ---- FG event recorder: one begin/end pair per present path, beside the seams that already time them ------------
+    // FgPresentBegin sits after the willPresent timing block, before the feature lookup; FgPresentEnd reports the
+    // HRESULT at the tail return. OutPresentBegin sits before the original-present call, OutPresentEnd at the tail.
+    CHECK(Count(fgHooks, "ext::fgrec::FgPresentBegin(willPresent, SyncInterval, Flags);") == 1);
+    CHECK(Count(wrapped, "ext::fgrec::OutPresentBegin(willPresent, SyncInterval, Flags);") == 1);
+    CHECK(Count(fgHooks, "ext::fgrec::FgPresentEnd(willPresent, result);") == 1);
+    CHECK(Count(wrapped, "ext::fgrec::OutPresentEnd(willPresent, presentResult);") == 1);
+    CHECK(Has(fgHooks, "ext::fgrec::FgPresentBegin(willPresent, SyncInterval, Flags); IFGFeature* fg = state.currentFG;"));
+    CHECK(Has(fgHooks, "LOG_DEBUG(\"Present finished\"); ext::fgrec::FgPresentEnd(willPresent, result); return result; }"));
+    CHECK(Has(wrapped, "ext::fgrec::OutPresentBegin(willPresent, SyncInterval, Flags); LOG_DEBUG(\"Calling original present\");"));
+    CHECK(Has(wrapped, "ext::fgrec::OutPresentEnd(willPresent, presentResult); return presentResult; }"));
 
     // ---- native present: the bridge's PresentScope opens and closes the span --------------------------------------------------------------
     {

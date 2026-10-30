@@ -1,7 +1,7 @@
-// [PACE] The [FramePacing] keys through the real ini binding (ExtConfig.cpp): Trace (no default, "auto" = unset) and
-// HiddenPresentDoNotWait (default false) bind once under their section, load and save as documented, and the ini fragment
-// OptiScaler/ext/ini/FramePacing.ini documents them (the generic hygiene rules of tests/ext/menu/ini_fragments.cpp cover the
-// comment/default agreement; this test pins the values this stream decided).
+// [PACE] The [FramePacing] keys through the real ini binding (ExtConfig.cpp): Trace (no default, "auto" = unset),
+// HiddenPresentDoNotWait (default false), FgRecorder (default false) and TickProbe (default false) bind once under
+// their section, load and save as documented, and the ini fragment there documents them (the generic hygiene rules of
+// tests/ext/menu/ini_fragments.cpp cover the comment/default agreement; this test pins the values this stream decided).
 //
 // CustomOptional::set_from_config only sets a value that has none yet, so every case reads into a fresh FramePacingConfig.
 #include "ext/core/ExtConfig.h"
@@ -64,10 +64,12 @@ void DefaultsAndBinding()
     CHECK(!cfg.GpuTimersKey().has_value());
     CHECK(!cfg.hiddenPresentDoNotWait.has_value());
     CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false); // todays behaviour
+    CHECK(!cfg.fgRecorder.has_value());
+    CHECK(cfg.fgRecorder.value_or_default() == false); // off by default: no thread, no file
     CHECK(!cfg.tickProbe.has_value()); // unset = auto
     CHECK(!cfg.TickProbeOn());         // the tick probe is not installed with a default ini
 
-    // exactly these four keys are bound in [FramePacing], once each, in the process-wide config too
+    // exactly these five keys are bound in [FramePacing], once each, in the process-wide config too
     for (bool global : { false, true })
     {
         ext::config::Binder b;
@@ -75,7 +77,7 @@ void DefaultsAndBinding()
             ext::Cfg().Bind(b);
         else
             cfg.Bind(b);
-        int count = 0, trace = 0, timers = 0, hidden = 0, tick = 0;
+        int count = 0, trace = 0, timers = 0, hidden = 0, recorder = 0, tick = 0;
         for (const auto& e : b.Table())
             if (std::string(e.section) == "FramePacing")
             {
@@ -83,39 +85,54 @@ void DefaultsAndBinding()
                 trace += std::string(e.key) == "Trace" ? 1 : 0;
                 timers += std::string(e.key) == "GpuTimers" ? 1 : 0;
                 hidden += std::string(e.key) == "HiddenPresentDoNotWait" ? 1 : 0;
+                recorder += std::string(e.key) == "FgRecorder" ? 1 : 0;
                 tick += std::string(e.key) == "TickProbe" ? 1 : 0;
             }
-        CHECK(count == 4 && trace == 1 && timers == 1 && hidden == 1 && tick == 1);
+        CHECK(count == 5 && trace == 1 && timers == 1 && hidden == 1 && recorder == 1 && tick == 1);
     }
 }
 
 void LoadSaveRoundTrip()
 {
-    // nothing in the ini, "auto" (the shipped template) and unknown words: both unset
-    for (const char* text : { "", "[FramePacing]\nTrace=auto\nGpuTimers=auto\nHiddenPresentDoNotWait=auto\nTickProbe=auto\n",
-                               "[FramePacing]\nTrace=maybe\nGpuTimers=perhaps\nHiddenPresentDoNotWait=perhaps\nTickProbe=perhaps\n" })
+    // nothing in the ini, "auto" (the shipped template) and unknown words: all unset
+    for (const char* text :
+         { "", "[FramePacing]\nTrace=auto\nGpuTimers=auto\nHiddenPresentDoNotWait=auto\nFgRecorder=auto\nTickProbe=auto\n",
+           "[FramePacing]\nTrace=maybe\nGpuTimers=perhaps\nHiddenPresentDoNotWait=perhaps\nFgRecorder=perhaps\nTickProbe=perhaps\n" })
     {
         auto cfg = LoadFresh(text);
         CHECK(!cfg.TraceKey().has_value());
         CHECK(!cfg.GpuTimersKey().has_value());
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == false);
+        CHECK(cfg.fgRecorder.value_or_default() == false);
         CHECK(!cfg.TickProbeOn());
     }
     {
-        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nGpuTimers=true\nHiddenPresentDoNotWait=true\nTickProbe=true\n");
+        auto cfg = LoadFresh("[FramePacing]\nTrace=true\nGpuTimers=true\nHiddenPresentDoNotWait=true\nFgRecorder=true\nTickProbe=true\n");
         CHECK(cfg.TraceKey().has_value() && *cfg.TraceKey() == true);
         CHECK(cfg.GpuTimersKey().has_value() && *cfg.GpuTimersKey() == true);
         CHECK(cfg.hiddenPresentDoNotWait.value_or_default() == true);
+        CHECK(cfg.fgRecorder.value_or_default() == true);
         CHECK(cfg.TickProbeOn());
         CHECK(Saved(cfg, "Trace") == "true");
         CHECK(Saved(cfg, "GpuTimers") == "true");
         CHECK(Saved(cfg, "HiddenPresentDoNotWait") == "true");
+        CHECK(Saved(cfg, "FgRecorder") == "true");
         CHECK(Saved(cfg, "TickProbe") == "true");
     }
     {
         auto cfg = LoadFresh("[FramePacing]\nGpuTimers=false\n");
         CHECK(cfg.GpuTimersKey().has_value() && *cfg.GpuTimersKey() == false); // an explicit false is not "unset"
         CHECK(Saved(cfg, "GpuTimers") == "false");
+    }
+    {
+        auto cfg = LoadFresh("[FramePacing]\nFgRecorder=false\n");
+        CHECK(cfg.fgRecorder.value_or_default() == false); // false is the default, so it saves as "auto"
+        CHECK(Saved(cfg, "FgRecorder") == "auto");
+    }
+    {
+        auto cfg = LoadFresh("[FramePacing]\nTickProbe=false\n");
+        CHECK(!cfg.TickProbeOn()); // false is the default, so it saves as "auto"
+        CHECK(Saved(cfg, "TickProbe") == "auto");
     }
     {
         auto cfg = LoadFresh("[FramePacing]\nTrace=false\n");
@@ -127,6 +144,8 @@ void LoadSaveRoundTrip()
         CHECK(Saved(cfg, "Trace") == "auto");
         CHECK(Saved(cfg, "GpuTimers") == "auto");
         CHECK(Saved(cfg, "HiddenPresentDoNotWait") == "auto");
+        CHECK(Saved(cfg, "FgRecorder") == "auto");
+        CHECK(Saved(cfg, "TickProbe") == "auto");
     }
 }
 
@@ -138,6 +157,8 @@ void IniFragment(const std::string& repo)
     CHECK(ini.find("\nTrace=auto") != std::string::npos);
     CHECK(ini.find("\nGpuTimers=auto") != std::string::npos);
     CHECK(ini.find("\nHiddenPresentDoNotWait=auto") != std::string::npos);
+    CHECK(ini.find("\nFgRecorder=auto") != std::string::npos);
+    CHECK(ini.find("\nTickProbe=auto") != std::string::npos);
     // what the user needs to know, in words
     CHECK(ini.find("Default (auto) is false") != std::string::npos);  // the switch is off unless asked for
     CHECK(ini.find("Frame pacing CPU [") != std::string::npos);      // the line to look for
@@ -147,6 +168,8 @@ void IniFragment(const std::string& repo)
     CHECK(ini.find("Frame pacing trace: ") != std::string::npos);    // the line that says whether the trace is on
     CHECK(ini.find("Frame pacing GPU [") != std::string::npos);      // the lines the timers add when they sample
     CHECK(ini.find("Default (auto) is off unless the trace is on") != std::string::npos); // what auto means here
+    CHECK(ini.find("fg-recordings") != std::string::npos); // where the recorder writes
+    CHECK(ini.find("tools/analyze-fg-recording.ps1") != std::string::npos); // how to read a session
 }
 
 // The live-key mirrors (ext/AddKeysLoadedHook): a module that must not read its key per frame refreshes it at the end of every config load. The

@@ -16,13 +16,17 @@ void OnActivated(IFGFeature* fg)
 {
     // XeFG_Dx12::Activate, before the feature is marked active: the provider's pacing restarts clean.
     if (dynamic_cast<XeFG_Dx12*>(fg) != nullptr)
+    {
         XeFGPacing::RequestRecovery();
+        ext::fgrec::OnProviderOn("xefg"); // recorder: a new generation starts
+    }
     // DLSSG_Common::Activate, after the feature is marked active: DLSS-G presentation telemetry restarts (the Vulkan
     // output has none).
     else if (dynamic_cast<DLSSG_Dx12*>(fg) != nullptr)
     {
         ResetDlssgPresentStats();
         ResetAutoMfg(); // dynamic MFG on RTX 40: a new observation window (the kill-switch memory stays)
+        ext::fgrec::OnProviderOn("dlssg"); // recorder: a new generation starts
     }
 }
 } // namespace ext::fg

@@ -530,6 +530,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         State::Instance().frameCount = _frameCounter;
     }
 
+    ext::fgrec::OutPresentBegin(willPresent, SyncInterval, Flags); // ext: FG recorder output present begin
     LOG_DEBUG("Calling original present");
 
     // swapchain present
@@ -570,6 +571,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
+    ext::fgrec::OutPresentEnd(willPresent, presentResult); // ext: FG recorder output present end with HRESULT
     return presentResult;
 }
 

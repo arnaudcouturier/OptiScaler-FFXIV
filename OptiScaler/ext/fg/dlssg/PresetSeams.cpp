@@ -181,6 +181,7 @@ bool PresetSwitchTick(IFGFeature* fg, const sl::ViewportHandle& viewport)
         LOG_INFO("DLSS-G render preset: {} -> {}; the resources were released and the hooks are in place, frame generation resumes on "
                  "the next frame with fresh history",
                  Name(previous), Name(configured));
+        ext::fgrec::OnPresetSwitch(Name(previous), Name(configured)); // recorder: a new generation starts
         return true; // skip this frame's dispatch
     }
     if (result == SwitchResult::RestartNeeded && g_reportedFailure != configured)

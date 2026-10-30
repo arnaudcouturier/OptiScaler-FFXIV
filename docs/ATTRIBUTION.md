@@ -37,6 +37,7 @@ A few features follow code SirenBrink published later, in v6.0 (commit `e17a7362
 | Source-level jitter fix (`[FFXIV] JitterSource`) | follows SirenBrink's `FfxivJitter` hooks (`5bfa6e92`) | SirenBrink | same hook points, strength range, phase-count rule, ring criteria and most guard blocks; the controller, verification, fall-back and install are this fork's |
 | Automatic DLSS-G multiplier (`[DLSSG] AutoMFG`) | selector rules from SirenBrink's XeFG selector (`XeFGDynamic.h`) | SirenBrink | controller, kill-switch, stall rule and self-test are this fork's |
 | Window mode, Ember menu style, FFXIV tab and card registry, create-time automatic mipmap bias, game jitter probe and learned correction, packaging and release tooling, patch runbook | this fork | arnaudcouturier | no counterpart in SirenBrink's tree |
+| FG event recorder (`OptiScaler/ext/fgrec/`: ini key, menu checkbox, JSONL writer, analyzer) | this fork (no third-party source) | arnaudcouturier | wrote it |
 
 ## Linear light, HDR PNG menu option and character preview
 

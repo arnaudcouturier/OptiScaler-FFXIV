@@ -2,6 +2,8 @@
 
 #include "ext/present/PresentSeams.h"
 
+#include "ext/fgrec/FgRecSeams.h"
+
 #include "ext/core/ExtConfig.h"
 #include "ext/latency/TickLease.h"
 #include "ext/latency/TickProbe.h"
@@ -141,10 +143,23 @@ PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _ac
         _active = true;
         _startUs = NowUs();
     }
+    // The recorder times the Reflex sleep through this same scope (no new upstream line): armed only.
+    if (phase == Phase::ReflexSleep && ext::fgrec::RecArmed())
+        QueryPerformanceCounter(&_recQpc);
 }
 
 PacingScope::~PacingScope()
 {
+    if (_recQpc.QuadPart != 0)
+    {
+        // The timed Reflex sleep, in QPC ticks (the analyzer converts with the session frequency).
+        LARGE_INTEGER end {};
+        QueryPerformanceCounter(&end);
+        const int64_t ticks = end.QuadPart >= _recQpc.QuadPart ? end.QuadPart - _recQpc.QuadPart : 0;
+        _recQpc.QuadPart = 0;
+        ext::fgrec::OnReflexSleep(ticks);
+    }
+    // The simulation-tick probe closes its own sleep span on the same scope (ext/latency/TickProbe.h).
     if (_phase == Phase::ReflexSleep)
         ext::latency::OnSleepScopeEnd();
     if (!_active)
@@ -239,6 +254,16 @@ HRESULT HiddenPresent(IDXGISwapChain* swapChain, UINT flags)
 {
     PacingScope scope(Phase::HiddenPresent);
     HiddenHooks hooks { scope };
-    return hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks);
+    LARGE_INTEGER begin {}, end {};
+    const bool rec = ext::fgrec::RecArmed();
+    if (rec)
+        QueryPerformanceCounter(&begin);
+    const HRESULT hr = hidden::SeamPresent(HiddenPolicy(), swapChain, flags, hooks);
+    if (rec)
+    {
+        QueryPerformanceCounter(&end);
+        ext::fgrec::OnHiddenPresent(hr, end.QuadPart - begin.QuadPart);
+    }
+    return hr;
 }
 } // namespace ext::present

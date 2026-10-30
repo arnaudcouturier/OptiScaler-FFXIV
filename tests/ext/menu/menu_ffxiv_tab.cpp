@@ -84,7 +84,7 @@ void Cards(const std::string& repo)
     size_t tokens = 0;
     const auto regs = menuscan::ScanRegistrations(repo, tokens);
     CHECK(regs.size() == tokens);
-    CHECK(regs.size() == 14); // was 15 with the retired companion card
+    CHECK(regs.size() == 15); // the frame_pacing card joined the registry, the retired companion card left it
 
     std::map<std::string, std::string> tabOf;
     for (const auto& r : regs)

@@ -2,6 +2,7 @@
 
 #include "ext/core/ExtConfig.h"
 #include "ext/fg/DynamicMfgGlue.h"
+#include "ext/fgrec/FgRecSeams.h"
 #include "ext/fg/FgInternal.h"
 #include "ext/fg/dlssg/MfgUnlock.h"
 
@@ -82,6 +83,7 @@ struct LiveWorld
     std::unique_lock<std::mutex> lock() { return std::unique_lock<std::mutex>(g_mutex); }
     void log(bool warn, const std::string& text)
     {
+        ext::fgrec::OnAutoMfg(warn, text.c_str()); // recorder: the switch, the verdict, the stall seam
         if (warn)
             LOG_WARN("{}", text);
         else
@@ -110,6 +112,7 @@ void NoteModelRebuild()
 {
     std::scoped_lock lock(g_mutex);
     g_glue.controller.NoteExternalStall();
+    ext::fgrec::OnNrRebuild(); // recorder: the rebuild hitches its frame
 }
 
 void ResetAutoMfg()
