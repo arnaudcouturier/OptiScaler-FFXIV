@@ -33,10 +33,12 @@ namespace detail
 void VertexShaderCreated(ID3D11VertexShader* shader, const void* code, size_t size);
 } // namespace detail
 
-// Every draw hook, before anything else: remembers what the draw was asked to do. One atomic test while the probe is off.
+// Every draw hook, before anything else: remembers what the draw was asked to do. One atomic test while both probes are off; it serves
+// the UI draw probe and the draw diagnostic (ext/ffxiv/diag), which is why it tests both feature bits at once (one relaxed load either
+// way).
 inline void NoteDraw(char kind, uint32_t count, uint32_t instances, uint32_t start, int32_t baseVertex)
 {
-    if (ext::hudless::plate::Enabled())
+    if (ext::ActiveAny(ext::F::PlateProbe, ext::F::DrawDiag))
         g_args = { kind, count, instances, start, baseVertex };
 }
 

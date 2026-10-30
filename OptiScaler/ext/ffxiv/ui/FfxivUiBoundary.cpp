@@ -4,6 +4,7 @@
 
 #include "ext/core/HooksBypass.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h"
+#include "ext/ffxiv/diag/DrawDiag.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/ui/UiBoundaryCore.h"
 #include "ext/ffxiv/ui/PlateDraws.h"
@@ -398,6 +399,9 @@ void OnPresentBegin()
         // One Present for the shader catalog health log. BEFORE the Armed() test: a default-ini session (Mode off, Diagnostics off) is
         // not armed and still has to get its catalog summary line (catalog health at first launch is the point).
         ext::ffxiv::catalog::OnPresent();
+        // Developer draw diagnostic ([FFXIV] DrawDiagnostics, off by default): closes the frame the draw hooks collected, before the
+        // Armed() test so that it does not depend on the UI boundary detector being armed.
+        ext::ffxiv::diag::OnPresent();
         RefreshArmed();
         if (!Armed())
             return;

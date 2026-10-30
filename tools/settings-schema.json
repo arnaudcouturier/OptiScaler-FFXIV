@@ -2135,6 +2135,33 @@
           "menu": { "tab": "FFXIV", "card": "reshade_depth", "cardTitle": "ReShade depth compatibility" },
           "description": "Automatic scene depth for ReShade: copies the depth the upscaler is given into the back-buffer size for ReShade effects. Needs ReShade 6.8+. Switching it on takes effect within a few frames.",
           "flags": [ "ffxivOnly" ]
+        },
+        {
+          "key": "[FFXIV] DrawDiagnostics",
+          "section": "FFXIV",
+          "name": "DrawDiagnostics",
+          "type": "enum",
+          "values": [ "off", "capture" ],
+          "default": "auto",
+          "defaultMeans": "off",
+          "applies": "start",
+          "menu": { "tab": null, "card": null, "iniOnly": "developer draw diagnostic: log only, writes the draw list of a few frames" },
+          "description": "Developer switch, ini only: capture writes the draw order of a few complete frames to OptiScaler/draw-diag/<run>/ (draws.csv: one row per draw with its pixel shader CRC and stage, the reflected names of the resources and constant buffers it binds, every render target's format and size, the depth view, the viewport, blend and depth state and the tone map, first UI draw and upscale boundary markers; cb.csv: the g_LightParam position, direction and colour read back once a second). Nothing in the frame changes. The shader names are recorded when the game creates its shaders, so set it before the game starts. Any other value counts as off.",
+          "flags": [ "ffxivOnly", "diagnostic" ]
+        },
+        {
+          "key": "[FFXIV] DrawDiagnosticsFrames",
+          "section": "FFXIV",
+          "name": "DrawDiagnosticsFrames",
+          "type": "int",
+          "min": 1,
+          "max": 16,
+          "default": "auto",
+          "defaultMeans": "3",
+          "applies": "start",
+          "menu": { "tab": null, "card": null, "iniOnly": "developer draw diagnostic: how many frames one capture writes" },
+          "description": "Developer switch, ini only: how many complete frames one capture writes. Frames with fewer than 32 draws (loading screens) are skipped. 1 to 16; anything else is clamped.",
+          "flags": [ "ffxivOnly", "diagnostic" ]
         }
       ]
     },

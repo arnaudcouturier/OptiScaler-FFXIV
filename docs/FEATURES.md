@@ -711,6 +711,25 @@ The two FFXIV-only NR options, "Scanned exposure" and "Spread alternating NR acr
 
 **Code and seams.** `ext/status/`. Upstream: one call in the `DLL_PROCESS_DETACH` case of `dllmain.cpp` (stops the writer and removes our file at exit).
 
+## Developer draw diagnostic
+
+**Origin.** Fork code.
+
+**What it does.** `[FFXIV] DrawDiagnostics = capture` (ini only) writes what the game asks the GPU to draw, for the first few complete frames of the session, to `OptiScaler\draw-diag\<run>\` next to the DLL (the five newest runs are kept):
+
+- `draws.csv`, one row per draw in draw order: ordinal, draw call, whether the draw came from the game's own context, the vertex/index counts, the pixel shader's bytecode CRC32 and its stage in the frame (tone map, the post stages, UI), the reflected names and slots of the textures and constant buffers that shader binds, every render target's format and size, the depth view, the viewport, the blend state and the depth state. One `#` comment line closes each frame with the ordinals of the tone-map draw, the first UI draw and the upscale boundary (`upscale_after` = the draw it followed).
+- `cb.csv`, the sun position, direction and diffuse colour of the `g_LightParam` constant buffer of the lighting passes (fixed offsets 0x00, 0x10 and 0x20), read back at most once a second while the capture runs.
+
+The reflected names are the engine's own (`g_SamplerOcclusion`, `g_SamplerShadowMask`, `g_LightParam`, `g_AmbientParamArray`, ...), read from the bytecode the game hands to `CreatePixelShader`, so a draw is described by what it reads instead of by a fingerprint alone. Frames with fewer than 32 draws (loading screens, the title) are not counted, so `DrawDiagnosticsFrames` counts rendered frames. Any other value than `capture` reads as `off`, which is today's behaviour.
+
+Nothing in the frame changes: the diagnostic binds nothing, draws nothing, writes no game resource and restores nothing, because it only reads D3D11 state. The GPU work it adds is one staging copy and one map of one constant buffer per second while a capture runs, and the files are written once, at the end of the capture, from the present thread. With the key off the draw hook pays one relaxed atomic load per draw. The frame boundary is the DX11-on-DX12 bridge's Present, so a session that runs without the bridge never completes a capture.
+
+**Status.** New; unit-tested (the two file formats, the marker ordering rule, the reflection reader on a shader compiled in the test, and wiring pins), **not tried in a game**. The run folder naming, the caps and the `#` comment rows follow the existing developer probes.
+
+**Config.** `[FFXIV] DrawDiagnostics` (`off` | `capture`, ini only, default `off`), `[FFXIV] DrawDiagnosticsFrames` (how many complete frames one capture writes, 1 to 16, default 3, ini only). Both are read once at start: the shader reflection is recorded when the game creates its shaders, so a capture has to be armed before that. **Menu.** None (developer key, listed in `kIniOnlyKeys`).
+
+**Code and seams.** `ext/ffxiv/diag/` (`DrawDiag.h` for the hook side, `FfxivDrawDiag.cpp` for the state reads, the reflection table and the files, `DrawDiagFormat.h` and `ShaderBindings.h` for the pure parts). It hangs on the existing FFXIV draw hooks (`ext/ffxiv/lighting/FfxivLightingCapture.h`: `Around()` and `CreateShader`), on the upscaler evaluate seam (`ext/Seams.cpp`) and on the Present entry of the UI boundary detector (`ext/ffxiv/ui/FfxivUiBoundary.cpp`). Upstream lines: none.
+
 ## Footprint
 
 **Origin.** Fork-original: the seams architecture (all fork code under `OptiScaler/ext/`, a small listed set of upstream seams) and the footprint script. SirenBrink's tree has no `ext/` folder and no seam document.

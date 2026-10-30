@@ -6,6 +6,7 @@
 #include "ext/ffxiv/lighting/FfxivLighting.h"
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h"
 #include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/diag/DrawDiag.h"
 #include "ext/ffxiv/jitter/FfxivJitter.h"
 #include "ext/ffxiv/resolve/ResolveStartup.h"
 #include "ext/upscaler/MipBindHooks.h"
@@ -77,6 +78,9 @@ void OnUpscaleBoundary(ID3D11DeviceContext* context, ID3D11Resource* color,
 
     // FFXIV game-jitter probe/correction ([FFXIV] JitterProbe, JitterCorrection; both off by default): ext/ffxiv/jitter/FfxivJitter.h.
     ext::ffxiv::jitter::OnUpscaleBoundary(parameters);
+
+    // Developer draw diagnostic ([FFXIV] DrawDiagnostics, off by default): marks the upscale boundary between the frame's draws.
+    ext::ffxiv::diag::OnUpscaleBoundary();
 
     // Bind-time mip bias: the target follows the sizes of this evaluate (no-op unless the sampler hooks are attached).
     ext::upscaler::mipbind::OnEvaluate(context, parameters);

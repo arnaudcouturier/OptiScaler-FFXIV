@@ -23,6 +23,7 @@ enum class F : uint64_t
     Upscaler = 1ull << 9,   // upscaler-layer extensions
     Game = 1ull << 10,      // a game module is active (ext::game::Current() is not all null)
     PlateProbe = 1ull << 11, // developer probes of the output stream and the UI draws ([HudLess] PlateDiagnostics, log only)
+    DrawDiag = 1ull << 12,  // developer draw diagnostic ([FFXIV] DrawDiagnostics, log only)
 };
 
 namespace detail

@@ -164,6 +164,8 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "FfxivUnknownBuildHooks", unknownBuildHooks);
     b.Add("FFXIV", "FfxivForceUnknownBuild", forceUnknownBuild);
     b.Add("FFXIV", "AutomaticReShadeDepth", automaticReShadeDepth);
+    b.Add("FFXIV", "DrawDiagnostics", drawDiagnostics);
+    b.Add("FFXIV", "DrawDiagnosticsFrames", drawDiagnosticsFrames);
     chara.Bind(b);
 }
 

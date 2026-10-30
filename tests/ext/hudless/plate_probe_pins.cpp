@@ -98,8 +98,8 @@ int main(int, char** argv)
     EXPECT(Has(hooks, "if(SUCCEEDED(hr)&&out&&*out)ext::ffxiv::ui::plate::OnVertexShaderCreated(*out,code,size);"), "vertex shader stamp");
 
     const std::string header = Code(repo, "ffxiv/ui/PlateDraws.h");
-    EXPECT(Has(header, "if(ext::hudless::plate::Enabled())g_args={kind,count,instances,start,baseVertex};"),
-           "NoteDraw is behind the probe test and only remembers the draw");
+    EXPECT(Has(header, "if(ext::ActiveAny(ext::F::PlateProbe,ext::F::DrawDiag))g_args={kind,count,instances,start,baseVertex};"),
+           "NoteDraw is behind one atomic test of both probes' bits and only remembers the draw");
     EXPECT(!Has(header, "g_packetPending") && !Has(header, "g_packetHas") && !Has(header, "AssignPacket"),
            "no packet record travels with the draw anymore");
     EXPECT(Has(header, "if(ext::hudless::plate::Enabled())detail::VertexShaderCreated(shader,code,size);"), "vertex shader behind the probe test");

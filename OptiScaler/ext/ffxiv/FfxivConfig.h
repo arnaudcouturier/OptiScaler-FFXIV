@@ -22,6 +22,10 @@ struct FfxivConfig
     CustomOptional<bool> unknownBuildHooks { false }; // [FFXIV] FfxivUnknownBuildHooks: allow the features that read game addresses on a game build the table does not know
     CustomOptional<bool> forceUnknownBuild { false }; // [FFXIV] FfxivForceUnknownBuild: debug, ignore the table so the resolver's values alone can be tried on today's exe
     CustomOptional<bool> automaticReShadeDepth { false }; // [FFXIV] AutomaticReShadeDepth: ReShade effects get a copy of the scene depth at the output size (ext/reshade/ReShadeDepth.h)
+    // Developer draw diagnostic (ext/ffxiv/diag), ini only, off by default: `off` | `capture`. Recorded when the game creates its shaders,
+    // so it is read once at start; anything but `capture` reads as off, which is today's behaviour.
+    CustomOptional<std::string> drawDiagnostics { "off" };     // [FFXIV] DrawDiagnostics
+    CustomOptional<int32_t> drawDiagnosticsFrames { 3 };       // [FFXIV] DrawDiagnosticsFrames: how many frames one capture writes (1..16)
     ffxiv::chara::CharaConfig chara; // ext/ffxiv/chara: [FFXIV] Preview* and [HDR] PreviewNRTrace
 
     void Bind(config::Binder& b);
@@ -31,11 +35,15 @@ struct FfxivConfig
     // build ExtConfig.cpp alone find it null and nothing happens. The hook only STORES the value (this can run inside DllMain).
     using BoolHook = void (*)(bool on);
     static inline BoolHook automaticReShadeDepthOnLoaded = nullptr;
+    // The developer draw diagnostic's key (ext/ffxiv/diag): arms one capture. Same pointer pattern and same reason.
+    static inline BoolHook drawDiagnosticsOnLoaded = nullptr;
 
     void PostLoad()
     {
         if (automaticReShadeDepthOnLoaded != nullptr)
             automaticReShadeDepthOnLoaded(automaticReShadeDepth.value_or_default());
+        if (drawDiagnosticsOnLoaded != nullptr)
+            drawDiagnosticsOnLoaded(drawDiagnostics.value_or_default() == "capture");
     }
 };
 } // namespace ext

@@ -13,6 +13,7 @@
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
 #include "ext/ffxiv/lighting/FfxivResolveGate.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
+#include "ext/ffxiv/diag/DrawDiag.h" // ext: developer draw diagnostic (log only, one atomic load per draw)
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
 #include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the nameplate vertex shaders (catalog group)
@@ -157,12 +158,14 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         ext::hdr::FfxivSceneHdr::Tag(*out,crc);
         ext::ffxiv::chara::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
+        ext::ffxiv::diag::OnPixelShaderCreated(*out,code,size,crc); // ext: developer draw diagnostic (one atomic test; reflects the bytecode once per shader)
     }
     return hr;
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
     if(ext::ffxiv::ui::Armed() && !inside){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
+    if(!inside && ext::ffxiv::diag::Capturing()) ext::ffxiv::diag::OnDraw(c,kind); // ext: developer draw diagnostic (ONE relaxed atomic load while the key is off)
     const bool wanted=ext::Cfg().nr.whitePointSource.value_or_default()==2;
     if (!inside && c==context && ext::hdr::FfxivSceneHdr::Requested()) {
         struct HdrGuard { HdrGuard(){inside=true;} ~HdrGuard(){inside=false;} } guard;
