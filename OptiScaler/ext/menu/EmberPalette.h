@@ -89,7 +89,7 @@ constexpr float Luminance(Rgba c) { return c.r * 0.2126f + c.g * 0.7152f + c.b *
 
 inline constexpr Rgba kWhite { 1.0f, 1.0f, 1.0f, 1.0f };
 
-// Surfaces: canvas < card < field, then two lifts for hover and press. The same values as Lucent's app tokens.
+// Surfaces: canvas < card < field, then two lifts for hover and press. These values were chosen for this fork.
 inline constexpr Rgba kCanvas = Hex(0x141519);
 inline constexpr Rgba kCard = Hex(0x1A1B20);
 inline constexpr Rgba kField = Hex(0x212329);

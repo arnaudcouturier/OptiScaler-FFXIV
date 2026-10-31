@@ -98,7 +98,7 @@ void DrawHudless(ext::menu::Ctx&)
     for (const std::string& line : sliderLogs.Due(GetTickCount64()))
         LOG_INFO("{}", line);
 
-    static const char* kModes[] = { "Off", "Recomposition (DLSS-G recomposes the UI)", "UI-free frame generation" };
+    static const char* kModes[] = { "Off", "Recomposition (DLSS-G recomposes the UI)", "UI-free frame generation (experimental)" };
     int selected = static_cast<int>(current);
     if (ImGui::Combo("Mode", &selected, kModes, 3) && selected != static_cast<int>(current))
     {
@@ -111,9 +111,18 @@ void DrawHudless(ext::menu::Ctx&)
                        "interpolates the UI layer. DLSS-G reads this when it is created: applies after a game restart. "
                        "FSR-FG and XeFG only receive the tags (untested).\n"
                        "UI-free: frame generation runs on the UI-free image and the UI is pasted back over every output "
-                       "frame at the real frame rate. DLSS-G only.\n"
+                       "frame at the real frame rate. DLSS-G only. Experimental: it has a known micro-stutter in motion, with "
+                       "DLSS-G preset Auto and preset C alike. Recomposition with preset Auto showed no micro-stutter.\n"
                        "Any doubt (no UI boundary, a size or format mismatch, a busy GPU slot, a fade) shows the normal "
                        "frame instead; the status line says why.");
+
+    // ui_free is the mode with the known micro-stutter; the recommendation is recomposition with the DLSS-G preset on Auto.
+    if (current == Mode::UiFree)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+        ImGui::TextWrapped("UI-free is experimental and micro-stutters in motion. Recomposition with DLSS-G preset Auto does not.");
+        ImGui::PopStyleColor();
+    }
 
     if (current == Mode::Recomposition || (selected == int(Mode::Recomposition)))
         ImGui::TextWrapped("Recomposition applies after a game restart (DLSS-G reads it when the feature is created).");

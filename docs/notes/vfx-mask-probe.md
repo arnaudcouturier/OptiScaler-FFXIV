@@ -3,6 +3,8 @@
 Material moved out of [FEATURES.md](../FEATURES.md#vfx-mask-probe-ffxiv-developer): the reasoning behind the probe, the
 measurement protocol and the limits. The feature itself is one ini key and one log line; everything below is how to read them.
 
+**Result (closed).** On the official benchmark client with DLSS 310.9.16 at the title's default preset, a constant half-screen mask changed nothing measurable: the masked half differed from the unmasked baseline by 7.55 against 8.51 mean absolute levels (two pairs), with no change in aliasing and at most 2 % spread across three runs. The gate is closed: the upscaler does not read the mask in that setup, so nothing here builds a mask. The null has no positive control, so it holds for that setup only (see below). Not tried in a played session.
+
 ## The question
 
 The upscalers this fork drives can be handed a mask that marks pixels a temporal upscaler should not trust: NVIDIA calls it the

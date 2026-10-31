@@ -174,7 +174,7 @@ const Pair kAllPairs[] = {
 };
 #undef PAIR
 
-// The golden dump: tools and Lucent read it so the ReShade menu can carry exactly the same palette (set EMBER_PALETTE_JSON to a path).
+// The golden dump: external tools read it so their menus can carry exactly the same palette (set EMBER_PALETTE_JSON to a path).
 void DumpJson(const char* path, const EmberInputs& in, const Ember& e)
 {
     FILE* f = std::fopen(path, "wb");
@@ -206,7 +206,7 @@ EmberInputs Inputs(float r, float g, float b, float alpha = 0.92f) { return { { 
 int main()
 {
     const std::vector<EmberInputs> accents = {
-        Inputs(1.000000f, 0.392157f, 0.039216f), // Crunchyroll orange, as Lucent ships it
+        Inputs(1.000000f, 0.392157f, 0.039216f), // Crunchyroll orange, as this style ships it
         Inputs(0.00f, 0.40f, 0.77f),             // OptiScaler's own blue
         Inputs(0.86f, 0.15f, 0.20f),
         Inputs(0.20f, 0.80f, 0.35f),

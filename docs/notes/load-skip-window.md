@@ -2,14 +2,12 @@
 
 `State::DisableChecks(...)` / `EnableChecks(...)` / `SkipDllName()` (upstream code in `State.h`) open a window in which the
 `LoadLibrary` hook runs no checks for the loads it makes: the plugin branches, the denylist and the catch-up for modules
-already in memory are all skipped, and the load goes straight to the real loader. Four call sites use it, each around a call
-that loads modules itself:
+already in memory are all skipped, and the load goes straight to the real loader. Four call sites open it:
 
 - `hooks/Dxgi_Hooks.cpp` (`hkCreateDXGIFactory`, `1`, `2`): `"dxgi"` around the original `CreateDXGIFactory*`.
 - `fsr4/FSR4Upgrade.cpp`: every name around `UpdateFfxApiProviderEx` / `UpdateFfxApiProvider`, which load the AMD driver.
 - `hooks/Streamline_Hooks.cpp` (`hookInterposer`): `"sl.interposer"`, because reading the DLL version loads modules.
-- `proxies/Streamline_Proxy.h` (`LoadStreamline`, `Init`): `"sl."` around `sl.interposer.dll` and around `slInit`, which
-  loads Streamline's own plugins from the local folder.
+- `proxies/Streamline_Proxy.h` (`LoadStreamline`, `Init`): `"sl."` around `sl.interposer.dll` and around `slInit`. The name is matched as a suffix (`EndsWithInsensitive(name, skip)` or `skip + ".dll"` in `hooks/Kernel_Hooks.cpp`), so with the DLSS-G output it matches no module and the outer window skips nothing; the local-folder test in `LoadLibraryCheckW` (`pathInsideLocalSlPath`) is what keeps Streamline's own plugins from the local folder out of the hook. The nesting sentence further down (`"sl."` around `"sl.interposer"`) still describes the rule: the windows can nest, and the newest open one decides the name.
 
 The state was four static members: a `std::map<UINT, std::string>` of open windows, the current owner id, an "enabled" flag
 and a counter handing out the owner ids. Two things were wrong with it.
@@ -56,3 +54,9 @@ and a counter handing out the owner ids. Two things were wrong with it.
 - Whether a load started on a second thread from inside a `DllMain` of a module the window's owner loaded should also be
   skipped: it is checked now. That is the intended change, and no caller in the tree relies on the old behaviour.
 - Nothing here was measured in a game: the defect is a race plus a wrong skip, and the tests run on this machine only.
+- `hookInterposer` (`hooks/Streamline_Hooks.cpp`) is not safe against two threads at once: its early return is checked at
+  entry and the field set after `unhookInterposer()`, with no lock. Before this change a second thread's interposer load
+  during the first thread's window was skipped; now it is hooked, so the overlap includes the owner's `hookInterposer`.
+  Two threads loading the same interposer within those milliseconds has never been observed.
+- `thread_local` state in a DLL that calls `DisableThreadLibraryCalls`: whether the per-thread map initialises correctly
+  on every thread is checked at the next in-game start, not proven.

@@ -57,6 +57,8 @@ which may take the loader lock such as `GetModuleFileName` is called before a pr
   lock is free again by the time the hook runs.
 - A plugin branch reached from inside a loader callout still waits for its mutex. Streamline loads its plugins from its own
   thread, and its documentation forbids calling `slInit` from `DllMain` for the same reason.
+- The probe loads an empty plugin, so a build that reorders the branches without changing the lock order can still pass it;
+  the source-order pin covers that.
 
 ## Freezes in old reports
 

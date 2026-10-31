@@ -37,7 +37,9 @@ A few features follow code SirenBrink published later, in v6.0 (commit `e17a7362
 | Source-level jitter fix (`[FFXIV] JitterSource`) | follows SirenBrink's `FfxivJitter` hooks (`5bfa6e92`) | SirenBrink | same hook points, strength range, phase-count rule, ring criteria and most guard blocks; the controller, verification, fall-back and install are this fork's |
 | Automatic DLSS-G multiplier (`[DLSSG] AutoMFG`) | selector rules from SirenBrink's XeFG selector (`XeFGDynamic.h`) | SirenBrink | controller, kill-switch, stall rule and self-test are this fork's |
 | Window mode, Ember menu style, FFXIV tab and card registry, create-time automatic mipmap bias, game jitter probe and learned correction, packaging and release tooling, patch runbook | this fork | arnaudcouturier | no counterpart in SirenBrink's tree |
-| FG event recorder (`OptiScaler/ext/fgrec/`: ini key, menu checkbox, JSONL writer, analyzer) | this fork (no third-party source) | arnaudcouturier | wrote it |
+| Simulation tick probe (`[FramePacing] TickProbe`) | the tick's slot, the function name and the instance counters follow FFXIVClientStructs (MIT); leasing the tick slot follows SirenBrink's FFXIVRender | aers and the FFXIVClientStructs contributors; SirenBrink | anchors, install checks, observer and probe are this fork's, written from the pattern; no source was copied; FFXIVClientStructs is a reference and is not shipped |
+| Names and offsets of the game's render-target and graphics-configuration structures used in comments and checks (`RenderHeight`, `MaxRenderHeight`, `MinRenderHeight`, `JitterMultiplier`, `GraphicsRezoScale`) and of the game loop's tick slot (see the tick probe) | FFXIVClientStructs (MIT, `https://github.com/aers/FFXIVClientStructs`) | aers and the FFXIVClientStructs contributors | used as a reference only: this fork finds every address with its own pattern search and ships no address or source from it |
+| FG event recorder (`OptiScaler/ext/fgrec/`: bounded queue, writer thread, rotation, analyzer) | ported from SirenBrink's FFXIVRender `fg_diagnostics` (GPL-3.0-or-later) | SirenBrink | smaller records, session cap, no paths, signal-only shutdown; the event kinds, call sites and analyzer are this fork's |
 
 ## Linear light, HDR PNG menu option and character preview
 
@@ -47,6 +49,6 @@ The fork first derived these features from an unpublished community build, a `wi
 
 ## People and projects
 
-Dagherbou, y4my4my4m, wilsjo2, byunjoe, SirenBrink, janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, maximedgoulet (FoveatedDLSS5), xenmods (DLSSNR-Cost-Scaler), RdenBlaauwen (RCAS-for-ReShade), AMD (FidelityFX RCAS), stegalloway, mavismmg, dashdogy, clshortfuse (RenoDX), Ersh and Pumbo (RenoDX FFXIV mod), the OptiScaler team. If your work is here and credited wrongly or not at all, open an issue and it will be fixed.
+Dagherbou, y4my4my4m, wilsjo2, byunjoe, SirenBrink, janblade, Citrus333, Ainquisition, MatheusGViana, ShyVortex, BeliyG3, maximedgoulet (FoveatedDLSS5), xenmods (DLSSNR-Cost-Scaler), RdenBlaauwen (RCAS-for-ReShade), AMD (FidelityFX RCAS), stegalloway, mavismmg, dashdogy, clshortfuse (RenoDX), Ersh and Pumbo (RenoDX FFXIV mod), aers and the FFXIVClientStructs contributors, the OptiScaler team. If your work is here and credited wrongly or not at all, open an issue and it will be fixed.
 
 Thank you.

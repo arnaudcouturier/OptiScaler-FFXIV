@@ -1,14 +1,9 @@
 # Simulation tick probe: how to run it and what the line says
 
-`[FramePacing] TickProbe` (off by default) measures where the game's own simulation tick sits relative to the frame that reaches the display. It
-exists to answer one question before anything is built on it: does the simulation finish early and wait for the render thread, or does the render
-thread wait for the simulation? Only the first case is worth acting on, and the number that separates the two is `W` below.
+`[FramePacing] TickProbe` (off by default) measures where the game's own simulation tick sits relative to the frame that reaches the display. `W` and `queue` are the numbers that say whether the render side waits for the simulation or the other way round. A sleep at the start of the tick was an experiment and is not shipped.
 
-Which number that is depends on the shape of the loop, and the line says which shape it measured. FFXIV runs its main loop on one thread: the
-bridge present is a piece of the tick body, so a finished simulation never waits in a queue. There `W` is the time the game thread spends inside
-the native present - the wait a sleep at tick start would move to before the input sampling. On a game with a separate render thread (or on this
-one if an overlay moves the present), the present runs outside the tick and `queue` is the old queue wait: a finished tick waiting for the render
-thread's previous present to end.
+Which number that is depends on the shape of the loop, and the line says which shape it measured. FFXIV runs its main loop on one thread: the bridge present is a piece of the tick body, so a finished simulation never waits in a queue. There `W` is the time the game thread spends inside
+the native present. On a game with a separate render thread (or on this one if an overlay moves the present), the present runs outside the tick and `queue` is the old queue wait: a finished tick waiting for the render thread's previous present to end.
 
 Nothing about the feature is guessed from a single session's numbers. The probe is a measurement, and a session that reads badly is a normal
 outcome.
@@ -80,14 +75,10 @@ All times are milliseconds of CPU time, from `QueryPerformanceCounter`. One line
 | `paired` | share of presents that found the tick their frame number named |
 | `counter` | `ok`, `missing` (the offset did not resolve) or `inconsistent` (the counter did not advance by exactly one per tick) |
 
-`W` is the number a sleep at tick start could give back. Inside the tick that is the time the game thread spends in the native present, which
-contains the bridge's copy and submit as well as its waits: the probe cannot tell those apart, so `W` is an upper bound on what a sleep could move
-to before the input sampling, never a prediction of the gain. On a single-thread loop the simulation never runs ahead of the render thread, so
-there is no queue to drain and `queue` reads `n/a`; a sleep then has to earn its place against `W` alone, and only if the wait it moves sits
-between the input sampling and the display.
+`W` is an upper bound: it contains the bridge's copy and submit as well as its waits, and the probe cannot tell them apart.
 
-Outside the tick, `queue` is the number a sleep could give back: a finished simulation that sits in a queue is time nothing else can use. A
-negative `queue` says the opposite (the render thread waited for the simulation), and a sleeping tick would then make latency worse, not better.
+Outside the tick, `queue` is the time a finished simulation spends waiting for the render thread: time nothing else can use. A
+negative `queue` says the opposite (the render thread waited for the simulation).
 That is why `queue`, not the spread of `age`, is the reading for that shape: a pipeline that always runs two frames deep has a nearly constant
 `age` and still a large positive `queue`.
 
@@ -118,8 +109,7 @@ tick.
 
 - It is CPU timestamps. It does not measure input-to-photon latency, and `age` includes whatever the GPU needs anyway.
 - `W` inside the tick is the whole native present, copy and submit included. It does not say how much of that time is a wait for the GPU or the
-deck, which is what decides how much of it a sleep could move; a session that needs that split has to time the present's stages or read the GPU
-stage timers beside it.
+driver; a session that needs that split has to time the present's stages or read the GPU stage timers beside it.
 - A frame the game never ticked has no pairing; `paired` is the share that did.
 - A loading screen, a cutscene or an alt-tab makes `paired` dip and the metrics jump. That is expected and recovers by itself; a session report
   should say which part of the window was a scene change.

@@ -17,7 +17,7 @@
           "defaultMeans": "off (today's behaviour)",
           "applies": "live",
           "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
-          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (applies after a game restart); ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate. Any other value counts as off.",
+          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (applies after a game restart), recommended with [DLSSG] RenderPreset = auto; ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate, experimental and known to micro-stutter. Any other value counts as off.",
           "flags": [ "ffxivOnly" ]
         },
         {
