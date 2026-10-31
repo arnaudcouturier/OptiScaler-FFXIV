@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Turns a folder made by tools\package.ps1 into the release archive dist\OptiScaler-FFXIV-<Version>.zip.
 .DESCRIPTION
@@ -76,7 +76,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $tagRoot = if ($RepoRoot) { $RepoRoot } else { $root }  # only the tag checks run here; every content file still comes from the script's own checkout
 if (-not $OutDir) { $OutDir = Join-Path $root 'dist' }
 
-if ($Version -cnotmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(-rc\d+)?$') {
+if ($Version -cnotmatch '^(ffxiv-)?\d{4}\.\d{2}\.\d{2}[a-z]?-[0-9a-f]{8}(-rc\d+)?$') {
     Fail "Version '$Version' does not follow ffxiv-<yyyy.mm.dd>-<upstream sha8>[-rcN]" 2
 }
 if (-not (Test-Path -LiteralPath $Package -PathType Container)) { Fail "Package folder not found: $Package" 2 }
@@ -94,7 +94,7 @@ $tag = if ($Version.StartsWith('ffxiv-', [StringComparison]::Ordinal)) { $Versio
 # smoke-tested are the bytes that ship. Only a string that stands on its own (a NUL before and after) with the long describe shape counts,
 # so the tag quoted inside a longer text does not.
 # Nothing has been written yet at this point.
-$describeShape = [regex]::new('ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?-\d+-g[0-9a-f]{7,40}(?:-dirty)?(?=\x00)', 'CultureInvariant, Compiled')
+$describeShape = [regex]::new('ffxiv-\d{4}\.\d{2}\.\d{2}[a-z]?-[0-9a-f]{8}(?:-rc\d+)?-\d+-g[0-9a-f]{7,40}(?:-dirty)?(?=\x00)', 'CultureInvariant, Compiled')
 $dllText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes((Join-Path $Package 'OptiScaler.dll')))   # one char per byte
 $found = [System.Collections.Generic.List[string]]::new()
 foreach ($m in $describeShape.Matches($dllText)) {
@@ -114,7 +114,7 @@ if ($embedded[0] -match '-dirty$') {
     Fail ("OptiScaler.dll was built from a dirty tree (it carries '$($embedded[0])'): uncommitted changes are baked into those bytes, so the tag cannot vouch for them. " +
           "Commit or stash every change, recreate the annotated tag on the clean commit, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
 }
-$em = [regex]::Match($embedded[0], '^(ffxiv-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}(?:-rc\d+)?)-(\d+)-g([0-9a-f]{7,40})$')
+$em = [regex]::Match($embedded[0], '^(ffxiv-\d{4}\.\d{2}\.\d{2}[a-z]?-[0-9a-f]{8}(?:-rc\d+)?)-(\d+)-g([0-9a-f]{7,40})$')
 if (-not $em.Success -or $em.Groups[1].Value -cne $tag) {
     Fail ("the DLL was built before the tag, or on another commit: it carries '$($embedded[0])' but -Version names '$tag'. " +
           "Create the annotated tag on the commit to be tested, rebuild on that commit, package again (docs\RELEASE.md section 1).") 6
