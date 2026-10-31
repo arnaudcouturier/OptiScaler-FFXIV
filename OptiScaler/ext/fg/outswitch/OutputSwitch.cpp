@@ -760,7 +760,7 @@ void OnPresent()
     const uint64_t start = NowMs();
     g_swap.presentStartMs = start;
 
-    // The whole idle cost of the feature: one relaxed load, one config read and one compare. A due judgement of the chain
+    // The whole idle cost after the stamp above: one config read and one compare. A due judgement of the chain
     // that is on the window still runs with the key off: the rollback of a chain that failed its presents must not be
     // held back because the player unticked the box after the switch.
     const bool keyOn = ext::Cfg().fg.outputHotSwap.value_or_default();

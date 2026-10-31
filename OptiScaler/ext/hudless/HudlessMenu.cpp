@@ -151,7 +151,7 @@ void DrawHudless(ext::menu::Ctx&)
     // output frame. Snapshot first, bit second: the presenting threads and the engine read the snapshot, so the bit may
     // only say "on" once the key says so, and the menu never clears it (the engine clears it when the last hidden plate
     // image is gone and re-reads this snapshot, so a key turned back on in that instant ends with the bit back on).
-    if (ImGui::TreeNode("Native nameplates"))
+    if (ImGui::TreeNode("Native nameplates (experimental)"))
     {
         auto publish = [&cfg]
         {
@@ -168,7 +168,8 @@ void DrawHudless(ext::menu::Ctx&)
             cfg.plateInterp = std::string(kInterpNames[interp]);
             publish();
         }
-        ext::menu::Tooltip("The game's nameplates move once per game frame; frame generation shows that step on every output.\n"
+        ext::menu::Tooltip("Experimental, and never tried in a game: only a session can say whether the game's plate draws really have the state the rule expects.\n"
+                           "The game's nameplates move once per game frame; frame generation shows that step on every output.\n"
                            "Off: nameplates stay native (today's behaviour).\n"
                            "Endpoint: the plate draws are taken out of the game's frame and drawn back over every output "
                            "unchanged, which proves the whole path with no visual change.\n"

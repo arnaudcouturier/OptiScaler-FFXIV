@@ -191,7 +191,8 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
 PresentScope::PresentScope()
 {
     // The live output switch: one call per present, first statement of the present, before the pacing trace opens so the
-    // switch's own hitch is not counted as a native present. With the feature key off it is one relaxed load and one compare.
+    // switch's own hitch is not counted as a native present. With the feature key off it is one clock read (the stamp
+    // OutputSwitch::OnPresent takes first), one config read and one compare.
     fg::outswitch::OnPresent();
 
     // The read-only live-chain observation of the release-model probe. One relaxed load per present; with the key off it

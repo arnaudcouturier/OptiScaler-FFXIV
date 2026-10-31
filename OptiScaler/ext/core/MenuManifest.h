@@ -88,7 +88,7 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] ContactShadowsSunSpace", // contact shadows: which space the game reports its sun direction in, redone after a patch (not a player setting)
     "[FFXIV] ContactShadowsSunSign", // contact shadows: which way the game's sun direction points, redone after a patch (not a player setting)
     "[FFXIV] ContactShadowsDump", // contact shadows: writes one frame's mask, term, depth and camera bytes for the developer check
-    "[HDR] LegacyComposition", // experimental rollback of the scene HDR composition: kept out of the menu until confirmed in a game
+    "[HDR] LegacyComposition", // true (the default) keeps the legacy scene HDR composition, false turns on the experimental continuous blend: kept out of the menu until the new path is confirmed in a game
 };
 
 // Proof of the control for keys whose member name is shared by several configs ([HDR], [HudLess] and [Window] all bind a member

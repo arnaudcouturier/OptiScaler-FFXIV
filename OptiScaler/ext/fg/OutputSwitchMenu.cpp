@@ -28,12 +28,13 @@ void DrawOutputSwitchCard(ext::menu::Ctx& c)
     auto& cfg = ext::Cfg().fg;
 
     bool enabled = cfg.outputHotSwap.value_or_default();
-    if (ImGui::Checkbox("Live output switch", &enabled))
+    if (ImGui::Checkbox("Live output switch (experimental)", &enabled))
         cfg.outputHotSwap = enabled;
     ext::menu::Tooltip("Move the chain that carries frame generation to the newly configured output while the game runs, "
                        "instead of asking for a restart.\n"
                        "Only starts from a run that already has FSR FG or XeFG selected with the upscaler as its input; a run "
-                       "with frame generation off has no input path to switch to. From there it moves between FSR FG, XeFG "
+                       "with frame generation off has no input path to switch to, and a DLSS-G output is not switched live. "
+                       "From there it moves between FSR FG, XeFG "
                        "and plain presentation in all six directions; they were verified on the official benchmark, in runs "
                        "that booted with FSR FG and in runs that booted with XeFG, not yet in a game session.\n"
                        "The new chain is judged by its first presents: one that fails is put back to plain presentation and that "
