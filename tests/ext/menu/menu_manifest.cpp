@@ -443,8 +443,8 @@ void StalePinsIgnored(const std::string& cppRaw)
 void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw)
 {
     CHECK(m.upstream.size() >= 40);
-    CHECK(m.slots.size() == 16); // the contact shadow card and the frame pacing card are the newest; the companion card is retired
-    CHECK(m.regs.size() == 16);  // MenuRelight.cpp and MenuFramePacing.cpp register those two, the companion card is gone
+    CHECK(m.slots.size() == 17); // live output switch, contact shadows and frame pacing joined; the companion card is retired
+    CHECK(m.regs.size() == 17);  // the same three registrations
 
     const Violations v = Check(m);
     Report("manifest", v);
@@ -456,8 +456,8 @@ void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw
 
     // facts the manifest test relies on, so a broken scanner cannot make the rules vacuous
     CHECK(Contains<std::string>(m.tabLabels, "FFXIV") && Contains<std::string>(m.tabLabels, "Frame Gen"));
-    CHECK(m.ffxivOnly.size() == 9); // the contact shadow card is FFXIV-only as well // was 9 with the retired companion card
-    CHECK(m.persisted.size() == 15);
+    CHECK(m.ffxivOnly.size() == 9); // the contact shadow card is FFXIV-only as well
+    CHECK(m.persisted.size() == 16); // the live output switch card added one; the contact shadow card is not persisted
     bool anyShared = false;
     for (const auto& b2 : m.upstream)
         anyShared = anyShared || b2.source == "RenderFrameGenerationRuntimeSettings";

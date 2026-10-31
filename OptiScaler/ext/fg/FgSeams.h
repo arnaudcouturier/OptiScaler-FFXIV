@@ -218,6 +218,8 @@ struct Resource;
 struct ResourceTag;
 } // namespace sl
 
+class Dx11wDx12SC;
+
 namespace ext::fg
 {
 // SetResource, after the lastFormat bookkeeping: the HUD-less format the loop guard compares. R10G10B10A2 while
@@ -236,4 +238,11 @@ bool XefgPrepareHudless(IFGFeature_Dx12* fg, Dx12Resource& fResource, int fIndex
 bool SceneRawHudless(const Dx12Resource& input);
 // UpscalerInputsDx11wDx12::UpscaleStart: OptiHDR output also needs the FG HDR flag.
 void AdjustConstants(FG_Constants& constants);
+// Dx11wDx12SC::Present, the early out when the bridge has no chain: the live output switch answers during its own
+// swap (S_OK inside the window) and the error the bridge always returned otherwise. No switch = that error.
+uint32_t DetachedPresent(Dx11wDx12SC& sc, bool realChainMissing);
+// Dx11wDx12SC::Present, the result of the FG chain's present, before the game sees it: probation masks a failure
+// it is about to roll back, and never a device loss. No switch composed = the same result. `sc` is the bridge that
+// presented, so a second window's bridge can never receive the first one's result.
+HRESULT OnFgPresentResult(Dx11wDx12SC& sc, HRESULT result);
 } // namespace ext::fg

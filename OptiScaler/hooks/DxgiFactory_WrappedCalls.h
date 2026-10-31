@@ -5,6 +5,7 @@
 
 class DxgiFactoryWrappedCalls
 {
+    friend struct ext::Access; // ext: the live output switch creates the plain chain through the wrapped factory, hook off
   public:
     static HRESULT CreateSwapChain(IDXGIFactory* realFactory, WrappedIDXGIFactory7* wrappedFactory, IUnknown* pDevice,
                                    const DXGI_SWAP_CHAIN_DESC* pDesc, IDXGISwapChain** ppSwapChain);

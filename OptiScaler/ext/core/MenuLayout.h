@@ -48,7 +48,7 @@ inline constexpr Slot kSlots[] = {
     { "fg_unlocks",               "Frame Gen",     "fg_sl_inputs" },
     { "fg_auto_mfg",              "Frame Gen",     "fg_unlocks" },
     { "frame_pacing",             "Frame Gen",     "fg_auto_mfg" },
-
+    { "fg_output_switch",         "Frame Gen",     "frame_pacing" },
     // FFXIV (tab hidden outside the FFXIV build match), after the Frame Gen cards, in the order of the tab:
     // display, image quality, HUD, diagnostics
     { "window_mode",              "FFXIV",         "fg_auto_mfg" },

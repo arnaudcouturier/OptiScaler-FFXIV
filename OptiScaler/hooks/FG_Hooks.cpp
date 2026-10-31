@@ -473,10 +473,16 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
             o_FGSCGetFrameLatencyWaitableObject = nullptr;
         }
     }
+
+    // ext: this class is hooked now (or the attach failed and there is none), so the bodies of either case run again
+    // instead of answering the refusals a detach left behind.
+    ext::fg::outswitch::HookGateFor().Reattached();
 }
 
 HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDXGIOutput* pTarget)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCSetFullscreenState(This, Fullscreen, pTarget); }, S_OK);
     IFGFeature* fg = State::Instance().currentFG;
 
     if (fg != nullptr && fg->IsActive())
@@ -563,6 +569,8 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
 HANDLE FGHooks::hkGetFrameLatencyWaitableObject(IDXGISwapChain2* This)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCGetFrameLatencyWaitableObject(This); }, static_cast<HANDLE>(nullptr));
     if (State::Instance().activeFgOutput != FGOutput::XeFG)
         return o_FGSCGetFrameLatencyWaitableObject(This);
 
@@ -587,6 +595,8 @@ HANDLE FGHooks::hkGetFrameLatencyWaitableObject(IDXGISwapChain2* This)
 
 HRESULT FGHooks::hkGetFullscreenDesc(IDXGISwapChain1* This, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCGetFullscreenDesc(This, pDesc); }, [&] { DXGI_SWAP_CHAIN_FULLSCREEN_DESC refused {}; refused.Windowed = TRUE; if (pDesc != nullptr) *pDesc = refused; return S_OK; });
     auto result = o_FGSCGetFullscreenDesc(This, pDesc);
 
     if (result == S_OK && State::Instance().SCExclusiveFullscreen &&
@@ -600,6 +610,8 @@ HRESULT FGHooks::hkGetFullscreenDesc(IDXGISwapChain1* This, DXGI_SWAP_CHAIN_FULL
 
 HRESULT FGHooks::hkGetFullscreenState(IDXGISwapChain* This, BOOL* pFullscreen, IDXGIOutput** ppTarget)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCGetFullscreenState(This, pFullscreen, ppTarget); }, [&] { if (pFullscreen != nullptr) *pFullscreen = FALSE; if (ppTarget != nullptr) *ppTarget = nullptr; return S_OK; });
     auto result = o_FGSCGetFullscreenState(This, pFullscreen, ppTarget);
 
     if (result == S_OK && State::Instance().SCExclusiveFullscreen &&
@@ -614,6 +626,8 @@ HRESULT FGHooks::hkGetFullscreenState(IDXGISwapChain* This, BOOL* pFullscreen, I
 HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat,
                                  UINT SwapChainFlags)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCResizeBuffers(This, BufferCount, Width, Height, NewFormat, SwapChainFlags); }, S_OK);
     // Skip XeFG's internal call
     if (_skipResize)
     {
@@ -831,6 +845,8 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
 
 HRESULT FGHooks::hkResizeTarget(IDXGISwapChain* This, const DXGI_MODE_DESC* pNewTargetParameters)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCResizeTarget(This, pNewTargetParameters); }, S_OK);
     if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
     {
         LOG_DEBUG("Skipping resize target.");
@@ -852,6 +868,8 @@ HRESULT FGHooks::hkResizeTarget(IDXGISwapChain* This, const DXGI_MODE_DESC* pNew
 HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
                                   UINT SwapChainFlags, const UINT* pCreationNodeMask, IUnknown* const* ppPresentQueue)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCResizeBuffers1(This, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue); }, S_OK);
     // Skip XeFG's internal call
     if (_skipResize1)
     {
@@ -1074,6 +1092,8 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 
 HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCPresent(This, SyncInterval, Flags); }, S_OK);
     if (ext::core::HooksBypassed()) // ext: C7
         return o_FGSCPresent(This, SyncInterval, Flags);
     // Skip XeFG's internal call
@@ -1111,6 +1131,8 @@ HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags
 HRESULT FGHooks::hkFGPresent1(IDXGISwapChain1* This, UINT SyncInterval, UINT Flags,
                               const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGSCPresent1(This, SyncInterval, Flags, pPresentParameters); }, S_OK);
     if (ext::core::HooksBypassed()) // ext: C7
         return o_FGSCPresent1(This, SyncInterval, Flags, pPresentParameters);
     // Skip XeFG's internal call
@@ -1433,6 +1455,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
 ULONG FGHooks::hkFGRelease(IUnknown* This)
 {
+    const ext::fg::outswitch::HookScope scope { ext::fg::outswitch::HookGateFor() };
+    if (!scope) return scope.Pass([&] { return o_FGRelease(This); }, static_cast<ULONG>(0));
     // We already released this one, prevent crashes
     if (This == oldSwapChain)
     {

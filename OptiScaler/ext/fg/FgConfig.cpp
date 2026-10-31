@@ -47,6 +47,12 @@ void FgConfig::Bind(config::Binder& b)
     b.AddEnum("LowLatency", "Input", Config::Instance()->LowLatencyInput, ::LowLatencyInput::_);
     b.AddEnum("LowLatency", "Output", Config::Instance()->LowLatencyOutput,
               static_cast<LowLatencyMode>(static_cast<uint32_t>(LowLatencyMode::Reflex) + 1));
+
+    // [FrameGen]: the live output switch and its developer measurement.
+    b.Add("FrameGen", "FGOutputHotSwap", outputHotSwap);
+    b.Add("FrameGen", "FGOutputSwitchProbe", outputSwitchProbe);
+    b.Add("FrameGen", "FGOutputSwitchScript", outputSwitchScript);
+    b.Add("FrameGen", "FGOutputSwitchFault", outputSwitchFault);
 }
 
 void FgConfig::PostLoad()

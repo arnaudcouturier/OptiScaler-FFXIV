@@ -40,6 +40,9 @@ void OnPresetSwitch(const char* from, const char* to) noexcept;
 void OnModule(const wchar_t* fileName) noexcept;
 // A XeFG dynamic factor change (the XeFG dispatch seam).
 void OnXeFactor(int from, int to) noexcept;
+// One live output switch milestone (ext/fg/outswitch/SwitchNotify.h), from the composition's observer: `kind` is one of
+// the kSwitch* names, `from`/`to` the outputs before and after, `text` the [fg-switch] line without its prefix.
+void OnSwitch(const char* kind, unsigned from, unsigned to, const char* text) noexcept;
 
 // Process reads shared by the taps: the numeric provider id and the short label of an FG output,
 // by its underlying value (so this header stays free of the upstream State type).

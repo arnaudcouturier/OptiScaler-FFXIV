@@ -1,0 +1,18 @@
+# The measured release-model rows: one line per class and library build.
+#
+# Written by a person from the output of the probe host (tools/fg-probe/build.ps1, then fg-probe.exe):
+#   class=<fsrfg|xefg> file=<library file name> size=<bytes> stamp=<PE TimeDateStamp, hex> config=<direct|xell>
+#   verdict=<M1|M2> witness=<honoured|no> order=<destroyfirst|pinfirst> refs=<standstill reference count>
+#   [companionFile=<file> companionSize=<bytes> companionStamp=<hex>, required for xefg]
+#   [ctx=<destroyed|refused|unknown> orderB=<clean|leaked|unknown> vramDeltaMb=<signed>]
+# config=direct for FSR FG (the library called directly) and config=xell for XeFG (with the XeLL context the product
+# always attaches); a row in any other configuration is refused, because it measures a setup the product never runs.
+# order= is the teardown order the row was measured with, and the product uses a row only in that order.
+# refs= is the count the chain carried at standstill; the preflight compares the live chain with it. An XeFG row
+# carries the build of the companion DLL the measurement needed (libxell.dll): another companion is another pair.
+# Then run Update-ModelTable.ps1, which regenerates OptiScaler/ext/fg/outswitch/ModelRows.h from this file.
+#
+# A row is admitted only from three probe runs that agreed, with a witness the library accepted; a build that is not
+# listed here is refused at run time.
+class=fsrfg file=amd_fidelityfx_framegeneration_dx12.dll size=40085776 stamp=6A2AB51F config=direct verdict=M2 witness=honoured order=destroyfirst refs=2 ctx=destroyed orderB=clean vramDeltaMb=0
+class=xefg file=libxess_fg.dll size=22957432 stamp=69CB0F4D config=xell verdict=M2 witness=honoured order=pinfirst refs=2 companionFile=libxell.dll companionSize=415368 companionStamp=6A561284 ctx=destroyed orderB=unknown vramDeltaMb=0

@@ -11,6 +11,10 @@
 #include "ext/ffxiv/ui/FfxivUiBoundary.h"
 #include "ext/hudless/HudlessSource.h"
 #include "ext/window/WindowSeams.h"
+#include "ext/fg/outswitch/BridgeRegistry.h"
+#include "ext/fg/outswitch/HookClock.h"
+#include "ext/fg/outswitch/OutputSwitch.h"
+#include "ext/fg/outswitch/Probe.h"
 
 #include <framegen/IFGFeature_Dx12.h>
 
@@ -22,6 +26,10 @@ namespace ext::dx11bridge
 {
 void ConfigureOutput(Dx11wDx12SC& sc)
 {
+    // The one bridge this module drives. A second window in the same process is refused for the session: the switch and
+    // the release-model protocol describe a single chain on a single window.
+    fg::outswitch::Bridges().NoteConfigured(&sc);
+
     auto* fgChain = Access::Bridge::FgSwapChain(sc);
     DXGI_SWAP_CHAIN_DESC1 hdrDesc {};
 
@@ -38,6 +46,7 @@ void ConfigureOutput(Dx11wDx12SC& sc)
 
 void OnDestroy(Dx11wDx12SC& sc)
 {
+    fg::outswitch::Bridges().NoteDestroyed(&sc);
     window::OnDestroy(sc); // window mode: drop a call held for this swapchain
 
     if (Access::Bridge::HdrOutput(sc))
@@ -49,9 +58,22 @@ DXGI_FORMAT OutputFormat(Dx11wDx12SC& sc, DXGI_FORMAT requested)
     return Access::Bridge::HdrOutput(sc) ? DXGI_FORMAT_R10G10B10A2_UNORM : requested;
 }
 
-HRESULT OnResizeDone(Dx11wDx12SC& sc)
+HRESULT OnResizeDone(Dx11wDx12SC& sc, bool gameResize)
 {
     window::OnResizeDone(sc); // window mode: probe record, border fix arming (one atomic load while [Window] Mode = off)
+
+    // The switch reads this generation across a swap: a resize that ran while the old chain was being replaced means the
+    // new chain has to be sized to the window again (SwapRecord.h). Recorded whether or not OptiHDR is on, after the
+    // window seam so that seam stays the body's first statement, and only for a resize of the window: the switch's own
+    // epilogue after it adopted a chain runs the same HDR/window work but is not a resize, and counting it would make the
+    // replay resize a chain that already has the window's size (and refuse the next switch as a busy resize).
+    if (gameResize)
+    {
+        auto& bridge = Access::Bridge::Ext(sc);
+        ++bridge.resizeGeneration;
+        bridge.lastResizeMs = ext::fg::outswitch::NowMs();
+        bridge.lastResizeThread = static_cast<uint32_t>(GetCurrentThreadId());
+    }
 
     if (Access::Bridge::HdrOutput(sc) && !hdr::Configure(Access::Bridge::FgSwapChain(sc)))
         return DXGI_ERROR_UNSUPPORTED;
@@ -61,6 +83,13 @@ HRESULT OnResizeDone(Dx11wDx12SC& sc)
 
 bool SetColorSpace(Dx11wDx12SC& sc, DXGI_COLOR_SPACE_TYPE colorSpace, HRESULT& out)
 {
+    // The live output switch replays the game's colour space on the chain that replaces this one (SwapRecord.h). It is
+    // recorded before the branch, and only replayed while the fork does not own the output: under OptiHDR the game's
+    // value is not what the chain carries (the epilogue's hdr::Configure negotiates that on the new chain instead).
+    auto& bridge = Access::Bridge::Ext(sc);
+    bridge.lastColorSpace = static_cast<uint32_t>(colorSpace);
+    bridge.colorSpaceRecorded = true;
+
     if (Access::Bridge::HdrOutput(sc))
     {
         out = hdr::Configure(Access::Bridge::FgSwapChain(sc)) ? S_OK : DXGI_ERROR_UNSUPPORTED;
@@ -161,6 +190,15 @@ void PrepareScreenshot(Dx11wDx12SC& sc, UINT slot, ID3D12Resource* hdrSource)
 // frame. Both cost one pointer test on a game without a source.
 PresentScope::PresentScope()
 {
+    // The live output switch: one call per present, first statement of the present, before the pacing trace opens so the
+    // switch's own hitch is not counted as a native present. With the feature key off it is one relaxed load and one compare.
+    fg::outswitch::OnPresent();
+
+    // The read-only live-chain observation of the release-model probe. One relaxed load per present; with the key off it
+    // latches after the first one. It runs here, at the first present, and not in the bridge constructor: at the first
+    // present the boot code has dropped its creation references, so the reference count it logs is the steady state.
+    fg::outswitch::probe::OnFirstPresent();
+
     ext::present::NativeBegin(); // PT: the whole bridge Present is one "native present" call
     ext::status::OnScopeBegin(ext::present::Phase::NativePresent); // status file base cadence (ignored phases cost nothing)
     ext::present::GpuTimersBeginFrame(); // the 4-of-16 frame counter of the GPU stage timers

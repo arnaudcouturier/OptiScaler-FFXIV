@@ -105,6 +105,7 @@ $presentEnds = New-Object System.Collections.Generic.List[object]
 $automfgLines = New-Object System.Collections.Generic.List[object]
 $rebuilds = New-Object System.Collections.Generic.List[object]
 $marks = New-Object System.Collections.Generic.List[object]
+$switchEvents = New-Object System.Collections.Generic.List[object]
 $warnings = New-Object System.Collections.Generic.List[object]
 
 function Convert-Ticks([long] $ticks) {
@@ -192,6 +193,18 @@ foreach ($file in $files) {
                 $t = $null
                 if ($null -ne $sec) { $t = [long] $sec }
                 $marks.Add([pscustomobject]@{ n = [long] $row['a']; qpc = [long] $row['qpc']; t_s = $t })
+            }
+            default {
+                # The live output switch's milestones (ext/fg/outswitch): one row per record, with the targets as provider
+                # names and the line the game log shows. The rows are the switch's own sequence; nothing is inferred.
+                if ($kind -like 'switch.*') {
+                    $t = $null
+                    if ($null -ne $sec) { $t = [long] $sec }
+                    $switchEvents.Add([pscustomobject]@{
+                            qpc = [long] $row['qpc']; t_s = $t; kind = $kind
+                            from = $providers["$($row['a'])"]; to = $providers["$($row['b'])"]; text = [string] $row['msg']
+                        })
+                }
             }
         }
         } catch { $parseErrors += "${name}:${lineNo}: $($_.Exception.Message)"; continue }
@@ -281,6 +294,7 @@ $result = [ordered]@{
     by_provider       = $byProv
     seconds           = $seconds
     automfg_switches  = $switches
+    switch_events     = $switchEvents.ToArray()
     rebuild_hitches   = $hitches
     marks             = $marks.ToArray()
     warnings          = $warnings

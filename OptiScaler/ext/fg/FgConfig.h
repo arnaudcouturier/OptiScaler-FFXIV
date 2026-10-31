@@ -55,6 +55,19 @@ struct FgConfig
     CustomOptional<float> autoMfgTarget { 0.0f };   // AutoMFGTarget
     CustomOptional<bool> autoMfgSelfTest { false }; // AutoMFGSelfTest
 
+    // Live output switch ([FrameGen] section): moves the chain that carries frame generation while the game runs.
+    // Off is exactly today's behaviour (the configured output takes effect on the next start).
+    CustomOptional<bool> outputHotSwap { false }; // FGOutputHotSwap
+    // Diagnostic keys of the switch, ini only and empty by default: a timed script of output changes ("45:xefg,90:none")
+    // counted from the first bridge present, and one named step to fail once (drain, teardown, create, adopt, replay,
+    // probation) so the rollback to plain presentation can be proven in a real process.
+    CustomOptional<std::string> outputSwitchScript { "" }; // FGOutputSwitchScript
+    CustomOptional<std::string> outputSwitchFault { "" };  // FGOutputSwitchFault
+    // Developer measurement: the probe behind the switch's release model. Ini only, off by default, reads the live chain
+    // once at the first present (reference count, present slot, one test present) and logs [fg-probe] lines; it creates
+    // and destroys nothing.
+    CustomOptional<bool> outputSwitchProbe { false }; // FGOutputSwitchProbe
+
     // D3: XeFG extras ([XeFG] section, shared with upstream's keys, which stay in Config.h). PostLoad() range-checks
     // InterpolationCount's upper bound, which upstream does not know.
     CustomOptional<bool> xefgDynamic { false };                               // DynamicMFG

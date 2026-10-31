@@ -1,6 +1,13 @@
 #pragma once
 #include <detours/detours.h>
 #include <tlhelp32.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <thread>
+#include <utility>
 #include <vector>
 
 // RAII enlistment of every other thread in the current process into a pending Detours
@@ -36,10 +43,10 @@
 // does nothing to avoid it. Not restructured here regardless: the alternative (not enlisting
 // other threads at all) trades this hazard for the different, also-real crash this scope exists
 // to prevent -- resuming a thread whose instruction pointer sits inside a prologue this
-// transaction just patched. Both are real; this file's callers only enlist on Detach (currently
-// unreachable in this build) specifically so the live, every-session Install path doesn't carry
-// either risk unnecessarily -- see each Install's own comment and the code-review ledger entry
-// for the full trade-off.
+// transaction just patched. Both are real, so the callers that do enlist another thread (the
+// lighting capture's patch, and the live output switch's detach) pair this scope with
+// DetourStallWatch below: the watch resumes every enlisted thread after a bounded stall, so a
+// thread suspended while holding the heap lock costs the bound instead of the session.
 namespace ext::core
 {
 class DetourThreadScope
@@ -97,11 +104,27 @@ class DetourThreadScope
 
     DetourThreadScope(const DetourThreadScope&) = delete;
     DetourThreadScope& operator=(const DetourThreadScope&) = delete;
+    // Move: the scopes are handed to the caller by value, so a caller that already listed the threads (a test, the
+    // retry's injected first attempt) can supply the list. A moved-from scope owns nothing and closes nothing.
+    DetourThreadScope(DetourThreadScope&& other) noexcept : threads_(std::move(other.threads_)), ok_(other.ok_)
+    {
+        other.threads_.clear();
+        other.ok_ = false;
+    }
+    DetourThreadScope& operator=(DetourThreadScope&&) = delete;
+
+    // A scope over handles the caller already opened: the test that enlists a thread which exited between the listing and
+    // the suspension (the race the failed update of a transaction retries). Ok() stays true: the listing itself was fine.
+    explicit DetourThreadScope(std::vector<HANDLE> threads) : threads_(std::move(threads)), ok_(true) {}
 
     // False if the snapshot could not be taken, or a thread could not be opened for a reason
     // other than it having already exited. Callers should abandon the transaction attempt
     // without starting it (DetourTransactionBegin was never called).
     bool Ok() const { return ok_; }
+
+    // The handles this scope keeps alive until after the commit or abort. Read by DetourStallWatch, which resumes them
+    // through the same handles when the window stalls.
+    const std::vector<HANDLE>& Handles() const { return threads_; }
 
     // Enlists the current thread plus every thread captured at construction. Call once, after
     // DetourTransactionBegin() has returned NO_ERROR.
@@ -120,5 +143,94 @@ class DetourThreadScope
   private:
     std::vector<HANDLE> threads_;
     bool ok_ = false;
+};
+
+// How long a transaction window may stay open before the watch resumes every enlisted thread. The number cannot tell a
+// thread suspended inside the heap lock from a commit that is slow for another reason (a hard page fault, an antivirus
+// scan) at this bound, and the threads resumed at the boundary would then run a prologue that is only half written. That
+// race is accepted because the transaction cannot be abandoned safely either, and the number is not lowered for it: it is
+// the time a legitimate window needs on this process (a few milliseconds, measured at boot).
+inline constexpr uint32_t kDetourStallMs = 500;
+
+// The bound on the hazard above. Detours allocates and frees through the process heap between the first
+// DetourUpdateThread and the commit, so a thread suspended inside that heap's lock stalls the installing thread for as
+// long as the commit never returns. This object is constructed BEFORE DetourTransactionBegin (it starts a thread and
+// copies the handle list, and both allocate: they must not happen once other threads are suspended), waits up to stallMs,
+// and resumes every enlisted thread through the same handles Detours resumes itself. A second ResumeThread on a running
+// thread is harmless (it answers the previous suspend count, which Detours ignores), and the transaction keeps working:
+// its own resume at the end finds nothing left to resume. Disarm (also the destructor) joins the worker and tells whether
+// it fired, so the caller can log it after the window closed.
+class DetourStallWatch
+{
+  public:
+    explicit DetourStallWatch(std::vector<HANDLE> threads, uint32_t stallMs = kDetourStallMs)
+        : threads_(std::move(threads))
+    {
+        if (threads_.empty())
+        {
+            // Only the calling thread is enlisted: it cannot be suspended, so the window cannot stall on itself.
+            armed_.store(true, std::memory_order_release);
+            return;
+        }
+
+        worker_ = std::thread([this, stallMs] {
+            std::unique_lock<std::mutex> lock(mutex_);
+            // The constructor waits for this store. A worker that has not reached its wait yet is still in its own
+            // start-up callbacks, TLS state and the process heap, and a stalled thread holding exactly that lock would
+            // block it too: a watch that returned before this point could never resume anything. Nothing has been
+            // suspended yet while the constructor runs, so the wait is short and cannot deadlock.
+            {
+                std::lock_guard<std::mutex> arm(armMutex_);
+                armed_.store(true, std::memory_order_release);
+            }
+            armCv_.notify_all();
+
+            const bool finished = done_.load();
+            if (finished || resume_.wait_for(lock, std::chrono::milliseconds(stallMs), [this] { return done_.load(); }))
+                return;
+
+            resumed_.store(true, std::memory_order_release);
+            for (const HANDLE thread : threads_)
+                ResumeThread(thread);
+        });
+
+        std::unique_lock<std::mutex> arm(armMutex_);
+        armCv_.wait(arm, [this] { return armed_.load(std::memory_order_acquire); });
+    }
+
+    DetourStallWatch(const DetourStallWatch&) = delete;
+    DetourStallWatch& operator=(const DetourStallWatch&) = delete;
+
+    ~DetourStallWatch() { Disarm(); }
+
+    // The window is over (commit or abort returned). Idempotent.
+    void Disarm()
+    {
+        done_.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            resume_.notify_all();
+        }
+        if (worker_.joinable())
+            worker_.join();
+    }
+
+    // True when the stall was long enough that the threads were resumed early: the transaction still completed, but a
+    // suspended thread held something the installing thread needed.
+    bool Resumed() const { return resumed_.load(std::memory_order_acquire); }
+
+    // True once the worker is inside its wait, which is the point the constructor returns on.
+    bool Armed() const { return armed_.load(std::memory_order_acquire); }
+
+  private:
+    std::vector<HANDLE> threads_;
+    std::mutex mutex_;
+    std::condition_variable resume_;
+    std::mutex armMutex_;
+    std::condition_variable armCv_;
+    std::atomic<bool> done_ { false };
+    std::atomic<bool> resumed_ { false };
+    std::atomic<bool> armed_ { false };
+    std::thread worker_;
 };
 } // namespace ext::core

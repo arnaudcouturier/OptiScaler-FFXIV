@@ -11,6 +11,7 @@ class DxgiFactoryHooks
     static void HookToFactory(IDXGIFactory* pFactory);
     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
     static bool SkipFgSwapChainCreation() { return _skipFGSwapChainCreation; } // ext: E5
+    friend struct ext::Access; // ext: the live output switch creates the plain chain through this entry, hook off
 
   private:
     using PFN_EnumAdapterByGpuPreference =

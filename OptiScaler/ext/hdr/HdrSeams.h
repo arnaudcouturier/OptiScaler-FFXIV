@@ -88,8 +88,9 @@ void OnDestroy(Dx11wDx12SC& sc);
 // ResizeBuffers / ResizeBuffers1, the FG chain's format argument: R10G10B10A2 while the bridge outputs HDR.
 DXGI_FORMAT OutputFormat(Dx11wDx12SC& sc, DXGI_FORMAT requested);
 // ResizeBuffers / ResizeBuffers1, after a successful resize: renegotiates the HDR output. A failure is returned
-// (DXGI_ERROR_UNSUPPORTED) and fails the resize.
-HRESULT OnResizeDone(Dx11wDx12SC& sc);
+// (DXGI_ERROR_UNSUPPORTED) and fails the resize. `gameResize` is false for the live output switch's own epilogue after it
+// adopted a chain: that is not a resize of the window, so it must not move the resize record the switch's replay reads.
+HRESULT OnResizeDone(Dx11wDx12SC& sc, bool gameResize = true);
 // SetColorSpace1, first statement. True = handled, `out` is the result (OptiHDR owns the output and swallows the game's
 // call). Otherwise the game's colour space is recorded in nightly's outputColorSpace/hdrOutputActive (SEAMS 5).
 bool SetColorSpace(Dx11wDx12SC& sc, DXGI_COLOR_SPACE_TYPE colorSpace, HRESULT& out);

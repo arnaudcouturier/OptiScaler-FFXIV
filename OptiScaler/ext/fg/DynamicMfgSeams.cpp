@@ -4,6 +4,7 @@
 #include "ext/fg/DynamicMfgGlue.h"
 #include "ext/fgrec/FgRecSeams.h"
 #include "ext/fg/FgInternal.h"
+#include "ext/fg/outswitch/OutputSwitch.h"
 #include "ext/fg/dlssg/MfgUnlock.h"
 
 #include <State.h>
@@ -73,6 +74,9 @@ struct LiveWorld
     }
     bool dx12() { return dynamic_cast<IFGFeature_Dx12*>(fg) != nullptr; }
     bool dlssgOutputActive() { return State::Instance().activeFgOutput == FGOutput::DLSSG; }
+    // The live output switch changed the chain: the selector discards what it observed and makes no automatic choice for
+    // that frame (DynamicMfgGlue.h).
+    uint32_t outputEpoch() { return ext::fg::outswitch::SwitchEpoch(); }
     bool gpuKnown() { return Gpu().known; }
     bool nvidia() { return Gpu().nvidia; }
     uint32_t architecture() { return Gpu().arch; }

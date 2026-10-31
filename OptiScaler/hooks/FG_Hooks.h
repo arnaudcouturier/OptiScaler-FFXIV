@@ -3,6 +3,7 @@
 #include <dxgi1_6.h>
 
 #include "Hook_Utils.h"
+#include "ext/fg/outswitch/HookScope.h" // ext: the live output switch closes this gate before it detaches the set
 
 class FGHooks
 {
@@ -23,6 +24,7 @@ class FGHooks
     static void SetDx12InteropPresentSC(IDXGISwapChain* pSwapChain, HWND hWnd);
     static void ClearDx12InteropPresentSC(IUnknown* pSwapChain);
     static bool IsDx12InteropPresentSC(IUnknown* pSwapChain);
+    friend struct ext::Access; // ext: the live output switch detaches the hook set through ext::Access::FgHooks
 
   private:
     using PFN_Present = rewrite_signature<decltype(&IDXGISwapChain::Present)>::type;

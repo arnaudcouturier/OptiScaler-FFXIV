@@ -32,6 +32,7 @@ inline constexpr const char* kPersistedForkIds[] = {
     "mipmap_auto",   "ffxiv_companion",         "reshade_addon_probe",
     "ffxiv_advanced", // new in the menu cleanup (not in session-final)
     "reshade_depth",  // new with the automatic ReShade scene depth
+    "fg_output_switch", // new with the live frame-generation output switch
 };
 
 // A retired card id and the card that took its place (a merged or removed card keeps its id here)
@@ -76,6 +77,9 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] FfxivLegacyGameBuild", // persistent rollback switch of the game build handling, read once at start
     "[FFXIV] FfxivUnknownBuildHooks", // persistent switch: the game-address features on a game build the table does not know
     "[FFXIV] FfxivForceUnknownBuild", // persistent debug switch: ignore the known-build table
+    "[FrameGen] FGOutputSwitchProbe", // developer measurement of the frame-generation libraries' release behaviour
+    "[FrameGen] FGOutputSwitchScript", // benchmark key: timed output changes, read from the ini only
+    "[FrameGen] FGOutputSwitchFault", // benchmark key: one named step to fail on purpose, read from the ini only
     "[FFXIV] DrawDiagnostics", // developer draw diagnostic: log only, one capture of a few frames; the shader names need it on at start
     "[FFXIV] DrawDiagnosticsFrames", // developer draw diagnostic: how many frames one capture writes
     "[FFXIV] DrawDiagnosticsDelaySeconds", // developer draw diagnostic: how long after the game starts the capture begins

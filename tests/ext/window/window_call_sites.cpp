@@ -165,7 +165,7 @@ int main(int argc, char** argv)
     CHECK(TopLevelStatement("b();\nwindow::OnPresentEnd();", "window::OnPresentEnd();"));
 
     // The resize and destroy seams: the call is the first statement of the body, so no early return can skip it.
-    const std::string resize = Body(bridge, "HRESULT OnResizeDone(Dx11wDx12SC& sc)");
+    const std::string resize = Body(bridge, "HRESULT OnResizeDone(Dx11wDx12SC& sc, bool gameResize)");
     const std::string destroy = Body(bridge, "void OnDestroy(Dx11wDx12SC& sc)");
     CHECK(!resize.empty() && !destroy.empty());
     {
@@ -177,7 +177,11 @@ int main(int argc, char** argv)
     {
         const size_t call = destroy.find("window::OnDestroy(sc);");
         CHECK(call != std::string::npos && destroy.find("return") > call);
-        CHECK(call != std::string::npos && destroy.find_first_not_of(" \t\r\n") == call); // the first statement
+        // The first statement is the read-only bridge-registry note (one atomic store, no call into the window); the
+        // window seam follows it directly, so no early return can skip either.
+        const size_t note = destroy.find("fg::outswitch::Bridges().NoteDestroyed(&sc);");
+        CHECK(note != std::string::npos && destroy.find_first_not_of(" \t\r\n") == note);
+        CHECK(call != std::string::npos && note < call);
         CHECK(Count(bridge, "window::OnDestroy(sc);") == 1);
     }
 

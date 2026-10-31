@@ -45,6 +45,11 @@ struct NVSDK_NGX_Parameter;
 // ID3D12Device/ID3D12GraphicsCommandList/ID3D12Resource are already complete by this point (NrSeams.h above pulls
 // in d3d12.h), so PrepareUpscalerColor's signature below can simply name them.
 
+namespace ext::fg::outswitch
+{
+struct HookSlot; // ext/fg/outswitch/HookRebind.h
+}
+
 namespace ext
 {
 // Friend of the upstream classes whose private state the fork has to reach (`friend struct ext::Access;`).
@@ -56,6 +61,24 @@ struct Access
     // Deactivate, so nothing queued references an upscaler that is about to be destroyed (ext::dx11bridge::
     // BeforeReleaseFeature). Not a seam: ext-internal.
     static void CancelPendingUpscalerWork(IFGFeature_Dx12& fg);
+
+    // hooks/FG_Hooks.h (friend line). The live output switch's rebind needs the ten (original, body) pairs upstream's
+    // HookFGSwapchain attaches; `o_*` and `hk*` are private statics, so this is the only way to name them. The definition
+    // is ext/fg/outswitch/HookAccess.h (it needs the complete class), and the caller treats a returned 0 as "no set".
+    static size_t FgHookSlots(ext::fg::outswitch::HookSlot* out, size_t maxOut);
+    // hooks/FG_Hooks.h (same friend line). True while the present slot holds a Detours trampoline: the rehook's proof that
+    // the class the switch created really is the hooked one. Defined in ext/fg/outswitch/HookAccess.h.
+    static bool FgPresentHooked();
+
+    // hooks/DxgiFactory_Hooks.h and hooks/DxgiFactory_WrappedCalls.h (their friend lines). The plain chain a live output
+    // switch creates goes through the real factory entry with the FG swapchain hook and the parent wrapping off, exactly as
+    // boot's fallback does. `wrappedFactory` is the WrappedIDXGIFactory7 the captured factory answered as, or null; the chain
+    // comes back with its creation reference. Defined in ext/fg/outswitch/FactoryGuards.cpp.
+    static long CreatePlainSwapChain(void* factory, void* wrappedFactory, void* device, void* desc, void** chain);
+    // The same two friend lines. A provider chain the switch creates goes through upstream's FGHooks::CreateSwapChain with
+    // the factory's FG swapchain creation skipped, as boot's own call is: the library creates its real chain through the
+    // hooked factory, and that inner create must not run the provider's create again. Same file.
+    static long CreateProviderSwapChain(void* factory, void* device, void* desc, void** chain);
 
     // resource_tracking/ResTrack_dx12.h (friend line). C6, ext-internal (ext::restrack::EnsureHooks): attach upstream's
     // own hkReset to ResTrack_Dx12::o_Reset. AttachResetHook is a no-op returning true when o_Reset is already set;

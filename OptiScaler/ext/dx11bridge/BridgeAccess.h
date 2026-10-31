@@ -34,6 +34,9 @@ struct ext::Access::Bridge
     static IFeature* InnerFeature(IFeature_Dx11wDx12& feature) { return feature.dx12Feature.get(); }
 
     static IDXGISwapChain4* FgSwapChain(Dx11wDx12SC& sc) { return sc._fgSwapChain; }
+    // The hidden real chain the bridge presents through: what the live output switch's capture reads when there is no FG
+    // chain on the window any more (a rollback or a limp retry).
+    static IDXGISwapChain* RealSwapChain(Dx11wDx12SC& sc) { return sc._real; }
     static DXGI_FORMAT BufferFormat(const Dx11wDx12SC& sc) { return sc._bufferFormat; }
     static ID3D12Device* Dx12Device(Dx11wDx12SC& sc) { return sc._dx12Device; }
     static ID3D11DeviceContext* Dx11Context(Dx11wDx12SC& sc) { return sc._dx11Context; }
@@ -55,6 +58,14 @@ struct ext::Access::Bridge
     // Window mode (M2): the bridge's back buffer index and buffer count. Dx11wDx12SC::Present advances the index
     // (_AdvanceFakeBackBufferIndex) only after `_fgSwapChain->Present` returned success, with frame generation on or off;
     // every early `return DXGI_ERROR_DEVICE_REMOVED` before that call leaves it alone. Read-only.
+    // The live output switch's accessors (ext/fg/outswitch/BridgeSwap.h). They write only what a switch owns: the FG chain
+    // and provider pointers, the cached descriptor the capture hands the new chain, and the interop resources a resize
+    // would retire anyway. Nothing here decides anything.
+    static void SetFgSwapChain(Dx11wDx12SC& sc, IDXGISwapChain4* chain) { sc._fgSwapChain = chain; }
+    static void SetFg(Dx11wDx12SC& sc, IFGFeature_Dx12* fg) { sc._fg = fg; }
+    static void RefreshDesc(Dx11wDx12SC& sc) { sc._RefreshCachedSwapchainDesc(); }
+    static void ReleaseInteropBackBuffers(Dx11wDx12SC& sc) { sc._ReleaseInteropBackBuffers(); }
+
     static UINT FakeBackBufferIndex(const Dx11wDx12SC& sc) { return sc._currentFakeIndex; }
     static UINT BufferCount(const Dx11wDx12SC& sc) { return sc._bufferCount; }
 };

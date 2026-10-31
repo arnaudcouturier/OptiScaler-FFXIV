@@ -164,7 +164,10 @@ int main(int argc, char** argv)
     {
         const auto ctor = Between(bridgeHdr, "PresentScope::PresentScope() {", "PresentScope::~PresentScope()");
         CHECK(!ctor.empty());
-        CHECK(Has(ctor, "PresentScope::PresentScope() { ext::present::NativeBegin(); "));
+        // The read-only probe observation is the ctor's first statement (one relaxed load, latched after the first present);
+        // the native span opens right after it and still before every close-out the ctor arms.
+        CHECK(Has(ctor, "PresentScope::PresentScope() { fg::outswitch::OnPresent(); fg::outswitch::probe::OnFirstPresent(); "
+                        "ext::present::NativeBegin(); "));
         const auto dtor = Between(bridgeHdr, "PresentScope::~PresentScope() {", "void BeforeSharedCopy(");
         CHECK(!dtor.empty());
         CHECK(Has(dtor, "window::OnPresentEnd(); ext::present::NativeEnd(); }")); // last, so the span covers every close-out

@@ -151,6 +151,16 @@ static void TapsThroughTheRecorder()
     fg::OnModule(L"");
     fg::OnXeFactor(2, 2); // unchanged factors emit nothing
     fg::OnXeFactor(2, 4);
+    fg::OnSwitch(nullptr, 0, 0, nullptr); // a null kind emits nothing
+    fg::OnSwitch(fg::kSwitchBegin, fg::kProvFsr, fg::kProvXeFg, "begin gen=1 from=fsrfg to=xefg why=script");
+    fg::OnSwitch(fg::kSwitchTeardown, fg::kProvFsr, fg::kProvNone,
+                 "teardown old chain=0000000000000001 class=fsrfg lib=amd_fidelityfx_framegeneration_dx12.dll/1/65F1A2B3 model=M2 pinRelease=yes witness=alive ms=800");
+    fg::OnSwitch(fg::kSwitchCreate, fg::kProvNone, fg::kProvXeFg, "create ok chain=0000000000000002 hr=0x0 retries=0 ms=1500");
+    State::Instance().activeFgOutput = FGOutput::XeFG; // the commit is the moment the live output changes
+    fg::OnSwitch(fg::kSwitchCommit, fg::kProvFsr, fg::kProvXeFg, "commit gen=1 hitchMs=2400 budgetLeft=7");
+    fg::OnSwitch(fg::kSwitchProbation, fg::kProvXeFg, fg::kProvXeFg, "probation ok presents=20 ms=8000 output=fg");
+    fg::OnSwitch(fg::kSwitchRollback, fg::kProvXeFg, fg::kProvNone,
+                 "FAILED step=create hr=0x80004005 rollback=plain remember=xefg");
 
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(std::size(exe)));
@@ -288,6 +298,23 @@ static void TapsThroughTheRecorder()
     }
     CHECK(count("xefg.factor") == 1); // the unchanged pair emits nothing
     CHECK(num(first("xefg.factor"), "a") == 2 && num(first("xefg.factor"), "b") == 4);
+    CHECK(count("switch.begin") == 1 && count("switch.teardown") == 1 && count("switch.create") == 1);
+    CHECK(count("switch.commit") == 1 && count("switch.probation") == 1 && count("switch.rollback") == 1);
+    {
+        const ft::JsonValue* begin = first("switch.begin");
+        CHECK(num(begin, "a") == static_cast<long long>(fg::kProvFsr));
+        CHECK(num(begin, "b") == static_cast<long long>(fg::kProvXeFg));
+        CHECK(num(begin, "gen") == g + 2); // no bump of its own
+        CHECK(ft::IsText(ft::Find(*begin, "msg"), "begin gen=1 from=fsrfg to=xefg why=script"));
+        // The commit is the moment records after it carry the new provider and a generation of their own.
+        const ft::JsonValue* commit = first("switch.commit");
+        CHECK(num(commit, "gen") == g + 3);
+        CHECK(num(commit, "prov") == static_cast<long long>(fg::kProvXeFg));
+        CHECK(num(first("switch.probation"), "gen") == g + 3);
+        CHECK(num(first("switch.rollback"), "gen") == g + 3); // a rollback bumps nothing
+        CHECK(num(first("switch.teardown"), "a") == static_cast<long long>(fg::kProvFsr));
+        CHECK(num(first("switch.teardown"), "b") == static_cast<long long>(fg::kProvNone));
+    }
 }
 
 int main()

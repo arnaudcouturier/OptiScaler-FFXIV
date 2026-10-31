@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 // The process reads of the FG event recorder: the key, the provider and frame ids and the session info.
@@ -417,6 +418,27 @@ void OnXeFactor(int from, int to) noexcept
         if (!TapEnter())
             return;
         Emit(kXeFactor, State::Instance().fgLastFrame, from, to, 0, nullptr);
+    }
+    catch (...)
+    {
+    }
+}
+
+void OnSwitch(const char* kind, unsigned from, unsigned to, const char* text) noexcept
+{
+    try
+    {
+        if (kind == nullptr || !TapEnter())
+            return;
+        // The commit is the moment the active output changed: records after it carry the new provider and a generation
+        // of their own, exactly like a provider activation does.
+        if (std::strcmp(kind, kSwitchCommit) == 0)
+        {
+            NoteProvider(MapProvider(static_cast<uint32_t>(State::Instance().activeFgOutput)));
+            NoteGeneration();
+        }
+        Emit(kind, State::Instance().frameCount, static_cast<int64_t>(from), static_cast<int64_t>(to), 0,
+             text != nullptr ? text : "");
     }
     catch (...)
     {

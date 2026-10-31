@@ -361,7 +361,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 {
     if (_real == nullptr || _fgSwapChain == nullptr)
-        return DXGI_ERROR_DEVICE_REMOVED;
+        return ext::fg::DetachedPresent(*this, _real == nullptr);
 
     if (_fg == nullptr)
         _fg = State::Instance().currentFG;
@@ -370,6 +370,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         return _real->Present(SyncInterval, Flags);
 
     ext::dx11bridge::PresentScope scenePresentScope; // ext: C10 ends the scene capture frame at every exit
+    if (_fgSwapChain == nullptr)
+        return ext::fg::DetachedPresent(*this, false); // ext: the present that ran the switch answers S_OK
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&
                                    State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
@@ -441,7 +443,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     else
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
 
-    return result;
+    return ext::fg::OnFgPresentResult(*this, result);
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)

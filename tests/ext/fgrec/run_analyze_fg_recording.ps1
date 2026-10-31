@@ -1,7 +1,8 @@
 # Runner (tools\test.ps1 `Runner`): fixture sessions for
 # tools/analyze-fg-recording.ps1. Twelve fixtures, all with qpc_frequency 1000
 # (one tick is one millisecond, so the expected p50/p95 numbers are exact):
-# clean (exit 0, with one switch, a rebuild hitch, floor per-second windows
+# clean (exit 0, with one switch, five live-output-switch milestones, a
+# rebuild hitch, floor per-second windows
 # and one warning; a switch verdict and a self-test line ride along and must
 # NOT count as switches), cut (no session.end, exit 2), rotated (.2/.1/base,
 # exit 0), dropped (a records_dropped line, exit 2), malformed (one bad line,
@@ -56,6 +57,12 @@ function Build-Clean {
         if ($i -eq 50) { $lines += Row ($qb + 60) 'nr.rebuild' 1 0 0 '' $i }
         if ($i -eq 30) { $lines += Row ($qb + 25) 'mark' 1 1 0 '' $i } # the user's "now": one mark record
     }
+    # The live output switch's milestones: one record per phase, targets as provider ids (3 = fsr, 2 = xefg).
+    $lines += Row 2900 'switch.begin' 3 3 2 'begin gen=1 from=fsrfg to=xefg why=script' 70
+    $lines += Row 2910 'switch.teardown' 3 3 1 'teardown old chain=0000000000000001 class=fsrfg lib=amd_fidelityfx_framegeneration_dx12.dll/1/65F1A2B3 model=M2 pinRelease=yes witness=alive ms=800' 70
+    $lines += Row 2920 'switch.create' 3 3 2 'create ok chain=0000000000000002 hr=0x0 retries=0 ms=1500' 70
+    $lines += Row 2930 'switch.commit' 3 3 2 'commit gen=1 hitchMs=2400 budgetLeft=7' 70
+    $lines += Row 2940 'switch.probation' 2 2 2 'probation ok presents=20 ms=8000 fgActive=yes' 70
     $lines += End-Line
     return $lines
 }
@@ -106,7 +113,15 @@ else {
     if ($r.Json.warnings.Count -ne 1) { Fail 'clean: want the one HRESULT warning' }
     if ($r.Json.clean_shutdown -ne $true) { Fail 'clean: not marked clean' }
     if ($r.Json.events.'fg.present.end' -ne 70) { Fail 'clean: event count off' }
-    if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 143) { Fail 'clean: sequence range off' }
+    if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 148) { Fail 'clean: sequence range off' }
+    if ((@($r.Json.switch_events)).Count -ne 5) { Fail "clean: switch rows $((@($r.Json.switch_events)).Count), want 5" }
+    else {
+        $bad = @($r.Json.switch_events | Where-Object { $_.kind -notlike 'switch.*' -or $null -eq $_.from -or $null -eq $_.to -or [string]::IsNullOrEmpty($_.text) })
+        if ($bad.Count) { Fail "clean: $($bad.Count) switch row(s) miss their kind, targets or text" }
+        elseif ($r.Json.switch_events[0].from -ne 'fsr' -or $r.Json.switch_events[0].to -ne 'xefg') { Fail "clean: begin targets $($r.Json.switch_events[0].from)/$($r.Json.switch_events[0].to), want fsr/xefg" }
+        elseif ($r.Json.switch_events[3].kind -ne 'switch.commit' -or $r.Json.switch_events[3].text -notlike 'commit gen=1 hitchMs=2400*') { Fail 'clean: the commit row lost its line' }
+        else { Pass 'clean reports the five switch milestones with their targets and lines' }
+    }
     if ($r.Json.dropped_records -ne 0) { Fail 'clean: dropped not zero' }
     if ((@($r.Json.marks)).Count -ne 1) { Fail "clean: marks $((@($r.Json.marks)).Count), want 1" }
     elseif ($r.Json.marks[0].n -ne 1) { Fail "clean: mark number $($r.Json.marks[0].n), want 1" }
@@ -128,7 +143,7 @@ Write-Fixture $rotBase ($clean[112..($clean.Count - 1)])
 $r = Invoke-Analyzer $rotBase 'rot'
 if ($r.Code -ne 0) { Fail "rotated: exit $($r.Code), want 0" } else { Pass 'rotated exits 0' }
 if ($r.Json.by_provider.dlssg.presents.count -ne 70) { Fail 'rotated: presents not 70' }
-if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 143) { Fail 'rotated: sequence range off' }
+if ($r.Json.first_sequence -ne 1 -or $r.Json.last_sequence -ne 148) { Fail 'rotated: sequence range off' }
 if ($r.Json.head_rotated -ne $false) { Fail 'rotated: head_rotated must be false' }
 else { Pass 'rotated keeps a complete head, .3 included' }
 if ((@($r.Json.marks)).Count -ne 1) { Fail 'rotated: the mark of the .3 part was not read' }

@@ -2726,6 +2726,60 @@
           "flags": [ "ffxivOnly" ]
         }
       ]
+    },
+    {
+      "name": "FrameGen",
+      "fragment": "OptiScaler/ext/ini/FrameGen.ini",
+      "keys": [
+        {
+          "key": "[FrameGen] FGOutputHotSwap",
+          "section": "FrameGen",
+          "name": "FGOutputHotSwap",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "live",
+          "menu": { "tab": "Frame Gen", "card": "fg_output_switch", "cardTitle": "Live frame generation output switch" },
+          "description": "Live frame-generation output switch: moves the output chain to the new provider while the game runs instead of asking for a restart. It moves between the three DX11-to-DX12 bridge outputs (plain presentation, FSR FG, XeFG), in all six directions, from a run that booted with FSR FG or XeFG; the six directions were verified on the official benchmark (windowed), in runs that booted with FSR FG and in runs that booted with XeFG, not yet in a game session. A chain that fails its first presents is put back to plain presentation and that target is remembered until restart; a session allows a few switches. Off is today's behaviour: the configured output applies on the next start.",
+          "flags": [ "experimental" ]
+        },
+        {
+          "key": "[FrameGen] FGOutputSwitchProbe",
+          "section": "FrameGen",
+          "name": "FGOutputSwitchProbe",
+          "type": "bool",
+          "default": "auto",
+          "defaultMeans": "false",
+          "applies": "start",
+          "menu": { "tab": null, "card": null, "iniOnly": "developer measurement of the frame-generation libraries' release behaviour" },
+          "description": "Release-model probe: reads the live chain once at the first present - its reference count, the library its present slot lives in, and one test present - and logs one [fg-probe] line per result. It creates and destroys nothing: the measurement that releases a reference runs in the separate probe host under tools/fg-probe, never in the game's process. For a measurement run only.",
+          "flags": [ "diagnostic" ]
+        },
+        {
+          "key": "[FrameGen] FGOutputSwitchScript",
+          "section": "FrameGen",
+          "name": "FGOutputSwitchScript",
+          "type": "string",
+          "default": "auto",
+          "defaultMeans": "empty, nothing scripted",
+          "applies": "start",
+          "menu": { "tab": null, "card": null, "iniOnly": "benchmark key: timed output changes, read from the ini only" },
+          "description": "Diagnostic: a timed script of output changes, in seconds from the first bridge present, each entry seconds:target (target none, fsrfg or xefg), comma separated, for example 45:xefg,90:none,135:fsrfg. A step with an unknown target or a missing time is dropped and the rest of the list still runs. Read once, at the first present, and honoured only while FGOutputHotSwap is on; a scripted step does not survive an ini write.",
+          "flags": [ "diagnostic" ]
+        },
+        {
+          "key": "[FrameGen] FGOutputSwitchFault",
+          "section": "FrameGen",
+          "name": "FGOutputSwitchFault",
+          "type": "string",
+          "default": "auto",
+          "defaultMeans": "empty, no fault",
+          "applies": "start",
+          "menu": { "tab": null, "card": null, "iniOnly": "benchmark key: one named step fails on purpose, read from the ini only" },
+          "description": "Diagnostic: force one named step of the switch to fail once, so the rollback to plain presentation can be proven in a real process: drain, teardown, create, adopt, replay or probation. The probation fault fires inside a probation only, so it always ends in a rollback to plain; the teardown fault ends the session, because a chain that cannot be freed leaves the window bound. Read once, at the first present, and honoured only while FGOutputHotSwap is on. Empty is no fault.",
+          "flags": [ "diagnostic" ]
+        }
+      ]
     }
   ],
   "untaggedYet": [],

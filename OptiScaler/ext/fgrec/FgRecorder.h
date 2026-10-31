@@ -44,6 +44,17 @@ inline constexpr const char* kProviderOff = "provider.deactivating"; // msg = pr
 inline constexpr const char* kPresetSwitch = "dlssg.preset.switch";  // msg = "A -> B"
 inline constexpr const char* kModule = "provider.module";            // msg = module file name only
 inline constexpr const char* kXeFactor = "xefg.factor";              // a = from, b = to
+// The live output switch (ext/fg/outswitch): one record per milestone, from the composition's observer. a = the output
+// that was on the window (the provider ids above), b = the output the step is about, and msg = the `[fg-switch]` line
+// without its prefix (the numbers of the step, in the same words the log shows).
+inline constexpr const char* kSwitchBegin = "switch.begin";
+inline constexpr const char* kSwitchRefused = "switch.refused";
+inline constexpr const char* kSwitchTeardown = "switch.teardown";
+inline constexpr const char* kSwitchCreate = "switch.create";
+inline constexpr const char* kSwitchAdopt = "switch.adopt";
+inline constexpr const char* kSwitchCommit = "switch.commit";
+inline constexpr const char* kSwitchProbation = "switch.probation";
+inline constexpr const char* kSwitchRollback = "switch.rollback";
 inline constexpr const char* kMark = "mark";                        // a = the user's mark number, see Mark()
 
 // One user mark: the recorder counts the presses of the mark key ([FramePacing] FgRecorderMarkKey) and writes a `mark` record, so

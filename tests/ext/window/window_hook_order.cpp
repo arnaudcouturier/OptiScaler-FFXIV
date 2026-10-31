@@ -79,9 +79,13 @@ int main(int argc, char** argv)
 
     // ... and before anything else the hook does (the ForceBorderless handling and the call into the original function).
     const size_t forceBorderless = body.find("FGXeFGForceBorderless");
-    const size_t original = body.find("o_FGSCSetFullscreenState(");
+    // The body's own call to the original, not the pass-through the hook's first two statements make: while a switch
+    // detaches its set, the body runs none of its logic and calls the original through the gate instead.
+    const size_t original = body.rfind("o_FGSCSetFullscreenState(");
     CHECK(forceBorderless != std::string::npos && original != std::string::npos);
     CHECK(deactivate < forceBorderless && deactivate < original);
+    const size_t gate = body.find("HookGateFor()");
+    CHECK(gate != std::string::npos && gate < active); // the gate is asked before any of the three steps
 
     // The module's copy is only made while frame generation is active (the verdict needs it, and a re-request only happens when
     // the snapshot says active), which is the condition upstream guards the three steps with.

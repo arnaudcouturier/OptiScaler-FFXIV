@@ -65,6 +65,20 @@ class AutoMfgGlue
         if (ClosedForGood() && keyOn == latchedKeyOn_ && selfTest == latchedSelfTest_)
             return false;
 
+        // The live output switch replaced the chain under the selector: the status and the count it observed belong to the
+        // previous provider, so this frame makes no automatic choice and the observation starts over on the new chain.
+        if constexpr (requires { w.outputEpoch(); })
+        {
+            const uint32_t epoch = w.outputEpoch();
+            if (epoch != outputEpoch_)
+            {
+                outputEpoch_ = epoch;
+                [[maybe_unused]] auto lock = w.lock();
+                observed = {};
+                return false;
+            }
+        }
+
         bool controls = false;
         try
         {
@@ -257,6 +271,7 @@ class AutoMfgGlue
     uint64_t refreshReadAt_ = 0;
     double refresh_ = 0.0;
     std::atomic<bool> closedForGood_ { false };
+    uint32_t outputEpoch_ = 0; // the live output switch's epoch the observation belongs to
     bool latchedKeyOn_ = false;
     bool latchedSelfTest_ = false;
     bool failing_ = false;
