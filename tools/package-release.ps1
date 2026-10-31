@@ -361,9 +361,10 @@ $(($byo | ForEach-Object { "  $_" }) -join "`n")
 KNOWN LIMITS
   * Only the settings marked "tested" in docs/STATUS.md of the project repository were played in game, on one RTX 4090. Everything else is untested.
   * HUD-less is opt-in and off by default; recomposition in SDR with DLSS-G 2x-4x was tested, HDR was not. Recommended setup: [HudLess] Mode = recomposition
-    with [DLSSG] RenderPreset = auto. ui_free is experimental and has a known micro-stutter (confirmed in a played session on v0.3.0, v0.4.0 and a test
-    build of this line, with the DLSS-G preset on Auto and on C; recomposition with preset Auto did not stutter), and in one scene its UI mask fell back
-    for most frames.
+    with [DLSSG] RenderPreset = auto. ui_free is still experimental: the micro-stutter seen while it fell back (v0.3.0, v0.4.0 and a test build, with the
+    DLSS-G preset on Auto and on C; recomposition with preset Auto did not stutter) was gone with the default [HudLess] ProbeInterval = 8 in one played
+    session on 2026-10-31 with preset C (at 1 it came back), and in one scene its UI mask fell back for most frames. Recomposition with preset Auto stays
+    the safe setup.
   * Neural Rendering (nvngx_dlssnr.dll) needs an RTX Blackwell GPU on the D3D12 path (Dx11Upscaler, the bridge), not on the game's own D3D11 device,
     plus a recent driver: NVIDIA's own description of the feature gives driver 615.64 or newer, while the community integrations of the same model
     report 616.56 as the version that works, so treat 615.64 as the vendor's stated minimum and 616.56 as the figure with field reports. Graphics

@@ -119,11 +119,11 @@ const Row kRows[] = {
                  "keeps the first HUD draw", "In recomposition mode no coverage guard checks it" },
       .fileHas = { "staticconstexprconstchar*kAnchorNames[]={\"r1b\",\"early\"};", "intanchor=static_cast<int>(cfg.GetAnchorRule());" },
       .fold = "ImGui::TreeNode(\"Advanced\")", .blockNot = { "restart" } },
-    // [HudLess] ProbeInterval (1..16), inside the Advanced fold, live: the tooltip says it is experimental and untried in a game, and gives
-    // the stutter cause it addresses as suspected, not found
+    // [HudLess] ProbeInterval (1..16), inside the Advanced fold, live: the tooltip gives the default 8, keeps the stutter cause it
+    // addresses as suspected (not measured), and says what one play session showed
     { .home = kHudless, .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::SliderInt(\"Probe one frame in N while falling back\"",
       .write = "cfg.probeInterval=probe", .keyPrefix = "cfg.probeInterval=",
-      .block = { "Experimental: unit-tested, not tried in a game yet", "is the suspected cause", "not measured", "Not changed by Reset advanced" },
+      .block = { "Default 8", "is the suspected cause", "not measured", "removed that stutter", "Not changed by Reset advanced" },
       .fold = "ImGui::TreeNode(\"Advanced\")", .blockNot = { "restart", "could make frame generation stutter" } },
     // WP4 item 2: [XeFG] UnlockMFG and MaxInterpolatedFrames, drawn inside upstream's XeFG card (XeFgExtras); both are read when
     // the provider is loaded / the swapchain is created = restart

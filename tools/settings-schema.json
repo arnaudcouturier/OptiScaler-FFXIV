@@ -17,7 +17,7 @@
           "defaultMeans": "off (today's behaviour)",
           "applies": "live",
           "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
-          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (switching to or from it recreates DLSS-G: frame generation restarts for a moment), recommended with [DLSSG] RenderPreset = auto; ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate, experimental and known to micro-stutter. Any other value counts as off.",
+          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (switching to or from it recreates DLSS-G: frame generation restarts for a moment), recommended with [DLSSG] RenderPreset = auto; ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate; experimental, and the micro-stutter seen while the coverage guard was tripped was gone with the default probe interval of 8 in one play session on 2026-10-31 with DLSS-G render preset C (at 1 it came back). Any other value counts as off.",
           "flags": [ "ffxivOnly" ]
         },
         {
@@ -158,10 +158,10 @@
           "min": 1,
           "max": 16,
           "default": "auto",
-          "defaultMeans": "1 (every present: the behaviour before this key)",
+          "defaultMeans": "8 (one present in eight while falling back; 1 = every present, the behaviour before this key)",
           "applies": "live",
           "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
-          "description": "Advanced, experimental: while the coverage guard is tripped (falling back), build the UI-free capture and its mask on only one present in this many; the others are plain frame generation. The boundary still applies the ReShade presets in the same place on every frame. The guard then comes back after about 30 x this many presents of a clean scene instead of 30. 1 = every present. Building them on every present is the suspected cause of a faint stutter felt while falling back (with DLSS-G render preset C; felt in play, not measured). Unit-tested, not tried in a game.",
+          "description": "Advanced, experimental: while the coverage guard is tripped (falling back), build the UI-free capture and its mask on only one present in this many; the others are plain frame generation. The boundary still applies the ReShade presets in the same place on every frame. The guard then comes back after about 30 x this many presents of a clean scene instead of 30. 1 = every present. Building them on every present is the suspected cause of the micro-stutter seen while falling back (with DLSS-G render preset C; felt in play, not measured): in one play session on 2026-10-31, 8 removed that stutter and 1 brought it back. Only that session and preset were compared. Unit-tested.",
           "flags": [ "ffxivOnly", "experimental" ]
         },
         {

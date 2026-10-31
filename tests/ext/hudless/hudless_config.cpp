@@ -32,8 +32,9 @@ int main()
     // the two density-guard options are off by default (today's rule)
     assert(defaults.guardReleaseHolds.value_or_default() == 0 && defaults.ReleaseHolds() == 0);
     assert(!defaults.guardTripOnAnchorLater.value_or_default() && !defaults.TripOnAnchorLater());
-    // a tripped guard probes every present by default (today's rule), and the blind A/B of the interval is off
-    assert(defaults.probeInterval.value_or_default() == 1 && defaults.ProbeInterval() == 1);
+    // a tripped guard probes one present in eight by default (proved in a play session with DLSS-G preset C; the load case below
+    // covers the ini value auto), and the blind A/B of the interval is off
+    assert(defaults.probeInterval.value_or_default() == 8 && defaults.ProbeInterval() == 8);
     assert(defaults.probeAbSeconds.value_or_default() == 0 && defaults.ProbeAbSeconds() == 0);
     // the capture is taken at R1b by default (today's rule); the early anchor is opt-in
     assert(defaults.anchorRule.value_or_default() == "r1b" && defaults.GetAnchorRule() == hudless::AnchorRule::R1b);
@@ -92,6 +93,27 @@ int main()
     assert(std::string(hudless::AnchorRuleName(hudless::AnchorRule::R1b)) == "r1b");
     assert(std::string(hudless::AnchorRuleName(hudless::AnchorRule::Early)) == "early");
 
+    // [HudLess] ProbeInterval: the key's default is 8, and the ini value auto (or a missing line) resolves to that default through
+    // the real load function, not to 1. The field is read straight off a fresh config so the global one, already given a value
+    // above, cannot hide a wrong default (a CustomOptional takes the first value only).
+    {
+        HudlessConfig fresh;
+        assert(fresh.probeInterval.value_or_default() == 8 && fresh.ProbeInterval() == 8); // missing line
+        config::Binder probeBinder;
+        fresh.Bind(probeBinder);
+        CSimpleIniA autoIni;
+        autoIni.SetValue("HudLess", "ProbeInterval", "AUTO");
+        for (const auto& entry : probeBinder.Table())
+            if (std::string(entry.key) == "ProbeInterval")
+                entry.load(entry, autoIni);
+        assert(!fresh.probeInterval.has_value() && fresh.ProbeInterval() == 8); // auto
+        CSimpleIniA autoOut;
+        for (const auto& entry : probeBinder.Table())
+            if (std::string(entry.key) == "ProbeInterval")
+                entry.save(entry, autoOut);
+        assert(std::string(autoOut.GetValue("HudLess", "ProbeInterval", "")) == "auto"); // the default saves as auto
+    }
+
     // Nothing is published before the config loads.
     assert(hudless::CurrentMode() == Mode::Off);
     assert(!hudless::Wanted());
@@ -109,7 +131,7 @@ int main()
     ini.SetValue("HudLess", "GuardMode", "Density");
     ini.SetValue("HudLess", "GuardReleaseHolds", "4");
     ini.SetValue("HudLess", "GuardTripOnAnchorLater", "true");
-    ini.SetValue("HudLess", "ProbeInterval", "8");
+    ini.SetValue("HudLess", "ProbeInterval", "4");
     ini.SetValue("HudLess", "ProbeAbSeconds", "60");
     ini.SetValue("HudLess", "AnchorRule", "Early");
     ini.SetValue("FrameGen", "ExternalUIFreeFrameGen", "false"); // the old keys are not read
@@ -126,7 +148,7 @@ int main()
     assert(cfg.HdrPasteOn());
     assert(cfg.GetGuardPolicy() == hudless::GuardPolicy::Density);
     assert(cfg.ReleaseHolds() == 4 && cfg.TripOnAnchorLater());
-    assert(cfg.ProbeInterval() == 8 && cfg.ProbeAbSeconds() == 60);
+    assert(cfg.ProbeInterval() == 4 && cfg.ProbeAbSeconds() == 60);
     assert(cfg.GetAnchorRule() == hudless::AnchorRule::Early);
     assert(hudless::CurrentMode() == Mode::UiFree);
     assert(hudless::Wanted());
@@ -140,7 +162,7 @@ int main()
     assert(std::string(out.GetValue("HudLess", "PasteCleanup", "")) == "false");
     assert(std::string(out.GetValue("HudLess", "GuardReleaseHolds", "")) == "4");
     assert(std::string(out.GetValue("HudLess", "GuardTripOnAnchorLater", "")) == "true");
-    assert(std::string(out.GetValue("HudLess", "ProbeInterval", "")) == "8");
+    assert(std::string(out.GetValue("HudLess", "ProbeInterval", "")) == "4");
     assert(std::string(out.GetValue("HudLess", "ProbeAbSeconds", "")) == "60");
     assert(std::string(out.GetValue("HudLess", "AnchorRule", "")) == "Early"); // the stored text is not rewritten
     assert(out.GetValue("FrameGen", "ExternalUIFreeFrameGen", nullptr) == nullptr);

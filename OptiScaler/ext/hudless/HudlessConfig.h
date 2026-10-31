@@ -43,8 +43,9 @@ struct HudlessConfig
     // Density policy only, ini only (see hudless::CoverageGuard).
     CustomOptional<int> guardReleaseHolds { 0 };               // GuardReleaseHolds, 0 = off, clamped to kMaxReleaseHolds
     CustomOptional<bool> guardTripOnAnchorLater { false };     // GuardTripOnAnchorLater
-    // While the guard is tripped, probe one present in N (1 = every present), live, 1 .. kProbeIntervalMax.
-    CustomOptional<int> probeInterval { 1 };                   // ProbeInterval
+    // While the guard is tripped, probe one present in N (1 = every present), live, 1 .. kProbeIntervalMax. The default 8 keeps
+    // the per-present probe off the GPU on most presents of a fallback; 1 restores the behaviour before the key.
+    CustomOptional<int> probeInterval { 8 };                   // ProbeInterval
     // Developer, ini only: blind A/B of the probe interval in blocks of this many seconds (0 = off), 0 .. kProbeAbSecondsMax.
     CustomOptional<int> probeAbSeconds { 0 };                  // ProbeAbSeconds
     // off | on. A string key, ini only. on = under HDR output the paste's HDR stage is made before the first paste image (the PQ

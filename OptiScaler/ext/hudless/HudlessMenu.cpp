@@ -117,16 +117,21 @@ void DrawHudless(ext::menu::Ctx&)
                        "interpolates the UI layer. Switching to or from it recreates DLSS-G (frame generation restarts for a moment). "
                        "FSR-FG and XeFG only receive the tags (untested).\n"
                        "UI-free: frame generation runs on the UI-free image and the UI is pasted back over every output "
-                       "frame at the real frame rate. DLSS-G only. Experimental: it has a known micro-stutter in motion, with "
-                       "DLSS-G preset Auto and preset C alike. Recomposition with preset Auto showed no micro-stutter.\n"
+                       "frame at the real frame rate. DLSS-G only. Experimental: in a play session on 2026-10-31 with DLSS-G "
+                       "preset C the micro-stutter seen in motion while the coverage guard was tripped was gone with the "
+                       "default probe interval of 8, and it came back at 1. Recomposition with preset Auto showed no "
+                       "micro-stutter.\n"
                        "Any doubt (no UI boundary, a size or format mismatch, a busy GPU slot, a fade) shows the normal "
                        "frame instead; the status line says why.");
 
-    // ui_free is the mode with the known micro-stutter; the recommendation is recomposition with the DLSS-G preset on Auto.
+    // ui_free stays experimental; the one play session with preset C showed the default probe interval removing the stutter seen
+    // while the coverage guard was tripped, so the warning says that much and keeps recomposition with preset Auto as the safe setup.
     if (current == Mode::UiFree)
     {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
-        ImGui::TextWrapped("UI-free is experimental and micro-stutters in motion. Recomposition with DLSS-G preset Auto does not.");
+        ImGui::TextWrapped("UI-free is experimental. The micro-stutter seen while the coverage guard was tripped was gone with the "
+                           "default probe interval of 8 (played 2026-10-31 with DLSS-G preset C), and it came back at 1. "
+                           "Recomposition with DLSS-G preset Auto stays the safe choice.");
         ImGui::PopStyleColor();
     }
 
@@ -296,8 +301,9 @@ void DrawHudless(ext::menu::Ctx&)
         }
     }
 
-    // While tripped the guard keeps measuring on one frame in N only (docs/HUDLESS.md 5): the per-frame probe could make frame generation
-    // stutter during the fallback.
+    // While tripped the guard keeps measuring on one frame in N only (docs/HUDLESS.md 5). The per-present probe was the suspected
+    // cause of the stutter while falling back; a play session on 2026-10-31 with DLSS-G preset C set the default to 8 (1 = every
+    // frame keeps the old behaviour).
     int probe = cfg.ProbeInterval();
     if (ImGui::SliderInt("Probe one frame in N while falling back", &probe, 1, ext::hudless::kProbeIntervalMax))
     {
@@ -306,10 +312,11 @@ void DrawHudless(ext::menu::Ctx&)
     }
     ext::menu::Tooltip("While the coverage guard is tripped (falling back), build the UI-free capture and its mask on only one frame in "
                        "this many; the other frames are plain frame generation with nothing extra. The guard then comes back after about "
-                       "30 x N frames of a clean scene instead of 30. 1 = every frame (the old behaviour). Building them on every frame "
-                       "is the suspected cause of a faint stutter felt while falling back (with DLSS-G render preset C; felt in play, "
-                       "not measured).\n"
-                       "Experimental: unit-tested, not tried in a game yet. Not changed by Reset advanced.");
+                       "30 x N frames of a clean scene instead of 30. 1 = every frame (the behaviour before this key). Default 8.\n"
+                       "Building them on every frame is the suspected cause of a faint stutter felt while falling back (with DLSS-G render "
+                       "preset C; felt in play, not measured): in one play session on 2026-10-31, setting this to 8 removed that stutter "
+                       "and 1 brought it back. Only that session and preset were compared.\n"
+                       "Not changed by Reset advanced. Unit-tested.");
 
     // [DLSSG] UIRecomposition: unset = on (the engine treats an unset key as on); read when the DLSS-G feature is created.
     auto& recompositionSetting = ext::Cfg().fg.uiRecomposition;
