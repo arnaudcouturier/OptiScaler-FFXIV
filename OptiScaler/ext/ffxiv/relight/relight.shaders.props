@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Contact shadow shaders (ext\ffxiv\relight\shaders\ContactShadows.hlsl). One source, three entry points, each compiled by
+  fxc -O3 into a header in $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl
+  are mirrored by ContactShadowsPass.cpp; change them together.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ContactShadows.hlsl">
+      <Variable>ContactShadows_Vs_cso</Variable>
+      <Header>ContactShadows_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ContactShadows.hlsl">
+      <Variable>ContactShadows_March_cso</Variable>
+      <Header>ContactShadows_March.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_March</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ContactShadows.hlsl">
+      <Variable>ContactShadows_Combine_cso</Variable>
+      <Header>ContactShadows_Combine.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Combine</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

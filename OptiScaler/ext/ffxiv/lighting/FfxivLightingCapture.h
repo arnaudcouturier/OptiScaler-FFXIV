@@ -14,6 +14,7 @@
 #include "ext/ffxiv/lighting/FfxivResolveGate.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/diag/DrawDiag.h" // ext: developer draw diagnostic (log only, one atomic load per draw)
+#include "ext/ffxiv/relight/Inject.h" // ext: contact shadows before the sun light pass (one atomic load per draw while off)
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
 #include "ext/ffxiv/ui/PlateLayoutTag.h" // ext: input-layout tags for the nameplate vertex shaders (catalog group and the plate classifier)
@@ -77,6 +78,18 @@ using Indirect = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Buffer*,UIN
 inline Create create=nullptr; inline Draw draw=nullptr; inline Indexed indexed=nullptr;
 inline Instanced instanced=nullptr; inline IndexedInstanced indexedInstanced=nullptr;
 inline Indirect indirect=nullptr,indexedIndirect=nullptr;
+// ext: contact shadows tracks the bound pixel shader here, so the draw hook never asks the context for it (a PSGetShader per draw was
+// 0.65 ms a frame at the game's ~9,250 draws, 32x the design's 0.02 ms budget). The seam sits behind the game's own PSSetShader call, which
+// it makes about 0.7 times per draw: with the key off the seam adds one out-of-line call and one relaxed load per bind, measured at 1.0 ns
+// on this machine, i.e. 0.007 ms a frame at 6,300 binds; with it on, one pointer compare and (on a hit) one stamp
+// check per bind, and one integer load per draw.
+using SetPs=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11PixelShader*,ID3D11ClassInstance* const*,UINT);
+inline SetPs setPs=nullptr;
+inline void STDMETHODCALLTYPE OnSetPs(ID3D11DeviceContext* c,ID3D11PixelShader* ps,ID3D11ClassInstance* const* instances,UINT count)
+{
+    setPs(c,ps,instances,count);
+    if(c==context) ext::ffxiv::relight::OnPixelShaderSet(ps,count); // ext: contact shadows (one atomic load inside while the key is off)
+}
 using Copy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
 using CopyRegion=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
 inline Copy copy=nullptr;inline CopyRegion copyRegion=nullptr;
@@ -162,10 +175,11 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
         ext::ffxiv::plates::OnPixelShaderCreated(*out,crc); // ext: native nameplates (stamps the four nameplate variants ALWAYS: a key switched on later needs them)
         ext::ffxiv::diag::OnPixelShaderCreated(*out,code,size,crc); // ext: developer draw diagnostic (one atomic test; reflects the bytecode once per shader)
+        ext::ffxiv::relight::OnShaderCreated(*out,code,size,crc); // ext: contact shadows (one atomic test; the reflection of a sun light draw is parsed once)
     }
     return hr;
 }
-template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
+template<class F> inline void AroundBody(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
     if(ext::ffxiv::ui::Armed() && !inside){inside=true;ext::ffxiv::ui::OnDraw(c,c==context);inside=false;} // ext: S10 A boundary detector (before every early-out; `inside` keeps its own copies away from OnCopy)
     if(!inside && ext::ffxiv::diag::Capturing()) ext::ffxiv::diag::OnDraw(c,kind); // ext: developer draw diagnostic (ONE relaxed atomic load while the key is off)
@@ -195,6 +209,26 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
     FfxivLightingScan::Before(c, id);
     original();
     FfxivLightingScan::After(c, id);
+}
+// The seam of the contact shadow pass: it wraps only the game's draw (it hands the hook body a draw call that runs the pass first), and
+// only on the game's own immediate context - a draw on any other context is passed through, since the classification reads the immediate
+// context's tracked shader and the pass enters its private state on that context. The feature bit is tested first: one relaxed load while
+// the key is off, and nothing else.
+template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
+{
+    if(!inside && c==context && ext::Active(ext::F::ContactShadows)) // ext: contact shadows (ONE relaxed load while off)
+    {
+        bool first=true;
+        auto wrapped=[&]{
+            // The first call of the hook body runs the pass with the game's draw; every later call is a replay of the same draw (the scene
+            // HDR path repeats it to re-run the tone chain, the lighting scan runs it twice) and runs the draw alone: the pass belongs to the
+            // draw the frame makes, and running it again would double its cost and write the mask copy a second time.
+            ext::ffxiv::relight::RunDrawOnce(first,ext::hdr::FfxivSceneHdr::Requested(),[&]{ext::ffxiv::relight::BoundDraw(c,original);},original);
+        };
+        AroundBody(c,kind,wrapped);
+        return;
+    }
+    AroundBody(c,kind,original);
 }
 inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { ext::ffxiv::ui::plate::NoteDraw('D',n,1,start,0); Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{draw(c,n,start);});}); }
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
@@ -246,6 +280,7 @@ inline void Install(ID3D11Device* d)
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
     clearRtv=reinterpret_cast<ClearRtv>(cv[50]);beginQuery=reinterpret_cast<QueryCall>(cv[27]);endQuery=reinterpret_cast<QueryCall>(cv[28]); // ext: S11
+    setPs=reinterpret_cast<SetPs>(cv[9]); // ext: contact shadows' pixel-shader tracker
     createVs=reinterpret_cast<CreateVs>(dv[12]);
     // Single-thread enlistment only, deliberately, even though Detach() below enlists every
     // process thread. Install happens once per device, early; Detours itself allocates (per
@@ -266,7 +301,7 @@ inline void Install(ID3D11Device* d)
         began=true;
         bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
-        LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
+        LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed); LIGHT_ATTACH(setPs,OnSetPs);
         LIGHT_ATTACH(createLayout,OnCreateLayout);
         LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
         LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
@@ -302,7 +337,7 @@ inline void DetachTransaction()
     if (DetourTransactionBegin()!=NO_ERROR) return;
     bool ok=threads.Update()==NO_ERROR;
 #define LIGHT_DETACH(o,h) ok &= DetourDetach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
-    LIGHT_DETACH(create,CreateShader); LIGHT_DETACH(draw,OnDraw); LIGHT_DETACH(indexed,OnIndexed);
+    LIGHT_DETACH(create,CreateShader); LIGHT_DETACH(draw,OnDraw); LIGHT_DETACH(indexed,OnIndexed); LIGHT_DETACH(setPs,OnSetPs);
     LIGHT_DETACH(createLayout,OnCreateLayout);
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);

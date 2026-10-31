@@ -137,14 +137,21 @@ int main(int, char** argv)
 
         const std::string cpp = Code(repo, "ffxiv/diag/FfxivDrawDiag.cpp");
         Pins(cpp, "runtime", {
-            { R"x(if(S().phase.load(std::memory_order_relaxed)!=kCapturing||context==nullptr)return;)x", "the draw path leaves at once when no capture is running" },
+            { R"x(constuint8_tphase=S().phase.load(std::memory_order_relaxed);if(context==nullptr||(phase!=kCapturing&&phase!=kWaiting))return;)x", "the draw path leaves after one load when the diagnostic is idle or done" },
             { R"x(voidOnPresent(){if(S().phase.load(std::memory_order_relaxed)!=kCapturing)return;)x", "the present path leaves after one load" },
             { R"x(if(s.phase.load(std::memory_order_relaxed)!=kIdle)return;)x", "a capture happens once per session, whatever the config reload does" },
-            { R"x(s.phase.store(kCapturing,std::memory_order_relaxed);ext::SetActive(ext::F::DrawDiag,true);)x", "the bit is set last, so a draw never sees it without a capture behind it" },
+            { R"x(s.arm=PlannedArm();)x", "the delay and the key are read with the frame count, at the config load" },
+            { R"x(s.phase.store(s.arm.trigger==Trigger::Immediate?kCapturing:kWaiting,std::memory_order_relaxed);ext::SetActive(ext::F::DrawDiag,true);)x", "the bit is set last, so a draw never sees it without a capture behind it" },
             { R"x(s.phase.store(kDone,std::memory_order_relaxed);ext::SetActive(ext::F::DrawDiag,false);)x", "a written capture puts the draw path back to one load" },
             { R"x(if(s.drawsInFrame>=kMinDrawsPerFrame))x", "only a rendered frame (not a loading screen) counts" },
             { R"x(constexprconstchar*kLightParamName="g_LightParam";)x", "the constant buffer of the lighting passes is found by its reflected name" },
-            { R"x(if(s.lastReadQpc==0||SecondsBetween(s.lastReadQpc,now)>=1.0))x", "the constant buffer is read at most once a second" },
+            { R"x(constexprconstchar*kCameraParamName="g_CameraParameter";)x", "the camera buffer beside it gives the direction's space" },
+            { R"x(boolSampleDue(State&s))x", "the constant buffers are read at most once a second" },
+            { R"x(if(s.split.NoteDraw(row.stage,s.drawsInFrame))x", "the tone map draw closes the frame: a capture needs no bridge Present" },
+            { R"x(if(phase==kCapturing)Draw(context,api);elseWaitTick(context);)x",
+              "a waiting capture collects no draw row: the key poll and the constant-buffer sample are the whole waiting path" },
+            { R"x(if(start){StartCollecting();return;})x",
+              "the key or the delay starts the collection on the waiting path, which then returns for that draw" },
             { R"x(if(s.drawsInFrame>kMaxRowsPerFrame))x", "the per-frame row cap" },
             { R"x(ext::FfxivConfig::drawDiagnosticsOnLoaded=&ext::ffxiv::diag::OnConfigLoaded;)x", "the key reaches the diagnostic through the config's hook pointer" },
         });
@@ -152,10 +159,25 @@ int main(int, char** argv)
         const size_t note = Find(cpp, "s.markers.NoteDraw(row.stage,row.ordinal);");
         const size_t cap = Find(cpp, "if(s.drawsInFrame>kMaxRowsPerFrame)");
         EXPECT(note != std::string::npos && cap != std::string::npos && note < cap, "markers are noted before the row cap is applied");
-        // The marker state is reset with the frame, so ordinals never leak into the next one.
+        // The split is asked after the row is kept, so the tone map draw is the closed frame's last row, not the next one's first.
+        const size_t kept = Find(cpp, "s.frameRows+=DrawsRowText(row);");
+        const size_t split = Find(cpp, "if(s.split.NoteDraw(row.stage,s.drawsInFrame))");
+        EXPECT(kept != std::string::npos && split != std::string::npos && kept < split, "the tone map row is kept before its frame closes");
+        // The marker state and the splitter are reset with the frame, so neither leaks into the next one.
         const size_t reset = Find(cpp, "s.markers.Reset();");
-        const size_t finished = Find(cpp, "if(s.framesCaptured>=s.wantedFrames)Finish();");
-        EXPECT(reset != std::string::npos && finished != std::string::npos && reset < finished, "the frame is reset before the capture can finish");
+        const size_t splitReset = Find(cpp, "s.split.Reset();");
+        EXPECT(reset != std::string::npos && splitReset != std::string::npos && reset < splitReset, "the frame is reset with it, splitter included");
+        // One close, one finish test: the frame end exists in two places only (the split and the bridge Present), and both ask the same.
+        EXPECT(Count(cpp, "if(s.framesCaptured>=s.wantedFrames)Finish();") == 2, "a frame end always tests whether the capture is complete");
+        EXPECT(Count(cpp, "CloseFrame();") == 2, "two frame ends (the tone map split and the bridge Present) share one close");
+        // Waiting for the capture costs one draw in kWaitDrawsPerPoll: the key poll and the sample sit behind that counter, never in Draw().
+        const size_t waitTick = Find(cpp, "voidWaitTick(ID3D11DeviceContext*c){");
+        const size_t keyDown = Find(cpp, "KeyDown(s.arm.key)");
+        const size_t drawFn = Find(cpp, "voidDraw(ID3D11DeviceContext*c,constchar*api){");
+        EXPECT(waitTick != std::string::npos && keyDown != std::string::npos && drawFn != std::string::npos && waitTick < keyDown,
+               "the capture key is read on the waiting path only");
+        EXPECT(drawFn < waitTick, "the collecting path is written first and the waiting path after it, so the key is not in the collecting one");
+        EXPECT(Count(cpp, "GetAsyncKeyState(") == 1, "one key read, in one place");
         // Nothing in the output names a path, a user or a machine.
         EXPECT(!Has(cpp, "GetUserName") && !Has(cpp, "GetComputerName") && !Has(cpp, "C:\\\\"), "no user, machine or absolute path in the output");
         EXPECT(!Has(cpp, "CreateFileA(\"C:") && !Has(cpp, "getenv"), "no environment path");
@@ -176,18 +198,24 @@ int main(int, char** argv)
         Pins(ffxivConfig, "FfxivConfig.h", {
             { R"x(CustomOptional<std::string>drawDiagnostics{"off"};)x", "the default is off: today's behaviour" },
             { R"x(CustomOptional<int32_t>drawDiagnosticsFrames{3};)x", "three frames by default" },
+            { R"x(CustomOptional<int32_t>drawDiagnosticsDelaySeconds{0};)x", "no delay by default: today's behaviour" },
+            { R"x(CustomOptional<std::string>drawDiagnosticsKey{"off"};)x", "no key by default" },
             { R"x(drawDiagnosticsOnLoaded(drawDiagnostics.value_or_default()=="capture");)x", "any other value counts as off, and the key is published at the end of every config load" },
         });
         const std::string configCpp = Code(repo, "core/ExtConfig.cpp");
         Pins(configCpp, "ExtConfig.cpp", {
             { R"x(b.Add("FFXIV","DrawDiagnostics",drawDiagnostics);)x", "the key" },
             { R"x(b.Add("FFXIV","DrawDiagnosticsFrames",drawDiagnosticsFrames);)x", "the frame count key" },
+            { R"x(b.Add("FFXIV","DrawDiagnosticsDelaySeconds",drawDiagnosticsDelaySeconds);)x", "the delay key" },
+            { R"x(b.Add("FFXIV","DrawDiagnosticsKey",drawDiagnosticsKey);)x", "the capture key" },
         });
         const std::string readme = Raw(repo, "ini/FFXIV.ini");
         EXPECT(Has(readme, "\nDrawDiagnostics=auto"), "the ini fragment documents the key");
         EXPECT(Has(readme, "\nDrawDiagnosticsFrames=auto"), "the ini fragment documents the frame count");
+        EXPECT(Has(readme, "\nDrawDiagnosticsDelaySeconds=auto"), "the ini fragment documents the delay");
+        EXPECT(Has(readme, "\nDrawDiagnosticsKey=auto"), "the ini fragment documents the capture key");
         // The ini-only rule of the menu manifest test: a key without a control says so in its own comment.
-        for (const char* key : { "DrawDiagnostics=", "DrawDiagnosticsFrames=" })
+        for (const char* key : { "DrawDiagnostics=", "DrawDiagnosticsFrames=", "DrawDiagnosticsDelaySeconds=", "DrawDiagnosticsKey=" })
         {
             const size_t at = readme.find(key);
             EXPECT(at != std::string::npos, "fragment line %s", key);
@@ -212,6 +240,8 @@ int main(int, char** argv)
         const std::string manifest = Code(repo, "core/MenuManifest.h");
         EXPECT(Has(manifest, "\"[FFXIV]DrawDiagnostics\",") && Has(manifest, "\"[FFXIV]DrawDiagnosticsFrames\","),
                "both keys are listed as ini-only");
+        EXPECT(Has(manifest, "\"[FFXIV]DrawDiagnosticsDelaySeconds\",") && Has(manifest, "\"[FFXIV]DrawDiagnosticsKey\","),
+               "the two keys that start a capture are listed as ini-only as well");
         // The frame count is clamped where it is used: a key of 0 or 999 cannot make a capture write no frames or a hundred.
         const std::string cpp = Code(repo, "ffxiv/diag/FfxivDrawDiag.cpp");
         EXPECT(Has(cpp, "static_cast<uint32_t>(v<1?1:(v>kMaxFrames?kMaxFrames:v))"), "the frame count is clamped to 1..16");

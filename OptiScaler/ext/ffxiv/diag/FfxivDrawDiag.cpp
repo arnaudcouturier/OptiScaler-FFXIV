@@ -47,12 +47,15 @@ constexpr GUID kCrcTag { 0x2d7b41c8, 0x9e04, 0x4a1d, { 0x8a, 0x3c, 0x1b, 0x6e, 0
 
 // The constant buffer the lighting passes carry, read back by name (its layout is in DrawDiagFormat.h: kLightParam*).
 constexpr const char* kLightParamName = "g_LightParam";
+// The camera buffer of the same draw: the view matrix beside the sun direction is what settles the direction's space.
+constexpr const char* kCameraParamName = "g_CameraParameter";
 
 enum Phase : uint8_t
 {
     kIdle = 0,
-    kCapturing = 1,
-    kDone = 2, // this session's capture is written; a config reload does not start another one
+    kWaiting = 1,   // armed with a delay or a key: the constant buffers are sampled, no draw row is collected
+    kCapturing = 2, // the draw list is being collected
+    kDone = 3,      // this session's capture is written; a config reload does not start another one
 };
 
 struct Bound
@@ -82,6 +85,68 @@ uint32_t WantedFrames()
     return static_cast<uint32_t>(v < 1 ? 1 : (v > kMaxFrames ? kMaxFrames : v));
 }
 
+// When the capture starts, from the two keys beside the main one (DrawDiagFormat.h has the rules).
+ArmPlan PlannedArm()
+{
+    return PlanArm(ext::Cfg().ffxiv.drawDiagnosticsDelaySeconds.value_or_default(),
+                   ext::Cfg().ffxiv.drawDiagnosticsKey.value_or_default());
+}
+
+// A mapped staging copy of a game constant buffer. One copy and one map, only while a sample or a capture is due.
+struct Staging
+{
+    ComPtr<ID3D11Buffer> buffer;
+    UINT bytes = 0;
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    bool mappedOk = false;
+};
+
+// Copies `wanted` bytes of `source` into `staging` and maps it. Returns the mapped bytes, or null when the buffer is too small, the
+// copy failed or the map failed; the caller unmaps with UnmapConstant in every case it mapped.
+const unsigned char* MapConstant(ID3D11DeviceContext* c, Staging& staging, ID3D11Buffer* source, UINT wanted)
+{
+    staging.mappedOk = false;
+    if (c == nullptr || source == nullptr || wanted == 0)
+        return nullptr;
+    D3D11_BUFFER_DESC desc {};
+    source->GetDesc(&desc);
+    if (desc.ByteWidth < wanted)
+        return nullptr;
+    if (!staging.buffer || staging.bytes != desc.ByteWidth)
+    {
+        ComPtr<ID3D11Device> device;
+        c->GetDevice(&device);
+        if (!device)
+            return nullptr;
+        D3D11_BUFFER_DESC create {};
+        create.ByteWidth = desc.ByteWidth;
+        create.Usage = D3D11_USAGE_STAGING;
+        create.BindFlags = 0;
+        create.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> created;
+        if (FAILED(device->CreateBuffer(&create, nullptr, &created)))
+            return nullptr;
+        staging.buffer = created;
+        staging.bytes = desc.ByteWidth;
+    }
+    c->CopyResource(staging.buffer.Get(), source);
+    if (FAILED(c->Map(staging.buffer.Get(), 0, D3D11_MAP_READ, 0, &staging.mapped)) || staging.mapped.pData == nullptr)
+        return nullptr;
+    staging.mappedOk = true;
+    return static_cast<const unsigned char*>(staging.mapped.pData);
+}
+
+void UnmapConstant(ID3D11DeviceContext* c, Staging& staging)
+{
+    if (staging.mappedOk && c != nullptr && staging.buffer)
+        c->Unmap(staging.buffer.Get(), 0);
+    staging.mappedOk = false;
+}
+
+// Whether the capture key is held down. Read with GetAsyncKeyState so the press does not need the game's window focused (a benchmark
+// run has no way to focus a key into the game); only ever called while the diagnostic waits for it.
+bool KeyDown(uint32_t key) { return (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0; }
+
 int64_t QpcFrequency()
 {
     LARGE_INTEGER f {};
@@ -97,11 +162,14 @@ struct State
     bool announced = false; // the "capturing" log line, written from the render thread (never from the config load)
 
     // Render thread only.
+    ArmPlan arm;
     uint32_t wantedFrames = static_cast<uint32_t>(kDefaultFrames);
     uint64_t frames = 0; // frames closed since the capture started; the frame in progress is frames + 1
     uint32_t drawsInFrame = 0;
     uint32_t omittedInFrame = 0;
     uint32_t framesCaptured = 0;
+    uint32_t waitTicks = 0; // draws since the last key poll while waiting for the capture to start
+    FrameSplitter split;
     std::string frameRows;
     MarkerPlan markers;
     std::string rows; // draws.csv body
@@ -110,8 +178,20 @@ struct State
     uint64_t rowsWritten = 0, cbRows = 0, shadersWithoutReflection = 0;
     int64_t clockZero = 0;
     int64_t lastReadQpc = 0;
-    ComPtr<ID3D11Buffer> staging;
-    UINT stagingBytes = 0;
+    Staging lightStaging, cameraStaging;
+
+    // The fixture dump: (crc, bytecode) of the pixel shaders whose reflection names one of the resources the fork identifies draws by
+    // (DrawDiagFormat.h's FixtureBitsOf), kept for the run folder.
+    struct Fixture
+    {
+        uint32_t crc = 0;
+        std::vector<std::string> names;
+        std::string code;
+    };
+    std::vector<Fixture> fixtures;
+    size_t fixtureBytes = 0;
+    size_t commonFixtures = 0; // the ones kept for a common name only, capped apart from the key shapes
+    size_t lightFixtures = 0;  // the ones kept for the light draw's own shape, which keeps slots of its own
 
     // Reflection table: appended to by shader creation on any thread, read by the draw path under the same mutex. Kept for the session
     // (freeing it would race a creation that outlives the capture); bounded by the two caps below.
@@ -414,49 +494,45 @@ std::string RenderTargetText(ID3D11DeviceContext* c, std::string& depth)
     return text;
 }
 
-// ---- the named constant buffer of the lighting passes ----------------------------------------------------------------
+// ---- the named constant buffers of the lighting passes ----------------------------------------------------------------
 
-void ReadLightParam(ID3D11DeviceContext* c, ID3D11Buffer* buffer, uint32_t crc, bool hasCrc, uint32_t slot, const char* name)
+// Reads the light parameters and the camera view matrix of one draw: position, direction and diffuse colour at the offsets
+// DrawDiagFormat.h documents, and the view matrix rows the space of the direction is read against. One staging copy and one map per
+// buffer, at most once a second, on the render thread. `frame` = the frame the read belongs to (0 while the diagnostic waits).
+void ReadConstants(ID3D11DeviceContext* c, uint64_t frame, ID3D11Buffer* light, uint32_t lightSlot, ID3D11Buffer* camera, uint32_t crc,
+                   bool hasCrc)
 {
     State& s = S();
-    D3D11_BUFFER_DESC desc {};
-    buffer->GetDesc(&desc);
-    if (desc.ByteWidth < kLightParamBytes)
+    if (light == nullptr)
         return;
-    if (!s.staging || s.stagingBytes != desc.ByteWidth)
-    {
-        ComPtr<ID3D11Device> device;
-        c->GetDevice(&device);
-        if (!device)
-            return;
-        D3D11_BUFFER_DESC staging {};
-        staging.ByteWidth = desc.ByteWidth;
-        staging.Usage = D3D11_USAGE_STAGING;
-        staging.BindFlags = 0;
-        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        ComPtr<ID3D11Buffer> created;
-        if (FAILED(device->CreateBuffer(&staging, nullptr, &created)))
-            return;
-        s.staging = created;
-        s.stagingBytes = desc.ByteWidth;
-    }
-    c->CopyResource(s.staging.Get(), buffer);
-    D3D11_MAPPED_SUBRESOURCE mapped {};
-    if (FAILED(c->Map(s.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)) || mapped.pData == nullptr)
+    const unsigned char* bytes = MapConstant(c, s.lightStaging, light, kLightParamBytes);
+    if (bytes == nullptr)
         return;
-    const auto* bytes = static_cast<const unsigned char*>(mapped.pData);
     ConstantRead read;
-    read.frame = s.frames + 1;
+    read.frame = frame;
     read.seconds = SecondsBetween(s.clockZero, Qpc());
     read.psCrc = crc;
     read.hasCrc = hasCrc;
-    read.name = name;
-    read.slot = slot;
+    read.name = kLightParamName;
+    read.slot = lightSlot;
+    D3D11_BUFFER_DESC desc {};
+    light->GetDesc(&desc);
     read.bytes = desc.ByteWidth;
     std::memcpy(read.position, bytes + kLightParamPositionAt, sizeof read.position);
     std::memcpy(read.direction, bytes + kLightParamDirectionAt, sizeof read.direction);
     std::memcpy(read.diffuse, bytes + kLightParamDiffuseAt, sizeof read.diffuse);
-    c->Unmap(s.staging.Get(), 0);
+    UnmapConstant(c, s.lightStaging);
+
+    // The camera buffer is read from the same draw, so the direction and the matrix always belong to one frame's state.
+    if (camera != nullptr)
+        if (const unsigned char* view = MapConstant(c, s.cameraStaging, camera, kCameraParamViewAt + kCameraParamMatrixBytes);
+            view != nullptr)
+        {
+            std::memcpy(read.view, view + kCameraParamViewAt, sizeof read.view);
+            read.hasView = true;
+            UnmapConstant(c, s.cameraStaging);
+        }
+
     if (s.truncatedCbs)
         return;
     const std::string row = CbRowText(read);
@@ -507,6 +583,31 @@ void Finish()
              s.cbRows, dir.string());
     if (s.truncated || s.truncatedCbs)
         LOG_WARN("Draw diagnostics: the byte cap of a file was reached, later rows were dropped");
+    if (!s.fixtures.empty())
+    {
+        // The fixture shaders: one file per shader plus a list of what each one declares, so a reflection rule can be replayed offline on
+        // the blob the game really handed to CreatePixelShader.
+        const fs::path folder = dir / kShaderFolder;
+        std::error_code ec;
+        fs::create_directories(folder, ec);
+        std::string list = "# FFXIV draw diagnostics, shader fixtures, format " + std::to_string(kFormatVersion) +
+                           "\n# crc,size,name=bindPoint,...\n";
+        for (const State::Fixture& fixture : s.fixtures)
+        {
+            char head[64];
+            snprintf(head, sizeof head, "%08X,%zu", fixture.crc, fixture.code.size());
+            std::string line = head;
+            for (const std::string& name : fixture.names)
+                line += "," + name;
+            list += line + "\n";
+            if (!ec)
+                WriteFile(folder / (detail::Hex32(fixture.crc) + ".dxbc"), fixture.code);
+        }
+        if (!ec && !WriteFile(dir / kShadersFile, list))
+            LOG_WARN("Draw diagnostics: the shader fixtures could not be listed");
+        else
+            LOG_INFO("Draw diagnostics: {} shader fixture(s) written", s.fixtures.size());
+    }
     if (s.shadersWithoutReflection != 0)
         LOG_INFO("Draw diagnostics: {} draw(s) named a pixel shader whose reflection was not recorded (created before the key was on)",
                  s.shadersWithoutReflection);
@@ -520,9 +621,80 @@ struct CbSlot
     uint32_t bytes = 0;
 };
 
+// Closes the frame in progress: its rows, its marker line, the counters and the splitter. Called from the tone map draw (the frame
+// split, which needs no Present) and from the bridge Present entry when a session has one.
+void CloseFrame()
+{
+    State& s = S();
+    const uint64_t frame = s.frames + 1;
+    if (s.drawsInFrame >= kMinDrawsPerFrame) // shorter frames are loading screens, the title and the like
+    {
+        std::string text = std::move(s.frameRows);
+        text += s.markers.Line(frame, s.drawsInFrame, s.omittedInFrame);
+        AppendDraws(s, text);
+        ++s.framesCaptured;
+    }
+    s.frameRows.clear();
+    s.frames = frame;
+    s.drawsInFrame = 0;
+    s.omittedInFrame = 0;
+    s.markers.Reset();
+    s.split.Reset();
+}
+
+// The pixel shader's bytecode CRC, as the creation hook stamped it on the object (0 when it has none).
+uint32_t ShaderCrc(ID3D11DeviceContext* c)
+{
+    ComPtr<ID3D11PixelShader> shader;
+    c->PSGetShader(&shader, nullptr, nullptr);
+    uint32_t crc = 0;
+    if (shader)
+    {
+        UINT bytes = sizeof crc;
+        if (FAILED(shader->GetPrivateData(kCrcTag, &bytes, &crc)) || bytes != sizeof crc)
+            crc = 0;
+    }
+    return crc;
+}
+
+// Whether the constant-buffer read of this draw is due (at most once a second).
+bool SampleDue(State& s)
+{
+    const int64_t now = Qpc();
+    if (s.lastReadQpc != 0 && SecondsBetween(s.lastReadQpc, now) < kSampleSeconds)
+        return false;
+    s.lastReadQpc = now;
+    return true;
+}
+
+// While the diagnostic waits for its capture (a delay or a key), it still samples the light and camera constants once a second - the
+// measurement of the sun direction's space needs a series over a moving camera - and checks every kWaitDrawsPerPoll draws whether it
+// is time to start. Nothing else happens per draw on this path: no render target, viewport, blend or depth query.
+void WaitTick(ID3D11DeviceContext* c);
+
+// Starts the collection, once, from the render thread (the config load may run inside DllMain, where nothing may log). `clockZero`
+// stays at the config load even for a delayed capture, so a cb.csv row says when in the session it was read.
+void StartCollecting()
+{
+    State& s = S();
+    s.phase.store(kCapturing, std::memory_order_relaxed);
+}
+
+// The log line of the first collected draw: when the capture started and how many frames it writes.
+void Announce(State& s)
+{
+    s.announced = true;
+    const char* how = s.arm.trigger == Trigger::Key     ? "now (the capture key was pressed)"
+                      : s.arm.trigger == Trigger::Delay ? "after the delay"
+                                                        : "at the first draw";
+    LOG_INFO("Draw diagnostics: capturing {} frame(s) {}; the files are written when the last frame ends", s.wantedFrames, how);
+}
+
 void Draw(ID3D11DeviceContext* c, const char* api)
 {
     State& s = S();
+    if (!s.announced)
+        Announce(s);
 
     DrawRow row;
     row.frame = s.frames + 1;
@@ -536,15 +708,7 @@ void Draw(ID3D11DeviceContext* c, const char* api)
     row.baseVertex = args.baseVertex;
 
     // The pixel shader, its bytecode CRC (stamped by the creation hook) and the catalog stage that CRC is known to be.
-    ComPtr<ID3D11PixelShader> shader;
-    c->PSGetShader(&shader, nullptr, nullptr);
-    uint32_t crc = 0;
-    if (shader)
-    {
-        UINT bytes = sizeof crc;
-        if (FAILED(shader->GetPrivateData(kCrcTag, &bytes, &crc)) || bytes != sizeof crc)
-            crc = 0;
-    }
+    const uint32_t crc = ShaderCrc(c);
     row.psCrc = crc;
     row.hasCrc = crc != 0;
     row.stage = ext::ffxiv::ui::StageOfCrc(crc);
@@ -591,10 +755,12 @@ void Draw(ID3D11DeviceContext* c, const char* api)
     row.depth = DepthText(c);
 
     // The names, from the reflection table. Every D3D query above is already done, so the mutex is never held across a D3D call.
-    // The name of the lighting constant buffer is copied here: the interned names live in a vector that shader creation still grows on other
-    // threads, so a pointer into it must not outlive this block.
+    // The names of the two constant buffers are copied out here: the interned names live in a vector that shader creation still grows on
+    // other threads, so a pointer into it must not outlive this block.
     std::string lightName;
     uint32_t lightSlot = 0;
+    uint32_t cameraSlot = 0;
+    bool hasCamera = false;
     {
         std::lock_guard lock(s.mutex);
         const Reflection* reflection = nullptr;
@@ -624,38 +790,116 @@ void Draw(ID3D11DeviceContext* c, const char* api)
             if (!row.cbs.empty())
                 row.cbs += '|';
             row.cbs += std::to_string(i) + ":" + (name != nullptr ? name : "-") + ":" + std::to_string(cb[i].bytes);
-            if (name != nullptr && std::strcmp(name, kLightParamName) == 0)
+            if (name == nullptr)
+                continue;
+            if (std::strcmp(name, kLightParamName) == 0)
             {
                 lightName = name;
                 lightSlot = static_cast<uint32_t>(i);
             }
+            else if (std::strcmp(name, kCameraParamName) == 0)
+            {
+                cameraSlot = static_cast<uint32_t>(i);
+                hasCamera = true;
+            }
         }
     }
 
-    // The named constant buffer of the lighting passes: at most once a second, one staging copy and one map on the render thread.
-    if (!lightName.empty())
-    {
-        const int64_t now = Qpc();
-        if (s.lastReadQpc == 0 || SecondsBetween(s.lastReadQpc, now) >= 1.0)
-        {
-            s.lastReadQpc = now;
-            ReadLightParam(c, cb[lightSlot].buffer.Get(), crc, row.hasCrc, lightSlot, lightName.c_str());
-        }
-    }
+    // The named constant buffers of the lighting and camera passes: at most once a second, one staging copy and one map each.
+    if (!lightName.empty() && SampleDue(s))
+        ReadConstants(c, s.frames + 1, cb[lightSlot].buffer.Get(), lightSlot, hasCamera ? cb[cameraSlot].buffer.Get() : nullptr, crc,
+                      row.hasCrc);
 
     // Markers are noted for every draw, whether or not the row below is kept, so a capped frame still reports its ordinals.
     row.markers = s.markers.NoteDraw(row.stage, row.ordinal);
     if (s.drawsInFrame > kMaxRowsPerFrame)
-    {
         ++s.omittedInFrame;
-        return;
+    else
+    {
+        s.frameRows += DrawsRowText(row);
+        ++s.rowsWritten;
     }
-    s.frameRows += DrawsRowText(row);
-    ++s.rowsWritten;
+    // The frame end, in the draw stream: the tone map draw closes the frame in progress, so a capture completes in a session that
+    // has no bridge Present at all (the reason a benchmark run with both keys set once wrote nothing).
+    if (s.split.NoteDraw(row.stage, s.drawsInFrame))
+    {
+        CloseFrame();
+        if (s.framesCaptured >= s.wantedFrames)
+            Finish();
+    }
 }
 
 // ---- the frame -------------------------------------------------------------------------------------------------------
 
+// Waiting for the capture to start (a delay or a key): the constants are sampled and the start is checked, and the draw list is not
+// collected. `waitTicks` bounds both costs to one draw in kWaitDrawsPerPoll.
+void WaitTick(ID3D11DeviceContext* c)
+{
+    State& s = S();
+    if (++s.waitTicks < kWaitDrawsPerPoll)
+        return;
+    s.waitTicks = 0;
+    const bool start = s.arm.trigger == Trigger::Key ? KeyDown(s.arm.key)
+                                                      : SecondsBetween(s.clockZero, Qpc()) >= s.arm.delaySeconds;
+    if (start)
+    {
+        StartCollecting();
+        return;
+    }
+    if (!SampleDue(s))
+        return;
+    try
+    {
+        const uint32_t crc = ShaderCrc(c);
+        ID3D11Buffer* buffers[8] {};
+        CbSlot cb[8] {};
+        c->PSGetConstantBuffers(0, 8, buffers);
+        for (size_t i = 0; i < 8; ++i)
+        {
+            if (buffers[i] == nullptr)
+                continue;
+            D3D11_BUFFER_DESC desc {};
+            buffers[i]->GetDesc(&desc);
+            cb[i].buffer.Attach(buffers[i]);
+            cb[i].bytes = desc.ByteWidth;
+        }
+        // The names, from the reflection table (the mutex is never held across a D3D call).
+        uint32_t lightSlot = 0, cameraSlot = 0;
+        bool hasLight = false, hasCamera = false;
+        {
+            std::lock_guard lock(s.mutex);
+            const auto it = s.byCrc.find(crc);
+            const Reflection* reflection = crc != 0 && it != s.byCrc.end() ? &it->second : nullptr;
+            for (size_t i = 0; i < 8; ++i)
+            {
+                if (!cb[i].buffer)
+                    continue;
+                const char* name = NameAt(s, reflection, kBindConstantBuffer, static_cast<uint32_t>(i));
+                if (name == nullptr)
+                    continue;
+                if (std::strcmp(name, kLightParamName) == 0)
+                {
+                    lightSlot = static_cast<uint32_t>(i);
+                    hasLight = true;
+                }
+                else if (std::strcmp(name, kCameraParamName) == 0)
+                {
+                    cameraSlot = static_cast<uint32_t>(i);
+                    hasCamera = true;
+                }
+            }
+        }
+        // `frame` 0: the read happened while the diagnostic was still waiting, so it does not belong to a captured frame.
+        if (hasLight)
+            ReadConstants(c, 0, cb[lightSlot].buffer.Get(), lightSlot, hasCamera ? cb[cameraSlot].buffer.Get() : nullptr, crc, crc != 0);
+    }
+    catch (...)
+    {
+    }
+}
+
+// The bridge Present entry, for the sessions that have one (frame generation, the HDR presenter, a DX12 upscaler). It closes the frame
+// the draw hooks collected at the exact end of the engine's frame; sessions without a bridge rely on the tone map split above.
 void Present()
 {
     State& s = S();
@@ -663,24 +907,7 @@ void Present()
         return;
     try
     {
-        if (!s.announced)
-        {
-            s.announced = true;
-            LOG_INFO("Draw diagnostics: capturing {} frame(s); the files are written when the last one ends", s.wantedFrames);
-        }
-        const uint64_t frame = s.frames + 1;
-        if (s.drawsInFrame >= kMinDrawsPerFrame) // shorter frames are loading screens, the title and the like
-        {
-            std::string text = std::move(s.frameRows);
-            text += s.markers.Line(frame, s.drawsInFrame, s.omittedInFrame);
-            AppendDraws(s, text);
-            ++s.framesCaptured;
-        }
-        s.frameRows.clear();
-        s.frames = frame;
-        s.drawsInFrame = 0;
-        s.omittedInFrame = 0;
-        s.markers.Reset();
+        CloseFrame();
         if (s.framesCaptured >= s.wantedFrames)
             Finish();
     }
@@ -694,11 +921,15 @@ void Present()
 
 void OnDraw(ID3D11DeviceContext* context, const char* api)
 {
-    if (S().phase.load(std::memory_order_relaxed) != kCapturing || context == nullptr)
+    const uint8_t phase = S().phase.load(std::memory_order_relaxed);
+    if (context == nullptr || (phase != kCapturing && phase != kWaiting))
         return;
     try
     {
-        Draw(context, api);
+        if (phase == kCapturing)
+            Draw(context, api);
+        else
+            WaitTick(context);
     }
     catch (...)
     {
@@ -721,6 +952,30 @@ void OnPixelShaderCreated(ID3D11PixelShader* shader, const void* code, size_t si
         const size_t count = ParseBindings(code, size, parsed, kMaxBindings);
         if (count == 0)
             return;
+        // A shader that names one of the fork's identifying resources is kept as a fixture (bounded, and only while a capture runs). The
+        // shaders that declare the sun mask or the light draw's own pair are kept ahead of the geometry passes that only name the camera
+        // buffer, so a bound that fills up cannot hide the draw a lighting feature is looking for.
+        {
+            uint32_t bits = 0;
+            for (size_t i = 0; i < count; ++i)
+                bits |= FixtureBitsOf(std::string_view(parsed[i].name, parsed[i].nameLength));
+            const bool key = IsKeyFixtureShader(bits);
+            const bool lightDraw = IsLightDrawFixture(bits);
+            if (AdmitFixture(bits, s.fixtures.size(), s.commonFixtures, s.lightFixtures, s.fixtureBytes, size))
+            {
+                State::Fixture fixture;
+                fixture.crc = crc;
+                fixture.code.assign(static_cast<const char*>(code), size);
+                for (size_t i = 0; i < count; ++i)
+                    fixture.names.push_back(std::string(parsed[i].name, parsed[i].nameLength) + "=" + std::to_string(parsed[i].bindPoint));
+                s.fixtureBytes += size;
+                if (lightDraw)
+                    ++s.lightFixtures;
+                else if (!key)
+                    ++s.commonFixtures;
+                s.fixtures.push_back(std::move(fixture));
+            }
+        }
         Reflection reflection;
         reflection.binds.reserve(count);
         for (size_t i = 0; i < count; ++i)
@@ -756,7 +1011,8 @@ void OnConfigLoaded(bool capture)
     State& s = S();
     if (!capture)
     {
-        if (s.phase.load(std::memory_order_relaxed) == kCapturing)
+        const uint8_t phase = s.phase.load(std::memory_order_relaxed);
+        if (phase == kCapturing || phase == kWaiting)
         {
             s.phase.store(kIdle, std::memory_order_relaxed);
             ext::SetActive(ext::F::DrawDiag, false);
@@ -766,10 +1022,12 @@ void OnConfigLoaded(bool capture)
     if (s.phase.load(std::memory_order_relaxed) != kIdle)
         return; // a capture is running, or this session already wrote its one capture
     s.wantedFrames = WantedFrames();
+    s.arm = PlannedArm();
     // The clock of cb.csv starts here, so the first captured frame already has a sane "seconds into the capture" (its draws run before the
-    // first Present). Reading the performance counter is safe from the config load.
+    // first Present). A delayed capture keeps this zero: its rows then say how long after the config load they were read. Reading the
+    // performance counter is safe from the config load.
     s.clockZero = Qpc();
-    s.phase.store(kCapturing, std::memory_order_relaxed);
+    s.phase.store(s.arm.trigger == Trigger::Immediate ? kCapturing : kWaiting, std::memory_order_relaxed);
     ext::SetActive(ext::F::DrawDiag, true); // set last: a draw never sees the bit without a capture behind it
 }
 } // namespace ext::ffxiv::diag

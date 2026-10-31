@@ -184,7 +184,16 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "AutomaticReShadeDepth", automaticReShadeDepth);
     b.Add("FFXIV", "DrawDiagnostics", drawDiagnostics);
     b.Add("FFXIV", "DrawDiagnosticsFrames", drawDiagnosticsFrames);
+    b.Add("FFXIV", "DrawDiagnosticsDelaySeconds", drawDiagnosticsDelaySeconds);
+    b.Add("FFXIV", "DrawDiagnosticsKey", drawDiagnosticsKey);
     b.Add("FFXIV", "VfxMaskProbe", vfxMaskProbe);
+    b.Add("FFXIV", "ContactShadows", contactShadows);
+    b.Add("FFXIV", "ContactShadowsLength", contactShadowsLength);
+    b.Add("FFXIV", "ContactShadowsStrength", contactShadowsStrength);
+    b.Add("FFXIV", "ContactShadowsSteps", contactShadowsSteps);
+    b.Add("FFXIV", "ContactShadowsSunSpace", contactShadowsSunSpace);
+    b.Add("FFXIV", "ContactShadowsSunSign", contactShadowsSunSign);
+    b.Add("FFXIV", "ContactShadowsDump", contactShadowsDump);
     chara.Bind(b);
 }
 

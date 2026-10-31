@@ -25,6 +25,7 @@ enum class F : uint64_t
     PlateProbe = 1ull << 11, // developer probes of the output stream and the UI draws ([HudLess] PlateDiagnostics, log only)
     DrawDiag = 1ull << 12,  // developer draw diagnostic ([FFXIV] DrawDiagnostics, log only)
     Plate = 1ull << 13,      // native nameplate interpolation (ffxiv/plates + hudless/UiPlates.cpp)
+    ContactShadows = 1ull << 14, // contact shadows before the sun light pass ([FFXIV] ContactShadows)
 };
 
 namespace detail

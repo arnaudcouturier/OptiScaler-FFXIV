@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 
 namespace ext::ffxiv::diag
 {
@@ -42,6 +43,17 @@ struct ShaderBinding
 inline bool BindingCovers(const ShaderBinding& binding, uint32_t type, uint32_t slot)
 {
     return binding.type == type && slot >= binding.bindPoint && slot < binding.bindPoint + binding.bindCount;
+}
+
+// The name a binding is compared by. The effect compiler this game's shaders go through declares a texture and its sampler under ONE
+// variable name and writes the pair into the reflection as "<name>.T" (the texture) and "<name>.S" (the sampler state); a constant
+// buffer keeps its plain name. So the reflected name of the sun mask is `g_SamplerShadow.T`, not `g_SamplerShadow`. The binding's own
+// type already tells a texture from a sampler, so the suffix carries nothing a caller needs: compare the variable's name.
+inline constexpr std::string_view ResourceBaseName(std::string_view name)
+{
+    if (name.size() > 2 && name[name.size() - 2] == '.' && (name.back() == 'T' || name.back() == 'S'))
+        return name.substr(0, name.size() - 2);
+    return name;
 }
 
 inline constexpr size_t kMaxBindings = 48; // the table of a real shader is a dozen to three dozen entries

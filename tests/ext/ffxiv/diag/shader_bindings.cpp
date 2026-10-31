@@ -226,5 +226,18 @@ int main()
         }
     }
 
+    // ---- the name a binding is compared by: the effect compiler's type suffix is not part of the variable's name
+    {
+        CHECK(ResourceBaseName("g_SamplerShadow") == "g_SamplerShadow");
+        CHECK(ResourceBaseName("g_SamplerShadow.T") == "g_SamplerShadow"); // the texture half of an effect variable
+        CHECK(ResourceBaseName("g_SamplerShadow.S") == "g_SamplerShadow"); // its sampler half
+        CHECK(ResourceBaseName("g_LightParam") == "g_LightParam");         // constant buffers keep their plain name
+        CHECK(ResourceBaseName("g_SamplerShadowMask.T") == "g_SamplerShadowMask"); // the base name is compared, not a prefix
+        CHECK(ResourceBaseName("g_SamplerShadow.X") == "g_SamplerShadow.X"); // anything else is left alone
+        CHECK(ResourceBaseName("a.T") == "a");                              // a one-letter variable is still a variable
+        CHECK(ResourceBaseName(".T") == ".T");                              // nothing before the dot: not a suffix this rule knows
+        CHECK(ResourceBaseName("") == "");
+    }
+
     return Finish("shader_bindings");
 }

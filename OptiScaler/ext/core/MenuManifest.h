@@ -20,8 +20,8 @@ inline constexpr const char* kFfxivTab = "FFXIV";
 // Fork cards that need the FFXIV build match: they live in the FFXIV tab, and only they do. Their visible predicates are
 // the build match (`ext::game::Current()`), so the card hides itself even when it is pinned to the Custom Tab.
 inline constexpr const char* kFfxivOnlyIds[] = {
-    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless",
-    "hudless_diag", "ffxiv_advanced",
+    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_contact_shadows", "ffxiv_jitter", "ffxiv_character_preview",
+    "fg_hudless", "hudless_diag", "ffxiv_advanced",
 };
 
 // Every fork card id that has been in a released menu. The Custom Tab saves pins by id (`[Menu] CustomTabCards`), so each
@@ -77,7 +77,12 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] FfxivForceUnknownBuild", // persistent debug switch: ignore the known-build table
     "[FFXIV] DrawDiagnostics", // developer draw diagnostic: log only, one capture of a few frames; the shader names need it on at start
     "[FFXIV] DrawDiagnosticsFrames", // developer draw diagnostic: how many frames one capture writes
+    "[FFXIV] DrawDiagnosticsDelaySeconds", // developer draw diagnostic: how long after the game starts the capture begins
+    "[FFXIV] DrawDiagnosticsKey", // developer draw diagnostic: the key that starts the capture in place of the delay
     "[FFXIV] VfxMaskProbe", // developer probe: a constant half-screen mask in the upscaler's mask input, to see whether a backend reads it at all
+    "[FFXIV] ContactShadowsSunSpace", // contact shadows: which space the game reports its sun direction in, redone after a patch (not a player setting)
+    "[FFXIV] ContactShadowsSunSign", // contact shadows: which way the game's sun direction points, redone after a patch (not a player setting)
+    "[FFXIV] ContactShadowsDump", // contact shadows: writes one frame's mask, term, depth and camera bytes for the developer check
     "[HDR] LegacyComposition", // experimental rollback of the scene HDR composition: kept out of the menu until confirmed in a game
 };
 
