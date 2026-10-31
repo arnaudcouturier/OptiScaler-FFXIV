@@ -247,7 +247,7 @@ int main(int argc, char** argv)
     const auto cfg = Normalize(Read(ext + "core/ExtConfig.cpp"));
     CHECK(Has(cfg, "b.Add(\"FFXIV\", \"AutomaticReShadeDepth\", automaticReShadeDepth);"));
     CHECK(!Has(cfg, "AutomaticReShadeMotionScale") && !Has(cfg, "AutomaticReShadeGBuffers"));
-    CHECK(Has(cfg, "window.PostLoad(); ffxiv.PostLoad(); }"));
+    CHECK(Has(cfg, "window.PostLoad(); ffxiv.PostLoad(); bridge.PostLoad(); }"));
     const auto cfgHeader = Normalize(Read(ext + "ffxiv/FfxivConfig.h"));
     CHECK(Has(cfgHeader, "CustomOptional<bool> automaticReShadeDepth { false };"));
     CHECK(!Has(cfgHeader, "automaticReShadeMotionScale") && !Has(cfgHeader, "automaticReShadeGBuffers"));
