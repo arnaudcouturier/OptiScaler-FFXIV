@@ -6,7 +6,8 @@ game session**; its evidence comes from the official benchmark.
 
 **All six directions between FSR FG, XeFG and plain presentation switch live in this build** (benchmark-verified, see
 "What the benchmark showed" below). A run still has to boot with FSR FG or XeFG selected: a boot with frame generation
-off has no input path to switch to.
+off has no input path to switch to, and a DLSS-G output is not switched live (the switch moves only the three DX11-to-DX12
+bridge outputs).
 
 The master key `[FrameGen] FGOutputHotSwap` (menu: Frame Gen, the live output switch card) arms it. With the key on, a
 present that finds the configured output different from the one on the window runs one switch: it quiesces and drains the
