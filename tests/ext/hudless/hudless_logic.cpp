@@ -8,6 +8,7 @@
 #include <cstring>
 #include <set>
 #include <string>
+#include <vector>
 
 using namespace ext::hudless;
 
@@ -1290,6 +1291,134 @@ void TestHudCoverageWindow()
     assert(ties.Samples() == 0 && ties.Estimate() < 0.f);
 }
 
+
+// The developer's blind A/B of the probe interval ([HudLess] ProbeAbSeconds): blocks of fixed length, each pair holding one block at
+// interval 1 and one at the configured interval in an order drawn from the seed, deterministic for a seed, restarted by a new
+// configuration, off at 0 seconds or with nothing to compare (interval 1), one log line format.
+std::vector<int> AbSequence(int seconds, int interval, uint64_t seed, int blocks)
+{
+    ProbeAbSchedule s;
+    s.Configure(seconds, interval, seed);
+    std::vector<int> seq;
+    const uint64_t start = 5000;
+    const uint64_t len = static_cast<uint64_t>(seconds) * 1000;
+    for (int k = 0; k < blocks; ++k)
+    {
+        const auto b = s.Next(start + k * len);
+        assert(b.changed && b.index == static_cast<uint64_t>(k));
+        const auto mid = s.Next(start + k * len + len / 2);
+        assert(!mid.changed && mid.index == b.index && mid.interval == b.interval);
+        const auto last = s.Next(start + k * len + len - 1);
+        assert(!last.changed && last.interval == b.interval);
+        seq.push_back(b.interval);
+    }
+    return seq;
+}
+
+void TestProbeAbSchedule()
+{
+    {
+        ProbeAbSchedule off;
+        off.Configure(0, 8, 1);
+        assert(!off.On());
+        assert(off.Next(0).interval == 1 && off.Next(10'000'000).interval == 1 && !off.Next(20'000'000).changed);
+        ProbeAbSchedule same;
+        same.Configure(60, 1, 1); // nothing to compare
+        assert(!same.On() && same.Next(0).interval == 1);
+        ProbeAbSchedule negative;
+        negative.Configure(-5, 8, 1);
+        assert(!negative.On() && negative.Next(0).interval == 1);
+    }
+
+    const std::vector<int> seq = AbSequence(60, 8, 12345, 40);
+    int bFirst = 0;
+    for (size_t p = 0; p + 1 < seq.size(); p += 2)
+    {
+        assert((seq[p] == 1 && seq[p + 1] == 8) || (seq[p] == 8 && seq[p + 1] == 1)); // one of each per pair
+        bFirst += seq[p] == 8;
+    }
+    assert(bFirst > 2 && bFirst < 18); // both orders occur: not a fixed alternation
+    assert(AbSequence(60, 8, 12345, 40) == seq); // deterministic for a seed
+    assert(AbSequence(60, 8, 999, 40) != seq);   // another seed, another order
+    assert(AbSequence(30, 4, 12345, 6).size() == 6);
+
+    // the clock may jump over blocks: the block of that time is reported, and it is a change
+    ProbeAbSchedule jump;
+    jump.Configure(10, 8, 7);
+    assert(jump.On());
+    const auto b0 = jump.Next(1000);
+    assert(b0.changed && b0.index == 0);
+    const auto b5 = jump.Next(1000 + 5 * 10'000 + 1);
+    assert(b5.changed && b5.index == 5);
+    // a clock that goes back stays in the block it is in
+    assert(!jump.Next(1000).changed && jump.Next(1000).index == 5);
+
+    // a new configuration starts over at the next call; the same configuration again does not
+    jump.Configure(10, 8, 7);
+    assert(!jump.Next(1000 + 5 * 10'000 + 2).changed);
+    jump.Configure(20, 8, 7);
+    const auto restarted = jump.Next(9'000'000);
+    assert(restarted.changed && restarted.index == 0);
+
+    assert(ProbeAbLine({ 3, 8, true }, 60) == "HudLess: probe A/B block 3 (60 s blocks): probe interval 8");
+    assert(ProbeAbLine({ 0, 1, true }, 30) == "HudLess: probe A/B block 0 (30 s blocks): probe interval 1");
+}
+
+
+// GuardReleaseHolds counts a hold window only when a fresh sample arrived in it. With the probe interval most windows between two
+// anchor-later presents carry none; counting them as clean would release a guard whose every measured image was over the release level.
+void TestDensityHoldNeedsSample()
+{
+    CoverageGuard g;
+    g.Configure(0.60f, GuardPolicy::Density, 3, false);
+    uint64_t seq = 0;
+    g.Update(-1.f, seq); // the baseline: whatever was read back before the guard started is stale
+    for (int i = 0; i < 3; ++i)
+    {
+        g.Update(0.9f, ++seq);
+        g.ResolveRelease(false);
+    }
+    assert(g.Blocking());
+    // holds with no sample in their window: they count neither way
+    for (int i = 0; i < 20; ++i)
+    {
+        g.Update(0.9f, seq);
+        g.ResolveRelease(true);
+    }
+    assert(g.Blocking() && g.HoldReleases() == 0);
+    // a dirty sample ends the run, and the empty windows after it do not start one
+    g.Update(0.9f, ++seq);
+    g.ResolveRelease(true);
+    for (int i = 0; i < 20; ++i)
+    {
+        g.Update(0.9f, seq);
+        g.ResolveRelease(true);
+    }
+    assert(g.Blocking() && g.HoldReleases() == 0);
+    // a clean sample in each of three windows in a row: the limit releases
+    for (int i = 0; i < 3; ++i)
+    {
+        g.Update(0.1f, ++seq);
+        g.ResolveRelease(true);
+    }
+    assert(!g.Blocking() && g.HoldReleases() == 1);
+    // empty windows between clean ones keep the run going (they neither count nor end it)
+    for (int i = 0; i < 3; ++i)
+    {
+        g.Update(0.9f, ++seq);
+        g.ResolveRelease(false);
+    }
+    assert(g.Blocking());
+    for (int k = 0; k < 3; ++k)
+    {
+        g.Update(0.1f, ++seq);
+        g.ResolveRelease(true);
+        g.Update(0.1f, seq);
+        g.ResolveRelease(true);
+    }
+    assert(!g.Blocking() && g.HoldReleases() == 2);
+}
+
 } // namespace
 
 int main()
@@ -1307,6 +1436,8 @@ int main()
     TestFormats();
     TestGuardAdvisory();
     TestHudCoverageWindow();
+    TestProbeAbSchedule();
+    TestDensityHoldNeedsSample();
     std::puts("PASS: reasons, state tracker hysteresis, coverage guard (trip, release, starvation, unknown, release limit, per-frame trip), "
               "guard-limit advisory and paste gate, slot ring fences, log formats");
     return 0;

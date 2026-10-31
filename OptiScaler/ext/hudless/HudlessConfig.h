@@ -43,6 +43,10 @@ struct HudlessConfig
     // Density policy only, ini only (see hudless::CoverageGuard).
     CustomOptional<int> guardReleaseHolds { 0 };               // GuardReleaseHolds, 0 = off, clamped to kMaxReleaseHolds
     CustomOptional<bool> guardTripOnAnchorLater { false };     // GuardTripOnAnchorLater
+    // While the guard is tripped, probe one present in N (1 = every present), live, 1 .. kProbeIntervalMax.
+    CustomOptional<int> probeInterval { 1 };                   // ProbeInterval
+    // Developer, ini only: blind A/B of the probe interval in blocks of this many seconds (0 = off), 0 .. kProbeAbSecondsMax.
+    CustomOptional<int> probeAbSeconds { 0 };                  // ProbeAbSeconds
     // off | on. A string key, ini only. on = under HDR output the paste's HDR stage is made before the first paste image (the PQ
     // conversion path of the paste has not run in a game yet); anything else reads as off.
     CustomOptional<std::string> hdrPaste { "off" };            // HdrPaste
@@ -54,12 +58,16 @@ struct HudlessConfig
     CustomOptional<std::string> platePhaseOffset { "auto" };   // PlatePhaseOffset
     // Largest plate shift, in output pixels per game frame (0..256).
     CustomOptional<int> plateMaxStep { 24 };                   // PlateMaxStep
+    // r1b | early, live: where the UI-free capture is taken when the first UI draw goes off-screen. A string key; anything else
+    // reads as r1b (today's behaviour).
+    CustomOptional<std::string> anchorRule { "r1b" };          // AnchorRule
 
     // Values as the engine uses them: out-of-range or non-finite input is clamped / replaced, the stored text is not
     // rewritten.
     hudless::Mode GetMode() const { return hudless::ParseMode(mode.value_or_default()); }
     bool HdrPasteOn() const { return hudless::ParseHdrPaste(hdrPaste.value_or_default()); }
     hudless::GuardPolicy GetGuardPolicy() const { return hudless::ParseGuardPolicy(guardMode.value_or_default()); }
+    hudless::AnchorRule GetAnchorRule() const { return hudless::ParseAnchorRule(anchorRule.value_or_default()); }
     // 0 = off. Out-of-range input is clamped, the stored text is not rewritten.
     int ReleaseHolds() const
     {
@@ -67,6 +75,13 @@ struct HudlessConfig
         return v < 0 ? 0 : (v > hudless::kGuardReleaseHoldsMax ? hudless::kGuardReleaseHoldsMax : v);
     }
     bool TripOnAnchorLater() const { return guardTripOnAnchorLater.value_or_default(); }
+    // Out-of-range input is clamped, the stored text is not rewritten.
+    int ProbeInterval() const { return hudless::ClampProbeInterval(probeInterval.value_or_default()); }
+    int ProbeAbSeconds() const
+    {
+        const int v = probeAbSeconds.value_or_default();
+        return v < 0 ? 0 : (v > hudless::kProbeAbSecondsMax ? hudless::kProbeAbSecondsMax : v);
+    }
     float Threshold() const
     {
         const float v = maskThreshold.value_or_default();

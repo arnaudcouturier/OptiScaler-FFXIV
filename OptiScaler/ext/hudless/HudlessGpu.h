@@ -60,6 +60,11 @@ bool Ready(ID3D12Device* device, uint32_t width, uint32_t height);
 // Resize / teardown: drops the images (freed once the GPU is done with them).
 void Release();
 
+// Destroys the retired images nothing on the GPU still writes or reads. Release() keeps the ones it cannot destroy yet and Produce()
+// collects them, but after a switch away from ui_free nothing produces again: the engine calls this until it returns false (no
+// retired image left). Any thread, never waits.
+bool Collect();
+
 // Any thread that presents the frame-generation swapchain (real and generated frames). Records and submits on
 // `presentQueue`: draws the newest COMPLETED paste image over the current backbuffer, never older than the last one
 // pasted and never older than 250 ms. Draws nothing and counts a skip otherwise. Never stalls pacing.

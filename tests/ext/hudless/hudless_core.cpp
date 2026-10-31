@@ -25,6 +25,7 @@ struct FakeSource final : IHudlessSource
     bool anchorLater = false; // the boundary's same-frame fact: the first backbuffer UI draw came after off-screen UI draws
     int takes = 0;
     int activeCalls = 0;
+    int skips = 0; // SkipNextCopy() calls: the engine will not use the next frame's image
     bool Active() override
     {
         ++activeCalls;
@@ -42,6 +43,7 @@ struct FakeSource final : IHudlessSource
     }
     const char* LastReason() override { return reason; }
     void EndFrame() override {}
+    void SkipNextCopy() override { ++skips; }
 };
 
 struct FakeHost final : IEngineHost
@@ -61,6 +63,7 @@ struct FakeHost final : IEngineHost
     GuardPolicy policy = GuardPolicy::Legacy; // [HudLess] GuardMode
     int releaseHolds = 0;                     // [HudLess] GuardReleaseHolds, 0 = off
     bool tripOnAnchorLater = false;           // [HudLess] GuardTripOnAnchorLater
+    int probeInterval = 1;                    // [HudLess] ProbeInterval (1 = every present)
     uint64_t maskKey = 0;                     // MaskThreshold/MaskDilation as one key
     uint64_t now = 0;                         // the clock for the guard-limit warning's settle time (0 = no clock)
     int pausedQueries = 0;
@@ -77,6 +80,7 @@ struct FakeHost final : IEngineHost
     GuardPolicy CoverageGuardPolicy() override { return policy; }
     int CoverageGuardReleaseHolds() override { return releaseHolds; }
     bool CoverageGuardTripOnAnchorLater() override { return tripOnAnchorLater; }
+    int ProbeInterval() override { return probeInterval; }
     uint64_t MaskKey() override { return maskKey; }
     uint64_t NowMs() override { return now; }
     IHudlessSource* Source() override { ++calls; return sourcePtr; }
@@ -572,6 +576,9 @@ struct Replay
     uint64_t produced = 0;
     bool completed = false; // a completed image exists and nothing invalidated the ring since
     bool tookLast = true;   // the source was asked in the previous present
+    bool skippedLast = false; // the engine told the source to skip the copy of this present's frame
+    bool honorSkip = true;    // the source honours SkipNextCopy (a source that ignores it captures anyway)
+    bool stallReadbacks = false; // the producer's readbacks stop completing (the starvation case)
 
     std::vector<Run> runs;
     std::vector<PasteAction> actions;
@@ -583,7 +590,7 @@ struct Replay
     Run Step()
     {
         ++present;
-        while (!inFlight.empty() && inFlight.front().dueAt <= present)
+        while (!stallReadbacks && !inFlight.empty() && inFlight.front().dueAt <= present)
         {
             const Image image = inFlight.front();
             inFlight.pop_front();
@@ -594,13 +601,16 @@ struct Replay
         }
         counters.produced = produced; // builds are counted when they are submitted, as UiPaste::Snapshot() does
 
-        host.source.result = (noBoundary || !tookLast) ? TakeResult::NotThisFrame : TakeResult::Ok;
+        host.source.result = (noBoundary || !tookLast || (honorSkip && skippedLast)) ? TakeResult::NotThisFrame : TakeResult::Ok;
         host.source.anchorLater = anchorFlag;
         host.pasteReady = completed;
         const int takesBefore = host.source.takes;
+        const int skipsBefore = host.source.skips;
         const Run r = Present(core, Mode::UiFree, counters, host.hdr ? 0 : -1);
         imageCoverage.push_back(coverage);
         tookLast = host.source.takes > takesBefore;
+        skippedLast = host.source.skips > skipsBefore;
+        assert(host.source.skips - skipsBefore <= 1); // at most one call per present
 
         const PasteAction action = core.PasteDecision();
         if (action == PasteAction::Produce)
@@ -2476,6 +2486,412 @@ void TestPasteGate()
     held.EndPresent();
 }
 
+// ---- [HudLess] ProbeInterval: a tripped guard probes one present in N -------------------------------------------------------------
+
+size_t FirstSwappedFrom(const Replay& replay, size_t from)
+{
+    size_t i = from;
+    while (i < replay.runs.size() && !replay.runs[i].swapped)
+        ++i;
+    return i;
+}
+
+// Constant coverage over the limit with interval N: after the trip (present 7) only one present in N takes a capture, stages it and
+// builds the paste image; the others stage nothing, build nothing and still fall back with MaskCoverage (the guard's doing, not a
+// missing boundary), and before each of them the source is told to skip that frame's copy. The source is asked on every present: it
+// stays armed, so the ReShade presets keep their place at the boundary and the same-frame facts keep coming.
+void TestProbeIntervalThrottles()
+{
+    for (int n : { 2, 4, 8, 16 })
+    {
+        Replay replay;
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(6);
+        const uint64_t producedBefore = replay.produced;
+        const int takesBefore = replay.host.source.takes;
+        const int skipsBefore = replay.host.source.skips;
+        assert(skipsBefore == 0); // nothing is skipped before the trip
+        const int presents = 50 * n;
+        int probes = 0;
+        for (int i = 0; i < presents; ++i)
+        {
+            const Run r = replay.Step();
+            assert(!r.swapped && r.reason == Reason::MaskCoverage);
+            assert(r.staged == replay.core.Probing());
+            assert(r.staged == (i % n == 0)); // the trip present probes, then one in n
+            probes += r.staged ? 1 : 0;
+            if (!r.staged && i >= Core::kLeaveHold)
+                assert(replay.core.PasteDecision() == PasteAction::Invalidate);
+            assert(!replay.core.WantsTags());
+            assert(replay.core.Snapshot().boundary == "ok");
+            assert(replay.core.Snapshot().coverageTripped);
+        }
+        assert(probes == 50);
+        assert(replay.produced - producedBefore == 50);
+        assert(replay.host.source.takes - takesBefore == presents);      // asked on every present
+        assert(replay.host.source.skips - skipsBefore == presents - 50); // before every present that does not probe
+        const Status s = replay.core.Snapshot();
+        assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+    }
+}
+
+// Interval 1 (and anything below it) is today's guard exactly: every present probes and nothing is skipped; above the maximum the
+// interval is the maximum.
+void TestProbeIntervalBounds()
+{
+    for (int n : { 1, 0, -3 })
+    {
+        Replay replay;
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(400);
+        assert(replay.host.source.skips == 0);
+        assert(replay.produced == 400 && replay.host.source.takes == 400);
+        for (size_t i = 6; i < replay.runs.size(); ++i)
+            assert(replay.runs[i].staged && replay.runs[i].reason == Reason::MaskCoverage);
+    }
+    Replay big;
+    big.host.probeInterval = 1000;
+    big.coverage = 0.95f;
+    big.Steps(6);
+    const uint64_t before = big.produced;
+    big.Steps(kProbeIntervalMax * 10);
+    assert(big.produced - before == 10);
+}
+
+// Not tripped, nothing is throttled: a scene under the limit swaps and builds an image on every present whatever the interval.
+void TestProbeIntervalOnlyWhileTripped()
+{
+    Replay replay;
+    replay.host.probeInterval = 8;
+    replay.coverage = 0.10f;
+    replay.Steps(300);
+    assert(replay.host.source.skips == 0);
+    assert(replay.produced == 300);
+    for (size_t i = 2; i < replay.runs.size(); ++i)
+        assert(replay.runs[i].staged && replay.runs[i].swapped && replay.runs[i].reason == Reason::None);
+}
+
+// The scene clears while the guard is tripped: the release needs 30 fresh clean samples, one per probe, so it comes after about 30 x N
+// presents, and the base comes back within a few presents after it (the copy of the release present may have been skipped, and the
+// ring was invalidated by the presents without a capture, so the first image is built before the first swap). Nothing in between is
+// called a missing boundary, and no swapped base carries an image over the limit.
+void TestProbeIntervalRelease()
+{
+    for (int n : { 4, 8 })
+    {
+        Replay replay;
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(60);
+        replay.coverage = 0.10f;
+        const size_t first = replay.runs.size();
+        replay.Steps(30 * n + 200);
+        const auto& runs = replay.runs;
+        const size_t swap = FirstSwappedFrom(replay, first);
+        assert(swap < runs.size());
+        assert(swap >= first + static_cast<size_t>(29 * n));
+        assert(swap <= first + static_cast<size_t>(30 * n + n) + 2 * Replay::kLatency + 3);
+        for (size_t i = first; i < swap; ++i)
+            assert(runs[i].reason == Reason::MaskCoverage || runs[i].reason == Reason::PasteNotReady);
+        for (size_t i = swap; i < runs.size(); ++i)
+            assert(runs[i].staged && runs[i].swapped && runs[i].reason == Reason::None);
+        for (size_t i = 6; i < runs.size(); ++i)
+            if (runs[i].swapped)
+                assert(replay.imageCoverage[i] < replay.host.limit);
+        assert(replay.flips == 3); // bootstrap swap, trip, release
+        const Status s = replay.core.Snapshot();
+        assert(s.reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+        assert(s.reasons[static_cast<size_t>(Reason::PasteNotReady)] <= 2 + 3);
+        assert(!s.coverageTripped);
+    }
+}
+
+// Readbacks that stop: the starvation release still needs 120 probing presents without a fresh sample, which are now one present in N.
+// With readbacks coming (one per probe), a tripped guard never starves, however long the interval.
+void TestProbeIntervalStarvation()
+{
+    {
+        const int n = 4;
+        Replay replay;
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(60);
+        replay.stallReadbacks = true;
+        const size_t from = replay.runs.size();
+        size_t releasedAt = 0;
+        for (int i = 0; i < 120 * n + 60 && releasedAt == 0; ++i)
+        {
+            replay.Step();
+            if (!replay.core.Snapshot().coverageTripped)
+                releasedAt = replay.runs.size() - 1;
+        }
+        assert(releasedAt != 0);
+        // the probes just before the stall count too (their readbacks never arrive): 120 probes, one in n presents
+        assert(releasedAt >= from + static_cast<size_t>(118 * n));
+        assert(releasedAt <= from + static_cast<size_t>(120 * n + n) + 2);
+    }
+    {
+        Replay replay;
+        replay.host.probeInterval = kProbeIntervalMax;
+        replay.coverage = 0.95f;
+        replay.Steps(6);
+        for (int i = 0; i < 3000; ++i)
+        {
+            replay.Step();
+            assert(replay.core.Snapshot().coverageTripped);
+        }
+    }
+}
+
+// The density policy under the interval: the release needs 60 clean samples (about 60 x N presents) and may become due on a present
+// without a capture; the base comes back within a few presents and nothing reads as a missing boundary.
+void TestProbeIntervalDensity()
+{
+    const int n = 4;
+    Replay replay;
+    replay.host.policy = GuardPolicy::Density;
+    replay.host.probeInterval = n;
+    replay.coverage = 0.95f;
+    replay.Steps(60);
+    assert(replay.core.Snapshot().coverageTripped);
+    replay.coverage = 0.10f;
+    const size_t first = replay.runs.size();
+    replay.Steps(60 * n + 200);
+    const size_t swap = FirstSwappedFrom(replay, first);
+    assert(swap < replay.runs.size());
+    assert(swap >= first + static_cast<size_t>(59 * n));
+    assert(swap <= first + static_cast<size_t>(60 * n + n) + 2 * Replay::kLatency + 3);
+    for (size_t i = swap; i < replay.runs.size(); ++i)
+        assert(replay.runs[i].swapped);
+    assert(replay.core.Snapshot().reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+}
+
+// The interval changes while tripped: from N to 1 every present probes again from the next present on (at most one present has no
+// capture, the one whose copy was already skipped, and it reads MaskCoverage); from 1 to N the next probe is N presents later at most.
+void TestProbeIntervalLiveChange()
+{
+    Replay replay;
+    replay.host.probeInterval = 8;
+    replay.coverage = 0.95f;
+    replay.Steps(6 + 40);
+    replay.host.probeInterval = 1;
+    const size_t change = replay.runs.size();
+    replay.Steps(50);
+    int missing = 0;
+    for (size_t i = change; i < replay.runs.size(); ++i)
+    {
+        assert(replay.runs[i].reason == Reason::MaskCoverage);
+        if (!replay.runs[i].staged)
+        {
+            ++missing;
+            assert(i == change);
+        }
+    }
+    assert(missing <= 1);
+    const int skipsBefore = replay.host.source.skips;
+    replay.host.probeInterval = 8;
+    const uint64_t producedBefore = replay.produced;
+    replay.Steps(80);
+    assert(replay.produced - producedBefore >= 10 && replay.produced - producedBefore <= 11);
+    assert(replay.host.source.skips > skipsBefore);
+    assert(replay.core.Snapshot().reasons[static_cast<size_t>(Reason::NoBoundaryThisFrame)] == 0);
+}
+
+// A source that ignores SkipNextCopy captures every frame anyway: the engine still stages and builds only on the probing presents and
+// drops the other images.
+void TestProbeIntervalSourceIgnoresSkip()
+{
+    const int n = 4;
+    Replay replay;
+    replay.honorSkip = false;
+    replay.host.probeInterval = n;
+    replay.coverage = 0.95f;
+    replay.Steps(6);
+    const uint64_t producedBefore = replay.produced;
+    const int stagesBefore = replay.host.stages;
+    replay.Steps(40 * n);
+    assert(replay.produced - producedBefore == 40);
+    assert(replay.host.stages - stagesBefore == 40);
+    for (size_t i = 6; i < replay.runs.size(); ++i)
+        assert(replay.runs[i].reason == Reason::MaskCoverage && replay.runs[i].staged == ((i - 6) % n == 0));
+}
+
+// Other modes never skip: recomposition asks for the image on every present.
+void TestProbeIntervalUiFreeOnly()
+{
+    FakeHost host;
+    host.probeInterval = 8;
+    Core core(host);
+    PasteCounters p;
+    for (uint64_t i = 1; i <= 50; ++i)
+    {
+        p.produced = i;
+        p.coverageSequence = i;
+        p.coverage = 0.99f;
+        const Run r = Present(core, Mode::Recomposition, p);
+        assert(r.staged && r.reason == Reason::None);
+    }
+    assert(host.source.skips == 0);
+}
+
+// The phase of the interval starts at every trip: after a release and a new trip the trip present itself probes, and the next probes
+// follow one in N from there (several N, so a phase left over from the first trip cannot line up by chance for all of them).
+void TestProbeIntervalPhaseRestartsAtTrip()
+{
+    for (int n : { 3, 4, 5, 8 })
+    {
+        Replay replay;
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(6 + 37); // tripped at present 7, then 37 tripped presents
+        replay.coverage = 0.10f;
+        replay.Steps(30 * n + 40); // released, swapping again
+        assert(!replay.core.Snapshot().coverageTripped);
+        assert(replay.runs.back().swapped);
+        replay.coverage = 0.95f;
+        const size_t high = replay.runs.size();
+        replay.Steps(40);
+        size_t trip = high;
+        while (trip < replay.runs.size() && replay.runs[trip].swapped)
+            ++trip;
+        assert(trip < replay.runs.size() - 3 * static_cast<size_t>(n));
+        for (size_t i = trip; i < replay.runs.size(); ++i)
+            assert(replay.runs[i].reason == Reason::MaskCoverage && replay.runs[i].staged == ((i - trip) % static_cast<size_t>(n) == 0));
+    }
+}
+
+// The density release limit (GuardReleaseHolds) under the interval: a hold window without a fresh sample says nothing, so dirty images
+// keep the guard tripped although most windows between two anchor-later presents carry no sample; with clean images the limit still
+// releases (one clean window per probe).
+void TestProbeIntervalDensityHolds()
+{
+    for (int n : { 1, 8 })
+    {
+        Replay replay;
+        replay.host.policy = GuardPolicy::Density;
+        replay.host.releaseHolds = 4;
+        replay.host.probeInterval = n;
+        replay.anchorFlag = true;
+        replay.coverage = 0.95f;
+        replay.Steps(60);
+        assert(replay.core.Snapshot().coverageTripped);
+        for (int i = 0; i < 1000; ++i)
+        {
+            replay.Step();
+            assert(replay.core.Snapshot().coverageTripped); // dirty: never released by the limit
+        }
+        replay.coverage = 0.10f;
+        bool released = false;
+        for (int i = 0; i < 40 * n + 40 && !released; ++i)
+        {
+            replay.Step();
+            released = !replay.core.Snapshot().coverageTripped;
+        }
+        assert(released); // clean: four sampled windows in a row let go
+    }
+}
+
+// The debug tint needs an image on every present it draws, so with the tint on the engine runs every present as a probe.
+void TestProbeIntervalTint()
+{
+    static_assert(EffectiveProbeInterval(8, true) == 1);
+    static_assert(EffectiveProbeInterval(8, false) == 8);
+    static_assert(EffectiveProbeInterval(0, false) == 1 && EffectiveProbeInterval(99, false) == kProbeIntervalMax);
+    static_assert(EffectiveProbeInterval(99, true) == 1);
+}
+
+// Changes while a skip is pending (the present before asked the source to skip this frame's copy): a mode change, the guard switched off,
+// a present that returns before the source is asked. None of them sticks: the next presents behave as without the interval.
+void TestProbeIntervalPendingSkip()
+{
+    const int n = 4;
+    auto tripped = [n](Replay& replay)
+    {
+        replay.host.probeInterval = n;
+        replay.coverage = 0.95f;
+        replay.Steps(6 + 1); // the trip present probed and asked to skip the next copy
+        assert(replay.core.Snapshot().coverageTripped && replay.skippedLast);
+    };
+    {
+        // to recomposition: one present without a capture (the source skipped it), then the tags on every present
+        Replay replay;
+        tripped(replay);
+        replay.host.source.result = TakeResult::NotThisFrame;
+        Run r = Present(replay.core, Mode::Recomposition, replay.counters);
+        assert(!r.staged && r.reason == Reason::NoBoundaryThisFrame);
+        replay.host.source.result = TakeResult::Ok;
+        for (int i = 0; i < 20; ++i)
+        {
+            r = Present(replay.core, Mode::Recomposition, replay.counters);
+            assert(r.staged && r.reason == Reason::None);
+        }
+        const int skips = replay.host.source.skips;
+        // ... and back to ui_free: the guard starts over, nothing is skipped until it trips again
+        replay.honorSkip = true;
+        replay.skippedLast = false;
+        replay.coverage = 0.10f;
+        replay.Steps(30);
+        assert(replay.host.source.skips == skips);
+        assert(replay.runs.back().swapped);
+    }
+    {
+        // the guard switched off: the skipped present reads MaskCoverage, then every present swaps again
+        Replay replay;
+        tripped(replay);
+        replay.host.limit = 0.f;
+        const size_t from = replay.runs.size();
+        replay.Steps(20);
+        assert(replay.runs[from].reason == Reason::MaskCoverage && !replay.runs[from].staged);
+        const size_t swap = FirstSwappedFrom(replay, from);
+        assert(swap <= from + 3);
+        for (size_t i = swap; i < replay.runs.size(); ++i)
+            assert(replay.runs[i].swapped);
+    }
+    {
+        // frame generation off for one present (it returns before the source is asked): nothing sticks, the probes resume
+        Replay replay;
+        tripped(replay);
+        replay.host.fgActive = false;
+        replay.Step();
+        assert(replay.runs.back().reason == Reason::NoFrameGeneration);
+        replay.host.fgActive = true;
+        const uint64_t before = replay.produced;
+        replay.Steps(4 * n);
+        assert(replay.produced - before >= 3 && replay.produced - before <= 4);
+        assert(replay.core.Snapshot().coverageTripped);
+        for (size_t i = replay.runs.size() - 4 * n; i < replay.runs.size(); ++i)
+            assert(replay.runs[i].reason == Reason::MaskCoverage || replay.runs[i].reason == Reason::NoBoundaryThisFrame);
+    }
+}
+
+// GuardTripOnAnchorLater under the interval: the present that trips on its own anchor-later frame probes (its base is not swapped,
+// its image is built and measured), the next probe comes N presents later.
+void TestProbeIntervalTripOnAnchorLater()
+{
+    const int n = 4;
+    Replay replay;
+    replay.host.policy = GuardPolicy::Density;
+    replay.host.tripOnAnchorLater = true;
+    replay.host.probeInterval = n;
+    replay.coverage = 0.10f;
+    replay.Steps(20);
+    assert(!replay.core.Snapshot().coverageTripped && replay.runs.back().swapped);
+    replay.anchorFlag = true;
+    const Run trip = replay.Step();
+    assert(replay.core.Snapshot().coverageTripped);
+    assert(trip.staged && !trip.swapped && trip.reason == Reason::MaskCoverage && replay.core.Probing());
+    replay.anchorFlag = false;
+    for (int i = 1; i <= 2 * n; ++i)
+    {
+        const Run r = replay.Step();
+        if (!replay.core.Snapshot().coverageTripped)
+            break;
+        assert(r.staged == (i % n == 0));
+    }
+}
+
 int main()
 {
     TestOff();
@@ -2515,6 +2931,20 @@ int main()
     TestHudCoverageWindowFollows();
     TestGuardAdvisorySettle();
     TestPasteGate();
+    TestProbeIntervalThrottles();
+    TestProbeIntervalBounds();
+    TestProbeIntervalOnlyWhileTripped();
+    TestProbeIntervalRelease();
+    TestProbeIntervalStarvation();
+    TestProbeIntervalDensity();
+    TestProbeIntervalLiveChange();
+    TestProbeIntervalSourceIgnoresSkip();
+    TestProbeIntervalUiFreeOnly();
+    TestProbeIntervalPhaseRestartsAtTrip();
+    TestProbeIntervalDensityHolds();
+    TestProbeIntervalTint();
+    TestProbeIntervalPendingSkip();
+    TestProbeIntervalTripOnAnchorLater();
     std::puts("PASS: engine core: every fallback reason, sequencing, hysteresis, coverage guard, guard-limit advisory, paste gate, "
               "scene HDR priority, log lines");
     return 0;

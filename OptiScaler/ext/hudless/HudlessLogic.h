@@ -374,6 +374,7 @@ class CoverageGuard
         _releaseDue = false;
         _holdRun = 0;
         _holdWindowClean = true;
+        _holdWindowSampled = false;
     }
 
     // Once per armed present, before the decision. `coverage` is PasteStatus::coverage (0..1, < 0 unknown),
@@ -411,6 +412,7 @@ class CoverageGuard
 
         if (_tripped)
         {
+            _holdWindowSampled = true;
             if (coverage > _release)
             {
                 _clean = 0; // still too much UI area, including the band up to the limit: stay tripped
@@ -472,8 +474,12 @@ class CoverageGuard
             _clean = 0;
             _releaseDue = false;
             ++_holds;
-            _holdRun = _holdWindowClean ? _holdRun + 1 : 0;
+            // A window without a fresh sample says nothing (with [HudLess] ProbeInterval above 1 most of them are such windows): it
+            // neither counts toward the limit nor ends the run
+            if (_holdWindowSampled)
+                _holdRun = _holdWindowClean ? _holdRun + 1 : 0;
             _holdWindowClean = true; // the window after this hold starts empty
+            _holdWindowSampled = false;
             if (_releaseHolds > 0 && _holdRun >= _releaseHolds)
                 ClearTrip(true);
         }
@@ -508,6 +514,7 @@ class CoverageGuard
         _clean = 0;
         _starve = 0;
         _releaseDue = false;
+        _holdWindowSampled = false;
         ++_trips;
     }
 
@@ -524,6 +531,7 @@ class CoverageGuard
         _releaseDue = false;
         _holdRun = 0;
         _holdWindowClean = true;
+        _holdWindowSampled = false;
     }
 
     float _limit = 0.f;
@@ -540,6 +548,7 @@ class CoverageGuard
     int _releaseHolds = 0;           // density: GuardReleaseHolds, 0 = off
     int _holdRun = 0;                // density: clean hold windows in a row towards _releaseHolds
     bool _holdWindowClean = true;    // density: no sample over the release level since the last hold or trip
+    bool _holdWindowSampled = false; // density: a fresh sample arrived since the last hold or trip (a window without one counts neither way)
     bool _tripOnAnchorLater = false; // density: GuardTripOnAnchorLater
     GuardPolicy _policy = GuardPolicy::Legacy;
     uint16_t _window = 0;     // density: the last kDensityWindow fresh samples, bit 0 the newest, 1 = over the limit
@@ -1070,5 +1079,79 @@ inline std::string ModeLine(Mode mode) { return std::format("HudLess: mode {}", 
 inline std::string ModeChangeLine(Mode from, Mode to)
 {
     return std::format("HudLess: mode {} -> {}", ModeName(from), ModeName(to));
+}
+
+// ---- The blind A/B of the probe interval ([HudLess] ProbeAbSeconds, developer, ini only) ----------------------------------------------
+// Time is cut into blocks of `seconds`. Each pair of blocks holds one block that probes every present (interval 1, "A") and one at the
+// configured interval ("B"), in an order drawn per pair from `seed`, so both conditions get the same time and a player cannot learn the
+// order. Pure: the engine feeds its clock and writes the line of every block change; the menu shows nothing of it.
+class ProbeAbSchedule
+{
+  public:
+    struct Block
+    {
+        uint64_t index = 0; // block number since the schedule started
+        int interval = 1;   // the probe interval in force
+        bool changed = false; // this call started a new block (the first call too)
+    };
+
+    // A change of any value starts the schedule over at the next call. Off (interval 1 throughout) when seconds <= 0 or when there is
+    // nothing to compare (interval <= 1).
+    void Configure(int seconds, int interval, uint64_t seed)
+    {
+        if (seconds == _seconds && interval == _interval && seed == _seed)
+            return;
+        _seconds = seconds;
+        _interval = interval;
+        _seed = seed;
+        _started = false;
+    }
+
+    bool On() const { return _seconds > 0 && _interval > 1; }
+
+    // The block in force at `nowMs` (the first call starts block 0). A clock that goes back stays in the block it is in.
+    Block Next(uint64_t nowMs)
+    {
+        if (!On())
+            return {};
+        if (!_started)
+        {
+            _started = true;
+            _startMs = nowMs;
+            _block = 0;
+            return { 0, IntervalOf(0), true };
+        }
+        const uint64_t length = static_cast<uint64_t>(_seconds) * 1000;
+        const uint64_t index = nowMs > _startMs ? (nowMs - _startMs) / length : 0;
+        const bool changed = index > _block;
+        if (changed)
+            _block = index;
+        return { _block, IntervalOf(_block), changed };
+    }
+
+  private:
+    // Each pair of blocks holds one of each; which comes first is a bit of a mixed hash of the seed and the pair number.
+    int IntervalOf(uint64_t index) const
+    {
+        uint64_t z = _seed + 0x9E3779B97F4A7C15ull * (index / 2 + 1);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        const bool configuredFirst = (z & 1u) != 0;
+        const bool firstOfPair = index % 2 == 0;
+        return configuredFirst == firstOfPair ? _interval : 1;
+    }
+
+    int _seconds = 0;
+    int _interval = 1;
+    uint64_t _seed = 0;
+    bool _started = false;
+    uint64_t _startMs = 0;
+    uint64_t _block = 0;
+};
+
+inline std::string ProbeAbLine(const ProbeAbSchedule::Block& block, int seconds)
+{
+    return std::format("HudLess: probe A/B block {} ({} s blocks): probe interval {}", block.index, seconds, block.interval);
 }
 } // namespace ext::hudless

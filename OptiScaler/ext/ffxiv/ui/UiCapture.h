@@ -77,6 +77,22 @@ inline Result GetBound(ID3D11DeviceContext* c, Bound& out)
     return Result::Ok;
 }
 
+// The checks of GetBound for a texture named by the caller instead of the bound target (the early anchor copies the swapchain
+// backbuffer while another target is bound): no view, so the copy is described by the texture format.
+inline Result Describe(ID3D11Texture2D* texture, Bound& out)
+{
+    if (!texture)
+        return Result::NotTexture2D;
+    out.texture = texture;
+    texture->GetDesc(&out.desc);
+    out.viewFormat = DXGI_FORMAT_UNKNOWN;
+    if (out.desc.SampleDesc.Count != 1)
+        return Result::Multisampled;
+    if (out.desc.ArraySize != 1 || out.desc.MipLevels != 1)
+        return Result::ArrayOrMips;
+    return Result::Ok;
+}
+
 // Typed (non typeless, non sRGB-view) format to describe the copy with: the view format when it is typed, else the
 // texture format reduced to its UNORM / FLOAT member.
 inline DXGI_FORMAT TypedFormat(const Bound& b)

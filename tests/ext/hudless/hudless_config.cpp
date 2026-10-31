@@ -32,6 +32,11 @@ int main()
     // the two density-guard options are off by default (today's rule)
     assert(defaults.guardReleaseHolds.value_or_default() == 0 && defaults.ReleaseHolds() == 0);
     assert(!defaults.guardTripOnAnchorLater.value_or_default() && !defaults.TripOnAnchorLater());
+    // a tripped guard probes every present by default (today's rule), and the blind A/B of the interval is off
+    assert(defaults.probeInterval.value_or_default() == 1 && defaults.ProbeInterval() == 1);
+    assert(defaults.probeAbSeconds.value_or_default() == 0 && defaults.ProbeAbSeconds() == 0);
+    // the capture is taken at R1b by default (today's rule); the early anchor is opt-in
+    assert(defaults.anchorRule.value_or_default() == "r1b" && defaults.GetAnchorRule() == hudless::AnchorRule::R1b);
     // the developer probes are off by default (and the seam bit that serves them starts clear)
     assert(!defaults.plateDiagnostics.value_or_default());
     assert(!ext::Active(F::PlateProbe));
@@ -46,8 +51,8 @@ int main()
     defaults.Bind(binder);
     const std::vector<std::string> expectedKeys { "Mode",         "MaskThreshold", "MaskDilation", "PasteCleanup",
                                                   "SteadyTiming", "CoverageGuard", "ShowDetectedUi", "GuardMode", "GuardReleaseHolds",
-                                                  "GuardTripOnAnchorLater", "HdrPaste", "PlateDiagnostics", "PlateInterp",
-                                                  "PlatePhaseOffset", "PlateMaxStep" };
+                                                  "GuardTripOnAnchorLater", "ProbeInterval", "ProbeAbSeconds", "AnchorRule", "HdrPaste", "PlateDiagnostics",
+                                                  "PlateInterp", "PlatePhaseOffset", "PlateMaxStep" };
     assert(binder.Table().size() == expectedKeys.size());
     for (size_t i = 0; i < expectedKeys.size(); ++i)
     {
@@ -78,6 +83,15 @@ int main()
     for (const char* text : { "off", "auto", "", "true", "1", "yes", "enabled", "onn", "of" })
         assert(!hudless::ParseHdrPaste(text));
 
+    // AnchorRule: only "early" (case-insensitive, whitespace tolerant) moves the capture; every other text is r1b, fail open
+    assert(hudless::ParseAnchorRule("early") == hudless::AnchorRule::Early);
+    assert(hudless::ParseAnchorRule("EARLY") == hudless::AnchorRule::Early);
+    assert(hudless::ParseAnchorRule("  Early \t") == hudless::AnchorRule::Early);
+    for (const char* text : { "r1b", "R1B", "auto", "", "earlyy", "earl", "r1", "true", "1", "on", "late" })
+        assert(hudless::ParseAnchorRule(text) == hudless::AnchorRule::R1b);
+    assert(std::string(hudless::AnchorRuleName(hudless::AnchorRule::R1b)) == "r1b");
+    assert(std::string(hudless::AnchorRuleName(hudless::AnchorRule::Early)) == "early");
+
     // Nothing is published before the config loads.
     assert(hudless::CurrentMode() == Mode::Off);
     assert(!hudless::Wanted());
@@ -95,6 +109,9 @@ int main()
     ini.SetValue("HudLess", "GuardMode", "Density");
     ini.SetValue("HudLess", "GuardReleaseHolds", "4");
     ini.SetValue("HudLess", "GuardTripOnAnchorLater", "true");
+    ini.SetValue("HudLess", "ProbeInterval", "8");
+    ini.SetValue("HudLess", "ProbeAbSeconds", "60");
+    ini.SetValue("HudLess", "AnchorRule", "Early");
     ini.SetValue("FrameGen", "ExternalUIFreeFrameGen", "false"); // the old keys are not read
     config::Load(ini);
 
@@ -109,6 +126,8 @@ int main()
     assert(cfg.HdrPasteOn());
     assert(cfg.GetGuardPolicy() == hudless::GuardPolicy::Density);
     assert(cfg.ReleaseHolds() == 4 && cfg.TripOnAnchorLater());
+    assert(cfg.ProbeInterval() == 8 && cfg.ProbeAbSeconds() == 60);
+    assert(cfg.GetAnchorRule() == hudless::AnchorRule::Early);
     assert(hudless::CurrentMode() == Mode::UiFree);
     assert(hudless::Wanted());
     assert(ext::Active(ext::F::Hudless));
@@ -121,6 +140,9 @@ int main()
     assert(std::string(out.GetValue("HudLess", "PasteCleanup", "")) == "false");
     assert(std::string(out.GetValue("HudLess", "GuardReleaseHolds", "")) == "4");
     assert(std::string(out.GetValue("HudLess", "GuardTripOnAnchorLater", "")) == "true");
+    assert(std::string(out.GetValue("HudLess", "ProbeInterval", "")) == "8");
+    assert(std::string(out.GetValue("HudLess", "ProbeAbSeconds", "")) == "60");
+    assert(std::string(out.GetValue("HudLess", "AnchorRule", "")) == "Early"); // the stored text is not rewritten
     assert(out.GetValue("FrameGen", "ExternalUIFreeFrameGen", nullptr) == nullptr);
     // [HudLess] Diagnostics is bound by package A's UiConfig (ext/ffxiv/ui) in the same table; HudlessConfig does not own it,
     // but once both packages are stacked the key is part of the saved section.
@@ -154,6 +176,31 @@ int main()
     assert(cfg.ReleaseHolds() == 3);
     cfg.guardTripOnAnchorLater = false;
     assert(!cfg.TripOnAnchorLater());
+
+    // the probe interval: below 1 is every present (today), above the maximum is the maximum; the A/B block length: below 0 is off,
+    // above the maximum is the maximum
+    cfg.probeInterval = 0;
+    assert(cfg.ProbeInterval() == 1);
+    cfg.probeInterval = -7;
+    assert(cfg.ProbeInterval() == 1);
+    cfg.probeInterval = 1000;
+    assert(cfg.ProbeInterval() == hudless::kProbeIntervalMax);
+    cfg.probeInterval = 5;
+    assert(cfg.ProbeInterval() == 5);
+    cfg.probeAbSeconds = -5;
+    assert(cfg.ProbeAbSeconds() == 0);
+    cfg.probeAbSeconds = 100000;
+    assert(cfg.ProbeAbSeconds() == hudless::kProbeAbSecondsMax);
+    cfg.probeAbSeconds = 45;
+    assert(cfg.ProbeAbSeconds() == 45);
+
+    // AnchorRule is live: the menu-style assignment is what the boundary reads at the next present, and an unknown text reads as r1b
+    cfg.anchorRule = std::string("r1b");
+    assert(cfg.GetAnchorRule() == hudless::AnchorRule::R1b);
+    cfg.anchorRule = std::string("early");
+    assert(cfg.GetAnchorRule() == hudless::AnchorRule::Early);
+    cfg.anchorRule = std::string("sideways");
+    assert(cfg.GetAnchorRule() == hudless::AnchorRule::R1b);
 
     // PlateDiagnostics publishes its own seam bit at load; unset or false clears it again.
     assert(!cfg.plateDiagnostics.value_or_default() && !ext::Active(F::PlateProbe));

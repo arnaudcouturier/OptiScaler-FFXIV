@@ -48,6 +48,9 @@ void DrawStatus(const ext::hudless::Status& status)
             ImGui::TextDisabled("Flagged UI area: unknown (no readback has completed)");
         // The guard in force: its limit, where the release sits, and why a present falls back while it is tripped (docs/HUDLESS.md 5).
         ImGui::TextDisabled("%s", ext::hudless::GuardStatusLine(status.guardLimit, status.coverageTripped, status.guardPolicy).c_str());
+        // Hidden while the blind A/B of the interval runs: the line would tell the player which block they are in.
+        if (status.coverageTripped && status.probeInterval > 1 && ext::Cfg().hudless.ProbeAbSeconds() <= 0)
+            ImGui::TextDisabled("Measuring on one frame in %d while falling back", status.probeInterval);
         // The HUD's own flagged area the limit has to let through, so the user has a number to set the guard against before the
         // warning ever fires, and a pointer to the warning itself (whose full text is next to the guard slider in the fold).
         if (status.hudCoverage >= 0.f)
@@ -97,6 +100,9 @@ void DrawHudless(ext::menu::Ctx&)
     static ext::hudless::HudlessSliderLogs sliderLogs;
     for (const std::string& line : sliderLogs.Due(GetTickCount64()))
         LOG_INFO("{}", line);
+    static ext::hudless::SliderSettleLog probeLog; // [HudLess] ProbeInterval, same settle rule
+    if (probeLog.Due(GetTickCount64()))
+        LOG_INFO("HudLess: ProbeInterval set to {} from the menu", static_cast<int>(probeLog.Take()));
 
     static const char* kModes[] = { "Off", "Recomposition (DLSS-G recomposes the UI)", "UI-free frame generation (experimental)" };
     int selected = static_cast<int>(current);
@@ -108,7 +114,7 @@ void DrawHudless(ext::menu::Ctx&)
     }
     ext::menu::Tooltip("Off: frame generation interpolates the whole frame, UI included (today's behaviour).\n"
                        "Recomposition: DLSS-G gets a hud-less and a UI image and recomposes the UI itself; it still "
-                       "interpolates the UI layer. DLSS-G reads this when it is created: applies after a game restart. "
+                       "interpolates the UI layer. Switching to or from it recreates DLSS-G (frame generation restarts for a moment). "
                        "FSR-FG and XeFG only receive the tags (untested).\n"
                        "UI-free: frame generation runs on the UI-free image and the UI is pasted back over every output "
                        "frame at the real frame rate. DLSS-G only. Experimental: it has a known micro-stutter in motion, with "
@@ -125,7 +131,7 @@ void DrawHudless(ext::menu::Ctx&)
     }
 
     if (current == Mode::Recomposition || (selected == int(Mode::Recomposition)))
-        ImGui::TextWrapped("Recomposition applies after a game restart (DLSS-G reads it when the feature is created).");
+        ImGui::TextWrapped("Switching to or from recomposition recreates DLSS-G: frame generation restarts for a moment.");
     // A DLSS-G render preset that takes the recomposition away (A, C): the same sentence as in the log and next to the preset selector.
     if (const auto note = ext::fg::preset::UiRecompositionMenuNote(); !note.empty())
     {
@@ -241,6 +247,23 @@ void DrawHudless(ext::menu::Ctx&)
     ext::menu::Tooltip("Paste the UI of one real frame behind: steadier world-anchored UI such as nameplates, about one "
                        "base frame of extra UI latency.");
 
+    // [HudLess] AnchorRule: where the UI-free image is taken on a frame whose first UI draw goes to an off-screen target (docs/HUDLESS.md
+    // section 10). Live: the boundary reads it at every present and logs each change.
+    static constexpr const char* kAnchorNames[] = { "r1b", "early" };
+    int anchor = static_cast<int>(cfg.GetAnchorRule());
+    if (ImGui::Combo("UI-free capture point", &anchor, "First HUD draw (default)\0Early (experimental)\0"))
+        cfg.anchorRule = std::string(kAnchorNames[anchor]);
+    ext::menu::Tooltip("Where the UI-free image is taken on frames whose first interface draw goes to an off-screen target (a small "
+                       "interface target the game draws before the HUD in the world, probably the minimap). In a city such frames "
+                       "made the detected UI area cover most of the screen.\n"
+                       "First HUD draw: at the first interface draw into the screen image (the behaviour before this setting).\n"
+                       "Early: at that off-screen draw, right after the scene, before the off-screen block and the draws that follow "
+                       "it. Frames whose first interface draw is on the screen image do not change, and a frame with ReShade presets "
+                       "to apply at the UI boundary keeps the first HUD draw.\n"
+                       "Both HUD-less modes use this image. In recomposition mode no coverage guard checks it, so a wrong early image goes to DLSS-G as it is (in UI-free mode the guard falls back).\n"
+                       "Experimental: unit-tested, not tried in a game yet. Applies at once; not changed by Reset advanced. Save "
+                       "Settings to keep it.");
+
     // The coverage guard is its own row of the fold, under its own heading: it is a second 0..1 slider and was mistaken for the mask
     // threshold in a play session, and a limit below the HUD's own coverage keeps ui_free off for a whole session.
     ImGui::Spacing();
@@ -272,15 +295,30 @@ void DrawHudless(ext::menu::Ctx&)
         }
     }
 
+    // While tripped the guard keeps measuring on one frame in N only (docs/HUDLESS.md 5): the per-frame probe could make frame generation
+    // stutter during the fallback.
+    int probe = cfg.ProbeInterval();
+    if (ImGui::SliderInt("Probe one frame in N while falling back", &probe, 1, ext::hudless::kProbeIntervalMax))
+    {
+        cfg.probeInterval = probe;
+        probeLog.Observe(static_cast<float>(cfg.ProbeInterval()), GetTickCount64());
+    }
+    ext::menu::Tooltip("While the coverage guard is tripped (falling back), build the UI-free capture and its mask on only one frame in "
+                       "this many; the other frames are plain frame generation with nothing extra. The guard then comes back after about "
+                       "30 x N frames of a clean scene instead of 30. 1 = every frame (the old behaviour). Building them on every frame "
+                       "is the suspected cause of a faint stutter felt while falling back (with DLSS-G render preset C; felt in play, "
+                       "not measured).\n"
+                       "Experimental: unit-tested, not tried in a game yet. Not changed by Reset advanced.");
+
     // [DLSSG] UIRecomposition: unset = on (the engine treats an unset key as on); read when the DLSS-G feature is created.
     auto& recompositionSetting = ext::Cfg().fg.uiRecomposition;
     int recomposition = !recompositionSetting.has_value() ? 0 : (recompositionSetting.value() ? 1 : 2);
-    if (ImGui::Combo("UI recomposition (restart)", &recomposition, "Auto (on)\0On\0Off\0"))
+    if (ImGui::Combo("UI recomposition", &recomposition, "Auto (on)\0On\0Off\0"))
         recompositionSetting = recomposition == 0 ? std::optional<bool> {} : std::optional<bool>(recomposition == 1);
     ext::menu::Tooltip("Recomposition mode only: whether DLSS-G gets a separate UI path and recomposes the UI itself "
                        "(Auto = on). Off: DLSS-G treats the tagged hud-less and UI images as hints only and still "
                        "interpolates the UI.\n"
-                       "DLSS-G reads this when it is created: applies after a restart. Save Settings to keep it.");
+                       "A change recreates DLSS-G at once (frame generation restarts for a moment). Save Settings to keep it.");
 
     if (ImGui::Button("Reset advanced"))
     {

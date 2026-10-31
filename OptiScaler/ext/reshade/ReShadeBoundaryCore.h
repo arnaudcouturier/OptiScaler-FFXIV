@@ -47,6 +47,9 @@ class Applier
     // ---- boundary thread
     // `context`/`target` are an ID3D11DeviceContext* and the ID3D11Resource* bound as render target 0.
     ApplyResult Apply(PresetsMode mode, bool registered, void* context, void* target);
+    // What Apply would return now without the ReShade call: Applied = every gate before render_effects passes (the bound target is
+    // not inspected). Counts nothing; the caches it shares with Apply (runtime choice, technique count) move as Apply moves them.
+    ApplyResult Predict(PresetsMode mode, bool registered, void* context);
     void FrameEnded() { _appliedThisFrame.store(false, std::memory_order_relaxed); }
 
     ApplyStats GetStats() const;
@@ -60,8 +63,12 @@ class Applier
     };
     static constexpr size_t kSlots = 8;
 
-    ApplyResult Done(ApplyResult result, const char* detail);
+    ApplyResult Done(ApplyResult result, const char* detail); // counts the result, then Note
     ApplyResult Done(ApplyResult result, const std::string& detail) { return Done(result, detail.c_str()); }
+    ApplyResult Note(ApplyResult result, const char* detail); // the detail text of a result that is not Applied
+    // Every check of Apply before the ReShade call, with _mutex held: Applied (and the runtime) when the call may run, otherwise the
+    // result Apply returns and its detail text. Apply and Predict share it, so the prediction cannot drift from the call.
+    ApplyResult Gates(PresetsMode mode, void* context, uint64_t& runtime, std::string& detail);
     Slot* FindSlot(uint64_t runtime);
     std::vector<uint64_t> AliveIds() const;
 

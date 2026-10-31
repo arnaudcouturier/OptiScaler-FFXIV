@@ -104,11 +104,27 @@ const Row kRows[] = {
       .write = "ext::Cfg().reshade.presets=std::string(kPresetNames[preset])", .keyPrefix = "ext::Cfg().reshade.presets=",
       .block = { "Switching to Off applies at once", "applies after a restart", "Only used in UI-free mode" },
       .fileHas = { "ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default())" }, .before = "ImGui::TreeNode(\"Advanced\")" },
-    // WP4 item 1: [DLSSG] UIRecomposition (auto/on/off), inside the existing Advanced fold, read when DLSS-G is created = restart
-    { .home = kHudless, .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"UI recomposition (restart)\"",
+    // WP4 item 1: [DLSSG] UIRecomposition (auto/on/off), inside the existing Advanced fold. Read when DLSS-G is created, and a change in
+    // the game makes Streamline recreate the feature at once: a live key whose tooltip says so (not "applies after a restart")
+    { .home = kHudless, .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"UI recomposition\"",
       .write = "recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1)",
-      .keyPrefix = "recompositionSetting=recomposition==0", .block = { "applies after a restart", "Recomposition mode only" },
-      .fileHas = { "auto&recompositionSetting=ext::Cfg().fg.uiRecomposition;" }, .fold = "ImGui::TreeNode(\"Advanced\")" },
+      .keyPrefix = "recompositionSetting=recomposition==0", .block = { "A change recreates DLSS-G at once", "Recomposition mode only" },
+      .fileHas = { "auto&recompositionSetting=ext::Cfg().fg.uiRecomposition;" }, .fold = "ImGui::TreeNode(\"Advanced\")",
+      .blockNot = { "applies after a restart" } },
+    // [HudLess] AnchorRule (r1b/early), inside the Advanced fold. Read by the boundary at every present: a live key whose tooltip says it is
+    // experimental and untried in a game, and that both HUD-less modes use the image it moves.
+    { .home = kHudless, .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::Combo(\"UI-free capture point\"",
+      .write = "cfg.anchorRule=std::string(kAnchorNames[anchor])", .keyPrefix = "cfg.anchorRule=",
+      .block = { "Experimental: unit-tested, not tried in a game yet", "Both HUD-less modes use this image", "Applies at once",
+                 "keeps the first HUD draw", "In recomposition mode no coverage guard checks it" },
+      .fileHas = { "staticconstexprconstchar*kAnchorNames[]={\"r1b\",\"early\"};", "intanchor=static_cast<int>(cfg.GetAnchorRule());" },
+      .fold = "ImGui::TreeNode(\"Advanced\")", .blockNot = { "restart" } },
+    // [HudLess] ProbeInterval (1..16), inside the Advanced fold, live: the tooltip says it is experimental and untried in a game, and gives
+    // the stutter cause it addresses as suspected, not found
+    { .home = kHudless, .file = "hudless/HudlessMenu.cpp", .widget = "ImGui::SliderInt(\"Probe one frame in N while falling back\"",
+      .write = "cfg.probeInterval=probe", .keyPrefix = "cfg.probeInterval=",
+      .block = { "Experimental: unit-tested, not tried in a game yet", "is the suspected cause", "not measured", "Not changed by Reset advanced" },
+      .fold = "ImGui::TreeNode(\"Advanced\")", .blockNot = { "restart", "could make frame generation stutter" } },
     // WP4 item 2: [XeFG] UnlockMFG and MaxInterpolatedFrames, drawn inside upstream's XeFG card (XeFgExtras); both are read when
     // the provider is loaded / the swapchain is created = restart
     { .home = kXeFg, .file = "fg/xefg/XefgSeams.cpp", .widget = "ImGui::Checkbox(\"Unlock multi frame generation (restart)\"",

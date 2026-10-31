@@ -428,6 +428,7 @@ $enumSets = @{
     '[HudLess] Mode'           = @{ values = @('off', 'recomposition', 'ui_free'); source = 'ext/hudless/HudlessMode.h ParseMode (alias uifree accepted, not canonical)' }
     '[HudLess] GuardMode'      = @{ values = @('legacy', 'density'); source = 'ext/hudless/HudlessMode.h ParseGuardPolicy' }
     '[HudLess] HdrPaste'       = @{ values = @('off', 'on'); source = 'ext/hudless/HudlessMode.h ParseHdrPaste' }
+    '[HudLess] AnchorRule'     = @{ values = @('r1b', 'early'); source = 'ext/hudless/HudlessMode.h ParseAnchorRule' }
     '[HudLess] ReShadePresets' = @{ values = @('auto', 'on', 'off'); source = 'ext/reshade/ReShadeBoundaryCore.cpp ParsePresetsMode' }
     '[Window] Mode'            = @{ values = @('off', 'probe', 'on'); source = 'ext/window/WindowMode.h ParseMode' }
     '[Menu] Style'             = @{ values = @('classic', 'ember'); source = 'ext/menu/MenuStyle.h Parse' }

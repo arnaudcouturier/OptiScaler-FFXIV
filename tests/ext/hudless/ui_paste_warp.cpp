@@ -926,6 +926,202 @@ void RingAndFences(Rig& rig)
     }
 }
 
+// Addresses of the live paste images: the debug layer's live-object report names every image texture
+// "HudLess paste image", so one address per image the module still holds.
+struct LiveImages
+{
+    bool available = false;
+    std::vector<uintptr_t> addresses;
+};
+
+LiveImages ReadLiveImages(Rig& rig, ID3D12InfoQueue* queueInfo)
+{
+    LiveImages out;
+    ComPtr<ID3D12DebugDevice> debugDevice;
+    if (queueInfo == nullptr || FAILED(rig.device.As(&debugDevice)))
+        return out;
+    queueInfo->ClearStoredMessages();
+    if (FAILED(debugDevice->ReportLiveDeviceObjects(D3D12_RLDO_DETAIL)))
+        return out;
+    out.available = true;
+    const UINT64 stored = queueInfo->GetNumStoredMessages();
+    for (UINT64 i = 0; i < stored; ++i)
+    {
+        SIZE_T length = 0;
+        if (FAILED(queueInfo->GetMessage(i, nullptr, &length)) || length < sizeof(D3D12_MESSAGE))
+            continue;
+        std::vector<uint8_t> buffer(length);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
+        if (FAILED(queueInfo->GetMessage(i, message, &length)) || message->pDescription == nullptr)
+            continue;
+        const char* name = std::strstr(message->pDescription, "HudLess paste image");
+        const char* address = std::strstr(message->pDescription, " at 0x");
+        if (name == nullptr || address == nullptr)
+            continue;
+        out.addresses.push_back(uintptr_t(std::strtoull(address + std::strlen(" at 0x"), nullptr, 16)));
+    }
+    queueInfo->ClearStoredMessages();
+    return out;
+}
+
+bool Holds(const std::vector<uintptr_t>& addresses, uintptr_t address)
+{
+    return std::find(addresses.begin(), addresses.end(), address) != addresses.end();
+}
+
+// The debug layer's stored ERROR / CORRUPTION messages (empty without the layer).
+struct DebugErrors
+{
+    size_t count = 0;
+    std::string first;
+};
+
+DebugErrors ReadDebugErrors(ID3D12InfoQueue* queueInfo)
+{
+    DebugErrors out;
+    const UINT64 stored = queueInfo->GetNumStoredMessages();
+    for (UINT64 i = 0; i < stored; ++i)
+    {
+        SIZE_T length = 0;
+        if (FAILED(queueInfo->GetMessage(i, nullptr, &length)) || length < sizeof(D3D12_MESSAGE))
+            continue;
+        std::vector<uint8_t> buffer(length);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
+        if (FAILED(queueInfo->GetMessage(i, message, &length)))
+            continue;
+        if (message->Severity != D3D12_MESSAGE_SEVERITY_ERROR && message->Severity != D3D12_MESSAGE_SEVERITY_CORRUPTION)
+            continue;
+        ++out.count;
+        if (out.first.empty() && message->pDescription != nullptr)
+            out.first = message->pDescription;
+    }
+    return out;
+}
+
+// (4) Release() (a mode switch away from UI-free, or a resize) while the newest produce pass is still queued: that pass
+//     reads the previous image as its cleanup input, so the image must outlive the pass; it is destroyed, with the rest of
+//     the retired images, once the pass completed. Destroying it under the queued pass is what faulted the GPU in the game.
+void ReleaseUnderPendingCleanupRead(Rig& rig)
+{
+    std::printf("  release under a pending cleanup read: the previous image outlives the queued pass\n");
+    Bridge bridge { rig };
+    const UINT w = 48, h = 32;
+    const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Image8 hudless(w, h, 60, 60, 60);
+    auto uiAt = [&](UINT x0)
+    {
+        Image8 f = hudless;
+        Fill(f, x0, 4, x0 + 3, 7, 200, 50, 20); // a 4x4 block at dilation 0: 16 pasted pixels
+        return f;
+    };
+
+    // the uploads wait for the queue, so they happen before it is stalled
+    auto final1 = bridge.Tex(uiAt(2));  // frame 1: UI at x 2..5
+    auto hud1 = bridge.Tex(hudless);
+    auto final2 = bridge.Tex(uiAt(20)); // frame 2: UI at x 20..23, its pass reads image 1 as the cleanup input
+    auto hud2 = bridge.Tex(hudless);
+
+    // The debug layer names the live objects, which is the only window on the images the module keeps; the rig breaks on
+    // every error by default, so the messages of this window are collected instead of stopping the test.
+    ComPtr<ID3D12InfoQueue> queueInfo;
+    const bool layer = rig.debugLayer && SUCCEEDED(rig.device.As(&queueInfo));
+    const BOOL breakError = layer ? queueInfo->GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR) : FALSE;
+    const BOOL breakCorruption = layer ? queueInfo->GetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION) : FALSE;
+    if (layer)
+    {
+        queueInfo->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
+        queueInfo->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+    }
+
+    UiPaste::Release(); // a settled start: nothing is in flight
+    rig.WaitIdle();
+    const auto before = ReadLiveImages(rig, queueInfo.Get());
+    if (layer)
+        EXPECT(before.addresses.empty(), "the module holds no paste image after Release (%zu)", before.addresses.size());
+
+    // frame 1 completes on the GPU, so its image is complete and frame 2 may read it as the cleanup input
+    UiPaste::Produce(rig.device.Get(), rig.queue.Get(), final1.Get(), format, hud1.Get(), format, nullptr, Params(0.008f, 0));
+    rig.WaitIdle();
+    const auto afterFirst = UiPaste::Snapshot();
+    EXPECT(UiPaste::Ready(rig.device.Get(), w, h), "frame 1 completed, its image is ready");
+    const auto first = ReadLiveImages(rig, queueInfo.Get());
+    std::vector<uintptr_t> image1;
+    for (const uintptr_t address : first.addresses)
+        if (!Holds(before.addresses, address))
+            image1.push_back(address);
+    if (layer)
+        EXPECT(first.available && image1.size() == 1, "frame 1 added exactly one paste image (%zu new, report %s)",
+               image1.size(), first.available ? "readable" : "not readable");
+
+    // frame 2 stays queued behind a fence only the CPU holds
+    ComPtr<ID3D12Fence> blocker, probe;
+    Check(rig.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&blocker)), "blocker fence");
+    Check(rig.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&probe)), "probe fence");
+    Check(rig.queue->Wait(blocker.Get(), 1), "queue wait");
+    UiPaste::Produce(rig.device.Get(), rig.queue.Get(), final2.Get(), format, hud2.Get(), format, nullptr, Params(0.008f, 0));
+    Check(rig.queue->Signal(probe.Get(), 1), "probe signal");
+    EXPECT(probe->GetCompletedValue() == 0, "the queue is stalled: frame 2 has not run yet (probe %llu)",
+           (unsigned long long) probe->GetCompletedValue());
+    EXPECT(UiPaste::Snapshot().produced == afterFirst.produced + 1, "frame 2 is submitted (%llu -> %llu)",
+           (unsigned long long) afterFirst.produced, (unsigned long long) UiPaste::Snapshot().produced);
+
+    // the mode switch / resize path, while frame 2 is still queued: image 1 is the cleanup input of that pass
+    UiPaste::Release();
+    EXPECT(!UiPaste::Ready(rig.device.Get(), w, h), "Release withdraws readiness while the pass is queued");
+    if (layer)
+    {
+        const auto errors = ReadDebugErrors(queueInfo.Get());
+        EXPECT(errors.count == 0, "the release under the queued pass raised %zu debug layer error(s): %s", errors.count,
+               errors.first.c_str());
+    }
+    // Collect() is what the engine polls after a switch away from ui_free: it still holds the retired image, so it reports "not done"
+    EXPECT(UiPaste::Collect(), "Collect reports the retired image still held while the pass that read it is queued");
+
+    // let the queued pass run, then wait for the queue to drain (a device removal throws here)
+    blocker->Signal(1);
+    rig.WaitIdle();
+
+    // the pass is complete, but only a collect may destroy the images: image 1 is still there
+    const auto pending = ReadLiveImages(rig, queueInfo.Get());
+    if (layer)
+        EXPECT(!image1.empty() && Holds(pending.addresses, image1[0]),
+               "image 1, the cleanup input of a pass that was queued when Release ran, is still alive");
+    else
+        std::printf("    no D3D12 debug layer here: the lifetime check falls back to the module's own state\n");
+    // ... and once that pass completed there is nothing left to collect
+    EXPECT(!UiPaste::Collect(), "Collect reports nothing left once the pass that read the image completed");
+
+    // a second Release collects the retired images: now image 1 is gone (nothing was allocated in between)
+    UiPaste::Release();
+    rig.WaitIdle();
+    const auto collected = ReadLiveImages(rig, queueInfo.Get());
+    if (layer)
+        EXPECT(!image1.empty() && !Holds(collected.addresses, image1[0]),
+               "the image is destroyed once the pass that read it completed");
+    if (layer)
+        std::printf("    live paste images: %zu after Release, %zu after frame 1, %zu after Release with the pass queued, "
+                    "%zu after the collect\n",
+                    before.addresses.size(), first.addresses.size(), pending.addresses.size(), collected.addresses.size());
+
+    if (layer)
+    {
+        queueInfo->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, breakError);
+        queueInfo->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, breakCorruption);
+    }
+
+    // the module still works after the two releases: a new image is built, pasted and read back
+    bridge.Backbuffer(w, h);
+    bridge.Produce(uiAt(2), hudless, Params(0.008f, 0));
+    EXPECT(UiPaste::Ready(rig.device.Get(), w, h), "Produce works after the release under the queued pass");
+    const size_t pasted = CountNonBg(bridge.Paste());
+    EXPECT(pasted == 16, "the next image pastes its 16 pixels (%zu)", pasted);
+    const auto after = UiPaste::Snapshot();
+    EXPECT(after.coverageSequence == after.produced && std::abs(after.coverage - 16.0f / float(w * h)) < 1e-6f,
+           "the readback of the new image is complete (sequence %llu, produced %llu, coverage %f)",
+           (unsigned long long) after.coverageSequence, (unsigned long long) after.produced, after.coverage);
+    UiPaste::Release();
+}
+
 void TimingAndLifecycle(Rig& rig)
 {
     std::printf("  steady timing, stale images, resize, invalidate, release\n");
@@ -1083,6 +1279,7 @@ try
     TypelessAndHdr(rig);
     OtherFormats(rig);
     RingAndFences(rig);
+    ReleaseUnderPendingCleanupRead(rig);
     TimingAndLifecycle(rig);
     PasteGate(rig);
     std::printf("[ui_paste_warp] failures: %d\n", g_failures);

@@ -168,6 +168,11 @@ void Applier::OnTechniquesChanged() { _techDirty.store(true, std::memory_order_r
 ApplyResult Applier::Done(ApplyResult result, const char* detail)
 {
     _results[Idx(result)].fetch_add(1, std::memory_order_relaxed);
+    return Note(result, detail);
+}
+
+ApplyResult Applier::Note(ApplyResult result, const char* detail)
+{
     if (result != ApplyResult::Applied && detail != nullptr && detail[0] != '\0')
     {
         std::lock_guard lock(_detailMutex);
@@ -192,67 +197,111 @@ ApplyStats Applier::GetStats() const
     return s;
 }
 
+namespace
+{
+constexpr const char* kOffDetail = "[HudLess] ReShadePresets = off";
+constexpr const char* kNotRegisteredDetail = "OptiScaler is not registered as a ReShade add-on";
+} // namespace
+
+ApplyResult Applier::Predict(PresetsMode mode, bool registered, void* context)
+{
+    try
+    {
+        if (mode == PresetsMode::Off)
+            return Note(ApplyResult::NotEnabled, kOffDetail);
+        if (!registered)
+            return Note(ApplyResult::NoReShade, kNotRegisteredDetail);
+
+        std::lock_guard lock(_mutex);
+        uint64_t runtime = 0;
+        std::string detail;
+        const ApplyResult gate = Gates(mode, context, runtime, detail);
+        return Note(gate, detail.c_str());
+    }
+    catch (...)
+    {
+        return ApplyResult::Failed;
+    }
+}
+
+ApplyResult Applier::Gates(PresetsMode mode, void* context, uint64_t& runtimeOut, std::string& detail)
+{
+    auto stop = [&detail](ApplyResult result, std::string why)
+    {
+        detail = std::move(why);
+        return result;
+    };
+    if (_inert.load(std::memory_order_relaxed))
+        return stop(ApplyResult::Failed, "latched inert after an earlier failure (restart the game)");
+    if (_appliedThisFrame.load(std::memory_order_relaxed))
+        return stop(ApplyResult::NothingToApply, "already applied this frame");
+    if (context == nullptr)
+        return stop(ApplyResult::Failed, "no D3D11 context");
+
+    // ---- which runtime: chosen once per (context, runtime generation) --------------------------------------------
+    if (!_pickValid || _pickContext != context || _pickGeneration != _generation)
+    {
+        _pickValid = true;
+        _pickContext = context;
+        _pickGeneration = _generation;
+        _pickRuntime = 0;
+        _pickWhy.clear();
+        const std::vector<uint64_t> alive = AliveIds();
+        if (alive.empty())
+            _pickWhy = "no live ReShade effect runtime";
+        else
+            _pickRuntime = _backend.PickRuntime(context, alive, _pickWhy);
+        if (_pickRuntime == 0 && _pickWhy.empty())
+            _pickWhy = "no ReShade runtime matches this D3D11 context";
+    }
+    if (_pickRuntime == 0)
+        return stop(ApplyResult::NoRuntime, _pickWhy);
+    const uint64_t runtime = _pickRuntime;
+
+    // ---- is there anything to apply -------------------------------------------------------------------------------
+    bool effects = false;
+    if (!_backend.GetEffectsState(runtime, effects))
+        return stop(ApplyResult::Failed, "could not read the ReShade effects state");
+    if (!effects)
+        return stop(ApplyResult::NothingToApply, "ReShade effects are disabled");
+
+    Slot* slot = FindSlot(runtime);
+    if (slot == nullptr || !slot->reloaded.load(std::memory_order_relaxed))
+        return stop(ApplyResult::NothingToApply, "ReShade effects are not loaded yet");
+
+    if (_techDirty.exchange(false, std::memory_order_relaxed) || _techRuntime != runtime || _techGeneration != _generation ||
+        ++_techAge >= kRecountEvery)
+    {
+        _techAge = 0;
+        _techRuntime = runtime;
+        _techGeneration = _generation;
+        _techKnown = _backend.CountTechniques(runtime, _techTotal, _techEnabled);
+        if (!_techKnown)
+            _techAge = kRecountEvery - 60; // unknown: retry in 60 calls, meanwhile do not block the presets
+    }
+    if (_techKnown && _techEnabled == 0 && mode != PresetsMode::On)
+        return stop(ApplyResult::NothingToApply, std::format("no technique is enabled ({} loaded)", _techTotal));
+
+    runtimeOut = runtime;
+    return ApplyResult::Applied;
+}
+
 ApplyResult Applier::Apply(PresetsMode mode, bool registered, void* context, void* target)
 {
     try
     {
         _calls.fetch_add(1, std::memory_order_relaxed);
         if (mode == PresetsMode::Off)
-            return Done(ApplyResult::NotEnabled, "[HudLess] ReShadePresets = off");
+            return Done(ApplyResult::NotEnabled, kOffDetail);
         if (!registered)
-            return Done(ApplyResult::NoReShade, "OptiScaler is not registered as a ReShade add-on");
+            return Done(ApplyResult::NoReShade, kNotRegisteredDetail);
 
         std::lock_guard lock(_mutex);
-        if (_inert.load(std::memory_order_relaxed))
-            return Done(ApplyResult::Failed, "latched inert after an earlier failure (restart the game)");
-        if (_appliedThisFrame.load(std::memory_order_relaxed))
-            return Done(ApplyResult::NothingToApply, "already applied this frame");
-        if (context == nullptr)
-            return Done(ApplyResult::Failed, "no D3D11 context");
-
-        // ---- which runtime: chosen once per (context, runtime generation) --------------------------------------------
-        if (!_pickValid || _pickContext != context || _pickGeneration != _generation)
-        {
-            _pickValid = true;
-            _pickContext = context;
-            _pickGeneration = _generation;
-            _pickRuntime = 0;
-            _pickWhy.clear();
-            const std::vector<uint64_t> alive = AliveIds();
-            if (alive.empty())
-                _pickWhy = "no live ReShade effect runtime";
-            else
-                _pickRuntime = _backend.PickRuntime(context, alive, _pickWhy);
-            if (_pickRuntime == 0 && _pickWhy.empty())
-                _pickWhy = "no ReShade runtime matches this D3D11 context";
-        }
-        if (_pickRuntime == 0)
-            return Done(ApplyResult::NoRuntime, _pickWhy);
-        const uint64_t runtime = _pickRuntime;
-
-        // ---- is there anything to apply -------------------------------------------------------------------------------
-        bool effects = false;
-        if (!_backend.GetEffectsState(runtime, effects))
-            return Done(ApplyResult::Failed, "could not read the ReShade effects state");
-        if (!effects)
-            return Done(ApplyResult::NothingToApply, "ReShade effects are disabled");
-
-        Slot* slot = FindSlot(runtime);
-        if (slot == nullptr || !slot->reloaded.load(std::memory_order_relaxed))
-            return Done(ApplyResult::NothingToApply, "ReShade effects are not loaded yet");
-
-        if (_techDirty.exchange(false, std::memory_order_relaxed) || _techRuntime != runtime || _techGeneration != _generation ||
-            ++_techAge >= kRecountEvery)
-        {
-            _techAge = 0;
-            _techRuntime = runtime;
-            _techGeneration = _generation;
-            _techKnown = _backend.CountTechniques(runtime, _techTotal, _techEnabled);
-            if (!_techKnown)
-                _techAge = kRecountEvery - 60; // unknown: retry in 60 calls, meanwhile do not block the presets
-        }
-        if (_techKnown && _techEnabled == 0 && mode != PresetsMode::On)
-            return Done(ApplyResult::NothingToApply, std::format("no technique is enabled ({} loaded)", _techTotal));
+        uint64_t runtime = 0;
+        std::string detail;
+        const ApplyResult gate = Gates(mode, context, runtime, detail);
+        if (gate != ApplyResult::Applied)
+            return Done(gate, detail);
 
         // ---- the call ---------------------------------------------------------------------------------------------------
         BoundaryRelease release { _backend };

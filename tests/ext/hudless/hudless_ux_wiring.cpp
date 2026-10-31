@@ -5,7 +5,10 @@
 //   - the HUD-less card prints the guard status line, keeps the coverage guard under its own sub-heading, prints the guard-limit
 //     warning next to the guard slider, logs the settled slider values once, and its Reset tooltip says it resets the guard,
 //   - the frame-pacing card registers the mark key in the Keybinds section (slot 19) and its handler writes the "user mark N" line,
-//   - the recorder keeps 9 files of 16 MiB (the documented 144 MiB session bound).
+//   - the recorder keeps 9 files of 16 MiB (the documented 144 MiB session bound),
+//   - the probe interval: its slider, settle log and status line in the card, the engine through the tested pure rules, the skip
+//     forwarded by the FFXIV source only while it delivers frames,
+//   - the paste images' lifetime: the producer's cleanup read is recorded and the retire collection uses the ring's Idle rule.
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -125,6 +128,85 @@ void TestHudlessCard(const std::string& repo)
     CHECK(Has(menu, Squash("cfg.coverageGuard = ext::HudlessConfig::kGuardDefault;")));
     CHECK(Count(menu, Squash("sliderLogs.Reset(cfg.Threshold(), static_cast<int>(cfg.Dilation()), cfg.CoverageLimit())")) == 1);
     CHECK(due < fold && Has(menu, Squash("and the Coverage guard back to 0.60 (the guard is reset with them)")));
+
+    // The probe interval: a slider in the fold after the guard slider and before Reset advanced, its settled value logged by its own
+    // timer flushed before the fold's early return, untouched by Reset advanced (the only assignment is the slider's), and the status
+    // line that names it is hidden while the blind A/B of the interval runs
+    const size_t probe = menu.find(Squash("SliderInt(\"Probe one frame in N while falling back\", &probe, 1, ext::hudless::kProbeIntervalMax)"));
+    const size_t reset = menu.find(Squash("if (ImGui::Button(\"Reset advanced\"))"));
+    CHECK(probe != std::string::npos && reset != std::string::npos && guard < probe && probe < reset);
+    CHECK(Count(menu, Squash("probeLog.Observe(static_cast<float>(cfg.ProbeInterval()), GetTickCount64());")) == 1);
+    const size_t probeDue = menu.find(Squash("if (probeLog.Due(GetTickCount64()))"));
+    CHECK(probeDue != std::string::npos && probeDue < fold);
+    CHECK(Has(menu, Squash("LOG_INFO(\"HudLess: ProbeInterval set to {} from the menu\", static_cast<int>(probeLog.Take()));")));
+    CHECK(Count(menu, Squash("cfg.probeInterval =")) == 1 && menu.find(Squash("cfg.probeInterval =")) < reset);
+    CHECK(Count(menu, Squash("if (status.coverageTripped && status.probeInterval > 1 && ext::Cfg().hudless.ProbeAbSeconds() <= 0)")) == 1);
+}
+
+// The paste images' lifetime goes through the tested ring rule: the producer records its read of the previous image (the cleanup input),
+// also when its fence signal failed, and a retired image is destroyed only when ring::Idle says nothing still reads it (a retire right
+// after a pass used to destroy the image that pass still read: a GPU fault on a mode switch)
+void TestPasteLifetimeWiring(const std::string& repo)
+{
+    const std::string paste = Squash(ReadFile(repo + "/OptiScaler/ext/hudless/UiPaste.cpp"));
+    CHECK(Count(paste, Squash("c.ring.NoteCleanupRead(previous, value);")) == 1);
+    CHECK(Count(paste, Squash("c.ring.NoteCleanupRead(previous, ring::kNever);")) == 1);
+    CHECK(Count(paste, Squash("if (!done.removed && !ring::Idle(item.meta, done.fences)) return false;")) == 1);
+    const size_t endWrite = paste.find(Squash("c.ring.EndWrite(target, value, NowMs());"));
+    const size_t note = paste.find(Squash("c.ring.NoteCleanupRead(previous, value);"));
+    CHECK(endWrite != std::string::npos && note != std::string::npos && endWrite < note);
+    const std::string ringModel = Squash(ReadFile(repo + "/OptiScaler/ext/hudless/UiPasteRing.h"));
+    CHECK(Has(ringModel, Squash("if (i == previous || i == newest || !Writable(slot, done)) continue;")));
+    // a retire keeps the slots' bookkeeping (the cleanup read included) with the images it retires, under both producer locks
+    CHECK(Count(paste, Squash("c.retired.push_back({ std::move(c.images[i]), c.ring.slots[i] });")) == 1);
+    const size_t release = paste.find(Squash("void Release() {"));
+    CHECK(release != std::string::npos && paste.find(Squash("std::lock_guard producer(c.prodMutex);"), release) <
+                                              paste.find(Squash("RetireAllLocked(c);"), release));
+    // the collector the engine polls after a switch away from ui_free, and the engine polling it until nothing is left
+    CHECK(Has(paste, Squash("bool Collect() {")));
+    // an image a paste still holds between pick and submit is not collected (only a race with a pending paste reaches it: the ring model
+    // tests the rule, this pins the collector's use of it)
+    CHECK(Count(paste, Squash("if (item.meta.readers != 0) return false;")) == 1);
+    // a producer pass without a completion token never lets its slot be reused or pasted again
+    CHECK(Count(paste, Squash("c.ring.PoisonWrite(target);")) == 1);
+    const std::string engine = Squash(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessEngine.cpp"));
+    CHECK(Has(engine, Squash("if (_pasteRetired) _pasteRetired = UiPaste::Collect();")));
+    CHECK(Has(engine, Squash("if (_retired.empty() && !_pasteRetired)")));
+    CHECK(Count(engine, Squash("_pasteRetired = true;")) == 1);
+    // the slot keeps the bridge's final image its pass read until the slot's readers completed, and a pass without a completion token
+    // keeps its slot for good
+    CHECK(Has(engine, Squash("slot.finalRef = finalImage;")) && Has(engine, Squash("keep(slot.finalRef);")));
+    CHECK(Has(engine, Squash("AddReader(static_cast<size_t>(_stagedSlot), _produceFence.Get(), UINT64_MAX);")));
+    // the cadence line: the window a pause ended is taken before the paste is counted, the full window after it, and the lines are
+    // written once the paste's locks are released
+    const size_t before = paste.find(Squash("c.cadenceClock.BeforePaste(nowMs, c.status.produced)"));
+    const size_t onPaste = paste.find(Squash("c.cadence.OnPaste(cadenceCurrent, cadencePasted, cadencePending, cadenceSteady);"));
+    const size_t after = paste.find(Squash("c.cadenceClock.AfterPaste(nowMs, c.status.produced)"));
+    CHECK(before != std::string::npos && onPaste != std::string::npos && after != std::string::npos && before < onPaste &&
+          onPaste < after);
+    const size_t locked = paste.find(Squash("PasteLocked(c, swapChain, presentQueue, cadenceLines);"));
+    const size_t written = paste.find(Squash("for (const std::string& line : cadenceLines) LOG_INFO(\"{}\", line);"));
+    CHECK(locked != std::string::npos && written != std::string::npos && locked < written);
+}
+
+// The engine answers the core's probe interval through the tested pure rules (the tint needs every present, the A/B schedule only
+// when it is on), and the FFXIV source forwards a skip to the live source only while it delivers frames
+void TestProbeWiring(const std::string& repo)
+{
+    const std::string engine = Squash(ReadFile(repo + "/OptiScaler/ext/hudless/HudlessEngine.cpp"));
+    CHECK(Count(engine, Squash("return EffectiveProbeInterval(cfg.ProbeInterval(), tint);")) == 2);
+    CHECK(Count(engine, Squash("return EffectiveProbeInterval(block.interval, tint);")) == 1);
+    // the tint the interval rule is asked about is the setting, not a constant: with it on, every present probes
+    CHECK(Count(engine, Squash("const bool tint = cfg.showDetectedUi.value_or_default();")) == 1);
+    const size_t on = engine.find(Squash("if (!_probeAb.On())"));
+    const size_t announce = engine.find(Squash("HudLess: probe A/B on:"));
+    CHECK(on != std::string::npos && announce != std::string::npos && on < announce);
+    CHECK(Has(engine, Squash("if (block.changed) LOG_INFO(\"{}\", ProbeAbLine(block, seconds));")));
+    const std::string boundary = Squash(ReadFile(repo + "/OptiScaler/ext/ffxiv/ui/FfxivUiBoundary.cpp"));
+    const size_t skip = boundary.find(Squash("void SkipNextCopy() override"));
+    CHECK(skip != std::string::npos);
+    CHECK(boundary.find(Squash("if (!Armed() || !ext::hudless::Wanted()) return;"), skip) != std::string::npos);
+    CHECK(boundary.find(Squash("Live().SkipNextCopy();"), skip) != std::string::npos);
 }
 
 void TestMarkWiring(const std::string& repo)
@@ -144,6 +226,34 @@ void TestMarkWiring(const std::string& repo)
     CHECK(Has(card, Squash("9 kept per session: 144 MiB plus the one")));
     CHECK(Has(card, Squash("queue batch that crossed the limit")));
     CHECK(Has(card, Squash("about 40 minutes at 60 base fps and 2x frame generation")));
+}
+
+void TestEarlyAnchorWiring(const std::string& repo)
+{
+    // A snapshot that cannot be made (no device, or the texture creation failed) must not be copied, and it is its own decline cause.
+    // A working device always creates the same-size RGBA8 snapshot of the backbuffer, so no unit test can reach the branch; the decline
+    // counters and their summary text are tested with the other causes.
+    const std::string live = Squash(ReadFile(repo + "/OptiScaler/ext/ffxiv/ui/UiLive.h"));
+    CHECK(!live.empty());
+    CHECK(Count(live, Squash("if (!device || !capture::EnsureTexture(device.Get(), bound, false, _snapshot)) return "
+                             "decline(EarlyDecline::Texture);")) == 1);
+
+    // The game side (no unit test reaches it: it needs the game's swapchain and draw hook). Each of these, reverted, makes early do nothing
+    // in a game while every behavioural test passes: the predictor and the backbuffer fetch handed to the live source, the rule read
+    // once per Present, the draws forwarded to it, and the fetched buffer handed out with its reference.
+    const std::string hook = Squash(ReadFile(repo + "/OptiScaler/ext/ffxiv/ui/FfxivUiBoundary.cpp"));
+    CHECK(!hook.empty());
+    CHECK(Count(hook, Squash("env.predictEffects = &ext::reshade::PresetsWouldApply;")) == 1);
+    CHECK(Count(hook, Squash("env.backbuffer = &BackbufferTexture;")) == 1);
+    CHECK(Count(hook, Squash("Live().SetAnchorRule(ext::Cfg().hudless.GetAnchorRule());")) == 1);
+    CHECK(Count(hook, Squash("if (live && (res.r1bChanged || res.r1OffscreenChanged))")) == 1);
+    CHECK(Count(hook, Squash("if (live::IsLiveEvent(ev))")) == 1);
+    CHECK(Count(hook, Squash("if (keep) *keep = buffer.Detach();")) == 1);
+    // the copy source comes from the same chain choice as the identity: all three candidates pass `keep` on
+    CHECK(Count(hook, Squash("return BufferOf(st.currentRealSwapchain, game.Get(), texture, shape, keep) || "
+                             "BufferOf(st.currentSwapchain, game.Get(), texture, shape, keep) || "
+                             "BufferOf(st.currentRealSwapchain, nullptr, texture, shape, keep);")) == 1);
+    CHECK(Count(hook, Squash("return BackbufferOf(&identity, &shape, texture) && *texture != nullptr;")) == 1);
 }
 
 void TestDocs(const std::string& repo)
@@ -184,6 +294,9 @@ int main(int argc, char** argv)
     const std::string repo = argc > 1 ? argv[1] : ".";
     TestEngineGate(repo);
     TestHudlessCard(repo);
+    TestProbeWiring(repo);
+    TestPasteLifetimeWiring(repo);
+    TestEarlyAnchorWiring(repo);
     TestDocs(repo);
     TestMarkWiring(repo);
     TestRecorderBound(repo);

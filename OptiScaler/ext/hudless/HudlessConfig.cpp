@@ -49,6 +49,9 @@ void HudlessConfig::Bind(config::Binder& b)
     b.Add("HudLess", "GuardMode", guardMode);
     b.Add("HudLess", "GuardReleaseHolds", guardReleaseHolds);
     b.Add("HudLess", "GuardTripOnAnchorLater", guardTripOnAnchorLater);
+    b.Add("HudLess", "ProbeInterval", probeInterval);
+    b.Add("HudLess", "ProbeAbSeconds", probeAbSeconds);
+    b.Add("HudLess", "AnchorRule", anchorRule);
     b.Add("HudLess", "HdrPaste", hdrPaste);
     b.Add("HudLess", "PlateDiagnostics", plateDiagnostics);
     b.Add("HudLess", "PlateInterp", plateInterp);

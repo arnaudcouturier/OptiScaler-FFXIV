@@ -372,6 +372,128 @@ void Run()
         source.EndFrame();
     }
 
+    // ---- the engine skips the copy of the next frame (a tripped coverage guard probes one frame in N): the source stays armed, the
+    // presets are still applied at the boundary (their place never alternates with ReShade's own pass), the same-frame fact still
+    // arrives, no copy is made, Take() says why without calling it a missing boundary, and the call covers that one frame only ---------
+    {
+        gpu.Bind(bbRtv.Get(), 128, 72);
+        g_fx.result = ApplyResult::Applied;
+        source.Take(img);
+        source.SkipNextCopy();
+        source.EndFrame();
+        CHECK(source.Armed());
+        const auto before = source.GetStats();
+        const int calls = g_fx.calls, copies = g_fx.copies;
+        ctx->ClearRenderTargetView(bbRtv.Get(), green);
+        DrawEvent skipped = R1b(13);
+        skipped.anchorLater = true;
+        source.OnDraw(ctx, skipped);
+        CHECK_EQ(g_fx.calls, calls + 1); // the presets at the boundary, as on any armed frame
+        CHECK_EQ(g_fx.copies, copies);   // no snapshot
+        UINT p = 0;
+        const auto live = gpu.Read(bb.Get(), p);
+        CHECK(Is(At(live, p, 64, 36), 255, 0, 255)); // the effects did rewrite the live target
+        CHECK(source.Take(img) == TakeResult::NotThisFrame);
+        CHECK(img.texture == nullptr);
+        CHECK(img.anchoredAfterOffscreenUi); // the same-frame fact is reported on a skipped frame too
+        CHECK(std::string(source.LastReason()) == "copy skipped (the coverage guard probes one frame in N)");
+        source.EndFrame();
+        const auto after = source.GetStats();
+        CHECK_EQ(after.noBoundary, before.noBoundary); // not a missing boundary
+        CHECK_EQ(after.captured, before.captured);
+        CHECK_EQ(after.copySkipped, before.copySkipped + 1);
+        CHECK_EQ(after.frames, before.frames + 1);
+
+        // the Take() of that skipped frame armed the next one without a skip: it copies again
+        ctx->ClearRenderTargetView(bbRtv.Get(), green);
+        source.OnDraw(ctx, R1b(14));
+        CHECK_EQ(g_fx.copies, copies + 1);
+        CHECK(source.Take(img) == TakeResult::Ok);
+        CHECK(img.texture != nullptr);
+        source.EndFrame();
+        CHECK(source.Summary().find("copy skipped by the engine 1") != std::string::npos);
+
+        // a skip asked in a Present without Take() leaves the source idle, as without the call
+        source.SkipNextCopy();
+        source.EndFrame();
+        CHECK(!source.Armed());
+        const int idleCalls = g_fx.calls;
+        source.OnDraw(ctx, R1b(15));
+        CHECK_EQ(g_fx.calls, idleCalls);
+        Present(source, img); // re-arm for what follows
+    }
+
+    // ---- skips on two frames in a row, a skip on a frame whose effects fail or whose target the guard refuses (those verdicts come
+    // first and are not hidden by the skip), and Release() forgetting a skip asked before it --------------------------------------------
+    {
+        gpu.Bind(bbRtv.Get(), 128, 72);
+        g_fx.result = ApplyResult::Applied;
+        const auto before = source.GetStats();
+        const int copies = g_fx.copies;
+        source.Take(img);
+        source.SkipNextCopy();
+        source.EndFrame();
+        source.OnDraw(ctx, R1b(20));
+        CHECK(source.Take(img) == TakeResult::NotThisFrame);
+        source.SkipNextCopy();
+        source.EndFrame();
+        source.OnDraw(ctx, R1b(21));
+        CHECK_EQ(g_fx.copies, copies);
+        CHECK(source.Take(img) == TakeResult::NotThisFrame);
+        source.SkipNextCopy();
+        source.EndFrame();
+
+        g_fx.result = ApplyResult::Failed;
+        source.OnDraw(ctx, R1b(22));
+        CHECK(source.Take(img) == TakeResult::Rejected);
+        CHECK(std::string(source.LastReason()) == "ReShade effects failed");
+        source.SkipNextCopy();
+        source.EndFrame();
+        g_fx.result = ApplyResult::Applied;
+
+        auto tiny = gpu.Target(64, 64, DXGI_FORMAT_B8G8R8A8_UNORM);
+        auto tinyRtv = gpu.Rtv(tiny.Get());
+        gpu.Bind(tinyRtv.Get(), 64, 64);
+        const int calls = g_fx.calls;
+        source.OnDraw(ctx, R1b(23));
+        CHECK_EQ(g_fx.calls, calls);
+        CHECK(source.Take(img) == TakeResult::Rejected);
+        CHECK(std::string(source.LastReason()) == "render target is not the full-size backbuffer");
+        source.EndFrame();
+        CHECK_EQ(source.GetStats().copySkipped, before.copySkipped + 2); // the two skipped frames, not the refused ones
+
+        // the boundary moves after the presets ran on a skipped frame: rejected as superseded, as on a copied frame, no second effects
+        gpu.Bind(bbRtv.Get(), 128, 72);
+        source.Take(img);
+        source.SkipNextCopy();
+        source.EndFrame();
+        {
+            const auto beforeSuper = source.GetStats();
+            const int callsBefore = g_fx.calls;
+            source.OnDraw(ctx, R1b(30));
+            DrawEvent cleared;
+            cleared.r1bCleared = true;
+            source.OnDraw(ctx, cleared);
+            source.OnDraw(ctx, R1b(30));
+            CHECK_EQ(g_fx.calls, callsBefore + 1);
+            CHECK(source.Take(img) == TakeResult::Rejected);
+            CHECK(std::string(source.LastReason()) == "boundary moved after the capture");
+            source.EndFrame();
+            CHECK_EQ(source.GetStats().rejectedBy[size_t(Reason::Superseded)], beforeSuper.rejectedBy[size_t(Reason::Superseded)] + 1);
+        }
+
+        // a skip asked, then Release(): the next armed frame copies again
+        gpu.Bind(bbRtv.Get(), 128, 72);
+        source.SkipNextCopy();
+        source.Release();
+        source.Take(img);
+        source.EndFrame();
+        source.OnDraw(ctx, R1b(24));
+        CHECK_EQ(g_fx.copies, copies + 1);
+        CHECK(source.Take(img) == TakeResult::Ok);
+        source.EndFrame();
+    }
+
     // ---- release drops the texture and the armed state -----------------------------------------------------------------------------
     source.Release();
     CHECK(!source.Armed());

@@ -131,6 +131,35 @@ class Engine final : public IEngineHost, private FenceReader
     GuardPolicy CoverageGuardPolicy() override { return ext::Cfg().hudless.GetGuardPolicy(); }
     int CoverageGuardReleaseHolds() override { return ext::Cfg().hudless.ReleaseHolds(); }
     bool CoverageGuardTripOnAnchorLater() override { return ext::Cfg().hudless.TripOnAnchorLater(); }
+    // [HudLess] ProbeInterval, or while [HudLess] ProbeAbSeconds runs the blind A/B, the interval of the block in force (1 or
+    // ProbeInterval): one log line per block, nothing in the menu.
+    int ProbeInterval() override
+    {
+        const auto& cfg = ext::Cfg().hudless;
+        const bool tint = cfg.showDetectedUi.value_or_default();
+        const int seconds = cfg.ProbeAbSeconds();
+        if (seconds <= 0 || tint) // with the tint every present probes: the A/B would compare 1 with 1
+            return EffectiveProbeInterval(cfg.ProbeInterval(), tint);
+        if (_probeAbSeed == 0)
+        {
+            LARGE_INTEGER counter {};
+            QueryPerformanceCounter(&counter);
+            _probeAbSeed = static_cast<uint64_t>(counter.QuadPart) | 1u;
+        }
+        _probeAb.Configure(seconds, cfg.ProbeInterval(), _probeAbSeed);
+        if (!_probeAb.On()) // ProbeInterval 1: nothing to compare
+            return EffectiveProbeInterval(cfg.ProbeInterval(), tint);
+        if (!_probeAbAnnounced)
+        {
+            _probeAbAnnounced = true;
+            LOG_INFO("HudLess: probe A/B on: blocks of {} s, probe interval 1 or {}, order seed {}", seconds, cfg.ProbeInterval(),
+                     _probeAbSeed);
+        }
+        const ProbeAbSchedule::Block block = _probeAb.Next(GetTickCount64());
+        if (block.changed)
+            LOG_INFO("{}", ProbeAbLine(block, seconds));
+        return EffectiveProbeInterval(block.interval, tint);
+    }
     IHudlessSource* Source() override { return ext::game::Current().hudless; }
     Reason CheckCapture(const FrameImage& image) override;
     Reason StageCapture(const FrameImage& image) override;
@@ -160,6 +189,10 @@ class Engine final : public IEngineHost, private FenceReader
         ComPtr<ID3D12Resource> hdrFinal;
         ComPtr<ID3D12CommandAllocator> hdrAllocator;
         ComPtr<ID3D12GraphicsCommandList> hdrList;
+        // The bridge's final image the slot's last paste pass (and HDR stage) read. The bridge releases its images right after
+        // OnReleaseInterop (a resize, a swapchain change) without waiting for this queue; this reference keeps the image alive until the
+        // slot's readers completed (it is retired with the slot).
+        ComPtr<ID3D12Resource> finalRef;
     };
 
     // Resources of a torn-down ring, kept alive until every recorded reader fence reached its value
@@ -187,6 +220,10 @@ class Engine final : public IEngineHost, private FenceReader
 
     std::vector<std::string> _refusals; // texts NoteRefusal already logged
     HdrStageLatch _hdrLatch;            // HdrPaste = on: a failed creation of the HDR stage is not retried on every present
+    bool _pasteRetired = false;         // UiPaste may still hold retired images (RetireAll); PollRetired collects them
+    ProbeAbSchedule _probeAb;           // [HudLess] ProbeAbSeconds: the blind A/B of the probe interval
+    uint64_t _probeAbSeed = 0;          // drawn once per session from the clock, logged
+    bool _probeAbAnnounced = false;     // the "probe A/B on" line was written
     Core _core;
     SlotRing<kSlots> _ring;
     std::array<Slot, kSlots> _slots;
@@ -554,6 +591,7 @@ void Engine::RetireSlot(size_t index)
     keep(slot.hdrList);
     keep(slot.hdrAllocator);
     keep(slot.hdrFinal);
+    keep(slot.finalRef);
     keep(slot.shared.resource);
     keep(slot.shared.texture);
     if (slot.shared.handle != nullptr)
@@ -584,10 +622,16 @@ void Engine::RetireAll()
     _hdrLatch.Clear();
     UiPaste::Release();
     UiImage::Release();
+    _pasteRetired = true; // collected by PollRetired until UiPaste::Collect() reports none left
 }
 
 void Engine::PollRetired()
 {
+    // The paste images a retire could not destroy yet (UiPaste::Collect); after a switch away from ui_free nothing else collects them.
+    // One that can never become idle (a pass whose fence signal failed) keeps this set for the rest of the session, and the seams stay
+    // active (one mutex per present): only after a device-level failure.
+    if (_pasteRetired)
+        _pasteRetired = UiPaste::Collect();
     for (size_t i = 0; i < _retired.size();)
     {
         bool done = true;
@@ -621,8 +665,9 @@ void Engine::OnModeOff()
     }
     PollRetired();
 
-    // Retired resources still waiting for their fences keep the seams alive; otherwise the inline guard can go quiet.
-    if (_retired.empty())
+    // Retired resources still waiting for their fences (the slots here, the paste images in UiPaste) keep the seams alive; otherwise the
+    // inline guard can go quiet.
+    if (_retired.empty() && !_pasteRetired)
     {
         ext::SetActive(ext::F::Hudless, false);
         if (CurrentMode() != Mode::Off) // the menu switched the mode on in the meantime
@@ -753,11 +798,22 @@ bool Engine::ProducePaste(Dx11wDx12SC& sc, Slot& slot, ID3D12Resource* finalImag
     UiPaste::Produce(_device12, queue, finalImage, TypedFormat(finalImage->GetDesc().Format), slot.shared.resource.Get(),
                      slot.format, hdrFinal, params);
 
+    // The pass read the bridge's final image: keep it until the slot's readers completed (the slot reuse waits for them first)
+    slot.finalRef = finalImage;
+
     // Whatever Produce submitted, and the HDR stage list, precede this signal on the queue.
     if (SUCCEEDED(queue->Signal(_produceFence.Get(), _produceValue + 1)))
         AddReader(static_cast<size_t>(_stagedSlot), _produceFence.Get(), ++_produceValue);
     else
-        LOG_WARN("HudLess: could not signal the paste producer fence; slot {} stays unreleased by this reader", _stagedSlot);
+    {
+        // (3) The pass was submitted without a completion token: a reader that never completes holds the slot and what it holds back,
+        // instead of an empty reader list that would let a retire destroy them at once. A retire keeps them until the device goes away;
+        // the slot ring's reuse path drops a reader still pending after SlotRing::kStaleFrames and then reuses the slot.
+        AddReader(static_cast<size_t>(_stagedSlot), _produceFence.Get(), UINT64_MAX);
+        LOG_WARN("HudLess: could not signal the paste producer fence; slot {} is held back (its pass has no completion token: a retire "
+                 "never destroys it, the slot ring reuses it after its stale-reader limit)",
+                 _stagedSlot);
+    }
     return true;
 }
 

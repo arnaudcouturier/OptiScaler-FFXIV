@@ -2,6 +2,7 @@
 
 #include "ext/ffxiv/ui/FfxivUiBoundary.h"
 
+#include "ext/core/ExtConfig.h"
 #include "ext/core/HooksBypass.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h"
 #include "ext/ffxiv/diag/DrawDiag.h"
@@ -40,8 +41,9 @@ inline int64_t Qpc()
 // index = GetCurrentBackBufferIndex() when IDXGISwapChain3 exists). `device` (may be null) restricts the choice to a chain
 // on the game's device: another component's helper chain (State::currentRealSwapchain can be replaced by a composition
 // swapchain of an overlay) must not become "the backbuffer". Only the pointer value and the description are kept: a
-// retained reference would make ResizeBuffers fail.
-bool BufferOf(IDXGISwapChain* chain, ID3D11Device* device, const void** texture, dfmt::RtShape* shape)
+// retained reference would make ResizeBuffers fail. `keep` (may be null) receives the buffer with a reference for a caller that copies
+// from it at once and releases it (the early anchor); nobody keeps it across a draw.
+bool BufferOf(IDXGISwapChain* chain, ID3D11Device* device, const void** texture, dfmt::RtShape* shape, ID3D11Texture2D** keep = nullptr)
 {
     if (!chain)
         return false;
@@ -66,10 +68,12 @@ bool BufferOf(IDXGISwapChain* chain, ID3D11Device* device, const void** texture,
     buffer->GetDesc(&d);
     *texture = buffer.Get();
     *shape = { d.Width, d.Height, static_cast<uint32_t>(d.Format) };
-    return true; // `buffer` is released on return; the pointer stays valid as an identity for the frame
+    if (keep)
+        *keep = buffer.Detach();
+    return true; // `buffer` is released on return (unless handed to `keep`); the pointer stays valid as an identity for the frame
 }
 
-bool Backbuffer(const void** texture, dfmt::RtShape* shape)
+bool BackbufferOf(const void** texture, dfmt::RtShape* shape, ID3D11Texture2D** keep)
 {
     auto& st = State::Instance();
     Microsoft::WRL::ComPtr<ID3D11Device> game;
@@ -77,8 +81,27 @@ bool Backbuffer(const void** texture, dfmt::RtShape* shape)
         context->GetDevice(&game);
     // Prefer a chain on the game's device; fall back to the bridge's real chain whatever its device (a proxied device
     // object may not compare equal).
-    return BufferOf(st.currentRealSwapchain, game.Get(), texture, shape) || BufferOf(st.currentSwapchain, game.Get(), texture, shape) ||
-           BufferOf(st.currentRealSwapchain, nullptr, texture, shape);
+    return BufferOf(st.currentRealSwapchain, game.Get(), texture, shape, keep) ||
+           BufferOf(st.currentSwapchain, game.Get(), texture, shape, keep) || BufferOf(st.currentRealSwapchain, nullptr, texture, shape, keep);
+}
+
+bool Backbuffer(const void** texture, dfmt::RtShape* shape) { return BackbufferOf(texture, shape, nullptr); }
+
+// The early anchor's copy source ([HudLess] AnchorRule = early): the same buffer, by the same choice of chain, as the identity the core
+// compares render targets with (the live source checks that it is), with a reference the live source drops after the copy.
+bool BackbufferTexture(ID3D11Texture2D** texture)
+{
+    *texture = nullptr;
+    try
+    {
+        const void* identity = nullptr;
+        dfmt::RtShape shape {};
+        return BackbufferOf(&identity, &shape, texture) && *texture != nullptr;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 Core& C()
 {
@@ -121,6 +144,8 @@ live::LiveSource& Live()
         env.effects = &ext::reshade::ApplyPresetsInPlace; // returns NotEnabled by itself with [HudLess] ReShadePresets = off
         env.copy = &SnapshotCopy;
         env.effectsDetail = &EffectsDetail;
+        env.predictEffects = &ext::reshade::PresetsWouldApply;
+        env.backbuffer = &BackbufferTexture;
         auto* s = new live::LiveSource(env); // never destroyed
         g_live.store(s, std::memory_order_release);
         return s;
@@ -173,6 +198,21 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
         }
     }
 
+    // The engine will not use the next frame's image (a tripped coverage guard probes one frame in N): the live source stays armed and
+    // applies the ReShade presets as usual but leaves the copy out.
+    void SkipNextCopy() override
+    {
+        if (!Armed() || !ext::hudless::Wanted())
+            return;
+        try
+        {
+            Live().SkipNextCopy();
+        }
+        catch (...)
+        {
+        }
+    }
+
     const char* LastReason() override
     {
         if (!Armed())
@@ -209,6 +249,7 @@ class UiBoundaryProvider final : public ext::hudless::IHudlessSource
                 diag::OnFrameComplete(C(), std::move(outcome), Others().Get());
             if (ext::hudless::Wanted())
             {
+                Live().SetAnchorRule(ext::Cfg().hudless.GetAnchorRule()); // [HudLess] AnchorRule, live: read once per frame
                 LogLines(Live().EndFrame(note)); // summary and state lines are written here, never from the draw path
                 ext::reshade::FrameEnded();
             }
@@ -357,13 +398,14 @@ void OnDraw(ID3D11DeviceContext* context, bool latched)
         if (res.change != 0 && snapshot::Armed())
             snapshot::OnCandidate(context, core, res); // before the candidate draw runs (and before the live effects: D1 shows the raw boundary)
 
-        if (live && res.r1bChanged)
+        if (live && (res.r1bChanged || res.r1OffscreenChanged))
         {
-            // S10 E2: R1b only (R1/R2/R3 are tracked for D1 but never acted on). R1b set by this draw = the first UI draw into the
-            // backbuffer after the last scene stage = capture opportunity (UI draws into other render targets, e.g. the character
-            // preview, are skipped); R1b dropped by this draw = a later scene/post stage superseded it.
+            // S10 E2: R1b (R1/R2/R3 are tracked for D1 but never acted on). R1b set by this draw = the first UI draw into the
+            // backbuffer after the last scene stage = capture opportunity (UI draws into other render targets, e.g. the off-screen UI
+            // target of in-world frames, are skipped); R1b dropped by this draw = a later scene/post stage superseded it. R1 set into
+            // or dropped from an off-screen target = the early anchor's events ([HudLess] AnchorRule = early).
             const live::DrawEvent ev = live::EventOf(core, res);
-            if (ev.r1bSet || ev.r1bCleared)
+            if (live::IsLiveEvent(ev))
             {
                 ext::core::BypassScope bypass; // ReShade's own draws and copies must not look like game draws to other hooks
                 Live().OnDraw(context, ev);

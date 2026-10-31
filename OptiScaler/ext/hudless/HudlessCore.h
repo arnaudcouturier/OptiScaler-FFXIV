@@ -56,6 +56,9 @@ struct IEngineHost
     // them runs today's density rule.
     virtual int CoverageGuardReleaseHolds() { return 0; }
     virtual bool CoverageGuardTripOnAnchorLater() { return false; }
+    // [HudLess] ProbeInterval (and its blind A/B): while the guard is tripped, one present in N probes. Asked only in ui_free; a host
+    // that does not answer probes every present (today's behaviour). Values below 1 read as 1, above kProbeIntervalMax as the max.
+    virtual int ProbeInterval() { return 1; }
     virtual IHudlessSource* Source() = 0;
     // Size / format / sample count of the capture against the bridge's backbuffer: None, SizeMismatch,
     // FormatUnsupported, MsaaOrArray or CaptureRejected.
@@ -111,6 +114,7 @@ struct Status
     bool guardAdvisoryWarn = false;    // the release level is below the HUD's own flagged area (menu line; the log waits for it to settle)
     PasteCounters paste;
     std::string boundary;              // last Take(): "ok", "not detected", the source's reason, "no source"
+    int probeInterval = 1;             // [HudLess] ProbeInterval in force (ui_free): a tripped guard probes one present in this many
 };
 
 class Core
@@ -143,6 +147,9 @@ class Core
         _reason = Reason::None;
         _mode = mode;
         _paste = paste;
+        // The previous present told the source to skip this frame's copy (read once, whatever this present does)
+        _copySkipped = _skipCopyAsked;
+        _skipCopyAsked = false;
 
         if (!_announced)
         {
@@ -157,6 +164,8 @@ class Core
             _tracker.SetOff();
             _guard.Reset();
             _holdLeft = 0;
+            _probePhase = 0;
+            _copySkipped = false;
             _shownPhase = Phase::Off;
             _shownReason = Reason::None;
             _baseline = paste;
@@ -183,6 +192,7 @@ class Core
             const GuardPolicy policy = _host.CoverageGuardPolicy();
             const int releaseHolds = _host.CoverageGuardReleaseHolds();
             const bool tripOnAnchorLater = _host.CoverageGuardTripOnAnchorLater();
+            _probeInterval = ClampProbeInterval(_host.ProbeInterval());
             _guard.Configure(limit, policy, releaseHolds, tripOnAnchorLater);
             const int guardSamplesBefore = _guard.Samples();
             const bool trippedBefore = _guard.Blocking();
@@ -287,6 +297,29 @@ class Core
             _guard.ResolveRelease(image.anchoredAfterOffscreenUi);
             _guardResolved = true;
             NoteGuardEvents();
+
+            // The probe interval (docs/HUDLESS.md 5): while the guard is tripped only one present in N probes. The source is still asked on
+            // every present (it stays armed, so the ReShade presets keep their place at the boundary and the same-frame facts keep
+            // coming), but a present that does not probe stages nothing and builds no image: it falls back with the guard's reason, and
+            // the present before it told the source to skip that frame's copy. A source that copied anyway has its image dropped here.
+            if (_guard.Blocking())
+            {
+                const bool probes = _probePhase % static_cast<uint32_t>(_probeInterval) == 0;
+                ++_probePhase;
+                if (_probePhase % static_cast<uint32_t>(_probeInterval) != 0)
+                {
+                    source->SkipNextCopy();
+                    _skipCopyAsked = true;
+                }
+                if (!probes)
+                    return Fail(Reason::MaskCoverage);
+            }
+            else
+                _probePhase = 0;
+            // A present whose copy was skipped and finds no capture (the guard let go on it, or the interval just changed) is still the
+            // guard's doing, not a missing boundary
+            if (_copySkipped && taken == TakeResult::NotThisFrame)
+                return Fail(Reason::MaskCoverage);
         }
         switch (taken)
         {
@@ -520,6 +553,7 @@ class Core
         s.guardAdvisoryWarn = _advisoryWarned;
         s.paste = _paste;
         s.boundary = _boundary;
+        s.probeInterval = _probeInterval;
         return s;
     }
 
@@ -595,6 +629,12 @@ class Core
     bool _swapped = false;
     bool _probing = false;
     int _holdLeft = 0;
+    // The probe interval: the value in force, the tripped presents counted since the trip (0 = the trip present, which probes), and
+    // whether this present told the source to skip the next frame's copy
+    int _probeInterval = 1;
+    uint32_t _probePhase = 0;
+    bool _skipCopyAsked = false;
+    bool _copySkipped = false; // the previous present asked the source to skip this present's copy
 
     // Log counters (observation only)
     std::array<ImageNote, 32> _images {};

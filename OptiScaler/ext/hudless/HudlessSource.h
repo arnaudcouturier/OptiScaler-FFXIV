@@ -55,5 +55,11 @@ struct IHudlessSource
 
     // End of the bridge Present: forgets this frame's boundary state.
     virtual void EndFrame() = 0;
+
+    // The engine will not use the NEXT frame's image (a tripped coverage guard probes one frame in N): stay armed, so the boundary
+    // still does its other work (the FFXIV source keeps applying the ReShade presets there and keeps reporting the same-frame facts),
+    // but skip the copy; that frame's Take() then returns NotThisFrame. Called after Take() in the Present before the frame, and it
+    // covers that one frame only. A source that ignores it captures as before and the engine drops the image.
+    virtual void SkipNextCopy() {}
 };
 } // namespace ext::hudless

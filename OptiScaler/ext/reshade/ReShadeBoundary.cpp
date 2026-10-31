@@ -72,6 +72,22 @@ ApplyResult ApplyPresetsInPlace(ID3D11DeviceContext* context, ID3D11Resource* re
     }
 }
 
+ApplyResult PresetsWouldApply(ID3D11DeviceContext* context)
+{
+    try
+    {
+        // the same inputs as ApplyPresetsInPlace, without its log lines (nothing was called)
+        if (State::Instance().isShuttingDown)
+            return ApplyResult::NoReShade;
+        const PresetsMode mode = ParsePresetsMode(ext::Cfg().reshade.presets.value_or_default());
+        return boundary::Instance().Predict(mode, Registered(), context);
+    }
+    catch (...)
+    {
+        return ApplyResult::Failed;
+    }
+}
+
 void FrameEnded()
 {
     try

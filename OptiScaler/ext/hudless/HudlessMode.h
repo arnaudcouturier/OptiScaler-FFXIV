@@ -66,9 +66,38 @@ constexpr GuardPolicy ParseGuardPolicy(std::string_view text)
 // Upper bound of [HudLess] GuardReleaseHolds, applied by the config and by the guard (one summary window of presents).
 constexpr int kGuardReleaseHoldsMax = 600;
 
+// [HudLess] ProbeInterval: while the coverage guard is tripped, one present in N builds the capture and the mask image that keep the
+// guard fed (1 = every present). The release needs 30 (density: 60) fresh samples, so it takes about that many times N presents.
+constexpr int kProbeIntervalMax = 16;
+constexpr int ClampProbeInterval(int interval) { return interval < 1 ? 1 : (interval > kProbeIntervalMax ? kProbeIntervalMax : interval); }
+// The interval the engine runs with. The debug tint ([HudLess] ShowDetectedUi) draws the newest completed image of every probing present;
+// with N above 1 the ring is empty between two probes, the tint would show next to nothing and every output would count as a skipped
+// paste, so with the tint on every present probes.
+constexpr int EffectiveProbeInterval(int configured, bool tint) { return tint ? 1 : ClampProbeInterval(configured); }
+// [HudLess] ProbeAbSeconds: block length of the developer's blind A/B of the probe interval (0 = off).
+constexpr int kProbeAbSecondsMax = 600;
+
 // [HudLess] HdrPaste: off | on. Only "on" (case-insensitive) switches the HDR paste path on; anything else, "auto" and the empty
 // string included, is off: fail open.
 constexpr bool ParseHdrPaste(std::string_view text) { return detail::EqualsNoCase(detail::Trim(text), "on"); }
+
+// [HudLess] AnchorRule: where the game-side source takes the UI-free capture on a frame whose first UI draw after the last scene stage
+// goes to an off-screen render target (docs/HUDLESS.md section 10).
+//   r1b   at the first UI draw into the backbuffer (today's behaviour)
+//   early at that first off-screen UI draw: the swapchain backbuffer is copied there
+enum class AnchorRule : uint8_t
+{
+    R1b,
+    Early,
+};
+
+// Case-insensitive; anything unknown (including "auto" and the empty string) is r1b: fail open, today's behaviour.
+constexpr AnchorRule ParseAnchorRule(std::string_view text)
+{
+    return detail::EqualsNoCase(detail::Trim(text), "early") ? AnchorRule::Early : AnchorRule::R1b;
+}
+
+constexpr const char* AnchorRuleName(AnchorRule rule) { return rule == AnchorRule::Early ? "early" : "r1b"; }
 
 constexpr const char* ModeName(Mode mode)
 {

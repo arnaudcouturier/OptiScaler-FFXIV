@@ -3,6 +3,7 @@
 #include "ext/gpu/Gpu.h"
 #include "ext/hudless/HudlessGpu.h"
 #include "ext/hudless/UiGpuCommon.h"
+#include "ext/hudless/UiPasteCadence.h"
 #include "ext/hudless/UiPasteRing.h"
 
 #include <UiPasteProduce_Shader.h>
@@ -155,6 +156,13 @@ struct Core
     std::atomic<bool> steady { false };
     std::atomic<bool> pasteEnabled { true }; // consumer gate (UiPaste::SetPasteEnabled)
 
+    // Which real frame's image each output got (log only, UiPasteCadence.h); under `mutex`. A closed gate is noted by the
+    // consumer without the lock and taken into the tracker at its next pick.
+    cadence::Tracker cadence;
+    cadence::WindowClock cadenceClock;
+    std::atomic<bool> cadenceGateClosed { false };
+    uint32_t cadenceEpoch = 0;
+
     // Objects of a device that went away are parked here and never released (work on that device may still reference
     // them; it is gone or about to be).
     std::vector<ComPtr<IUnknown>> graveyard;
@@ -209,11 +217,9 @@ void CollectRetiredLocked(Core& c, const Done& done, std::vector<Retired>& freed
                   {
                       if (item.meta.readers != 0)
                           return false;
-                      if (!done.removed && (item.meta.producedValue > done.fences.produced ||
-                                            (item.meta.allocated && item.meta.lastReadValue > done.fences.pasted)))
-                      {
+                      // the image's own write, the passes that read it as their cleanup input and the pastes that read it all completed
+                      if (!done.removed && !ring::Idle(item.meta, done.fences))
                           return false;
-                      }
                       freed.push_back(std::move(item));
                       return true;
                   });
@@ -822,13 +828,20 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
         std::lock_guard lock(c.mutex);
         if (FAILED(hr))
         {
-            // The write is submitted but has no completion token: never reuse or paste this slot again.
+            // The write is submitted but has no completion token: never reuse or paste this slot again, and the cleanup input it read
+            // stays busy for good too.
             LOG_ERROR("UI paste: producer Signal failed: {:X}", (UINT) hr);
             c.ring.PoisonWrite(target);
+            if (previous >= 0)
+                c.ring.NoteCleanupRead(previous, ring::kNever);
             SetMessageLocked(c, "Fence signal failed");
             return;
         }
         c.ring.EndWrite(target, value, NowMs());
+        // This pass reads the previous image as its cleanup input: that image stays busy (no reuse, no destruction on a retire) until the
+        // pass completes
+        if (previous >= 0)
+            c.ring.NoteCleanupRead(previous, value);
         image.coveragePending = true;
         image.ordinal = c.status.produced + 1;
         if (c.status.produced++ == 0 && !c.loggedFirstImage)
@@ -892,6 +905,27 @@ void Release()
     }
 }
 
+bool Collect()
+{
+    try
+    {
+        Core& c = C();
+        std::vector<Retired> freed; // declared first: destroyed after the lock is released
+        std::lock_guard lock(c.mutex);
+        if (c.retired.empty())
+            return false;
+        CollectRetiredLocked(c, ReadFences(c), freed);
+        return !c.retired.empty();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+// The body of Paste() under its locks; it collects the cadence lines that are due instead of writing them.
+static void PasteLocked(Core& c, IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue, std::vector<std::string>& cadenceLines);
+
 void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 {
     try
@@ -901,8 +935,27 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 
         Core& c = C();
         if (!c.pasteEnabled.load(std::memory_order_relaxed))
+        {
+            c.cadenceGateClosed.store(true, std::memory_order_relaxed);
             return; // switched off by the engine: not a failed paste, so nothing is counted
+        }
 
+        // Cadence lines due in this call, written once no lock is held (see below)
+        std::vector<std::string> cadenceLines;
+        PasteLocked(c, swapChain, presentQueue, cadenceLines);
+        for (const std::string& line : cadenceLines)
+            LOG_INFO("{}", line);
+    }
+    catch (...)
+    {
+    }
+}
+
+// Every lock it takes is released when it returns.
+static void PasteLocked(Core& c, IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue, std::vector<std::string>& cadenceLines)
+{
+    try
+    {
         std::lock_guard consumerLock(c.pasteMutex);
 
         // ---- pick -------------------------------------------------------------------------------------------------
@@ -912,6 +965,11 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         uint64_t producedValue = 0;
         ComPtr<ID3D12Device> device;
         ComPtr<ID3D12Fence> produceFence;
+        // the cadence record of this paste, taken at the pick (log only)
+        uint64_t cadenceCurrent = 0;
+        uint64_t cadencePasted = 0;
+        bool cadencePending = false;
+        bool cadenceSteady = false;
         {
             std::lock_guard lock(c.mutex);
             if (c.device == nullptr || !c.produceFence || c.status.produced == 0 || c.failed)
@@ -919,13 +977,24 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
             const Done done = ReadFences(c);
             if (done.removed)
                 return;
-            slot = c.ring.PickPaste(done.fences, NowMs(), c.steady.load(std::memory_order_relaxed));
+            if (c.cadenceGateClosed.exchange(false, std::memory_order_relaxed) || c.cadenceEpoch != c.ring.epoch)
+            {
+                c.cadence.Break();
+                c.cadenceEpoch = c.ring.epoch;
+            }
+            cadenceSteady = c.steady.load(std::memory_order_relaxed);
+            slot = c.ring.PickPaste(done.fences, NowMs(), cadenceSteady);
             if (slot < 0)
             {
+                c.cadence.Break();
                 ++c.status.skipped;
                 SetMessageLocked(c, "No completed UI image to paste");
                 return;
             }
+            const int newest = c.ring.Newest();
+            cadencePending = newest >= 0 && newest != slot && c.ring.slots[newest].producedValue > done.fences.produced;
+            cadenceCurrent = c.ring.frame;
+            cadencePasted = c.ring.slots[slot].frame;
             c.ring.BeginRead(slot);
             epoch = c.ring.epoch;
             image = c.images[slot].get();
@@ -937,6 +1006,7 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         auto abandon = [&](const char* message)
         {
             std::lock_guard lock(c.mutex);
+            c.cadence.Break();
             FinishReadLocked(c, image, slot, epoch, false, 0);
             ++c.status.skipped;
             SetMessageLocked(c, message);
@@ -1085,6 +1155,15 @@ void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         k.allocatorValues[ringIndex] = value;
         FinishReadLocked(c, image, slot, epoch, true, value);
         ++c.status.pasted;
+
+        // The cadence line (log only): about every 10 s of pasting, and at the end of a window a pause ended. Formatted here, written
+        // after the lock is released (the game's Present thread takes this mutex on every present; a file write must not hold it).
+        const double nowMs = NowMs();
+        if (const auto ended = c.cadenceClock.BeforePaste(nowMs, c.status.produced); ended.due)
+            cadenceLines.push_back(cadence::Line(c.cadence.Take(), ended.built, ended.seconds));
+        c.cadence.OnPaste(cadenceCurrent, cadencePasted, cadencePending, cadenceSteady);
+        if (const auto full = c.cadenceClock.AfterPaste(nowMs, c.status.produced); full.due)
+            cadenceLines.push_back(cadence::Line(c.cadence.Take(), full.built, full.seconds));
         if (!c.loggedFirstPaste)
         {
             c.loggedFirstPaste = true;

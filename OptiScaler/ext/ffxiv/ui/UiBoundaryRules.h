@@ -12,10 +12,13 @@
 //                        in the design doc), kept so the analysis can compare both readings.
 //   R3 (union):          whichever of R1 / R2 comes first, i.e. the smaller ordinal of the two that are valid.
 //   R1b (live anchor, S10 E2): the first UI-tagged draw after the last scene/post stage (1..5) draw whose render target IS the
-//                        swapchain backbuffer. UI draws into other render targets (the character preview: 352x352 / 1024x1024
-//                        B8G8R8A8, drawn before the HUD) are skipped, not rejected. R1b == R1 when the first UI draw is on the
-//                        backbuffer, later otherwise, 0 when no UI draw reaches the backbuffer. Kept apart from `Candidates` and
-//                        from LastChange() on purpose (frames.txt and the D1 tests are keyed on R1 / R2 / R3).
+//                        swapchain backbuffer. UI draws into other render targets (an off-screen UI target: 352x352 B8G8R8A8, drawn
+//                        in every in-world frame before the HUD, probably the minimap; 1024x1024 now and then) are skipped, not
+//                        rejected. R1b == R1 when the first UI draw is on the backbuffer, later otherwise, 0 when no UI draw reaches
+//                        the backbuffer. Kept apart from `Candidates` and from LastChange() on purpose (frames.txt and the D1 tests
+//                        are keyed on R1 / R2 / R3).
+//   R1 off-screen (the early anchor, [HudLess] AnchorRule = early): R1 when the render target of that draw is NOT the backbuffer,
+//                        0 otherwise. It never exists when R1 == R1b, and a later scene/post stage clears it with R1.
 //
 // "After the last X" is only known at the end of the frame. The tracker is ONLINE: a candidate is (re)assigned as draws
 // arrive and cleared when a later stage draw supersedes it, so a capture taken at a candidate must be repeated if the
@@ -83,6 +86,7 @@ class BoundaryTracker
         const uint32_t beforeR1 = _c.r1;
         const uint32_t beforeR2 = _c.r2;
         const uint32_t beforeR1b = _r1b;
+        const uint32_t beforeR1o = _r1o;
 
         const bool scene = d.stage >= 1 && d.stage <= 5;
         const bool ui = d.stage == kUiStage;
@@ -101,6 +105,7 @@ class BoundaryTracker
                 ++_s.r1Supersessions;
             _c.r1 = 0;
             _r1b = 0;
+            _r1o = 0;
         }
         else if (ui)
         {
@@ -108,7 +113,11 @@ class BoundaryTracker
             if (_s.firstUi == 0)
                 _s.firstUi = ordinal;
             if (_c.r1 == 0)
+            {
                 _c.r1 = ordinal;
+                if (!d.rtBackbuffer)
+                    _r1o = ordinal;
+            }
             if (_r1b == 0 && d.rtBackbuffer)
                 _r1b = ordinal;
         }
@@ -135,6 +144,7 @@ class BoundaryTracker
         _c.r3 = Min(_c.r1, _c.r2);
         _change = static_cast<uint8_t>((_c.r1 != beforeR1 ? 1 : 0) | (_c.r2 != beforeR2 ? 2 : 0));
         _r1bChanged = _r1b != beforeR1b;
+        _r1oChanged = _r1o != beforeR1o;
         if (_c.r3 != beforeR3)
         {
             ++_s.candidateMoves;
@@ -153,6 +163,11 @@ class BoundaryTracker
     uint32_t R1b() const { return _r1b; }
     bool R1bChanged() const { return _r1bChanged; }
 
+    // R1 off-screen (see the header): ordinal of R1 when that draw's render target is not the backbuffer (0 = none, or R1 is on
+    // the backbuffer) and whether the last OnDraw set or cleared it.
+    uint32_t R1Offscreen() const { return _r1o; }
+    bool R1OffscreenChanged() const { return _r1oChanged; }
+
   private:
     static uint32_t Min(uint32_t a, uint32_t b) { return a == 0 ? b : (b == 0 ? a : (a < b ? a : b)); }
 
@@ -162,6 +177,8 @@ class BoundaryTracker
     uint8_t _change = 0;
     uint32_t _r1b = 0;
     bool _r1bChanged = false;
+    uint32_t _r1o = 0;
+    bool _r1oChanged = false;
 };
 
 // The same candidates computed from the complete list of a frame's draws (the definition the online tracker implements).
@@ -213,5 +230,12 @@ inline uint32_t RetrospectiveR1b(std::span<const DrawIn> draws)
         if (draws[i].stage == kUiStage && draws[i].rtBackbuffer)
             return static_cast<uint32_t>(i + 1);
     return 0;
+}
+
+// R1 off-screen computed from the complete list of a frame's draws: R1 when its render target is not the backbuffer; 0 = none.
+inline uint32_t RetrospectiveR1Offscreen(std::span<const DrawIn> draws)
+{
+    const uint32_t r1 = Retrospective(draws).r1;
+    return r1 != 0 && !draws[r1 - 1].rtBackbuffer ? r1 : 0;
 }
 } // namespace ext::ffxiv::ui

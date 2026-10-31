@@ -50,6 +50,12 @@ const char* PresetsModeName(PresetsMode mode);
 // once per game frame (a second call before FrameEnded() returns NothingToApply). Restores the D3D11 pipeline state.
 ApplyResult ApplyPresetsInPlace(ID3D11DeviceContext* context, ID3D11Resource* renderTarget);
 
+// What ApplyPresetsInPlace would return at this point, without calling ReShade and without counting a call (render thread, before
+// a draw). Applied = it would run render_effects (the bound render target is not checked: the caller asks before the draw whose
+// target is not the one the effects would be applied to). The early UI anchor uses it to keep the presets where they always run.
+// Never throws.
+ApplyResult PresetsWouldApply(ID3D11DeviceContext* context);
+
 // End of the game frame (bridge Present exit): re-arms the once-per-frame gate. Cheap, any thread.
 void FrameEnded();
 

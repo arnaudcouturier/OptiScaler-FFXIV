@@ -72,10 +72,11 @@ void AdjustUiRecomposition(sl::DLSSGOptions& options)
     const int effective = decision.requested ? 1 : 0;
     if (lastLogged != effective)
     {
-        // "only applies after a game restart" is true for the config / hud-less mode changing; a drop by the preset is picked up at the
-        // next feature creation, which the live preset switch itself causes.
+        // A change of the config or of the hud-less mode after the start makes Streamline recreate the feature with the new value at once
+        // (it logs "UserInterfaceRecomposition flag changed from create-time value ..., feature needs to be recreated"); a drop by the
+        // preset is picked up at the next feature creation, which the live preset switch itself causes.
         const char* restart = lastEnabled != -1 && lastEnabled != (int) recomposition.enabled
-                                  ? " -- changed after start, only applies after a game restart"
+                                  ? " -- changed after start: DLSS-G is recreated with it (frame generation restarts for a moment)"
                                   : "";
         LOG_INFO("DLSSG UI recomposition: {} (HudLess mode {}, hudless format {} from {}, ui format {}){}{}{}{}",
                  effective != 0, ext::hudless::ModeName(ext::hudless::CurrentMode()), options.hudLessBufferFormat,

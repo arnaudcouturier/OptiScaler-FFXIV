@@ -17,7 +17,7 @@
           "defaultMeans": "off (today's behaviour)",
           "applies": "live",
           "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
-          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (applies after a game restart), recommended with [DLSSG] RenderPreset = auto; ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate, experimental and known to micro-stutter. Any other value counts as off.",
+          "description": "HUD-less frame generation (DLSS-G): keep the HUD sharp in fast camera motion. FFXIV only. off = today's behaviour; recomposition = DLSS-G recomposes the UI itself (switching to or from it recreates DLSS-G: frame generation restarts for a moment), recommended with [DLSSG] RenderPreset = auto; ui_free = frame generation runs on the UI-free image and the UI is pasted back at the real frame rate, experimental and known to micro-stutter. Any other value counts as off.",
           "flags": [ "ffxivOnly" ]
         },
         {
@@ -135,7 +135,7 @@
           "defaultMeans": "0 (off: today's behaviour)",
           "applies": "live",
           "menu": { "tab": null, "card": null, "iniOnly": "opt-in time limit of the density guard, which has not been tried in a game" },
-          "description": "Developer switch, ini only, density guard only: 0 = off. With N above 0 the guard leaves the fallback after N anchor-later frames in a row whose window had no measurement over the release level, even though the 60-measurement clean run cannot complete while they keep coming. The guard trips again by the normal rule.",
+          "description": "Developer switch, ini only, density guard only: 0 = off. With N above 0 the guard leaves the fallback after N anchor-later frames in a row whose window had at least one measurement and none over the release level (a window without one counts neither way), even though the 60-measurement clean run cannot complete while they keep coming. The guard trips again by the normal rule.",
           "flags": [ "ffxivOnly", "experimental" ]
         },
         {
@@ -148,6 +148,47 @@
           "applies": "live",
           "menu": { "tab": null, "card": null, "iniOnly": "opt-in per-frame trip of the density guard, which has not been tried in a game" },
           "description": "Developer switch, ini only, density guard only: a frame the game anchored after off-screen UI draws trips the guard at once, so the base of that very frame is not swapped, instead of waiting about two presents for its measurement. The trip then ends by the normal release rules.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] ProbeInterval",
+          "section": "HudLess",
+          "name": "ProbeInterval",
+          "type": "int",
+          "min": 1,
+          "max": 16,
+          "default": "auto",
+          "defaultMeans": "1 (every present: the behaviour before this key)",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
+          "description": "Advanced, experimental: while the coverage guard is tripped (falling back), build the UI-free capture and its mask on only one present in this many; the others are plain frame generation. The boundary still applies the ReShade presets in the same place on every frame. The guard then comes back after about 30 x this many presents of a clean scene instead of 30. 1 = every present. Building them on every present is the suspected cause of a faint stutter felt while falling back (with DLSS-G render preset C; felt in play, not measured). Unit-tested, not tried in a game.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] ProbeAbSeconds",
+          "section": "HudLess",
+          "name": "ProbeAbSeconds",
+          "type": "int",
+          "min": 0,
+          "max": 600,
+          "default": "auto",
+          "defaultMeans": "0 (off)",
+          "applies": "live",
+          "menu": { "tab": null, "card": null, "iniOnly": "developer A/B of the probe interval: a menu control would show the player which block runs" },
+          "description": "Developer switch, ini only: a blind A/B of ProbeInterval. With N above 0 the engine alternates between measuring on every present and on one present in ProbeInterval, in blocks of N seconds (each pair of blocks holds one of each, in an order drawn at start) and logs one line per block. 0 = off; nothing happens while ProbeInterval is 1.",
+          "flags": [ "ffxivOnly", "experimental" ]
+        },
+        {
+          "key": "[HudLess] AnchorRule",
+          "section": "HudLess",
+          "name": "AnchorRule",
+          "type": "enum",
+          "values": [ "r1b", "early" ],
+          "default": "auto",
+          "defaultMeans": "r1b (today's behaviour)",
+          "applies": "live",
+          "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
+          "description": "Advanced, experimental: where the UI-free image is taken on a frame whose first interface draw after the scene goes to an off-screen target (a small interface target drawn before the HUD in the world, probably the minimap). r1b = at the first interface draw into the backbuffer; early = at that off-screen draw, by copying the backbuffer there, before the off-screen block and the draws that follow it. Frames whose first interface draw goes to the backbuffer do not change; a frame with ReShade presets to apply at the UI boundary keeps r1b. Both HUD-less modes use this image; the coverage guard runs only in ui_free, so in recomposition a wrong early image goes to DLSS-G unchecked (only its size and format are checked). Any other value counts as r1b. Unit-tested, not tried in a game.",
           "flags": [ "ffxivOnly", "experimental" ]
         },
         {
@@ -1845,9 +1886,9 @@
           "type": "bool",
           "default": "auto",
           "defaultMeans": "true (on while a hud-less source is in use)",
-          "applies": "start",
+          "applies": "live",
           "menu": { "tab": "FFXIV", "card": "fg_hudless", "cardTitle": "HUD-less (UI-free frame generation)" },
-          "description": "Separate UI path for DLSS-G. Only used while a hud-less image source delivers frames; read when the DLSS-G feature is created, so change it before the game starts. The menu writes false for Off and auto for Auto and On (they act the same).",
+          "description": "Separate UI path for DLSS-G. Only used while a hud-less image source delivers frames; read when the DLSS-G feature is created, and a change in the game recreates DLSS-G at once (frame generation restarts for a moment). The menu writes false for Off and auto for Auto and On (they act the same).",
           "flags": [ "ffxivOnly" ]
         },
         {

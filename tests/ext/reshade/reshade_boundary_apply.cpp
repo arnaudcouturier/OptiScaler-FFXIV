@@ -106,6 +106,7 @@ struct Rig
     Fake fake;
     Applier applier { fake };
     ApplyResult Apply(PresetsMode m = PresetsMode::Auto, bool registered = true) { return applier.Apply(m, registered, kCtx, kRt); }
+    ApplyResult Predict(PresetsMode m = PresetsMode::Auto, bool registered = true, void* ctx = kCtx) { return applier.Predict(m, registered, ctx); }
     void Ready(uint64_t runtime = kRuntime)
     {
         applier.OnInitRuntime(runtime);
@@ -327,6 +328,101 @@ void Failures()
         CHECK(r.Apply() == ApplyResult::Failed);
     }
 }
+
+// The early UI anchor asks before a draw whose bound target is not the one the effects would run on: Predict must return what Apply would
+// return at that point (Applied = it would call render_effects), without inspecting the target, calling ReShade or counting a call.
+void Prediction()
+{
+    // Predict, then check it left no trace: no Inspect, no render_effects, no call or result counted
+    auto predictClean = [](Rig& r, ApplyResult expected, PresetsMode m = PresetsMode::Auto, bool registered = true, void* ctx = kCtx)
+    {
+        const ApplyStats before = r.applier.GetStats();
+        const int inspects = r.fake.inspects, renders = r.fake.renders;
+        const ApplyResult p = r.Predict(m, registered, ctx);
+        CHECK(p == expected);
+        const ApplyStats after = r.applier.GetStats();
+        CHECK(after.calls == before.calls);
+        for (size_t i = 0; i < kApplyResults; ++i)
+            CHECK(after.results[i] == before.results[i]);
+        CHECK(r.fake.inspects == inspects && r.fake.renders == renders && r.fake.held == 0);
+        return p;
+    };
+
+    { // off, not registered: the same results as Apply, before any lock or backend call
+        Rig r;
+        r.Ready();
+        predictClean(r, ApplyResult::NotEnabled, PresetsMode::Off);
+        CHECK(r.Apply(PresetsMode::Off) == ApplyResult::NotEnabled);
+        predictClean(r, ApplyResult::NoReShade, PresetsMode::Auto, false);
+        CHECK(r.Apply(PresetsMode::Auto, false) == ApplyResult::NoReShade);
+    }
+    { // no runtime, and a runtime that does not own the context
+        Rig r;
+        predictClean(r, ApplyResult::NoRuntime);
+        CHECK(r.Apply() == ApplyResult::NoRuntime);
+        Rig q;
+        q.Ready();
+        q.fake.pickNone = true;
+        predictClean(q, ApplyResult::NoRuntime);
+        CHECK(q.Apply() == ApplyResult::NoRuntime);
+    }
+    { // effects disabled, effects not loaded yet: nothing to apply, and the reason is the detail text
+        Rig r;
+        r.Ready();
+        r.fake.effectsOn = false;
+        predictClean(r, ApplyResult::NothingToApply);
+        CHECK(r.applier.GetStats().lastDetail == "ReShade effects are disabled");
+        CHECK(r.Apply() == ApplyResult::NothingToApply);
+        Rig q;
+        q.applier.OnInitRuntime(kRuntime);
+        predictClean(q, ApplyResult::NothingToApply);
+        CHECK(q.Apply() == ApplyResult::NothingToApply);
+    }
+    { // zero enabled techniques: nothing under auto, a call under on (the count is not trusted there)
+        Rig r;
+        r.Ready();
+        r.fake.enabled = 0;
+        predictClean(r, ApplyResult::NothingToApply, PresetsMode::Auto);
+        CHECK(r.Apply(PresetsMode::Auto) == ApplyResult::NothingToApply);
+        predictClean(r, ApplyResult::Applied, PresetsMode::On);
+        CHECK(r.Apply(PresetsMode::On) == ApplyResult::Applied);
+    }
+    { // enabled techniques: Applied, and the real call still happens once
+        Rig r;
+        r.Ready();
+        predictClean(r, ApplyResult::Applied);
+        predictClean(r, ApplyResult::Applied); // asking twice changes nothing
+        CHECK(r.Apply() == ApplyResult::Applied);
+        CHECK(r.fake.renders == 1);
+        CHECK(r.applier.GetStats().calls == 1);
+        predictClean(r, ApplyResult::NothingToApply); // already applied this frame, as a second Apply would say
+        r.applier.FrameEnded();
+        predictClean(r, ApplyResult::Applied);
+    }
+    { // the bound target is not inspected: a refusal only the call would see still predicts a call
+        Rig r;
+        r.Ready();
+        r.fake.inspectOk = false;
+        predictClean(r, ApplyResult::Applied);
+        CHECK(r.Apply() == ApplyResult::Failed);
+    }
+    { // failures before the call: unreadable effects state, no context, latched inert
+        Rig r;
+        r.Ready();
+        r.fake.effectsStateReadable = false;
+        predictClean(r, ApplyResult::Failed);
+        CHECK(r.Apply() == ApplyResult::Failed);
+        Rig q;
+        q.Ready();
+        predictClean(q, ApplyResult::Failed, PresetsMode::Auto, true, nullptr);
+        Rig u;
+        u.Ready();
+        u.fake.renderException = true;
+        CHECK(u.Apply() == ApplyResult::Failed);
+        CHECK(u.applier.GetStats().inert);
+        predictClean(u, ApplyResult::Failed);
+    }
+}
 } // namespace
 
 int main()
@@ -337,6 +433,7 @@ int main()
     RuntimeRecreated();
     TechniqueCount();
     Failures();
+    Prediction();
     if (g_fail)
     {
         std::printf("reshade_boundary_apply: %d check(s) failed\n", g_fail);

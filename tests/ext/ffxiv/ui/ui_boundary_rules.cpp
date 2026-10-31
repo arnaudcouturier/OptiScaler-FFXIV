@@ -44,6 +44,7 @@ struct Run
     int moves = 0;
     Candidates retro;
     uint32_t retroR1b = 0;
+    uint32_t retroR1o = 0;
 };
 
 Run Play(const Seq& s)
@@ -54,7 +55,9 @@ Run Play(const Seq& s)
             ++r.moves;
     r.retro = Retrospective(s.d);
     r.retroR1b = RetrospectiveR1b(s.d);
+    r.retroR1o = RetrospectiveR1Offscreen(s.d);
     CHECK_EQ(r.t.R1b(), r.retroR1b); // online equals retrospective on every hand written sequence too
+    CHECK_EQ(r.t.R1Offscreen(), r.retroR1o);
     return r;
 }
 
@@ -375,6 +378,139 @@ void R1bMenuOnlyFrame()
     CHECK_EQ(r.t.R1b(), ui);
 }
 
+// ---- R1 off-screen: the event of the early anchor ([HudLess] AnchorRule = early) ------------------------------------------------
+// The first UI draw after the last scene stage goes to another render target than the backbuffer (the off-screen 352x352 UI block of
+// an in-world frame drawn before the HUD): R1 off-screen is that draw. It fires exactly on such frames, never when R1 == R1b, and a
+// later scene/post stage clears it.
+void R1OffscreenFiresOnlyWhenR1IsOffTheBackbuffer()
+{
+    // the normal frame: the first UI draw is on the backbuffer (R1 == R1b), no draw of the frame is an R1 off-screen event
+    {
+        BoundaryTracker t;
+        const DrawIn draws[] = { { 1, false }, { 4, false }, { kStageNone, true }, { kUiStage, true }, { kUiStage, false },
+                                 { kUiStage, false }, { kStageNone, false }, { kUiStage, true } };
+        for (const auto& d : draws)
+        {
+            t.OnDraw(d);
+            CHECK_EQ(t.R1Offscreen(), 0u);
+            CHECK(!t.R1OffscreenChanged());
+        }
+        CHECK_EQ(t.Current().r1, 4u);
+        CHECK_EQ(t.R1b(), 4u); // the off-screen draws after the first HUD draw change nothing
+    }
+
+    // an anchor-later frame of a city scene: last scene stage, untagged draws, the off-screen block, untagged draws, HUD
+    BoundaryTracker t;
+    t.OnDraw({ 4, false });                 // 1: the last scene stage (LUT)
+    t.OnDraw({ kStageNone, false });        // 2
+    t.OnDraw({ kStageNone, true });         // 3
+    CHECK_EQ(t.R1Offscreen(), 0u);
+    CHECK(!t.R1OffscreenChanged());
+    t.OnDraw({ kUiStage, false });          // 4: R1, into the off-screen target
+    CHECK_EQ(t.Current().r1, 4u);
+    CHECK_EQ(t.R1Offscreen(), 4u);
+    CHECK(t.R1OffscreenChanged());          // set by this draw: the early anchor's capture opportunity (the draw has not run yet)
+    CHECK_EQ(t.R1b(), 0u);
+    t.OnDraw({ kUiStage, false });          // 5: the rest of the off-screen block
+    CHECK_EQ(t.R1Offscreen(), 4u);
+    CHECK(!t.R1OffscreenChanged());
+    t.OnDraw({ kStageNone, true });         // 6: untagged draws into the backbuffer
+    CHECK(!t.R1OffscreenChanged());
+    t.OnDraw({ kUiStage, true });           // 7: R1b, the first HUD draw into the backbuffer
+    CHECK_EQ(t.R1b(), 7u);
+    CHECK_EQ(t.R1Offscreen(), 4u);          // R1 did not move
+    CHECK(!t.R1OffscreenChanged());
+    t.OnDraw({ kUiStage, true });
+    CHECK(!t.R1OffscreenChanged());
+
+    // a later scene/post stage clears it (with R1 and R1b)
+    t.OnDraw({ 5, false });                 // 9
+    CHECK_EQ(t.R1Offscreen(), 0u);
+    CHECK(t.R1OffscreenChanged());
+    CHECK_EQ(t.Current().r1, 0u);
+    CHECK_EQ(t.R1b(), 0u);
+    t.OnDraw({ 5, false });
+    CHECK(!t.R1OffscreenChanged());         // nothing to clear
+
+    // ... and the frame continues with the HUD first: R1 == R1b, no event
+    t.OnDraw({ kUiStage, true });           // 11
+    CHECK_EQ(t.Current().r1, 11u);
+    CHECK_EQ(t.R1b(), 11u);
+    CHECK_EQ(t.R1Offscreen(), 0u);
+    CHECK(!t.R1OffscreenChanged());
+
+    // a scene stage clears it before any R1b exists
+    t.OnDraw({ 1, false });                 // 12
+    t.OnDraw({ kUiStage, false });          // 13: off-screen again
+    CHECK_EQ(t.R1Offscreen(), 13u);
+    CHECK(t.R1OffscreenChanged());
+    t.OnDraw({ 2, false });                 // 14
+    CHECK_EQ(t.R1Offscreen(), 0u);
+    CHECK(t.R1OffscreenChanged());
+    CHECK_EQ(t.R1b(), 0u);
+
+    // R1 / R2 / R3, LastChange() and R1b keep their meaning (frames.txt and the D1 tests are keyed on them)
+    t.OnDraw({ kUiStage, false });          // 15
+    CHECK_EQ(t.Current().r1, 15u);
+    CHECK_EQ(t.LastChange() & 1, 1);
+    CHECK(!t.R1bChanged());
+    t.Reset();
+    CHECK_EQ(t.R1Offscreen(), 0u);
+    CHECK(!t.R1OffscreenChanged());
+}
+
+void R1OffscreenOnHandWrittenSequences()
+{
+    // anchor-later: the retrospective definition agrees (Play checks it) and R1 off-screen is R1
+    {
+        Seq s;
+        s.Untagged(10).Stage(4).Untagged(4);
+        const uint32_t block = s.Next();
+        s.Ui(8, false).Untagged(6, true);
+        const uint32_t hud = s.Next();
+        s.Ui(20, true);
+        const auto r = Play(s);
+        CHECK_EQ(r.t.R1Offscreen(), block);
+        CHECK_EQ(r.t.Current().r1, block);
+        CHECK_EQ(r.t.R1b(), hud);
+    }
+    // normal: the early layer on the backbuffer, then the block: R1 == R1b, no R1 off-screen
+    {
+        Seq s;
+        s.Untagged(10).Stage(4).Untagged(2);
+        const uint32_t early = s.Next();
+        s.Ui(1, true).Untagged(2).Ui(8, false).Untagged(6, true).Ui(20, true);
+        const auto r = Play(s);
+        CHECK_EQ(r.t.R1Offscreen(), 0u);
+        CHECK_EQ(r.t.Current().r1, early);
+        CHECK_EQ(r.t.R1b(), early);
+    }
+    // UI only into other render targets: R1 off-screen, no R1b
+    {
+        Seq s;
+        s.Stage(1).Ui(4, false).Untagged(3, true);
+        const auto r = Play(s);
+        CHECK_EQ(r.t.R1Offscreen(), 2u);
+        CHECK_EQ(r.t.R1b(), 0u);
+    }
+    // a UI draw before the last scene stage is no R1 at all
+    {
+        Seq s;
+        s.Stage(1).Ui(2, false).Stage(5).Untagged(2);
+        const auto r = Play(s);
+        CHECK_EQ(r.t.R1Offscreen(), 0u);
+        CHECK_EQ(r.t.Current().r1, 0u);
+    }
+    // a menu frame (no scene stage): the tracker has no policy; the live source ignores frames without a scene stage
+    {
+        Seq s;
+        s.Untagged(2).Ui(3, false);
+        const auto r = Play(s);
+        CHECK_EQ(r.t.R1Offscreen(), 3u);
+        CHECK(!r.t.Summary().sawSceneStage);
+    }
+}
+
 // Deterministic generator for the property test.
 struct Lcg
 {
@@ -403,6 +539,16 @@ void OnlineEqualsRetrospective()
             t.OnDraw(d);
         const auto retro = Retrospective(s.d);
         const uint32_t retroR1b = RetrospectiveR1b(s.d);
+        CHECK_EQ(t.R1Offscreen(), RetrospectiveR1Offscreen(s.d));
+        // R1 off-screen is R1 exactly when R1's draw is not on the backbuffer, so it never exists when R1 == R1b
+        if (t.Current().r1 != 0)
+        {
+            const bool r1OnBackbuffer = s.d[t.Current().r1 - 1].rtBackbuffer;
+            CHECK_EQ(t.R1Offscreen(), r1OnBackbuffer ? 0u : t.Current().r1);
+            CHECK(r1OnBackbuffer == (t.R1b() == t.Current().r1));
+        }
+        else
+            CHECK_EQ(t.R1Offscreen(), 0u);
         if (!(t.Current() == retro) || t.R1b() != retroR1b)
         {
             std::printf("mismatch at iteration %d (len %u): online r1=%u r2=%u r2any=%u r3=%u r1b=%u, retro r1=%u r2=%u r2any=%u r3=%u r1b=%u\n",
@@ -442,6 +588,8 @@ int main()
     R1bNeedsABackbufferUiDraw();
     R1bResetsOnEverySceneStage();
     R1bMenuOnlyFrame();
+    R1OffscreenFiresOnlyWhenR1IsOffTheBackbuffer();
+    R1OffscreenOnHandWrittenSequences();
     OnlineEqualsRetrospective();
     return Finish("ui_boundary_rules");
 }

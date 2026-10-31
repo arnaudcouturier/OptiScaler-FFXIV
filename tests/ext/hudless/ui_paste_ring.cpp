@@ -37,6 +37,8 @@ struct Producer
             return -1;
         ring.BeginWrite(target);
         ring.EndWrite(target, ++issued, nowMs);
+        if (previous >= 0)
+            ring.NoteCleanupRead(previous, issued); // the pass reads the previous image as its cleanup input
         return target;
     }
 };
@@ -310,6 +312,8 @@ void RandomisedInvariants(bool steady)
             EXPECT(target != previous && target != ring.Newest(), "step %d: target is previous/newest", step);
             ring.BeginWrite(target);
             ring.EndWrite(target, ++producer.issued, now);
+            if (previous >= 0)
+                ring.NoteCleanupRead(previous, producer.issued);
             ++writes;
             break;
         }
@@ -349,6 +353,79 @@ void RandomisedInvariants(bool steady)
     std::printf("    %d writes, %d skipped frames, %d pastes\n", writes, skips, pastes);
     EXPECT(writes > 1000 && pastes > 500, "the run exercised the rules (%d writes, %d pastes)", writes, pastes);
 }
+
+// The producer reads the previous image as its cleanup input. That read is recorded with the pass's produce-fence value: until that pass
+// completes the image is not idle, so a retire (a mode switch, a resize) does not destroy it. Before this, a retire right after a pass
+// was submitted destroyed the image the pass still read on the GPU (a GPU fault and a driver reset, seen when the mode was switched off in
+// a game). The producer may still write that slot again: its pass is queued on the same queue after the pass that reads it.
+void CleanupReadIsTracked()
+{
+    std::printf("  the cleanup input's read keeps the image busy until the pass that reads it completes\n");
+    Ring ring;
+    Fences done {};
+    uint64_t issued = 0;
+    // pass 1 writes the image of frame 1
+    EXPECT(ring.Tick() == -1, "no previous image yet");
+    const int a = ring.PickTarget(-1, done);
+    ring.BeginWrite(a);
+    ring.EndWrite(a, ++issued, 0.0);
+    done.produced = 1;
+    // pass 2 (frame 2) reads it as the cleanup input; pass 2 is submitted but not complete
+    const int previous = ring.Tick();
+    EXPECT(previous == a, "frame 1's image is the cleanup input of frame 2");
+    const int b = ring.PickTarget(previous, done);
+    EXPECT(b >= 0 && b != a, "another slot for frame 2");
+    ring.BeginWrite(b);
+    ring.EndWrite(b, ++issued, 1.0);
+    ring.NoteCleanupRead(previous, issued);
+    EXPECT(ring.slots[a].cleanupReadValue == 2, "the read is recorded with pass 2's value");
+    EXPECT(!Idle(ring.slots[a], done), "pass 2 still reads frame 1's image");
+
+    // every other slot busy: the next pass may write frame 1's slot (same queue, after pass 2), although it is not idle
+    {
+        Ring busy = ring;
+        for (int i = 0; i < kSlots; ++i)
+            if (i != a && i != b)
+                busy.slots[i].readers = 1;
+        const int prev = busy.Tick();
+        EXPECT(Writable(busy.slots[a], done) && !Idle(busy.slots[a], done), "writable, not idle, while pass 2 reads it");
+        EXPECT(busy.PickTarget(prev, done) == a, "the write is queued after pass 2 on the same queue: no slot of headroom lost");
+    }
+
+    // a retire with pass 2 pending: the retired copy of frame 1's image is not idle, so it is not destroyed yet
+    const Slot retired = ring.slots[a];
+    ring.Reset();
+    EXPECT(!Idle(retired, done), "retired, still read by pass 2: kept");
+    done.produced = 2;
+    EXPECT(Idle(retired, done), "pass 2 completed: the retired image may be destroyed");
+
+    // a pass whose completion token was lost marks its cleanup input busy for good
+    Slot lost = retired;
+    lost.cleanupReadValue = kNever;
+    EXPECT(!Idle(lost, Fences { kNever - 1, kNever - 1 }), "a read without a completion token never completes");
+}
+
+void IdleTable()
+{
+    std::printf("  Idle and Writable: readers, own write, cleanup read, pastes\n");
+    const Fences done { 10, 20 };
+    Slot s;
+    s.allocated = true;
+    s.producedValue = 10;
+    s.cleanupReadValue = 10;
+    s.lastReadValue = 20;
+    EXPECT(Idle(s, done), "everything completed");
+    { Slot t = s; t.readers = 1; EXPECT(!Idle(t, done), "a paste between pick and submit"); }
+    { Slot t = s; t.producedValue = 11; EXPECT(!Idle(t, done), "own write pending"); }
+    { Slot t = s; t.cleanupReadValue = 11; EXPECT(!Idle(t, done) && Writable(t, done), "cleanup read pending: not idle, still writable"); }
+    { Slot t = s; t.readers = 1; EXPECT(!Writable(t, done), "a paste between pick and submit: not writable"); }
+    { Slot t = s; t.producedValue = 11; EXPECT(!Writable(t, done), "own write pending: not writable"); }
+    { Slot t = s; t.lastReadValue = 21; EXPECT(!Writable(t, done), "a paste read pending: not writable"); }
+    { Slot t = s; t.lastReadValue = 21; EXPECT(!Idle(t, done), "a paste read pending"); }
+    { Slot t = s; t.allocated = false; t.lastReadValue = 99; EXPECT(Idle(t, done), "an unallocated slot has no paste reads"); }
+    { Slot t; EXPECT(Idle(t, Fences {}), "a fresh slot is idle"); }
+}
+
 } // namespace
 
 int main()
@@ -361,6 +438,8 @@ int main()
     ProducerNeverReusesBusySlots();
     InvalidateAndReset();
     ReadAccounting();
+    CleanupReadIsTracked();
+    IdleTable();
     RandomisedInvariants(false);
     RandomisedInvariants(true);
     std::printf("[ui_paste_ring] failures: %d\n", g_failures);

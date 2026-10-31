@@ -110,6 +110,9 @@ class Core
         // S10 E2: R1b, the live anchor (first UI draw into the backbuffer after the last scene stage; UiBoundaryRules.h)
         uint32_t r1b = 0;       // ordinal of the R1b candidate after this draw (0 = none)
         bool r1bChanged = false; // this draw set, moved or cleared it (the draw has not run yet)
+        // R1 off-screen, the event of the early anchor ([HudLess] AnchorRule = early; UiBoundaryRules.h)
+        uint32_t r1Offscreen = 0;         // ordinal of R1 when its render target is not the backbuffer (0 = none)
+        bool r1OffscreenChanged = false;  // this draw set or cleared it (the draw has not run yet)
     };
 
     Core()
@@ -272,6 +275,8 @@ class Core
         res.cand = _tracker.Current();
         res.r1b = _tracker.R1b();
         res.r1bChanged = _tracker.R1bChanged();
+        res.r1Offscreen = _tracker.R1Offscreen();
+        res.r1OffscreenChanged = _tracker.R1OffscreenChanged();
         if (census)
             CensusDraw(c, stage, looked ? rt : RtInfo {}, res.r1bChanged, res.r1b);
         List(ordinal, stage, looked ? rt : RtInfo {});
@@ -360,6 +365,8 @@ class Core
     uint64_t BackbufferWidth() const { return _bbShape.width; }
     // S10 E: this frame's swapchain backbuffer (valid after the first counted draw of the frame; width 0 = unknown).
     const dfmt::RtShape& BackbufferShape() const { return _bbShape; }
+    // ... and its identity (the pointer the render targets are compared with; never dereferenced here, null = unknown).
+    const void* BackbufferPointer() const { return _bbPtr; }
 
     // Snapshot of every shader record for shaders.csv (render thread: counters are single-writer).
     std::vector<dfmt::ShaderRow> ShaderRows()

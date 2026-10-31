@@ -4,7 +4,9 @@
 // mutex, so the rules can be tested exhaustively on the CPU (tests/ext/hudless/ui_paste_ring.cpp).
 //
 // Rules (docs/HUDLESS.md section 6):
-//  * the producer writes a slot only after the slot's previous write AND every paste that read it have completed, and
+//  * the producer writes a slot only after the slot's previous write and every paste that read it have completed (Writable; a
+//    producer pass that read it as its cleanup input may still be pending: it runs on the same queue, ahead of the write), and a
+//    retired image is destroyed only when that cleanup read has completed too (Idle), and
 //    never touches the slot that holds the previous real frame's image (it is the cleanup input of the next pass) or
 //    the newest image (the one the consumer is most likely showing); it never waits: no such slot means "skip";
 //  * the consumer picks the newest image whose write COMPLETED, at most kStaleImageMs old, and never one older than
@@ -36,7 +38,21 @@ struct Slot
     uint64_t lastReadValue = 0; // paste-fence value that completes the last paste that read it (0 = never read)
     uint32_t readers = 0;       // pastes between "picked" and "submitted"
     double producedAtMs = 0.0;
+    uint64_t cleanupReadValue = 0; // produce-fence value of the newest pass that read this image as its cleanup input (0 = none)
 };
+
+// The producer may write the slot again: its own write completed, every paste that read it completed on the present queue, and no paste
+// is between pick and submit. A producer pass that read it as its cleanup input may still be pending: that pass runs on the same queue
+// and the new write is queued after it, so it is not waited for (waiting cost one slot of headroom when the GPU lags two frames).
+inline bool Writable(const Slot& slot, const Fences& done)
+{
+    return slot.readers == 0 && slot.producedValue <= done.produced && !(slot.allocated && slot.lastReadValue > done.pasted);
+}
+
+// Nothing on the GPU still writes or reads the image: Writable, and every producer pass that read it as the cleanup input completed. A
+// retired image is destroyed only in this state. The cleanup read is why a retire (mode change, resize) right after a pass was submitted
+// must keep the previous image: destroying it under the pass that reads it faulted the GPU.
+inline bool Idle(const Slot& slot, const Fences& done) { return Writable(slot, done) && slot.cleanupReadValue <= done.produced; }
 
 class Ring
 {
@@ -79,11 +95,8 @@ class Ring
         for (int i = 0; i < kSlots; ++i)
         {
             const Slot& slot = slots[i];
-            if (i == previous || i == newest || slot.readers != 0 || slot.producedValue > done.produced ||
-                (slot.allocated && slot.lastReadValue > done.pasted))
-            {
+            if (i == previous || i == newest || !Writable(slot, done))
                 continue;
-            }
             if (target < 0 || Better(slot, slots[target]))
                 target = i;
         }
@@ -109,6 +122,13 @@ class Ring
         slots[s].ready = false;
         slots[s].allocated = true;
         slots[s].producedValue = kNever;
+    }
+
+    // The pass that completes with produce-fence `value` (kNever: it has no completion token) reads slot `s` as its cleanup input.
+    void NoteCleanupRead(int s, uint64_t value)
+    {
+        if (value > slots[s].cleanupReadValue)
+            slots[s].cleanupReadValue = value;
     }
 
     // Stops pasting until the next write; in-flight bookkeeping (fence values) is kept.

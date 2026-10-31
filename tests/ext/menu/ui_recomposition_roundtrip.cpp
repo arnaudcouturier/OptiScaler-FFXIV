@@ -1,4 +1,4 @@
-// [DLSSG] UIRecomposition: the combo "UI recomposition (restart)" in HudlessMenu.cpp (Auto / On / Off) against the config.
+// [DLSSG] UIRecomposition: the combo "UI recomposition" in HudlessMenu.cpp (Auto / On / Off) against the config.
 //
 // The bug this pins: the member was declared `CustomOptional<bool> uiRecomposition { false }`, so Off (false == the declared
 // default) was written to the ini as `auto` by Save Settings, and the engine reads an unset key as ON (HudlessEngine.cpp
@@ -125,7 +125,7 @@ void ComboMappingIsPinned()
           std::string::npos);
     CHECK(menu.find("recompositionSetting=recomposition==0?std::optional<bool>{}:std::optional<bool>(recomposition==1);") !=
           std::string::npos);
-    CHECK(menu.find("ImGui::Combo(\"UIrecomposition(restart)\",&recomposition,\"Auto(on)\\0On\\0Off\\0\")") != std::string::npos);
+    CHECK(menu.find("ImGui::Combo(\"UIrecomposition\",&recomposition,\"Auto(on)\\0On\\0Off\\0\")") != std::string::npos);
 }
 
 void DeclaredDefaultEqualsTheEngineFallback()
