@@ -48,7 +48,7 @@ The [install guide](../docs/INSTALL.md) has the details, the settings of the tes
 
 ## Status
 
-The current release is v0.5.0 (tag `ffxiv-2026.10.31-d9b62110`) on OptiScaler nightly `d9b62110`, played in game on 2026-10-31. Before it: v0.4.0 (tag `ffxiv-2026.10.30-d9b62110`) was played on 2026-10-30, v0.3.0 (tag `ffxiv-2026.10.26-d9b62110`) was played on 2026-10-26, v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) was played on 2026-10-25 and v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`) on 2026-10-23, all on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
+The current release is v0.5.1 (tag `ffxiv-2026.10.31b-d9b62110`) on OptiScaler nightly `d9b62110`: v0.5.0 (tag `ffxiv-2026.10.31-d9b62110`, played in game on 2026-10-31) with `[HudLess] ProbeInterval` defaulting to 8, the setting played that day. Before it: v0.4.0 (tag `ffxiv-2026.10.30-d9b62110`) was played on 2026-10-30, v0.3.0 (tag `ffxiv-2026.10.26-d9b62110`) was played on 2026-10-26, v0.2.0 (tag `ffxiv-2026.10.25-d9b62110`) was played on 2026-10-25 and v0.1.0 (tag `ffxiv-2026.10.23-d9b62110`) on 2026-10-23, all on one RTX 4090; other graphics cards are untested. The FFXIV features that read or hook the game's own code follow one game build and switch themselves off after a game patch until the fork is updated; the others keep running. What was and was not tested is listed in [docs/STATUS.md](../docs/STATUS.md).
 
 ## Documentation
 
