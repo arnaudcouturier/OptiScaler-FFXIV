@@ -830,4 +830,10 @@ Upstream files carry only the seam calls and the small marked edits. `tools/foot
 
 The overage is known: the seam surface grew with each feature port and with the later HUD-less, composition and frame-generation work. Every upstream line is listed in [SEAMS-catalog.md](SEAMS-catalog.md). Re-measure with `pwsh -File tools/footprint.ps1` after every sync.
 
-<!-- Reserved section: the live frame-generation output switch. Its entry, summary row and settings text are added here when the feature lands; nothing in this release describes it. -->
+### Live frame-generation output switch (experimental, off by default)
+
+**What it does.** Moves frame generation between FSR FG, XeFG and plain presentation while the game runs, without a restart. `[FrameGen] FGOutputHotSwap` (menu card on the Frame Gen tab, off by default) arms it; with it on, the present switches when the configured output differs from the running one. All six directions are handled: FSR FG to XeFG and back, either one to plain and back.
+
+**How it stays safe.** The old chain is drained and torn down in the order measured for each library build, every new chain is created on the bridge's own queue, the hooks are re-bound under a gate so no call reaches a freed object, and the new chain is judged by its first 20 presents. A chain that fails is replaced by plain presentation (the game keeps presenting) and the target is remembered until a retry. Hard refusals (an unknown library build, a busy hook transaction) leave the running output in place and say why in the menu and the log.
+
+**Status.** Verified on the official benchmark (windowed) in runs that booted with FSR FG and in runs that booted with XeFG, plus forced failures at create, adopt and probation that all fell back to plain. Not yet tried in a game session. The benchmark keys `FGOutputSwitchScript` and `FGOutputSwitchFault` script switches and force a failing step; the details and the per-library measurements are in `docs/notes/live-output-switch.md`.

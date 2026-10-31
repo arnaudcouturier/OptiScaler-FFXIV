@@ -58,6 +58,6 @@ What has been played in game and what has not, for every feature of this fork. T
 | Ampere (RTX 30) MFG loader | untested / community |
 | Vulkan NR path | untested / community |
 
-<!-- Reserved section: the live frame-generation output switch. The features, settings and status text are added here when the feature lands; nothing in this release describes it. -->
+**Live frame-generation output switch:** experimental, off by default (`[FrameGen] FGOutputHotSwap`, menu card). Switches between FSR FG, XeFG and plain presentation while the game runs, all six directions; verified on the official benchmark in runs that booted with FSR FG and with XeFG, and with forced failures that fell back to plain; not yet tried in a game session.
 
 "tested" means played in game by the author on the stated GPU. Everything else compiles and follows the same code paths, but nobody has verified it on real hardware.
