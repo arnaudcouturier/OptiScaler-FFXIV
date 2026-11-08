@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Atmosphere shaders (ext\ffxiv\engine\shaders\Atmo.hlsl). One source, two entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by AtmoPass.cpp;
+  change them together. This file is the Atmosphere stage's own: it shares no shader source with Godrays.hlsl, SceneMarch.hlsl or Dof.hlsl
+  and edits nothing of the engine's own family.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Atmo.hlsl">
+      <Variable>Atmo_Vs_cso</Variable>
+      <Header>Atmo_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Atmo.hlsl">
+      <Variable>Atmo_Ps_cso</Variable>
+      <Header>Atmo_Ps.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Atmo</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

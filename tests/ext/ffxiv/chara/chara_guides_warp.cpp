@@ -1,5 +1,5 @@
 // Helper passes of the character preview DLSS path on D3D11 WARP: the shader chara_guides.hlsl is compiled from the repository
-// (argument 1 = repository root) and run through the real CharaGuides.cpp, including the private context-state swap.
+// (argument 1 = repository root) and run through the real CharaGuides.cpp, including the scope's explicit save and restore of the game's state.
 #include "check.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
 
@@ -205,6 +205,15 @@ void TestCopy(Passes& passes)
         Passes::Scope scope(passes, g_context.Get(), settings, nullptr, 0, 0);
         CHECK(scope.Ok());
         CHECK(scope.Copy(src.srv.Get(), dst.rtv.Get(), kW, kH));
+        // the draw leaves nothing bound to the four pixel-shader slots, so the next pass can use these resources on the other side
+        ID3D11ShaderResourceView* leftover[4] {};
+        g_context->PSGetShaderResources(0, 4, leftover);
+        for (ID3D11ShaderResourceView* view : leftover)
+        {
+            CHECK(view == nullptr);
+            if (view != nullptr)
+                view->Release();
+        }
     }
     const auto out = Read(dst.texture.Get(), 4, kW, kH);
     CHECK(out[0] == 220 && out[1] == 120 && out[2] == 30 && out[3] == 90); // channels are swapped into RGBA order
@@ -353,7 +362,7 @@ void TestStateRestored(Passes& passes)
         Tex a = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 4, 4);
         Tex b = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 4, 4);
         CHECK(scope.Copy(a.srv.Get(), b.rtv.Get(), 4, 4));
-        // inside the scope the context shows the private state: the game's render target is not bound
+        // inside the scope the pass has unbound the game's render target (Draw drops its targets after each draw)
         ID3D11RenderTargetView* inside = nullptr;
         g_context->OMGetRenderTargets(1, &inside, nullptr);
         CHECK(inside != rtv);
@@ -393,6 +402,334 @@ void TestStateRestored(Passes& passes)
     Settings settings;
     Passes::Scope again(passes, g_context.Get(), settings, nullptr, 0, 0);
     CHECK(again.Ok());
+}
+
+// ---- the pictures do not depend on what the game had bound ----------------------------------------------------------------------------------
+// The passes used to run in a private context state whose defaults (rasterizer, blend, depth-stencil) the scope never set itself; run on the game's own
+// state they have to set them. The same three passes (Copy, Guides, Alpha, one scope, fresh textures) make the same bytes in a cleared context and in a
+// hostile one: a scissor of one pixel, front faces reversed with back-face culling, a blend state and a sample mask that write nothing, a depth test that
+// fails with a depth view bound, a constant-buffer range at slot 1 that is not the whole buffer, a texture at slot 3, a sampler at slot 0.
+struct Pictures
+{
+    std::vector<uint8_t> copy, depth, motion, alpha;
+    bool operator==(const Pictures& o) const { return copy == o.copy && depth == o.depth && motion == o.motion && alpha == o.alpha; }
+};
+
+Pictures RunAllThree(Passes& passes, ID3D11Buffer* camera, UINT first, UINT count)
+{
+    using DirectX::PackedVector::XMConvertFloatToHalf;
+    std::vector<uint8_t> bgra(kW * kH * 4);
+    for (UINT i = 0; i < kW * kH; ++i)
+    {
+        bgra[i * 4 + 0] = static_cast<uint8_t>(10 + i);
+        bgra[i * 4 + 1] = static_cast<uint8_t>(100 + i);
+        bgra[i * 4 + 2] = static_cast<uint8_t>(200 - i);
+        bgra[i * 4 + 3] = 90;
+    }
+    Tex src = MakeTexture(DXGI_FORMAT_B8G8R8A8_UNORM, kW, kH, bgra.data(), kW * 4);
+    Tex copyOut = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, kW, kH);
+
+    D3D11_TEXTURE2D_DESC dd {};
+    dd.Width = kW;
+    dd.Height = kH;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_R24G8_TYPELESS;
+    dd.SampleDesc.Count = 1;
+    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> depthTex;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11ShaderResourceView> depthSrv;
+    Ok(g_device->CreateTexture2D(&dd, nullptr, &depthTex), "depth texture");
+    D3D11_DEPTH_STENCIL_VIEW_DESC dvd {};
+    dvd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    Ok(g_device->CreateDepthStencilView(depthTex.Get(), &dvd, &dsv), "DSV");
+    D3D11_SHADER_RESOURCE_VIEW_DESC svd {};
+    svd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    svd.Texture2D.MipLevels = 1;
+    Ok(g_device->CreateShaderResourceView(depthTex.Get(), &svd, &depthSrv), "depth SRV");
+    g_context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 0.5f, 0);
+    std::vector<uint16_t> motion(kW * kH * 4, 0);
+    for (UINT i = 0; i < kW * kH; ++i)
+    {
+        motion[i * 4 + 0] = XMConvertFloatToHalf(0.125f * static_cast<float>(i));
+        motion[i * 4 + 1] = XMConvertFloatToHalf(-0.0625f * static_cast<float>(i));
+    }
+    Tex motionTex = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, kW, kH, motion.data(), kW * 8);
+    Tex depthOut = MakeTexture(DXGI_FORMAT_R32_FLOAT, kW, kH);
+    Tex motionOut = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, kW, kH);
+
+    std::vector<uint8_t> original(kW * kH * 4, 0), upscaled(kW * 2 * kH * 2 * 4);
+    for (UINT i = 0; i < kW * kH; ++i)
+        original[i * 4 + 3] = static_cast<uint8_t>(60 + 7 * i);
+    for (size_t i = 0; i < upscaled.size(); i += 4)
+    {
+        upscaled[i + 0] = static_cast<uint8_t>(20 + i / 4);
+        upscaled[i + 1] = 100;
+        upscaled[i + 2] = static_cast<uint8_t>(250 - i / 4);
+        upscaled[i + 3] = 255;
+    }
+    Tex orig = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, kW, kH, original.data(), kW * 4);
+    Tex up = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, kW * 2, kH * 2, upscaled.data(), kW * 2 * 4);
+    Tex alphaOut = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, kW * 2, kH * 2);
+
+    {
+        Settings settings;
+        settings.jitterX = 0.25f;
+        settings.jitterY = -0.125f;
+        settings.invWidth = 1.0f / kW;
+        settings.invHeight = 1.0f / kH;
+        Passes::Scope scope(passes, g_context.Get(), settings, camera, first, count);
+        CHECK(scope.Ok());
+        CHECK(scope.Copy(src.srv.Get(), copyOut.rtv.Get(), kW, kH));
+        CHECK(scope.Guides(motionTex.srv.Get(), depthSrv.Get(), depthOut.rtv.Get(), motionOut.rtv.Get(), kW, kH));
+        CHECK(scope.Alpha(up.srv.Get(), orig.srv.Get(), alphaOut.rtv.Get(), kW * 2, kH * 2));
+    }
+    Pictures p;
+    p.copy = Read(copyOut.texture.Get(), 4, kW, kH);
+    p.depth = Read(depthOut.texture.Get(), 4, kW, kH);
+    p.motion = Read(motionOut.texture.Get(), 4, kW, kH);
+    p.alpha = Read(alphaOut.texture.Get(), 4, kW * 2, kH * 2);
+    return p;
+}
+
+// What the game has bound that these tests compare: objects by identity, ranges and values by content.
+struct GameBound
+{
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11RasterizerState> rs;
+    ComPtr<ID3D11BlendState> blend;
+    ComPtr<ID3D11DepthStencilState> depth;
+    ComPtr<ID3D11ShaderResourceView> srv0, srv3;
+    ComPtr<ID3D11Buffer> cb0, cb1;
+    ComPtr<ID3D11SamplerState> sampler0;
+    UINT cb0First = 0, cb0Num = 0, cb1First = 0, cb1Num = 0, stencilRef = 0, sampleMask = 0, scissors = 0, viewports = 0;
+    FLOAT blendFactor[4] {};
+    D3D11_RECT scissor {};
+    D3D11_VIEWPORT viewport {};
+    D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+};
+
+GameBound TakeBound()
+{
+    GameBound b;
+    g_context->OMGetRenderTargets(1, &b.rtv, &b.dsv);
+    g_context->RSGetState(&b.rs);
+    g_context->OMGetBlendState(&b.blend, b.blendFactor, &b.sampleMask);
+    g_context->OMGetDepthStencilState(&b.depth, &b.stencilRef);
+    g_context->PSGetShaderResources(0, 1, &b.srv0);
+    g_context->PSGetShaderResources(3, 1, &b.srv3);
+    g_context->PSGetSamplers(0, 1, &b.sampler0);
+    ComPtr<ID3D11DeviceContext1> c1;
+    g_context.As(&c1);
+    ID3D11Buffer* cbs[2] {};
+    UINT first[2] {}, num[2] {};
+    c1->PSGetConstantBuffers1(0, 2, cbs, first, num);
+    b.cb0.Attach(cbs[0]);
+    b.cb1.Attach(cbs[1]);
+    b.cb0First = first[0];
+    b.cb0Num = num[0];
+    b.cb1First = first[1];
+    b.cb1Num = num[1];
+    b.scissors = b.viewports = 1;
+    g_context->RSGetScissorRects(&b.scissors, &b.scissor);
+    g_context->RSGetViewports(&b.viewports, &b.viewport);
+    g_context->IAGetPrimitiveTopology(&b.topology);
+    return b;
+}
+
+bool SameBound(const GameBound& a, const GameBound& b)
+{
+    return a.rtv == b.rtv && a.dsv == b.dsv && a.rs == b.rs && a.blend == b.blend && a.depth == b.depth && a.srv0 == b.srv0 && a.srv3 == b.srv3 && a.cb0 == b.cb0 &&
+           a.cb1 == b.cb1 && a.sampler0 == b.sampler0 && a.cb0First == b.cb0First && a.cb0Num == b.cb0Num && a.cb1First == b.cb1First && a.cb1Num == b.cb1Num &&
+           a.stencilRef == b.stencilRef && a.sampleMask == b.sampleMask && a.scissors == b.scissors && a.viewports == b.viewports &&
+           std::memcmp(a.blendFactor, b.blendFactor, sizeof(a.blendFactor)) == 0 && std::memcmp(&a.scissor, &b.scissor, sizeof(a.scissor)) == 0 &&
+           std::memcmp(&a.viewport, &b.viewport, sizeof(a.viewport)) == 0 && a.topology == b.topology;
+}
+
+void TestHostileGameState(Passes& passes)
+{
+    ComPtr<ID3D11Buffer> camera = MakeCamera(0.5f, -0.25f, 80, 16);
+
+    g_context->ClearState();
+    const Pictures clean = RunAllThree(passes, camera.Get(), 16, 64);
+
+    // the game's objects
+    Tex target = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 16, 16);
+    Tex sampled = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 8, 8);
+    D3D11_TEXTURE2D_DESC dd {};
+    dd.Width = dd.Height = 16;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.SampleDesc.Count = 1;
+    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> depthTexture;
+    ComPtr<ID3D11DepthStencilView> gameDsv;
+    Ok(g_device->CreateTexture2D(&dd, nullptr, &depthTexture), "game depth texture");
+    Ok(g_device->CreateDepthStencilView(depthTexture.Get(), nullptr, &gameDsv), "game DSV");
+    D3D11_RASTERIZER_DESC rd {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_BACK;
+    rd.FrontCounterClockwise = TRUE; // the full-screen triangle is clockwise: it is a back face here, and culled
+    rd.ScissorEnable = TRUE;
+    rd.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> raster;
+    Ok(g_device->CreateRasterizerState(&rd, &raster), "game rasterizer");
+    D3D11_BLEND_DESC bd {};
+    bd.IndependentBlendEnable = TRUE;
+    for (auto& rt : bd.RenderTarget)
+    {
+        rt.BlendEnable = FALSE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = 0; // nothing is written
+    }
+    ComPtr<ID3D11BlendState> blend;
+    Ok(g_device->CreateBlendState(&bd, &blend), "game blend state");
+    D3D11_DEPTH_STENCIL_DESC dsd {};
+    dsd.DepthEnable = TRUE;
+    dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D11_COMPARISON_NEVER;
+    ComPtr<ID3D11DepthStencilState> depthState;
+    Ok(g_device->CreateDepthStencilState(&dsd, &depthState), "game depth state");
+    D3D11_SAMPLER_DESC sd {};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    ComPtr<ID3D11SamplerState> sampler;
+    Ok(g_device->CreateSamplerState(&sd, &sampler), "game sampler");
+    ComPtr<ID3D11Buffer> big = MakeCamera(1.0f, 1.0f, 64);
+    ComPtr<ID3D11DeviceContext1> c1;
+    g_context.As(&c1);
+
+    ID3D11RenderTargetView* rtv = target.rtv.Get();
+    g_context->OMSetRenderTargets(1, &rtv, gameDsv.Get());
+    g_context->RSSetState(raster.Get());
+    const D3D11_RECT scissor { 0, 0, 1, 1 };
+    g_context->RSSetScissorRects(1, &scissor);
+    const D3D11_VIEWPORT viewport { 2.0f, 3.0f, 11.0f, 9.0f, 0.1f, 0.9f };
+    g_context->RSSetViewports(1, &viewport);
+    const FLOAT factor[4] { 0.2f, 0.4f, 0.6f, 0.8f };
+    g_context->OMSetBlendState(blend.Get(), factor, 0x0u); // sample mask 0: no sample is written
+    g_context->OMSetDepthStencilState(depthState.Get(), 5);
+    ID3D11ShaderResourceView* s3 = sampled.srv.Get();
+    g_context->PSSetShaderResources(3, 1, &s3);
+    ID3D11SamplerState* smp = sampler.Get();
+    g_context->PSSetSamplers(0, 1, &smp);
+    ID3D11Buffer* b1 = big.Get();
+    UINT f1 = 16, n1 = 16; // a window of the buffer, not the whole of it
+    c1->PSSetConstantBuffers1(1, 1, &b1, &f1, &n1);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+
+    const GameBound before = TakeBound();
+    CHECK(before.rtv.Get() == target.rtv.Get() && before.dsv.Get() == gameDsv.Get() && before.rs.Get() == raster.Get() && before.blend.Get() == blend.Get() &&
+          before.depth.Get() == depthState.Get() && before.srv3.Get() == sampled.srv.Get() && before.cb1.Get() == big.Get() && before.cb1First == 16 && before.cb1Num == 16 &&
+          before.sampleMask == 0 && before.scissor.right == 1); // the hostile state really is what the game has bound
+    const Pictures hostile = RunAllThree(passes, camera.Get(), 16, 64);
+    CHECK(hostile.copy == clean.copy);
+    CHECK(hostile.depth == clean.depth);
+    CHECK(hostile.motion == clean.motion);
+    CHECK(hostile.alpha == clean.alpha);
+    CHECK(SameBound(before, TakeBound()));
+    // the clean pictures are not empty (or the comparison above would compare nothing with nothing)
+    bool anyCopy = false, anyAlpha = false;
+    for (uint8_t v : clean.copy)
+        anyCopy = anyCopy || v != 0;
+    for (uint8_t v : clean.alpha)
+        anyAlpha = anyAlpha || v != 0;
+    CHECK(anyCopy && anyAlpha);
+    g_context->ClearState();
+}
+
+// Scope::KeepState(): the snapshot the scope hands to a call that uses the game's context in ways nobody knows (the NGX create and evaluate). Whatever such a call
+// leaves bound is put back when the snapshot ends: the state of the scope at the moment of the call comes back, and the game's own state comes back when the scope ends.
+// An inert snapshot (one that is built disabled) leaves the foreign call's bindings in place, and fails the comparison below.
+void TestKeepState(Passes& passes)
+{
+    g_context->ClearState();
+    Tex target = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 16, 16);
+    Tex sampled = MakeTexture(DXGI_FORMAT_R8G8B8A8_UNORM, 8, 8);
+    D3D11_RASTERIZER_DESC rd {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_BACK;
+    rd.FrontCounterClockwise = TRUE;
+    rd.ScissorEnable = TRUE;
+    rd.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> foreignRaster;
+    Ok(g_device->CreateRasterizerState(&rd, &foreignRaster), "foreign rasterizer");
+    D3D11_BLEND_DESC bd {};
+    bd.IndependentBlendEnable = TRUE;
+    for (auto& rt : bd.RenderTarget)
+    {
+        rt.BlendEnable = FALSE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = 0;
+    }
+    ComPtr<ID3D11BlendState> foreignBlend;
+    Ok(g_device->CreateBlendState(&bd, &foreignBlend), "foreign blend state");
+    D3D11_DEPTH_STENCIL_DESC dsd {};
+    dsd.DepthEnable = TRUE;
+    dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D11_COMPARISON_NEVER;
+    ComPtr<ID3D11DepthStencilState> foreignDepth;
+    Ok(g_device->CreateDepthStencilState(&dsd, &foreignDepth), "foreign depth state");
+    D3D11_SAMPLER_DESC sd {};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    ComPtr<ID3D11SamplerState> foreignSampler;
+    Ok(g_device->CreateSamplerState(&sd, &foreignSampler), "foreign sampler");
+    ComPtr<ID3D11Buffer> big = MakeCamera(1.0f, 1.0f, 64);
+    ComPtr<ID3D11DeviceContext1> c1;
+    g_context.As(&c1);
+
+    // the game's state before the scope: something in every category the comparison reads
+    ID3D11RenderTargetView* gameRtv = target.rtv.Get();
+    g_context->OMSetRenderTargets(1, &gameRtv, nullptr);
+    const D3D11_VIEWPORT gameViewport { 1.0f, 2.0f, 12.0f, 10.0f, 0.0f, 1.0f };
+    g_context->RSSetViewports(1, &gameViewport);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    const GameBound game = TakeBound();
+
+    Settings settings;
+    {
+        Passes::Scope scope(passes, g_context.Get(), settings, nullptr, 0, 0);
+        CHECK(scope.Ok());
+        const GameBound atCall = TakeBound(); // the scope's own state: what the snapshot captures
+        CHECK(!SameBound(atCall, game));      // the scope really changed something (or the comparison would compare the game with itself)
+        {
+            auto keep = scope.KeepState();
+            // what a foreign call may leave behind: other pipeline state objects, bindings, viewports, topology
+            g_context->RSSetState(foreignRaster.Get());
+            const FLOAT factor[4] { 0.2f, 0.4f, 0.6f, 0.8f };
+            g_context->OMSetBlendState(foreignBlend.Get(), factor, 0x0u);
+            g_context->OMSetDepthStencilState(foreignDepth.Get(), 5);
+            ID3D11ShaderResourceView* s3 = sampled.srv.Get();
+            g_context->PSSetShaderResources(3, 1, &s3);
+            ID3D11SamplerState* smp = foreignSampler.Get();
+            g_context->PSSetSamplers(0, 1, &smp);
+            ID3D11Buffer* b1 = big.Get();
+            UINT f1 = 16, n1 = 16;
+            c1->PSSetConstantBuffers1(1, 1, &b1, &f1, &n1);
+            const D3D11_RECT scissor { 0, 0, 1, 1 };
+            g_context->RSSetScissorRects(1, &scissor);
+            const D3D11_VIEWPORT viewport { 2.0f, 3.0f, 11.0f, 9.0f, 0.1f, 0.9f };
+            g_context->RSSetViewports(1, &viewport);
+            g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            g_context->OMSetRenderTargets(0, nullptr, nullptr);
+            CHECK(!SameBound(TakeBound(), atCall)); // the foreign call really changed what is bound
+        }
+        CHECK(SameBound(TakeBound(), atCall)); // the snapshot put the scope's state back
+    }
+    CHECK(SameBound(TakeBound(), game)); // and the scope put the game's state back
+    g_context->ClearState();
 }
 } // namespace
 
@@ -438,6 +775,8 @@ int main(int argc, char** argv)
     TestAlpha(passes, -0.4375f, 0.3125f);
     TestAlphaTint(passes);
     TestStateRestored(passes);
+    TestHostileGameState(passes);
+    TestKeepState(passes);
 
     passes.Release();
     CHECK(!passes.Ready());

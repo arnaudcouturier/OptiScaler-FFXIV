@@ -105,7 +105,7 @@ std::atomic<uint64_t> g_collisionResets { 0 }; // history resets given because o
 bool SrLatched() { return nr::SharedLatches().SrLatched(); }
 std::atomic<uint32_t> g_slotsHeld { 0 }; // slots whose GPU objects still exist (a latched path drains them before it stops)
 std::atomic<uint32_t> g_tintHeld { 0 };   // cyan tint targets that exist (PreviewDebugTint)
-std::atomic<bool> g_passesHeld { false }; // the helper passes (shaders, private state) exist
+std::atomic<bool> g_passesHeld { false }; // the helper passes (shaders and constants) exist
 std::atomic<uint8_t> g_availability { static_cast<uint8_t>(Availability::ConfigOff) };
 std::atomic<uint64_t> g_nextGateCheck { 0 };
 nr::EdgeTracker g_queryHooks; // whether the SR hooks (including the query hooks) were being fed at the last look
@@ -492,7 +492,7 @@ ngx::PresetHints CurrentPresetHints()
 }
 
 // Creates the NGX feature of a slot. A failure here ends the path for the session (the driver cannot do it).
-bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t h, bool reversedZ)
+bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t h, bool reversedZ, guides::Passes::Scope& scope)
 {
     SlotGpu& g = g_gpu[static_cast<size_t>(index)];
     auto allocate = NVNGXProxy::D3D11_AllocateParameters();
@@ -516,7 +516,11 @@ bool CreateFeature(int index, ID3D11DeviceContext* context, uint32_t w, uint32_t
     ngx::ApplyPresetHints(setter, hints);
 
     NVSDK_NGX_Handle* handle = nullptr;
-    const NVSDK_NGX_Result result = create(context, NVSDK_NGX_Feature_SuperSampling, params, &handle);
+    NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+    {
+        auto ngxState = scope.KeepState(); // NGX runs on the game's context: whatever state it leaves is put back right after the call
+        result = create(context, NVSDK_NGX_Feature_SuperSampling, params, &handle);
+    }
     if (result != NVSDK_NGX_Result_Success || handle == nullptr)
     {
         if (auto destroy = NVNGXProxy::D3D11_DestroyParameters(); destroy != nullptr)
@@ -726,7 +730,7 @@ bool EnsureInit(ID3D11DeviceContext* context, bool latchSrOnFailure = true)
     if (g_passesTried)
     {
         if (latchSrOnFailure)
-            Latch("initialisation failed earlier (private state, shaders or constants)"); // a tint-only attempt failed before the SR path asked
+            Latch("initialisation failed earlier (shaders or constants)"); // a tint-only attempt failed before the SR path asked
         return false;
     }
     g_passesTried = true;
@@ -743,7 +747,7 @@ bool EnsureInit(ID3D11DeviceContext* context, bool latchSrOnFailure = true)
     if (g_device == nullptr || !g_passes.Init(g_device.Get(), shaders, &DrawFullscreenTriangle))
     {
         if (latchSrOnFailure)
-            Latch("initialisation failed (private state, shaders or constants)");
+            Latch("initialisation failed (shaders or constants)");
         return false;
     }
     UpdateAuxCounts();
@@ -807,11 +811,11 @@ void RunSlot(int index, const DrawView& view)
     settings.invWidth = 1.0f / static_cast<float>(w);
     settings.invHeight = 1.0f / static_cast<float>(h);
 
-    // The whole step runs inside the private context state: whatever the passes or the upscaler bind is discarded with it.
+    // The whole step runs between the scope's explicit save and restore of the state the passes touch; the NGX calls below each get a full snapshot of their own.
     guides::Passes::Scope scope(g_passes, context, settings, camera::Buffer(), camera::FirstConstant(), camera::ConstantCount());
     if (!scope.Ok())
     {
-        FailSlot(index, "the private context state could not be entered");
+        FailSlot(index, "the pipeline state of the context could not be captured");
         return;
     }
     if (!scope.Copy(g.nativeSrv.Get(), g.color.rtv.Get(), w, h) ||
@@ -821,7 +825,7 @@ void RunSlot(int index, const DrawView& view)
         return;
     }
 
-    if (!s.hasFeature && !CreateFeature(index, context, w, h, g_reversedZ))
+    if (!s.hasFeature && !CreateFeature(index, context, w, h, g_reversedZ, scope))
     {
         FailSlot(index, "feature creation failed");
         return;
@@ -864,7 +868,10 @@ void RunSlot(int index, const DrawView& view)
             ngx::ApplyEvaluate<ParamSetter, ID3D11Resource*>(setter, ngx::WithReset(in, reset),
                                                              nr::SrColourFor<ID3D11Resource*>(source, preSrColour.Get(), g.color.texture.Get()),
                                                              g.output.texture.Get(), g.depth.texture.Get(), g.motion.texture.Get());
-            result = evaluate(context, g.handle, g.params, nullptr);
+            {
+                auto ngxState = scope.KeepState(); // NGX runs on the game's context: whatever state it leaves is put back right after the call
+                result = evaluate(context, g.handle, g.params, nullptr);
+            }
             if (source == nr::SrColourSource::PreSr)
                 nrColourResult = result;
             return result == NVSDK_NGX_Result_Success;

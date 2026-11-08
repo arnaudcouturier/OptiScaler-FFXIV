@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "ext/ffxiv/relight/ContactShadowsPass.h"
+#include "ext/core/D3D11ExplicitState.h"
 
 #include <ContactShadows_Combine.h>
 #include <ContactShadows_March.h>
@@ -23,6 +24,12 @@ constexpr uint32_t kSlotSun = 3;
 constexpr uint32_t kSlotMask = 4;
 constexpr uint32_t kSlotTerm = 5;
 
+// What this pass touches on the game's context: the IA layout and topology, VS and PS, PS resource slots 0..5 and constant buffer 0, the
+// rasterizer state and the viewports, blend, depth-stencil, and the render targets with the UAV slots. HS, DS, GS, stream-out and predication
+// are what the private device-context state used to provide as "none". No sampler is touched: the shaders only Load. The pass runs once for every
+// sun light draw of a frame, so it declares only these categories (scissor rects, sampler slots and the other constant buffers are not read).
+constexpr ext::core::explicit_state::Spec kSpec { /*psSrvCount*/ 6, /*psSamplerCount*/ 0, /*psConstantBuffers*/ 1 };
+
 // g_CameraParameter's layout, at the offsets the header shared with the shaders has: the view matrix's three rows at +0x00, the
 // view-projection at +0x60 and the inverse projection at +0xE0, row-major, four rows of a float4 each.
 constexpr uint32_t kCameraBytes = CS_CAMERA_BYTES;
@@ -39,8 +46,10 @@ struct ParamsBuffer
     float window[4]; // xy = origin in mask pixels, zw = extent in mask pixels
     float march[4];  // x = length, y = steps, z = strength, w = 0 world space / 1 view space
     float sign[4];   // x = +1 toward the sun / -1 the way the light travels, yz = the mask's size
+    float shadow[4]; // shadow mapping (ext/ffxiv/shadows), ext-internal: x = the mask lift (0 = the engine's own
+                     // mask bytes), y = the tent's reach in mask pixels, zw = 0 (ShadowLiftCommon.hlsli reads x, y)
 };
-static_assert(sizeof(ParamsBuffer) == 48, "the constant buffer of the shaders is three float4s");
+static_assert(sizeof(ParamsBuffer) == 64, "the constant buffer of the shaders is four float4s");
 
 // A byte range of a constant buffer as the box a partial copy takes. For a buffer the box is in bytes: left..right, one row, one slice.
 D3D11_BOX ByteBox(uint32_t offset, uint32_t bytes)
@@ -73,7 +82,6 @@ void Pass::Reset()
     _combine.Reset();
     _march.Reset();
     _vs.Reset();
-    _state.Reset();
     _device.Reset();
     _copyFormat = _copyWidth = _copyHeight = 0;
     _termWidth = _termHeight = 0;
@@ -90,12 +98,6 @@ void Pass::Reset()
 
 bool Pass::Init(ID3D11Device* device)
 {
-    ComPtr<ID3D11Device1> device1;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))))
-    {
-        _failure = "ID3D11Device1 is not available";
-        return false;
-    }
     if (FAILED(device->CreateVertexShader(ContactShadows_Vs_cso, sizeof ContactShadows_Vs_cso, nullptr, &_vs)) ||
         FAILED(device->CreatePixelShader(ContactShadows_March_cso, sizeof ContactShadows_March_cso, nullptr, &_march)) ||
         FAILED(device->CreatePixelShader(ContactShadows_Combine_cso, sizeof ContactShadows_Combine_cso, nullptr, &_combine)))
@@ -153,17 +155,7 @@ bool Pass::Init(ID3D11Device* device)
         return false;
     }
 
-    // The private pipeline state: the game's own is captured and put back after the two draws.
-    const D3D_FEATURE_LEVEL levels[] { D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL chosen {};
-    const UINT flags = (device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) ? D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED : 0;
-    if (FAILED(device1->CreateDeviceContextState(flags, levels, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), &chosen, &_state)) ||
-        _state == nullptr)
-    {
-        _failure = "the private device-context state could not be created";
-        return false;
-    }
-
+    // No private pipeline state: the game's own is captured and put back explicitly around the two draws (ext/core/D3D11ExplicitState.h).
     // The two draws' own GPU time: a timestamp pair inside a disjoint query, read one run later without ever waiting for the GPU.
     D3D11_QUERY_DESC disjointDesc { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
     D3D11_QUERY_DESC stampDesc { D3D11_QUERY_TIMESTAMP, 0 };
@@ -227,20 +219,24 @@ bool Pass::EnsureCopy(ID3D11Device* device, uint32_t format, uint32_t width, uin
     _copy.Reset();
     _copyFormat = _copyWidth = _copyHeight = 0;
 
+    // The copy is built with the typed member of the mask's format family: the engine creates the mask's texture as R8_TYPELESS and the draw
+    // samples an R8_UNORM view of it, and D3D11 refuses to create a render target (or any view) with a typeless format, while the combine's own
+    // write to this copy has to be one. The combine reads the game's mask itself, so the copy shares no format with it.
+    const uint32_t typedFormat = TypedMaskFormat(format);
     D3D11_TEXTURE2D_DESC desc {};
     desc.Width = width;
     desc.Height = height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = static_cast<DXGI_FORMAT>(format);
+    desc.Format = static_cast<DXGI_FORMAT>(typedFormat);
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     D3D11_RENDER_TARGET_VIEW_DESC rtv {};
-    rtv.Format = static_cast<DXGI_FORMAT>(format);
+    rtv.Format = static_cast<DXGI_FORMAT>(typedFormat);
     rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     D3D11_SHADER_RESOURCE_VIEW_DESC srv {};
-    srv.Format = static_cast<DXGI_FORMAT>(format);
+    srv.Format = static_cast<DXGI_FORMAT>(typedFormat);
     srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = 1;
     if (FAILED(device->CreateTexture2D(&desc, nullptr, &_copy)) || FAILED(device->CreateRenderTargetView(_copy.Get(), &rtv, &_copyRtv)) ||
@@ -330,10 +326,10 @@ ID3D11ShaderResourceView* Pass::Run(ID3D11DeviceContext* context, const Inputs& 
     if (cameraDesc.ByteWidth < kCameraBytes || lightDesc.ByteWidth < kSunOffset + kSunBytes)
         return nullptr;
 
-    // The term is the size of half the mask's allocation, which a dynamic-resolution change does not touch: the render window inside the
+    // The term is the size of the mask's allocation, which a dynamic-resolution change does not touch: the render window inside the
     // allocation is what moves, and it is a viewport on that texture. Only a real allocation change (a window resize) re-creates it.
     if (!EnsureCopy(device.Get(), inputs.maskFormat, inputs.maskWidth, inputs.maskHeight) ||
-        !EnsureTerm(device.Get(), HalfExtent(float(inputs.maskWidth)), HalfExtent(float(inputs.maskHeight))))
+        !EnsureTerm(device.Get(), inputs.maskWidth, inputs.maskHeight))
     {
         _failure = "the mask copy or the term target could not be created";
         return nullptr;
@@ -368,55 +364,39 @@ ID3D11ShaderResourceView* Pass::Run(ID3D11DeviceContext* context, const Inputs& 
     params.sign[0] = inputs.params.sign == SunSign::Toward ? 1.0f : -1.0f;
     params.sign[1] = float(inputs.maskWidth);
     params.sign[2] = float(inputs.maskHeight);
+    params.shadow[0] = inputs.maskLift;
+    params.shadow[1] = inputs.maskSoftness;
     std::memcpy(mapped.pData, &params, sizeof params);
     context->Unmap(_params.Get(), 0);
 
     CollectGpuTiming(context);
-    ComPtr<ID3DDeviceContextState> previous;
-    context1->SwapDeviceContextState(_state.Get(), &previous);
-    if (previous == nullptr)
-    {
-        context1->SwapDeviceContextState(_state.Get(), nullptr); // best effort, as the other fork passes do
-        _failure = "the previous device-context state was not returned";
-        return nullptr;
-    }
-    // From here on the game's own device-context state has to come back, also when one of the two draws throws through this fork's hooks (a
-    // developer diagnostic that allocates, a menu widget): the guard swaps it back on every path, so a throw can never leave the game
-    // drawing in this module's private state.
-    struct StateRestore
-    {
-        ID3D11DeviceContext1* context = nullptr;
-        ID3DDeviceContextState* previous = nullptr;
-        ~StateRestore()
-        {
-            if (previous != nullptr)
-                context->SwapDeviceContextState(previous, nullptr);
-        }
-    } stateRestore { context1.Get(), previous.Get() };
+    // From here on the game's own state has to come back, also when one of the two draws throws through this fork's hooks (a developer diagnostic
+    // that allocates, a menu widget): the guard restores it in its destructor on every path, so a throw can never leave the game drawing in this
+    // module's own pipeline state.
+    ext::core::explicit_state::Guard stateGuard(context, context1.Get(), device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1, kSpec);
+    stateGuard.Neutralise(); // what the private state's defaults provided: no HS, DS, GS, stream-out target or predicate
 
     const float blendFactor[4] {};
     ID3D11Buffer* buffers[1] { _params.Get() };
-    ID3D11SamplerState* samplers[1] {};
 
     context->IASetInputLayout(nullptr);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(_vs.Get(), nullptr, 0);
     context->PSSetConstantBuffers(0, 1, buffers);
-    context->PSSetSamplers(0, 1, samplers);
     context->RSSetState(_rasterizer.Get());
     context->OMSetBlendState(nullptr, blendFactor, 0xffffffff);
     context->OMSetDepthStencilState(nullptr, 0);
 
-    // The march: the window's half, at the window's own origin in the term texture. The term texture is the render target here, so it is
+    // The march: the window, at its own whole-texel origin in the term texture. The term texture is the render target here, so it is
     // not also bound as a shader resource: D3D11 would drop that binding and the combine below would then read nothing at all.
     ID3D11ShaderResourceView* marchViews[6] {};
     marchViews[kSlotDepth] = inputs.depth;
     marchViews[kSlotCamera] = _cameraView.Get();
     marchViews[kSlotSun] = _sunView.Get();
     ID3D11RenderTargetView* termRtv = _termRtv.Get();
-    const uint32_t termWidth = HalfExtent(inputs.window.width);
-    const uint32_t termHeight = HalfExtent(inputs.window.height);
-    const D3D11_VIEWPORT termViewport { float(uint32_t(inputs.window.x * 0.5f)), float(uint32_t(inputs.window.y * 0.5f)),
+    const uint32_t termWidth = TermExtent(inputs.window.width);
+    const uint32_t termHeight = TermExtent(inputs.window.height);
+    const D3D11_VIEWPORT termViewport { float(uint32_t(inputs.window.x)), float(uint32_t(inputs.window.y)),
                                         float(termWidth), float(termHeight), 0.0f, 1.0f };
     // The pair covers both draws: the march and the combine are one pass. Only the run that began the pair ends it (a run that found the
     // previous pair still in the queue is not timed at all), so no End is ever issued without its Begin.

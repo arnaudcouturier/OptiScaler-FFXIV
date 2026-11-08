@@ -53,6 +53,26 @@ int main() try {
     ComPtr<ID3D12Device> dx12;Check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&dx12)));
     auto& state=S::State();
 
+    // FfxivSceneHdr::Copy is the downstream persistent scene-candidate map.
+    // Model the same-shaped private SSR scene snapshot and prove that the
+    // non-full CopySubresourceRegion path erases/does not add an alias, while
+    // the engine source's existing alias stays valid. Full-copy is positive
+    // control for the exact same resources.
+    {
+        D3D11_TEXTURE2D_DESC desc{};desc.Width=3840;desc.Height=2160;desc.MipLevels=desc.ArraySize=1;
+        desc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;
+        desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> engineColor,ssrPrivateScene;
+        Check(d11->CreateTexture2D(&desc,nullptr,&engineColor));Check(d11->CreateTexture2D(&desc,nullptr,&ssrPrivateScene));
+        auto image=std::make_shared<S::Slot>();
+        {std::lock_guard lock(state.mutex);state.aliases.clear();state.aliases[engineColor.Get()]={engineColor,image};}
+        S::Copy(ssrPrivateScene.Get(),engineColor.Get(),false);
+        {std::lock_guard lock(state.mutex);Expect(state.aliases.contains(engineColor.Get()),"partial private copy removed engine source alias");
+            Expect(!state.aliases.contains(ssrPrivateScene.Get()),"partial private copy became an HDR scene alias");}
+        S::Copy(ssrPrivateScene.Get(),engineColor.Get(),true);
+        {std::lock_guard lock(state.mutex);Expect(state.aliases.contains(ssrPrivateScene.Get()),"full-copy positive control was not aliased");state.aliases.clear();}
+    }
+
     // A capture slot as AfterDraw leaves it (the same Allocate), without needing the replay shaders.
     auto makeSlot=[&](UINT w,UINT h,UINT viewportW,UINT viewportH){
         auto slot=std::make_shared<S::Slot>();

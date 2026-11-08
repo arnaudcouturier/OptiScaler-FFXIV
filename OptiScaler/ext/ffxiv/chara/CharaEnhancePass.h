@@ -1,7 +1,8 @@
 #pragma once
 // The spatial anti-aliasing pass of the character preview feature: runs chara_fxaa.hlsl over a source image into a private
-// texture (1x or 2x), inside a private device-context state so the game's pipeline state is untouched. Knows nothing about
-// the game: the integration (CharaEnhance.cpp) decides which draw gets the result.
+// texture (1x or 2x), between an explicit save and restore of the state it touches (ext/core/D3D11ExplicitState.h) so the game's pipeline
+// state is untouched, whether or not the draw hook it runs in is nested. Knows nothing about the game: the integration (CharaEnhance.cpp)
+// decides which draw gets the result.
 
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -47,7 +48,6 @@ class FxaaPass
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _psTint;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> _sampler;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> _rasterizer;
-    Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> _output;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> _outputRtv;

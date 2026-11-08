@@ -23,7 +23,7 @@ namespace ext::reshade::d3d11
 uint32_t GuardedCall(void (*fn)(void*), void* arg);
 
 // ONE process-wide mutex that serializes only OUR passes (the depth copy and the five G-buffer remaps) when they swap the immediate
-// context into a private ID3DDeviceContextState (CharaEnhancePass.cpp and CharaGuides.cpp also swap private context states, without it):
+// context into a private ID3DDeviceContextState (the chara passes do not swap any more: they save and restore the game's state explicitly):
 // begin_effects can arrive from the HudLess UI-boundary render_effects call and from ReShade's own pass in Present while the depth pass
 // runs on the evaluate thread, and a swap-in .. draw .. swap-back that is interleaved with another one puts the wrong state back.
 // Recursive (a Release that recovers a swap back holds it already) and TIMED: third-party ReShade / REST callbacks fire during our draws

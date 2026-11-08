@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  God rays shaders (ext\ffxiv\engine\shaders\Godrays.hlsl). One source, five entry points (four pixel/vertex stages and the stats compute shader), each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by GodraysPass.cpp;
+  change them together. This file is the volumetric march's own: it shares no shader source with SceneMarch.hlsl and edits nothing of
+  the radial's LightShafts.hlsl.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Godrays.hlsl">
+      <Variable>Godrays_Vs_cso</Variable>
+      <Header>Godrays_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Godrays.hlsl">
+      <Variable>Godrays_March_cso</Variable>
+      <Header>Godrays_March.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_March</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Godrays.hlsl">
+      <Variable>Godrays_SunColour_cso</Variable>
+      <Header>Godrays_SunColour.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_SunColour</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Godrays.hlsl">
+      <Variable>Godrays_Composite_cso</Variable>
+      <Header>Godrays_Composite.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Composite</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Godrays.hlsl">
+      <Variable>Godrays_Stats_cso</Variable>
+      <Header>Godrays_Stats.h</Header>
+      <Profile>cs_5_0</Profile>
+      <Entry>CS_Stats</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

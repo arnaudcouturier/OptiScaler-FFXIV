@@ -159,7 +159,8 @@ int main()
     CHECK(Find(bindings, count, "g_SamplerNothing") == nullptr);
 
     // A texture array indexed at run time is declared once at its base slot and covers as many slots as it has elements. The rule the draw
-    // path matches a bound slot with is checked here on its own, because no shader this compiler emits for a single slot exercises it.
+    // path matches a bound slot with is checked here on its own, because no shader this compiler emits for a single slot exercises it. The kind
+    // is part of the question, the same way it is for the lookup by name: a slot number means nothing without the right table.
     {
         ShaderBinding array;
         array.name = "g_SamplerLightDiffuse";
@@ -167,14 +168,18 @@ int main()
         array.type = kBindTexture;
         array.bindPoint = 8;
         array.bindCount = 4;
-        CHECK(BindingCovers(array, kBindTexture, 8));
-        CHECK(BindingCovers(array, kBindTexture, 11));
-        CHECK(!BindingCovers(array, kBindTexture, 7));
-        CHECK(!BindingCovers(array, kBindTexture, 12));
-        CHECK(!BindingCovers(array, kBindConstantBuffer, 9)); // a slot number means nothing without the right table
+        CHECK(BindingAnswers(array, BindKind::Texture, 8));
+        CHECK(BindingAnswers(array, BindKind::Texture, 11));
+        CHECK(!BindingAnswers(array, BindKind::Texture, 7));
+        CHECK(!BindingAnswers(array, BindKind::Texture, 12));
+        CHECK(!BindingAnswers(array, BindKind::ConstantBuffer, 9));
+        CHECK(!BindingAnswers(array, BindKind::Sampler, 8));
         ShaderBinding single = array;
         single.bindCount = 1;
-        CHECK(!BindingCovers(single, kBindTexture, 9));
+        CHECK(!BindingAnswers(single, BindKind::Texture, 9));
+        // A binding whose range was never read covers nothing: an empty range is not "every slot".
+        single.bindCount = 0;
+        CHECK(!BindingAnswers(single, BindKind::Texture, 8));
     }
 
     // A smaller destination truncates instead of overflowing, and says how many the table declares.
@@ -183,6 +188,64 @@ int main()
         uint32_t total = 0;
         CHECK_EQ(ParseBindings(blob.data(), blob.size(), few, 2, &total), size_t(2));
         CHECK_EQ(total, declared);
+    }
+
+    // A DXBC blob built by hand from the container header and one RDEF chunk: the body carries the table header, one 32-byte entry and the
+    // name it points at. `terminated` writes the name's NUL; without it the name reaches the end of the body, which is what a truncated or
+    // hand-edited reflection looks like. These are the blobs no compiler emits, so the reader's own bounds are what is under test.
+    const auto put = [](std::vector<unsigned char>& bytes, size_t at, uint32_t value)
+    {
+        bytes[at] = static_cast<unsigned char>(value & 0xFF);
+        bytes[at + 1] = static_cast<unsigned char>((value >> 8) & 0xFF);
+        bytes[at + 2] = static_cast<unsigned char>((value >> 16) & 0xFF);
+        bytes[at + 3] = static_cast<unsigned char>((value >> 24) & 0xFF);
+    };
+    const auto handBuilt = [&put](const char* name, bool terminated)
+    {
+        const size_t nameAt = 48; // the body header (16 B) and one entry (32 B)
+        const size_t nameBytes = std::strlen(name);
+        const size_t bodySize = nameAt + nameBytes + (terminated ? 1 : 0);
+        std::vector<unsigned char> body(bodySize, 0);
+        put(body, 8, 1);      // one bound resource
+        put(body, 12, 16);    // its table right after the body header
+        put(body, 16 + 0, static_cast<uint32_t>(nameAt)); // the name's offset inside the body
+        put(body, 16 + 4, kBindTexture);                  // a texture
+        put(body, 16 + 20, 5);                            // at t5
+        put(body, 16 + 24, 1);                            // one slot
+        std::memcpy(body.data() + nameAt, name, nameBytes);
+
+        const size_t chunkAt = 36; // "DXBC", the 16-byte digest, version, size, one chunk offset
+        std::vector<unsigned char> code(chunkAt + 8 + bodySize, 0);
+        std::memcpy(code.data(), "DXBC", 4);
+        put(code, 28, 1); // one chunk
+        put(code, 32, static_cast<uint32_t>(chunkAt));
+        std::memcpy(code.data() + chunkAt, "RDEF", 4);
+        put(code, chunkAt + 4, static_cast<uint32_t>(bodySize));
+        std::memcpy(code.data() + chunkAt + 8, body.data(), bodySize);
+        return code;
+    };
+
+    {
+        ShaderBinding one[4];
+        uint32_t total = 0;
+        const std::vector<unsigned char> named = handBuilt("g_SamplerDepth", true);
+        CHECK_EQ(ParseBindings(named.data(), named.size(), one, 4, &total), size_t(1));
+        CHECK_EQ(total, 1u);
+        CHECK_EQ(std::string(one[0].name, one[0].nameLength), std::string("g_SamplerDepth")); // the name ends at its NUL
+        CHECK_EQ(one[0].type, kBindTexture);
+        CHECK_EQ(one[0].bindPoint, 5u);
+
+        // A name with no NUL runs to the end of the blob. The entry is dropped rather than taken as a name that spans the rest of the body:
+        // a name that long is not a reflected identifier, and everything after it (a second name, another chunk) would be read as its text.
+        // The table itself is intact, so the reader still reports what the shader declared.
+        const std::vector<unsigned char> unterminated = handBuilt("g_SamplerDepth", false);
+        total = 99;
+        CHECK_EQ(ParseBindings(unterminated.data(), unterminated.size(), one, 4, &total), size_t(0));
+        CHECK_EQ(total, 1u);
+        // A name whose NUL is the body's last byte is legitimate: the bound is the end of the body, not the byte before it.
+        const std::vector<unsigned char> lastByte = handBuilt("g_SamplerDepth", true);
+        CHECK_EQ(ParseBindings(lastByte.data(), lastByte.size(), one, 4), size_t(1));
+        CHECK_EQ(std::string(one[0].name, one[0].nameLength), std::string("g_SamplerDepth"));
     }
 
     // Anything that is not a well-formed DXBC blob yields no bindings rather than a fault: the blobs come from the game.
@@ -224,6 +287,25 @@ int main()
             big[rdef + 8 + 9] = 0xFF;
             CHECK_EQ(ParseBindings(big.data(), big.size(), none, 4), size_t(0));
         }
+    }
+
+    // ---- whether a reflection declares a name: the shape of a pass is identified by the names it declares, through the base name
+    {
+        ShaderBinding table[3] {};
+        const char* names[] { "g_WetnessParameter", "g_SamplerGBuffer3.T", "g_SamplerViewPosition.T" };
+        for (size_t i = 0; i < 3; ++i)
+        {
+            table[i].name = names[i];
+            table[i].nameLength = static_cast<uint32_t>(std::strlen(names[i]));
+        }
+        CHECK(ReflectionDeclares(table, 3, "g_WetnessParameter"));
+        CHECK(ReflectionDeclares(table, 3, "g_SamplerGBuffer3"));
+        CHECK(ReflectionDeclares(table, 3, "g_SamplerGBuffer3.T")); // either form may be passed in
+        CHECK(ReflectionDeclares(table, 3, "g_SamplerViewPosition"));
+        CHECK(!ReflectionDeclares(table, 3, "g_SamplerGBuffer4"));
+        CHECK(!ReflectionDeclares(table, 3, "g_SamplerGBuffer")); // no prefix match
+        CHECK(!ReflectionDeclares(table, 0, "g_WetnessParameter"));
+        CHECK(!ReflectionDeclares(nullptr, 3, "g_WetnessParameter"));
     }
 
     // ---- the name a binding is compared by: the effect compiler's type suffix is not part of the variable's name

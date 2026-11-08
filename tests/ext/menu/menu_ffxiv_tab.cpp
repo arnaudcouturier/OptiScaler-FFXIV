@@ -84,16 +84,19 @@ void Cards(const std::string& repo)
     size_t tokens = 0;
     const auto regs = menuscan::ScanRegistrations(repo, tokens);
     CHECK(regs.size() == tokens);
-    CHECK(regs.size() == 17); // the live output switch, contact shadow and frame_pacing cards joined, the companion card left
+    CHECK(regs.size() == 30); // (the night grade card joined the 29 at the L1 integration; this count was not moved then) the live output switch, contact shadow, shadow mapping, engine pass override, ambient occlusion, light shaft,
+                              // puddles, screen-space reflection, godrays march, lighting tab, light bounce, depth of field, lens flare and frame_pacing cards joined, the companion card left
 
     std::map<std::string, std::string> tabOf;
     for (const auto& r : regs)
         tabOf[r.id] = r.tab;
 
-    // the eight cards that need the FFXIV build match are in the tab, and nothing else is
+    // the twenty cards that need the FFXIV build match are in the tab, and nothing else is (the lens flare card joined the nineteen; the depth-of-field card joined the eighteen)
     const std::vector<std::string> ffxivCards = { "window_mode",     "reshade_depth",   "ffxiv_hdr",    "ffxiv_contact_shadows",
-                                                  "ffxiv_jitter",    "ffxiv_character_preview", "fg_hudless", "hudless_diag",
-                                                  "ffxiv_advanced" };
+                                                  "ffxiv_engine_passes", "ffxiv_shadow_mapping", "ffxiv_lighting", "ffxiv_ambient_occlusion",
+                                                  "ffxiv_light_shafts", "ffxiv_puddles",
+                                                  "ffxiv_screen_space_reflections", "ffxiv_godrays", "ffxiv_gi", "ffxiv_engine_light", "ffxiv_atmosphere", "ffxiv_dof", "ffxiv_lens_flare", "ffxiv_jitter",
+                                                  "ffxiv_character_preview", "fg_hudless", "hudless_diag", "ffxiv_advanced" };
     for (const auto& id : ffxivCards)
         CHECK(tabOf.count(id) == 1 && tabOf[id] == "FFXIV");
 

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ResTrack_dx11.h"
+#include "ext/core/D3D11DrawDispatch.h"
 
 #include <Config.h>
 #include <State.h>
@@ -8,6 +9,9 @@
 
 #include <algorithm>
 #include <array>
+#include "ext/core/InjectedWorkDiagnostic.h"
+#include "ext/core/InjectedStateWindowDiagnostic.h"
+#include "ext/core/InjectedOmTraceDiagnostic.h"
 
 namespace
 {
@@ -62,6 +66,9 @@ PFN_DrawIndexedInstancedIndirect o_DrawIndexedInstancedIndirect = nullptr;
 PFN_DrawInstancedIndirect o_DrawInstancedIndirect = nullptr;
 PFN_Dispatch o_Dispatch = nullptr;
 PFN_DispatchIndirect o_DispatchIndirect = nullptr;
+void* literalDraw = nullptr; void* literalIndexed = nullptr; void* literalInstanced = nullptr;
+void* literalIndexedInstanced = nullptr; void* literalAuto = nullptr;
+void* literalIndexedIndirect = nullptr; void* literalIndirect = nullptr;
 
 PVOID g_hookedOMSetRenderTargetsAddress = nullptr;
 
@@ -151,7 +158,11 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D11DeviceContext* This, UINT NumV
                                             ID3D11RenderTargetView* const* ppRenderTargetViews,
                                             ID3D11DepthStencilView* pDepthStencilView)
 {
+    ext::core::om_trace::Record(ext::core::om_trace::Api::Rtv, ext::core::om_trace::Decision::Enter, This, NumViews);
     o_OMSetRenderTargets(This, NumViews, ppRenderTargetViews, pDepthStencilView);
+    ext::core::om_trace::Record(ext::core::om_trace::Api::Rtv, ext::core::om_trace::Decision::AfterOriginal, This, NumViews,
+                                ppRenderTargetViews && NumViews ? reinterpret_cast<uintptr_t>(ppRenderTargetViews[0]) : 0,
+                                reinterpret_cast<uintptr_t>(pDepthStencilView));
     ResTrack_Dx11::NoteOMRenderTargets(This, NumViews, ppRenderTargetViews);
 }
 
@@ -160,29 +171,40 @@ void STDMETHODCALLTYPE hkOMSetRenderTargetsAndUnorderedAccessViews(
     ID3D11DepthStencilView* pDepthStencilView, UINT UAVStartSlot, UINT NumUAVs,
     ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts)
 {
+    ext::core::om_trace::Record(ext::core::om_trace::Api::RtvUav, ext::core::om_trace::Decision::Enter, This, NumRTVs);
     o_OMSetRenderTargetsAndUnorderedAccessViews(This, NumRTVs, ppRenderTargetViews, pDepthStencilView, UAVStartSlot,
                                                 NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts);
+    ext::core::om_trace::Record(ext::core::om_trace::Api::RtvUav, ext::core::om_trace::Decision::AfterOriginal, This, NumRTVs,
+                                ppRenderTargetViews && NumRTVs && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL
+                                    ? reinterpret_cast<uintptr_t>(ppRenderTargetViews[0]) : 0,
+                                reinterpret_cast<uintptr_t>(pDepthStencilView));
     ResTrack_Dx11::NoteOMRenderTargetsAndUAVs(This, NumRTVs, ppRenderTargetViews, UAVStartSlot, NumUAVs,
                                               ppUnorderedAccessViews);
 }
 
 void STDMETHODCALLTYPE hkDraw(ID3D11DeviceContext* This, UINT VertexCount, UINT StartVertexLocation)
 {
-    o_Draw(This, VertexCount, StartVertexLocation);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::Draw, reinterpret_cast<void*>(&hkDraw));
+    if (IsFreshReentry(This, Api::Draw) && !layer) { o_Draw(This, VertexCount, StartVertexLocation); return; }
+    Forward(This, 13, literalDraw, o_Draw, Api::Draw, VertexCount, StartVertexLocation);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawInstanced);
 }
 
 void STDMETHODCALLTYPE hkDrawIndexed(ID3D11DeviceContext* This, UINT IndexCount, UINT StartIndexLocation,
                                      INT BaseVertexLocation)
 {
-    o_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::Indexed, reinterpret_cast<void*>(&hkDrawIndexed));
+    if (IsFreshReentry(This, Api::Indexed) && !layer) { o_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation); return; }
+    Forward(This, 12, literalIndexed, o_DrawIndexed, Api::Indexed, IndexCount, StartIndexLocation, BaseVertexLocation);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawIndexedInstanced);
 }
 
 void STDMETHODCALLTYPE hkDrawInstanced(ID3D11DeviceContext* This, UINT VertexCountPerInstance, UINT InstanceCount,
                                        UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-    o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::Instanced, reinterpret_cast<void*>(&hkDrawInstanced));
+    if (IsFreshReentry(This, Api::Instanced) && !layer) { o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation); return; }
+    Forward(This, 21, literalInstanced, o_DrawInstanced, Api::Instanced, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawInstanced);
 }
 
@@ -190,28 +212,35 @@ void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D11DeviceContext* This, UINT In
                                               UINT StartIndexLocation, INT BaseVertexLocation,
                                               UINT StartInstanceLocation)
 {
-    o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
-                           StartInstanceLocation);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::IndexedInstanced, reinterpret_cast<void*>(&hkDrawIndexedInstanced));
+    if (IsFreshReentry(This, Api::IndexedInstanced) && !layer) { o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation); return; }
+    Forward(This, 20, literalIndexedInstanced, o_DrawIndexedInstanced, Api::IndexedInstanced, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawIndexedInstanced);
 }
 
 void STDMETHODCALLTYPE hkDrawAuto(ID3D11DeviceContext* This)
 {
-    o_DrawAuto(This);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::Auto, reinterpret_cast<void*>(&hkDrawAuto));
+    if (IsFreshReentry(This, Api::Auto) && !layer) { o_DrawAuto(This); return; }
+    Forward(This, 38, literalAuto, o_DrawAuto, Api::Auto);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawInstanced);
 }
 
 void STDMETHODCALLTYPE hkDrawIndexedInstancedIndirect(ID3D11DeviceContext* This, ID3D11Buffer* pBufferForArgs,
                                                       UINT AlignedByteOffsetForArgs)
 {
-    o_DrawIndexedInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::IndexedIndirect, reinterpret_cast<void*>(&hkDrawIndexedInstancedIndirect));
+    if (IsFreshReentry(This, Api::IndexedIndirect) && !layer) { o_DrawIndexedInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs); return; }
+    Forward(This, 39, literalIndexedIndirect, o_DrawIndexedInstancedIndirect, Api::IndexedIndirect, pBufferForArgs, AlignedByteOffsetForArgs);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawIndexedInstanced);
 }
 
 void STDMETHODCALLTYPE hkDrawInstancedIndirect(ID3D11DeviceContext* This, ID3D11Buffer* pBufferForArgs,
                                                UINT AlignedByteOffsetForArgs)
 {
-    o_DrawInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs);
+    using namespace ext::core::draw_dispatch; LayerScope layer(This, Api::Indirect, reinterpret_cast<void*>(&hkDrawInstancedIndirect));
+    if (IsFreshReentry(This, Api::Indirect) && !layer) { o_DrawInstancedIndirect(This, pBufferForArgs, AlignedByteOffsetForArgs); return; }
+    Forward(This, 40, literalIndirect, o_DrawInstancedIndirect, Api::Indirect, pBufferForArgs, AlignedByteOffsetForArgs);
     ResTrack_Dx11::ProcessCandidates(This, Dx11CaptureInfo::DrawInstanced);
 }
 
@@ -232,6 +261,7 @@ void STDMETHODCALLTYPE hkDispatchIndirect(ID3D11DeviceContext* This, ID3D11Buffe
 
 bool ResTrack_Dx11::IsHudFixActive(ID3D11DeviceContext* context)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return false; }
     if (context == nullptr || InternalCallActive())
         return false;
 
@@ -267,6 +297,7 @@ void ResTrack_Dx11::RememberSlots(std::vector<UINT>& slots, UINT startSlot, UINT
 
 bool ResTrack_Dx11::CheckView(ID3D11DeviceContext* context, ID3D11View* view, Dx11ResourceType type, UINT captureInfo)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return false; }
     if (!IsHudFixActive(context) || view == nullptr)
         return false;
 
@@ -303,6 +334,7 @@ bool ResTrack_Dx11::CheckView(ID3D11DeviceContext* context, ID3D11View* view, Dx
 void ResTrack_Dx11::NoteGraphicsShaderResources(ID3D11DeviceContext* context, Dx11ShaderStage stage, UINT startSlot,
                                                 UINT numViews, ID3D11ShaderResourceView* const* views)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return; }
     if (!IsHudFixActive(context) || Config::Instance()->FGHudfixDisableSGR.value_or_default() ||
         Config::Instance()->FGHudfixDisableSRV.value_or_default())
         return;
@@ -333,6 +365,7 @@ void ResTrack_Dx11::NoteGraphicsShaderResources(ID3D11DeviceContext* context, Dx
 void ResTrack_Dx11::NoteCSShaderResources(ID3D11DeviceContext* context, UINT startSlot, UINT numViews,
                                           ID3D11ShaderResourceView* const* views)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return; }
     if (!IsHudFixActive(context) || Config::Instance()->FGHudfixDisableSCR.value_or_default() ||
         Config::Instance()->FGHudfixDisableSRV.value_or_default())
         return;
@@ -359,6 +392,7 @@ void ResTrack_Dx11::NoteCSShaderResources(ID3D11DeviceContext* context, UINT sta
 void ResTrack_Dx11::NoteCSUnorderedAccessViews(ID3D11DeviceContext* context, UINT startSlot, UINT numViews,
                                                ID3D11UnorderedAccessView* const* views)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return; }
     if (!IsHudFixActive(context) || Config::Instance()->FGHudfixDisableSCR.value_or_default() ||
         Config::Instance()->FGHudfixDisableUAV.value_or_default() ||
         !Config::Instance()->FGImmediateCapture.value_or_default() || views == nullptr)
@@ -376,10 +410,24 @@ void ResTrack_Dx11::NoteCSUnorderedAccessViews(ID3D11DeviceContext* context, UIN
 void ResTrack_Dx11::NoteOMRenderTargets(ID3D11DeviceContext* context, UINT numViews,
                                         ID3D11RenderTargetView* const* views)
 {
-    if (context == _immediateContext && !InternalCallActive())
+    using namespace ext::core::om_trace;
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); Record(Api::Rtv, Decision::Suppressed, context, numViews, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); return; }
+    if (context != _immediateContext) { Record(Api::Rtv, Decision::ContextMismatch, context, numViews, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); }
+    else if (InternalCallActive()) { Record(Api::Rtv, Decision::InternalCall, context, numViews, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); }
+    else
     {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        _omRtvCount = std::min<UINT>(numViews, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        UINT oldCount = 0, nextCount = std::min<UINT>(numViews, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            oldCount = _omRtvCount;
+            if (_omRtvCount != nextCount)
+            {
+                _omRtvCount = nextCount;
+                ext::core::state_window::PublishTrackedOm(context, _omRtvCount);
+            }
+        }
+        Record(Api::Rtv, oldCount == nextCount ? Decision::AcceptedSame : Decision::AcceptedChanged, context, numViews,
+               views && numViews ? reinterpret_cast<uintptr_t>(views[0]) : 0, 0, oldCount, nextCount, _immediateContext);
     }
 
     if (!IsHudFixActive(context) || Config::Instance()->FGHudfixDisableOM.value_or_default() ||
@@ -400,10 +448,25 @@ void ResTrack_Dx11::NoteOMRenderTargetsAndUAVs(ID3D11DeviceContext* context, UIN
                                                ID3D11RenderTargetView* const* rtvs, UINT uavStartSlot, UINT numUAVs,
                                                ID3D11UnorderedAccessView* const* uavs)
 {
-    if (context == _immediateContext && !InternalCallActive() && numRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+    using namespace ext::core::om_trace;
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); Record(Api::RtvUav, Decision::Suppressed, context, numRTVs, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); return; }
+    if (context != _immediateContext) { Record(Api::RtvUav, Decision::ContextMismatch, context, numRTVs, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); }
+    else if (InternalCallActive()) { Record(Api::RtvUav, Decision::InternalCall, context, numRTVs, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); }
+    else if (numRTVs == D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) { Record(Api::RtvUav, Decision::Keep, context, numRTVs, 0, 0, UINT32_MAX, UINT32_MAX, _immediateContext); }
+    else
     {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        _omRtvCount = std::min<UINT>(numRTVs, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        UINT oldCount = 0, nextCount = std::min<UINT>(numRTVs, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            oldCount = _omRtvCount;
+            if (_omRtvCount != nextCount)
+            {
+                _omRtvCount = nextCount;
+                ext::core::state_window::PublishTrackedOm(context, _omRtvCount);
+            }
+        }
+        Record(Api::RtvUav, oldCount == nextCount ? Decision::AcceptedSame : Decision::AcceptedChanged, context, numRTVs,
+               rtvs && numRTVs ? reinterpret_cast<uintptr_t>(rtvs[0]) : 0, 0, oldCount, nextCount, _immediateContext);
     }
 
     if (!IsHudFixActive(context) || Config::Instance()->FGHudfixDisableOM.value_or_default() ||
@@ -436,6 +499,7 @@ void ResTrack_Dx11::NoteOMRenderTargetsAndUAVs(ID3D11DeviceContext* context, UIN
 
 void ResTrack_Dx11::ProcessCandidates(ID3D11DeviceContext* context, UINT dispatchInfo)
 {
+    if (ext::core::diagnostic::ObserversSuppressed()) { ext::core::diagnostic::NoteSuppressedCallback(); return; }
     if (!IsHudFixActive(context))
         return;
 
@@ -687,14 +751,17 @@ void ResTrack_Dx11::HookDevice(ID3D11Device* device)
     // ID3D11DeviceContext
     o_PSSetShaderResources = (PFN_SetShaderResources) vtable[8];
     o_DrawIndexed = (PFN_DrawIndexed) vtable[12];
+    literalIndexed = vtable[12]; literalDraw = vtable[13];
     o_Draw = (PFN_Draw) vtable[13];
     o_DrawIndexedInstanced = (PFN_DrawIndexedInstanced) vtable[20];
+    literalIndexedInstanced = vtable[20]; literalInstanced = vtable[21];
     o_DrawInstanced = (PFN_DrawInstanced) vtable[21];
     o_VSSetShaderResources = (PFN_SetShaderResources) vtable[25];
     o_GSSetShaderResources = (PFN_SetShaderResources) vtable[31];
     o_OMSetRenderTargets = (PFN_OMSetRenderTargets) vtable[33];
     o_OMSetRenderTargetsAndUnorderedAccessViews = (PFN_OMSetRenderTargetsAndUnorderedAccessViews) vtable[34];
     o_DrawAuto = (PFN_DrawAuto) vtable[38];
+    literalAuto = vtable[38]; literalIndexedIndirect = vtable[39]; literalIndirect = vtable[40];
     o_DrawIndexedInstancedIndirect = (PFN_DrawIndexedInstancedIndirect) vtable[39];
     o_DrawInstancedIndirect = (PFN_DrawInstancedIndirect) vtable[40];
     o_Dispatch = (PFN_Dispatch) vtable[41];

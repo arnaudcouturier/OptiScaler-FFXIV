@@ -1,10 +1,10 @@
-// Contact shadows before the sun light pass: a short march along the sun direction at half the render window, combined into a copy of
+// Contact shadows before the sun light pass: a short march along the sun direction at the render window's own resolution, combined into a copy of
 // the engine's screen-space sun mask.
 //
 // Two pixel shaders, one vertex shader, no sampler (every read is a Load on an exact texel, so the result does not depend on filter
 // state and a test can predict it):
 //   VS         (vs_5_0) one oversized triangle from SV_VertexID
-//   PS_March   (ps_5_0) half the render window -> the contact visibility term, 1 = unoccluded
+//   PS_March   (ps_5_0) the render window -> the contact visibility term, 1 = unoccluded
 //   PS_Combine (ps_5_0) the mask's allocation -> the copy the light draw samples, mask * term
 //
 // Inputs of PS_March:
@@ -14,9 +14,10 @@
 //                                   reflected layout of the engine's own light shader)
 //   t3 Sun       Buffer<float4>     g_LightParam +0x10: the sun direction, as the game reports it
 // Inputs of PS_Combine:
-//   t4 Mask      Texture2D<float4>  the draw's g_SamplerShadow (the screen-space mask, B8G8R8A8_UNORM, 0..1 visibility)
-//   t5 Term      Texture2D<float>   the march's output, half the render window
-// and the march's t0 (the depth) again, for the depth-aware upsample. One bind list serves both passes.
+//   t4 Mask      Texture2D<float4>  the draw's screen-space mask (8-bit, 0..1 visibility in red: this game build binds it as R8_UNORM
+//                                   called g_SamplerShadowMask, the benchmark build as B8G8R8A8_UNORM called g_SamplerShadow)
+//   t5 Term      Texture2D<float>   the march's output, one texel per mask texel
+// One bind list serves both passes.
 //
 // Rules:
 //  1. Nothing is assumed about the G-buffer, and no view-position buffer is required: the sun light draw does not bind one (measured on
@@ -24,11 +25,16 @@
 //     projection, and the normal comes from that position's screen-space derivatives.
 //  2. Nothing is dark where nothing is: a pixel without the marched point visible nowhere (sky, no depth, NaN) keeps 1.0, so a pixel
 //     that fails validation is never darkened - the failure direction is "no shadow", never "black".
-//  3. The march starts off the surface (along its normal and a few pixels along the ray, so the receiver cannot shadow itself), grows
-//     exponentially, stops at its first hit and fades out toward the end of its length. A hit needs the sampled surface to be nearer to
+//  3. The march starts off the surface (along its normal and a few pixels along the ray, so the receiver cannot shadow itself), takes even
+//     steps of at most one depth texel, stops at its first hit and fades out toward the end of its reach. A step wider than a texel jumps
+//     over a twig one texel wide, which draws a thin occluder's contact as a row of dots. So the reach is what the steps can cover at one
+//     texel each: a nearer surface, where a texel is small, gets a shorter contact, and the engine's own shadow map owns the rest. A hit needs the sampled surface to be nearer to
 //     the camera than the ray point AND the ray point to be within a thickness of it in 3D: a depth difference alone counts a surface
 //     that is metres to the side as an occluder, which is what makes a depth-only test draw the object's own outline instead of the
-//     contact (measured on the benchmark, round 4).
+//     contact (measured on the benchmark, round 4). A hit's distance is then bisected between the step that crossed and the one before
+//     it, so the fade below is a function of where the surface is rather than of which step of the lattice happened to land on it: the
+//     lattice's own distance moves by a fifth of the march when a sub-pixel camera move shifts the taps, and a term that steps with it is
+//     what flickers under the upscaler's jitter.
 //  4. The thickness is measured in screen pixels' worth of world size at the receiver's depth: one depth buffer texel is as wide as the
 //     world it covers, so a thickness that follows the view depth means the same thing at two metres and at twenty. Near the terminator
 //     the term is faded out instead of added: the engine's own cosine and shadow map already darken a surface that faces away from the
@@ -36,9 +42,14 @@
 //  5. The term grows to the mask's 8 bits, so a low strength lands on whole levels (0.5 = 128) - by design, because the thing that
 //     consumes it is an 8-bit mask.
 //  6. The term is a fixed function of the frame's buffers: no frame number, no random offset, no history. DLSS Super Resolution is not
-//     a denoiser, and a term that differs between two frames of a still scene would arrive at the upscaler as noise.
+//     a denoiser, and a term that differs between two frames of a still scene would arrive at the upscaler as noise. The term has one texel
+//     per mask texel and needs no upsample, so a thin occluder's contact is as wide as the occluder and nothing crosses a depth edge.
 
 #include "CameraRegisters.h"
+
+// Shadow mapping (ext/ffxiv/shadows), ext-internal: the mask lift rides this pass's combine. One source for the
+// tent and the remap, so the module's own pass and this stage are the same rule the same WARP test pins.
+#include "../../shadows/shaders/ShadowLiftCommon.hlsli"
 
 Texture2D<float> Depth : register(t0);
 Buffer<float4> Camera : register(t2);
@@ -51,6 +62,8 @@ cbuffer Params : register(b0)
     float4 Window; // xy = the render window's origin in mask pixels, zw = its extent in mask pixels
     float4 March;  // x = length in metres, y = steps, z = strength, w = 0 the sun is in world space / 1 it is already in view space
     float4 Sign;   // x = +1 the direction points toward the sun / -1 it is the way the light travels, yz = the mask's size
+    float4 Shadow; // shadow mapping (ext/ffxiv/shadows), ext-internal: x = the mask lift's effective value (0 = the
+                   // engine's own mask bytes), y = the lift's tent reach in mask pixels (0 = the mask's own edges)
 };
 
 struct VSOutput
@@ -106,18 +119,18 @@ float3 ViewPositionOf(int2 at, float depth)
 
 
 // The march's shape, in the units a pixel has at the receiver's depth (`pixel` is the world size of one depth texel there):
-static const int kMaxSteps = 24;
-static const float kStepGrowth = 1.35;
+static const int kMaxSteps = 64;
 static const float kNormalTexels = 1.5;     // the start's offset along the surface normal, so the ray begins above its own pixel
 static const float kStartTexels = 2.5;      // hits closer than this along the ray are the receiver's own surface, not contact
-static const float kThicknessTexels = 12.0; // how far behind the ray a sampled surface may be and still count as the occluder
+static const float kThicknessTexels = 4.0;  // how far behind the ray a sampled surface may be and still count as the occluder: a ray that
+                                            // steps one texel at a time crosses a surface it enters, and a wider band reads a ray passing behind an object
 static const float kMinThickness = 0.005;   // metres: a floor for a very near surface
 static const float kMaxThickness = 0.25;    // and a ceiling, so a long march does not shadow through whole objects
 static const float kDepthBias = 0.002;      // metres the sampled surface must be in front of the ray point before it is an occluder
 static const float kTerminatorStart = 0.02; // dot(N, L) below this is not lit at all: the engine's shading owns it
 static const float kTerminatorFull = 0.25;  // and above this the term is at full strength
 static const float kFadeStart = 0.7;        // the term fades to 1.0 over the last 30 % of the march, so its end cannot cut
-static const float kUpsampleDepthRelative = 0.02; // the combine's depth-aware upsample: a 2 % depth difference is another surface
+static const int kRefineSteps = 2;          // bisection steps on a hit, so the distance the fade reads is not the step lattice's
 static const float kNormalDepthRelative = 0.02;   // a normal's neighbour belongs to the same surface within this depth difference
 
 // The geometric normal of a pixel, from its own depth neighbourhood. A neighbour takes part only when its depth belongs to the same
@@ -139,7 +152,12 @@ float3 NormalOf(int2 at, float depth, float3 P, float2 size)
     const float3 PRight = insideHigh.x && abs(neighbours.y - depth) <= tolerance ? ViewPositionOf(right, neighbours.y) : P;
     const float3 PUp = insideLow.y && abs(neighbours.z - depth) <= tolerance ? ViewPositionOf(up, neighbours.z) : P;
     const float3 PDown = insideHigh.y && abs(neighbours.w - depth) <= tolerance ? ViewPositionOf(down, neighbours.w) : P;
-    return cross(PRight - PLeft, PDown - PUp);
+    // One side per axis, the one whose depth is closest: a pixel in a crease has a neighbour on the other surface inside the tolerance, and a
+    // central difference across the crease tilts the normal into a direction neither surface has, which a march at one texel per step then
+    // finds a false hit from.
+    const float3 acrossX = abs(neighbours.y - depth) <= abs(neighbours.x - depth) ? PRight - P : P - PLeft;
+    const float3 acrossY = abs(neighbours.w - depth) <= abs(neighbours.z - depth) ? PDown - P : P - PUp;
+    return cross(acrossX, acrossY);
 }
 
 bool2 Inside(int2 at, float2 size)
@@ -159,12 +177,33 @@ float3 SunDirection()
     return lengthSquared > 1e-6 ? d * rsqrt(lengthSquared) : float3(0.0, 0.0, 0.0);
 }
 
+// How far behind the surface the depth buffer holds the ray point at `t` has gone, in metres: positive is occluded. A tap the buffer cannot
+// answer - behind the camera, outside the picture, the sky - answers a negative number, so it never reads as a crossing. The march asks this once
+// per step and twice more to bisect the crossing it found.
+float CrossingDepth(float3 origin, float3 L, float4x4 projection, float2 size, float t)
+{
+    const float3 S = origin + L * t;
+    const float4 clip = mul(projection, float4(S, 1.0));
+    if (!(clip.w > 0.0))
+        return -1.0;
+    const float2 uv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+    const int2 tap = int2(Window.xy + uv * Window.zw);
+    if (!all(Inside(tap, size)))
+        return -1.0;
+    const float tapDepth = Depth.Load(int3(tap, 0));
+    if (!(tapDepth > 0.0))
+        return -1.0;
+    const float3 Q = ViewPositionOf(tap, tapDepth);
+    if (any(isnan(Q)))
+        return -1.0;
+    return (-S.z) - (-Q.z);
+}
+
 float PS_March(float4 position : SV_Position) : SV_Target0
 {
     const float2 size = Sign.yz;
-    // The 2x2 full-resolution block this half-resolution pixel stands for: texel k of the window covers the window's pixels 2k and 2k+1, so
-    // its centre is 2k + 1 (a viewport-relative position of k + 0.5).
-    const int2 at = int2(Window.xy + position.xy * 2.0);
+    // One term texel per mask texel: the march's viewport sits at the window's whole-texel origin in a target of the mask's size.
+    const int2 at = int2(position.xy);
     if (!all(Inside(at, size)))
         return 1.0;
 
@@ -212,15 +251,18 @@ float PS_March(float4 position : SV_Position) : SV_Target0
     if (!(facing > 0.0))
         return 1.0;
 
-    const int steps = clamp(int(March.y), 1, kMaxSteps);
-    const float growth = pow(kStepGrowth, float(steps)) - 1.0;
-    const float base = March.x * (kStepGrowth - 1.0) / growth; // the geometric series sums to March.x
+    // Even steps of at most one depth texel, so nothing a texel wide can be stepped over: the reach is the shorter of the length key and what
+    // the steps cover, and a far surface, whose whole length is a few texels, takes only the steps it needs.
+    const float budget = float(clamp(int(March.y), 1, kMaxSteps));
+    const float reach = min(March.x, budget * pixel);
+    const int steps = clamp(int(ceil(reach / pixel)), 1, kMaxSteps);
+    const float stepLength = reach / float(steps);
 
     float t = 0.0;
     [loop]
     for (int k = 0; k < steps; ++k)
     {
-        const float stepLength = base * pow(kStepGrowth, float(k));
+        const float previous = t; // where this step starts: the bisection's near bound
         t += stepLength;
         if (t < start)
             continue; // the receiver's own surface, a few texels out: never an occluder of itself
@@ -272,7 +314,22 @@ float PS_March(float4 position : SV_Position) : SV_Target0
             }
             if (faces)
             {
-                const float fade = 1.0 - smoothstep(kFadeStart * March.x, March.x, t);
+                // Bisect the crossing between this step and the one before it. Without this the hit is reported at the step's own distance, so
+                // the fade below is a staircase in the march's step size: a sub-pixel camera move that puts a different step of the lattice over
+                // the same edge moves the term by a fifth of the fade's range, which is the flicker a session sees under the upscaler's jitter.
+                // The refined distance is continuous in the surface's position, so the same edge gives the same term whichever step found it.
+                float low = previous;
+                float high = t;
+                [unroll]
+                for (int i = 0; i < kRefineSteps; ++i)
+                {
+                    const float middle = 0.5 * (low + high);
+                    if (CrossingDepth(origin, L, projection, size, middle) > kDepthBias)
+                        high = middle;
+                    else
+                        low = middle;
+                }
+                const float fade = 1.0 - smoothstep(kFadeStart * reach, reach, high);
                 return saturate(1.0 - March.z * facing * fade);
             }
         }
@@ -280,56 +337,34 @@ float PS_March(float4 position : SV_Position) : SV_Target0
     return 1.0;
 }
 
+// The mask the combine writes: below the identity epsilon this is the mask's own bytes (the engine's own combine,
+// byte for byte); with a live lift, the lift's remap on the SQUARED mask - the value the light draw squares - per
+// channel, with the tent feathering the lifted mask's edges (it feathers the lift itself, so the passthrough never
+// changes whatever the softness key says).
+float4 LiftedMask(float4 position, int2 at, float4 mask)
+{
+    if (!(Shadow.x > SHADOW_LIFT_IDENTITY_EPSILON))
+        return mask;
+    const float2 relative = position.xy - Window.xy;
+    if (relative.x < 0.0 || relative.y < 0.0 || relative.x >= Window.z || relative.y >= Window.w)
+        return mask; // outside the render window, the mask's own bytes whatever the keys say
+    return ShadowLiftTexel(mask, Mask, at, int2(Window.z, Window.w), Shadow.x, Shadow.y);
+}
+
 float4 PS_Combine(float4 position : SV_Position) : SV_Target0
 {
     const int2 at = int2(position.xy);
-    const float4 mask = Mask.Load(int3(at, 0));
-    const float2 size = Sign.yz;
+    const float4 mask = LiftedMask(position, at, Mask.Load(int3(at, 0)));
 
     // Outside the render window the copy is the engine's mask, unchanged: the light draw does not touch those pixels, and a reader that
-    // does (a filter at the window's edge) sees exactly what it saw before.
+    // does (a filter at the window's edge) sees exactly what it saw before. With a live lift, the window's texels
+    // carry the lifted mask (the remap on the copy the light draw squares, term not yet applied) and the ones
+    // outside carry the mask back.
     const float2 relative = position.xy - Window.xy;
     if (relative.x < 0.0 || relative.y < 0.0 || relative.x >= Window.z || relative.y >= Window.w)
         return float4(mask.rgb, mask.a);
 
-    // The four half-resolution texels around this pixel, weighted by how well their depth agrees with the pixel's own: a term computed
-    // for a surface two metres away must not bleed onto this one.
-    const float2 centre = relative * 0.5 - 0.5;
-    const int2 first = int2(floor(centre));
-    const float2 fraction = centre - float2(first);
-    const float depth = Depth.Load(int3(at, 0));
-    // The term texture is the allocation's size, but only the render window's half is written (its own viewport), so the window-relative
-    // tap index is what the march wrote; the origin turns it into the texture's own texel.
-    const int2 termOrigin = int2(floor(Window.xy * 0.5));
-    const int2 termExtent = int2(floor(Window.zw * 0.5));
-
-    float sum = 0.0;
-    float weightSum = 0.0;
-    [unroll]
-    for (int dy = 0; dy < 2; ++dy)
-    {
-        [unroll]
-        for (int dx = 0; dx < 2; ++dx)
-        {
-            const int2 tap = first + int2(dx, dy);
-            if (!all(Inside(tap, float2(termExtent))))
-                continue; // outside the march's own target: no term there
-            const float2 weights = float2(dx == 0 ? 1.0 - fraction.x : fraction.x, dy == 0 ? 1.0 - fraction.y : fraction.y);
-            float weight = weights.x * weights.y;
-            if (weight <= 0.0)
-                continue;
-            // The tap's own depth, so a neighbour across an edge is dropped instead of blurred in. The threshold is relative to the pixel's
-            // own depth: a reversed-Z depth difference of two per cent is about two per cent of a metre at any distance, where a fixed
-            // threshold is a fraction of a millimetre near the camera and metres far away (measured on the benchmark).
-            const float2 tapPixel = Window.xy + (float2(tap) + 0.5) * 2.0;
-            const float tapDepth = Depth.Load(int3(int2(tapPixel), 0));
-            if (abs(tapDepth - depth) > kUpsampleDepthRelative * max(depth, tapDepth))
-                continue;
-            sum += Term.Load(int3(termOrigin + tap, 0)) * weight;
-            weightSum += weight;
-        }
-    }
-    // No usable neighbour (an edge, or a term the march never wrote): the engine's mask goes through untouched.
-    const float term = weightSum > 1e-5 ? saturate(sum / weightSum) : 1.0;
+    // The march wrote this very texel: the mask's own coordinates are the term's.
+    const float term = Term.Load(int3(at, 0));
     return float4(mask.rgb * term, mask.a);
 }

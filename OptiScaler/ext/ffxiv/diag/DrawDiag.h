@@ -21,6 +21,11 @@ namespace ext::ffxiv::diag
 // A capture is running: the key is `capture` and the requested frames have not been written yet.
 inline bool Capturing() { return ext::Active(ext::F::DrawDiag); }
 
+// A capture is COLLECTING its frames: the draw list is being written. `Capturing()` above is also true while the key waits for its delay or its press
+// (the constant buffers are sampled then, no draw row is collected), so a consumer that takes a per-frame record for the capture's files asks this.
+// One relaxed load; out of line in FfxivDrawDiag.cpp.
+bool Collecting();
+
 // Draw hook (FfxivLightingCapture::Around, before its early-outs). `api` is the name of the draw call the hook is in.
 void OnDraw(ID3D11DeviceContext* context, const char* api);
 
@@ -34,6 +39,8 @@ void OnUpscaleBoundary();
 // Present entry (ext::ffxiv::ui::OnPresentBegin): closes the frame the draw hooks collected and writes the files at the end.
 void OnPresent();
 
-// End of config::Load (ext::FfxivConfig::PostLoad): arms a capture, or disarms it. A capture happens once per session.
+// End of config::Load (ext::FfxivConfig::PostLoad): arms a capture, or disarms it. A delayed or immediate capture happens once per session; a
+// key-started one re-arms after it is written, up to kMaxCapturesPerSession captures. With DrawDiagnosticsDump = frame each of those captures
+// also writes its own one-frame dump into its own run folder, up to kMaxDumpsPerSession dumps per session.
 void OnConfigLoaded(bool capture);
 } // namespace ext::ffxiv::diag

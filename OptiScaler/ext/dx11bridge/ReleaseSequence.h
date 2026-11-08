@@ -20,6 +20,11 @@
 
 #include <chrono>
 
+// The wall clock behind every phase (steady_clock in ms), so one release line can be read without correlating the
+// per-line timestamps: quietMs is the gate's own wait (the evaluates in flight), the fences' shares come from the
+// DrainQueueEx lines. Only quietMs lives on ReleaseOutcome; the fence durations are logged inside ext::gpu where
+// they are measured.
+
 namespace ext::dx11bridge
 {
 struct ReleasePlan
@@ -38,6 +43,7 @@ struct ReleaseOutcome
     gpu::QueueDrain fg = gpu::QueueDrain::Absent;
     gpu::QueueDrain upscale = gpu::QueueDrain::Absent;
     Quiescence quiet = Quiescence::NotChecked;
+    double quietMs = 0.0; // the gate's own wait, 0 when the gate did not run (key off, shutdown)
     bool threw = false;
 };
 
@@ -50,7 +56,10 @@ template <class Ops> ReleaseOutcome PrepareRelease(EvalRegistry& registry, const
         if (plan.gate)
         {
             registry.Close(plan.handleId);
+            const auto quietStart = std::chrono::steady_clock::now();
             out.quiet = registry.WaitIdle(plan.handleId, plan.quietTimeout);
+            out.quietMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - quietStart).count();
             // Not proven quiet: Drained is out of reach from here, so stop refusing evaluates now. The drains and the kept
             // sleep then run the old flow, with the evaluates running.
             if (out.quiet != Quiescence::Idle)

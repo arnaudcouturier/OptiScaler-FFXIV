@@ -7,6 +7,7 @@
 #include "ext/ffxiv/relight/Inject.h"
 #include "ext/game/Game.h"
 
+#include "ext/ffxiv/meter/MeterCard.h"
 #include <imgui/imgui.h>
 
 #include <cstdio>
@@ -69,25 +70,47 @@ void Draw(ext::menu::Ctx&)
         cfg.contactShadowsSteps = int32_t(ClampSteps(steps));
         changed = true;
     }
-    ext::menu::Tooltip("Steps of the march. More steps find a thin occluder further away and cost more; twelve is the default and the\n"
-                       "range is four to twenty-four.");
+    ext::menu::Tooltip("Steps of the march, each at most one pixel long, so a thin occluder is never stepped over. More steps reach further from\n"
+                       "the surface up close and cost more; 32 is the default and the range is 4 to 64.");
     ImGui::EndDisabled();
     if (changed)
         Publish(shadows); // the render thread's copy of the keys and the feature bit, from the frame after this
 
     const Params current = CurrentParams();
-    const bool runs = Armed();
-    char state[256];
+    const Status status = CurrentStatus();
+    // The counters are the answer a session reads before its picture: a pass that never ran because the rule recognised a mask of another
+    // shape, and a mask whose format or size says why. The last classified light draw's mask is carried with its own verdict. One pass serves
+    // one light draw, so the pass count is not printed a second time as a "served" count: the line says what one pass is.
+    char counters[320];
+    if (status.haveInspection)
+        std::snprintf(counters, sizeof counters,
+                      "%u pass(es), one per light draw served, %u left alone (%u of them of another shape); the last classified light draw's mask "
+                      "is %ux%u in format %u at slot %u (%s)",
+                      status.runs, status.declined, status.shapes, status.maskWidth, status.maskHeight, status.maskFormat,
+                      status.maskSlot, DeclineName(status.lastDecline));
+    else if (status.indexed > 0)
+        std::snprintf(counters, sizeof counters,
+                      "%u pass(es), one per light draw served, %u left alone, %u shader(s) indexed, no light draw has been classified yet",
+                      status.runs, status.declined, status.indexed);
+    else
+        std::snprintf(counters, sizeof counters,
+                      "%u pass(es), one per light draw served, %u left alone, no shader of this build's light pass was recognised",
+                      status.runs, status.declined);
+    char state[512];
     if (!on)
         std::snprintf(state, sizeof state, "off");
-    else if (runs)
-        std::snprintf(state, sizeof state, "on: up to %.2f m, strength %.2f, %u steps; waiting for the frame's sun light draw",
-                      double(current.length), double(current.strength), current.steps);
+    else if (!status.armed)
+        std::snprintf(state, sizeof state, "off for this session: the last light draws were left alone (see the log); %s", counters);
+    else if (status.runs > 0)
+        std::snprintf(state, sizeof state, "on: up to %.2f m, strength %.2f, %u steps; %s", double(current.length), double(current.strength),
+                      current.steps, counters);
     else
-        std::snprintf(state, sizeof state, "off for this session: the last light draws were left alone (see the log)");
+        std::snprintf(state, sizeof state, "on: up to %.2f m, strength %.2f, %u steps; waiting for the frame's sun light draw; %s",
+                      double(current.length), double(current.strength), current.steps, counters);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("%s", state);
     ImGui::PopStyleColor();
+    ext::ffxiv::meter::DrawCardLine(ext::ffxiv::meter::StageId::ContactShadows); // the effect meter's "ran X %, visible Y %" (ext/ffxiv/meter)
 }
 
 const ext::menu::AutoRegister registration { { "ffxiv_contact_shadows", "FFXIV", "Contact shadows (FFXIV)", Draw, "output_scaling",

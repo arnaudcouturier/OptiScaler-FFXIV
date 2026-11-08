@@ -3,11 +3,16 @@
 #include "ext/ffxiv/relight/Inject.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/engine/EnginePass.h"
+#include "ext/ffxiv/shadows/ShadowsHooks.h" // ext: shadow mapping rides this seam when contact shadows does not ask
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include "ext/ffxiv/diag/StageDump.h" // the per-stage image dump: this stage reports its run and its pictures on the capture frame
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -137,14 +142,94 @@ void OnGameDraw(ID3D11DeviceContext* context, DrawFn draw, void* user)
     State& state = S();
     if (draw == nullptr)
         return;
-    if (context == nullptr || !state.session.Armed())
+    if (context == nullptr)
     {
+        draw(user);
+        return;
+    }
+    if (!ext::Active(ext::F::ContactShadows) || !state.session.Armed())
+    {
+        // Contact shadows is not serving this draw: its key is off (a module that was never armed has a fresh session, which
+        // reads as armed, so the key is asked on its own), or it stood or switched itself down. Shadow mapping
+        // (ext/ffxiv/shadows), ext-internal, may still want this same light draw: the hook answers quickly while its gate is
+        // closed (the sink is not even asked then, and the tracker stops following the shader when the gate closes, so a
+        // stale id must never reach it), and the draw route does the module's own copy/remap/bind and runs the game's draw
+        // exactly once. A shader the index does not hold comes back unserved and passes through here (the same "not a sun
+        // light draw" pass-through). The contact pass itself never runs from this branch.
+        if (ext::ffxiv::shadows::Hooks::lightDrawRoute != nullptr && ext::ffxiv::shadows::Hooks::maskWants != nullptr &&
+            ext::ffxiv::shadows::Hooks::maskWants())
+        {
+            // The layout is resolved on the seam's tracker, shared with the armed path below; the hook receives
+            // it so the route and the combine stage see the same classification the contact pass would.
+            const uint32_t id = state.boundLayoutId.load(std::memory_order_relaxed);
+            ext::ffxiv::shadows::RouteLayout routed {}; // the shadows module's read-only view of the resolved layout
+            bool known = false;
+            if (id != 0)
+            {
+                if (!state.refusedShapes.empty())
+                {
+                    // The same remembered-looking-again rule the armed path reads: the route must not pay the
+                    // index's lock and a whole inspect per atlas draw either.
+                    const auto refusal = state.refusedShapes.find(id);
+                    if (refusal != state.refusedShapes.end() &&
+                        ShapeRefusalActive(refusal->second.refusedQpc, Qpc(), QpcFrequency()))
+                        {
+                            draw(user);
+                            return;
+                        }
+                }
+                std::lock_guard lock(I().mutex);
+                if (size_t(id) <= I().layouts.size())
+                {
+                    const Layout& source = I().layouts[id - 1];
+                    routed.id = id;
+                    routed.maskSlot = source.maskSlot;
+                    routed.depthSlot = source.depthSlot;
+                    routed.lightParamSlot = source.lightParamSlot;
+                    routed.cameraParamSlot = source.cameraParamSlot;
+                    routed.fakeSpecular = source.fakeSpecular;
+                    known = true;
+                }
+            }
+            {
+                // The route runs its own passes under the same guards the armed path holds: the engine seam leaves the work alone
+                // (OwnWork), and the pass's pixel-shader binds and the restore of the game's shader do not overwrite the layout
+                // the tracker learned from the game (inPass, read by OnPixelShaderSet). Only a draw the index resolved can be served,
+                // so the other draws of the frame (almost all of them) are asked without the guards: the sink counts them and answers
+                // false at the cost of a few loads.
+                std::optional<ext::ffxiv::engine::OwnWork> routeOwnWork;
+                struct RouteTrackGuard
+                {
+                    State& state;
+                    const bool active;
+                    const bool previous;
+                    RouteTrackGuard(State& state, bool active)
+                        : state(state), active(active), previous(active && state.inPass.exchange(true, std::memory_order_relaxed))
+                    {
+                    }
+                    ~RouteTrackGuard()
+                    {
+                        if (active)
+                            state.inPass.store(previous, std::memory_order_relaxed); // nested guards restore, never clear
+                    }
+                } routeTrack { state, known };
+                if (known)
+                    routeOwnWork.emplace();
+                if (ext::ffxiv::shadows::Hooks::lightDrawRoute(context, draw, user, known ? &routed : nullptr))
+                    return; // answered: the game's draw has run (with or without the copy bound)
+            }
+        }
         draw(user);
         return;
     }
     if (state.inPass.load(std::memory_order_relaxed))
     {
         draw(user); // this module's own pass drawing its two full-screen triangles: never classified, never a decline
+        return;
+    }
+    if (ext::ffxiv::chara::t_replay)
+    {
+        draw(user);
         return;
     }
     ++state.drawsSeen;
@@ -193,6 +278,7 @@ void OnGameDraw(ID3D11DeviceContext* context, DrawFn draw, void* user)
             draw(user); // not a sun light draw, or one of another shape: passed through untouched
             return;
         }
+        ext::ffxiv::engine::OwnWork ownWork;
         const Decline outcome = ApplyDraw(context, state, &layout, draw, user);
         if (outcome == Decline::None)
             state.refusedShapes.erase(id); // a shader that has run is never remembered as refused
@@ -209,11 +295,17 @@ void OnGameDraw(ID3D11DeviceContext* context, DrawFn draw, void* user)
 
 void OnPixelShaderSet(ID3D11PixelShader* shader, uint32_t instances)
 {
-    if (!ext::Active(ext::F::ContactShadows))
-        return; // one relaxed load per bind while the key is off; nothing is tracked because nothing reads it
+    // Shadow mapping (ext/ffxiv/shadows) rides this tracker too: while contact shadows's key is off, the hooks'
+    // cheap answer (one pair of loads) says whether the module's mask lift still wants the light draws tracked. One
+    // relaxed load per bind while both mask features are quiet: nothing is tracked because nothing reads it.
+    const bool shadowsTrack = ext::ffxiv::shadows::Hooks::maskWants != nullptr && ext::ffxiv::shadows::Hooks::maskWants();
+    if (!ext::Active(ext::F::ContactShadows) && !shadowsTrack)
+        return; // one relaxed load per bind while the keys are off; nothing is tracked because nothing reads it
     State& state = S();
     if (state.inPass.load(std::memory_order_relaxed))
         return; // this module's own pass: the game's binding is put back by the context-state swap, not by another PSSetShader
+    if (ext::ffxiv::chara::t_replay)
+        return;
     ++state.bindsSeen;
     const int64_t bindStart = state.bindCost.Sampling() ? Qpc() : 0;
     const uint32_t id = instances == 0 ? TrackedIdOf(shader) : 0; // a class-instance override is never a sun light draw
@@ -236,15 +328,32 @@ void OnShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, u
         // nothing is logged while the key is off: a default-off install writes no line about a feature the player never enabled.
         const bool logging = ext::Active(ext::F::ContactShadows);
         const Layout layout = LayoutOfShader(code, size);
-        if (!layout.ok)
+        // The dump's other half, kept whatever the key says but only while a dump is armed: the light shader is created while the game loads,
+        // so the draw's bytecode cannot be captured later (see ContactShadowsRules.h's kMaxKeptShaders).
+        if (S().dumpDelaySeconds > 0)
+            KeepShaderBytecode(crc, code, size, layout);
+        if (!IsSunLightLayout(layout))
         {
+            // A shadowed point or spot light: the four names, but no directional cascade parameters (2026-11-07). Not the sun, so no stamp:
+            // its light colour must never reach the night curve, and the pass has no business with its shadow texture. One line per session.
+            if (layout.ok)
+            {
+                if (logging && !S().pointLightLogged)
+                {
+                    S().pointLightLogged = true;
+                    LOG_INFO("Contact shadows: a light shader declares the four names but not g_DirectionalShadowParameter (a point or spot "
+                             "light, crc {:08X}); only directional light draws are indexed",
+                             crc);
+                }
+                return;
+            }
             // Not a sun light draw: no stamp at all, so the draw path never looks it up. A shader that declares the mask but not all four
             // names is worth one line: it is the shape of the draw the feature is looking for, and a build whose light pass lost one of the
             // bindings would otherwise fail silently.
             if (logging && (layout.found & 1u) != 0 && !S().partialLogged)
             {
                 S().partialLogged = true;
-                LOG_WARN("Contact shadows: a shader declares g_SamplerShadow but not all of g_SamplerDepth, g_LightParam and g_CameraParameter "
+                LOG_WARN("Contact shadows: a shader declares the sun mask but not all of g_SamplerDepth, g_LightParam and g_CameraParameter "
                          "(found mask {}, depth {}, light {}, camera {}); the pass was not indexed",
                          (layout.found & 1u) != 0, (layout.found & 2u) != 0, (layout.found & 4u) != 0, (layout.found & 8u) != 0);
             }
@@ -267,12 +376,14 @@ void OnShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, u
         {
             shader->SetPrivateData(kLayoutTag, sizeof id, &id);
             RememberIndexed(shader, id);
+            if (layout.fakeSpecular)
+                g_anyFakeSpecularIndexed.store(true, std::memory_order_relaxed);
             if (logging && !S().indexedLogged)
             {
                 S().indexedLogged = true;
                 LOG_INFO("Contact shadows: sun light draw shader indexed (mask slot {}, depth slot {}, g_LightParam slot {}, g_CameraParameter "
-                         "slot {})",
-                         layout.maskSlot, layout.depthSlot, layout.lightParamSlot, layout.cameraParamSlot);
+                         "slot {}, main view {})",
+                         layout.maskSlot, layout.depthSlot, layout.lightParamSlot, layout.cameraParamSlot, layout.fakeSpecular);
             }
         }
     }
@@ -288,6 +399,35 @@ bool Armed()
 }
 
 Params CurrentParams() { return S().params; }
+
+// The stage dump's question about this stage's values, asked at the capture frame (the armed question is Armed()).
+std::string StageValues()
+{
+    const Params& params = S().params;
+    return std::format("length={:.2f} strength={:.2f} steps={}", double(params.length), double(params.strength), params.steps);
+}
+
+Status CurrentStatus()
+{
+    State& state = S();
+    Status status;
+    status.key = ext::Active(ext::F::ContactShadows);
+    status.armed = state.session.Armed();
+    status.runs = state.runs;
+    status.declined = state.declined;
+    status.shapes = state.shapes;
+    status.haveInspection = state.haveInspection;
+    status.maskFormat = state.lastMaskFormat;
+    status.maskWidth = state.lastMaskWidth;
+    status.maskHeight = state.lastMaskHeight;
+    status.maskSlot = state.lastMaskSlot;
+    status.lastDecline = state.lastDecline;
+    {
+        std::lock_guard lock(I().mutex);
+        status.indexed = uint32_t(I().layouts.size());
+    }
+    return status;
+}
 
 void Publish(bool on)
 {
@@ -314,6 +454,7 @@ void Publish(bool on)
         state.dumpStartQpc = Qpc(); // the delay of the dump counts from the config load
     state.indexedLogged = false; // a fresh session says once which shader it indexed, and once if one had the wrong shape
     state.partialLogged = false;
+    state.pointLightLogged = false;
     ext::SetActive(ext::F::ContactShadows, true);
 }
 
@@ -323,14 +464,20 @@ void Reset()
     state.pass.Reset();
     state.session = Session {};
     state.log = LogGate {};
+    state.declineLog = DeclineLog {};
     state.haveSun = false;
     state.lastCameraCheckQpc = 0;
     state.runs = 0;
     state.declined = 0;
+    state.shapes = 0;
+    state.haveInspection = false;
+    state.lastMaskFormat = state.lastMaskWidth = state.lastMaskHeight = state.lastMaskSlot = 0;
+    state.lastDecline = Decline::None;
     state.refusedShapes.clear();
     state.loggedOff = false;
     state.indexedLogged = false;
     state.partialLogged = false;
+    state.pointLightLogged = false;
     state.readback.Reset();
     state.cameraReadback.Reset();
     state.cost = CostMeter {};
@@ -340,6 +487,7 @@ void Reset()
     state.boundLayoutId.store(0, std::memory_order_relaxed);
     state.dumpStartQpc = 0;
     state.dumpWritten = false;
+    ForgetKeptShaders();
     {
         std::lock_guard lock(I().mutex);
         I().layouts.clear();
@@ -358,6 +506,10 @@ namespace
 // The registration of the config hook, set when this DLL's static initialisers run.
 struct RegisterContactShadows
 {
-    RegisterContactShadows() { ext::FfxivConfig::contactShadowsOnLoaded = &ext::ffxiv::relight::OnConfigLoaded; }
+    RegisterContactShadows()
+    {
+        ext::FfxivConfig::contactShadowsOnLoaded = &ext::ffxiv::relight::OnConfigLoaded;
+        ext::ffxiv::diag::StageRegister(ext::ffxiv::diag::StageId::ContactShadows, &ext::ffxiv::relight::Armed, &ext::ffxiv::relight::StageValues);
+    }
 } g_registerContactShadows;
 } // namespace

@@ -1,7 +1,7 @@
 #pragma once
 // Contact shadows before the sun light pass: the pass itself (ext/ffxiv/relight/shaders/ContactShadows.hlsl).
 //
-// Two draws on the game's own immediate context, inside a private device-context state (the pattern the other fork passes use, so no
+// Two draws on the game's own immediate context, between an explicit save and restore of the state they touch (ext/core/D3D11ExplicitState.h; so no
 // game binding is touched by them):
 //  1. the march, at half the render window, reading the draw's depth buffer and the camera's inverse projection (the light draw binds no
 //     view-position buffer) and writing the contact visibility;
@@ -23,14 +23,19 @@ namespace ext::ffxiv::relight
 // What one run needs: the draw's own resources, its measured sizes, the render window and the tuning keys.
 struct Inputs
 {
-    ID3D11ShaderResourceView* mask = nullptr;  // the draw's g_SamplerShadow (the screen-space mask)
+    ID3D11ShaderResourceView* mask = nullptr;  // the draw's screen-space mask (g_SamplerShadowMask or g_SamplerShadow)
     ID3D11ShaderResourceView* depth = nullptr; // the draw's g_SamplerDepth (the view position is reconstructed from it)
     ID3D11Buffer* lightParam = nullptr;        // the draw's g_LightParam
     ID3D11Buffer* cameraParam = nullptr;       // the draw's g_CameraParameter
-    uint32_t maskFormat = 0;
+    uint32_t maskFormat = 0; // the format the draw samples the mask in: a typeless texture's view is its family's typed member
     uint32_t maskWidth = 0, maskHeight = 0;
     Window window;
     Params params;
+    // Shadow mapping (ext/ffxiv/shadows), ext-internal: the mask lift rides this pass's combine (one copy per
+    // light draw, no second competing copy - the brief's composition rule). Zeros are the engine's own mask bytes,
+    // and only the combine reads them (the march is unchanged).
+    float maskLift = 0.0f;    // the effective remap lift (0 = the engine's own mask)
+    float maskSoftness = 0.0f; // the lift's tent reach in mask pixels (0 = the mask's own edges)
 };
 
 class Pass
@@ -87,7 +92,6 @@ class Pass
     uint32_t _timingBegins = 0, _timingEnds = 0;
     bool _haveGpuMs = false;
     double _gpuMs = 0.0;
-    Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _march;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _combine;

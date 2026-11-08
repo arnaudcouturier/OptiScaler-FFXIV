@@ -43,8 +43,8 @@
 //
 // Threading: Init, Remap and Release run on the thread that runs begin_effects (two possible paths: the HudLess UI-boundary
 // render_effects call and ReShade's own pass in Present). The process-wide context-state mutex (d3d11::ContextStateMutex) serializes
-// the swap-in .. draw .. swap-back sequence of OUR depth and G-buffer passes only (CharaEnhancePass.cpp and CharaGuides.cpp also swap
-// private context states without it). The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the pass
+// the swap-in .. draw .. swap-back sequence of OUR depth and G-buffer passes only (the chara passes do not swap any more: they save and
+// restore the game's state explicitly). The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the pass
 // 30 ms, not a freeze. On a timeout, before any state swap, Remap returns Failed (the add-on's binding is kept, the cache key is not
 // set), a pending recovery of a swap back returns false without counting an attempt, LockTimeouts() counts it and one line per minute
 // is logged. A cache hit swaps nothing and never takes the lock.

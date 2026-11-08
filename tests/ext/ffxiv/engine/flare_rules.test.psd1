@@ -1,0 +1,9 @@
+@{
+    Class       = 'cpu'
+    Note        = 'Lens flare rules (ext/ffxiv/engine/FlareRules.h): the four reflected names the card keys on with the kind of each (three constant buffers and the veil''s texture, never a CRC), the classification of the family''s own four pixel shaders on their real bytecodes (the ring, the sun, the ghost pass and the veil, each at the slot the capture records, the exposure-meter reader sharing the veil''s reflection), a layout that names two buffers refused, the veil''s name beside a constant buffer refused, a sampler-only sToneMap refused, the stamp''s packing (family in the high bits, the slot in the low eight, the veil''s 0xFF slot bits naming it), the three buffers as bound (64/128/16) and declared (48/80/16) with the capture''s technical offsets (+0x20 the ring''s colour, +0x40 the sun''s, +0x0C the ghost step''s .w), the three entries'' offsets and multipliers with the untouched components at 1, their fit against both widths, the parts bitfield (ring 1, sun+orbs 2, veil 4) clamped to its three bits, the three scale keys clamped 0..2 with a NaN reading as the engine''s own value and the epsilon that keeps a thousandth from being a look, the verdicts per family (the identity is the game''s own call, a part off asks its removal at 0, the sun''s patch at 0 orphaning the ghost step, the veil''s skip split from the exposure meters by the target''s size and refused on a replay), the counters'' bookkeeping (one streak at sixty-four, the runs that clear it), the log gate''s 32-line budget, and the lines a session reads back (the run line naming the part, the multiplier, the buffer''s bytes, name and slot; the keys line; the declines; the veil skip''s own reason)'
+    Sources     = @('flare_rules.cpp')
+    IncludeDirs = @('{repo}/OptiScaler')
+    Args        = @('{repo}')
+    Defines     = @('NOMINMAX')
+    Std         = 'c++20'
+}

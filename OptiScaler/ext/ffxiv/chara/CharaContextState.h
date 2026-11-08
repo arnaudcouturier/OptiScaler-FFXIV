@@ -1,7 +1,8 @@
 #pragma once
-// The flags a private device-context state is created with (the spatial AA and the DLSS guides both swap the game's context into a
-// state of their own). The state has to agree with the threading mode of the device: a device created single-threaded needs the
-// single-threaded flag on the state, otherwise the runtime may refuse it and the feature would fail for that setup only.
+// The flags a private device-context state is created with. The spatial AA and the DLSS guides no longer use one (they save and restore
+// the game's state explicitly, ext/core/D3D11ExplicitState.h); the ReShade depth and G-buffer copies still swap into a state of their own.
+// The state has to agree with the threading mode of the device: a device created single-threaded needs the single-threaded flag on the
+// state, otherwise the runtime may refuse it and the feature would fail for that setup only.
 
 #include <cstdint>
 

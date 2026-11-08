@@ -42,7 +42,7 @@ int main()
         const Params defaults = BuildParams(kDefaultLength, kDefaultStrength, kDefaultSteps, ParseSunSpace("auto"), ParseSunSign("auto"));
         CHECK_EQ(defaults.length, 0.5f);
         CHECK_EQ(defaults.strength, 0.5f);
-        CHECK_EQ(defaults.steps, 12u);
+        CHECK_EQ(defaults.steps, 32u);
         CHECK(defaults.space == SunSpace::View); // the measured space
         CHECK(defaults.sign == SunSign::Toward);
         // the clamps
@@ -52,7 +52,7 @@ int main()
         CHECK_EQ(ClampStrength(-0.5f), 0.0f);
         CHECK_EQ(ClampStrength(2.0f), 1.0f);
         CHECK_EQ(ClampSteps(0), 4u);
-        CHECK_EQ(ClampSteps(1000), 24u);
+        CHECK_EQ(ClampSteps(1000), 64u);
         CHECK_EQ(ClampSteps(12), 12u);
         // a key out of range never reaches the shader: the clamp is applied where the parameters are built
         const Params wild = BuildParams(100.0f, -3.0f, -1, SunSpace::View, SunSign::From);
@@ -123,8 +123,20 @@ int main()
         facts.maskSamples = 4;
         CHECK(Classify(facts) == Decline::MaskMsaa);
         facts = Good();
-        facts.maskFormat = 61; // DXGI_FORMAT_R8_UNORM: the cascade atlas
+        facts.maskFormat = 56; // DXGI_FORMAT_R16_UNORM: what the cascade atlas is sampled as (its texture is R16_TYPELESS, 53)
         CHECK(Classify(facts) == Decline::MaskFormat);
+        facts = Good();
+        facts.maskFormat = 53; // DXGI_FORMAT_R16_TYPELESS: the atlas' texture format
+        CHECK(Classify(facts) == Decline::MaskFormat);
+        facts = Good();
+        facts.maskFormat = 64; // DXGI_FORMAT_A8_UNORM: a single channel, but not a mask anyone measured
+        CHECK(Classify(facts) == Decline::MaskFormat);
+        facts = Good();
+        facts.maskFormat = 61; // DXGI_FORMAT_R8_UNORM: this game build's own screen-space mask
+        CHECK(Classify(facts) == Decline::None);
+        facts = Good();
+        facts.maskFormat = 60; // DXGI_FORMAT_R8_TYPELESS: the texture that view belongs to
+        CHECK(Classify(facts) == Decline::None);
         facts = Good();
         facts.maskWidth = 2048;
         facts.maskHeight = 10240; // the atlas' size, whatever its format says
@@ -165,6 +177,88 @@ int main()
         CHECK(classification.find("0.800") != std::string::npos);
         CHECK(classification.find("view space") != std::string::npos);
         CHECK(std::string(FormatSwitchedOff()).find("off for this session") != std::string::npos);
+    }
+
+    // ---- LIVE1 item 2: the format decline names the formats it saw, and the declines no longer spend the run line's budget
+    //
+    // The first rc7c session logged "left alone (the mask binding has an unexpected format)" 16 times against 14 run lines and read as half the sun
+    // draws declined. They were not sun draws: the shadow-mask builder (shader 0x1257B24B, four cascade draws and one near draw a frame) declares
+    // g_SamplerShadow too (a prefix of the mask's name) and binds the cascade atlas, a view of R16_UNORM (56) 2048x8192 / 2048x2048; it is looked at
+    // again every 3 seconds. The 32-line budget (16 + 16) was spent on the state flips between the two, not on draws.
+    {
+        CHECK_EQ(std::string(MaskFormatName(61)), std::string("R8_UNORM"));
+        CHECK_EQ(std::string(MaskFormatName(60)), std::string("R8_TYPELESS"));
+        CHECK_EQ(std::string(MaskFormatName(87)), std::string("B8G8R8A8_UNORM"));
+        CHECK_EQ(std::string(MaskFormatName(90)), std::string("B8G8R8A8_TYPELESS"));
+        CHECK_EQ(std::string(MaskFormatName(56)), std::string("R16_UNORM"));
+        CHECK_EQ(std::string(MaskFormatName(0)), std::string("unknown"));
+        CHECK_EQ(std::string(MaskFormatName(62)), std::string("another format"));
+
+        DrawFacts atlas;
+        atlas.hasMask = atlas.hasDepth = atlas.hasLightParam = atlas.hasCameraParam = true;
+        atlas.maskFormat = 56;        // the view the shadow-mask builder samples the atlas through
+        atlas.maskTextureFormat = 0;  // not looked at: the view format already refused it
+        atlas.maskWidth = 2048;
+        atlas.maskHeight = 8192;
+        atlas.depthWidth = atlas.displayWidth = 3840;
+        atlas.depthHeight = atlas.displayHeight = 2160;
+        CHECK(Classify(atlas) == Decline::MaskFormat);
+        const std::string line = FormatDeclineWithFacts(Decline::MaskFormat, atlas);
+        CHECK(line.find("Contact shadows: the draw was left alone") == 0);
+        CHECK(line.find("the mask binding has an unexpected format") != std::string::npos);
+        CHECK(line.find("R16_UNORM (56)") != std::string::npos);   // the format it saw
+        CHECK(line.find("2048x8192") != std::string::npos);        // and the size
+        CHECK(line.find("R8_UNORM (61)") != std::string::npos);    // the formats it wanted
+        CHECK(line.find("R8_TYPELESS (60)") != std::string::npos);
+        CHECK(line.find("B8G8R8A8_UNORM (87)") != std::string::npos);
+        CHECK(line.find("cascade shadow atlas") != std::string::npos);
+        CHECK(line.find('\\') == std::string::npos);
+
+        // the second MaskFormat site: the view is right, the texture behind it is another typed format of the family
+        DrawFacts odd = atlas;
+        odd.maskFormat = 61;
+        odd.maskTextureFormat = 62; // R8_UINT
+        odd.maskWidth = 3840;
+        odd.maskHeight = 2160;
+        const std::string pair = FormatDeclineWithFacts(Decline::MaskFormat, odd);
+        CHECK(pair.find("R8_UNORM (61)") != std::string::npos && pair.find("another format (62)") != std::string::npos);
+        CHECK(pair.find("3840x2160") != std::string::npos);
+
+        // the other reasons keep their plain line
+        CHECK_EQ(FormatDeclineWithFacts(Decline::MaskSize, atlas), FormatDecline(Decline::MaskSize));
+        CHECK_EQ(FormatDeclineWithFacts(Decline::StrengthZero, atlas), FormatDecline(Decline::StrengthZero));
+
+        // the decline gate: one line per distinct (reason, formats, size), a handful a session, and it never touches the run line's gate
+        DeclineLog declines;
+        const uint32_t atlasTag = DeclineTag(Decline::MaskFormat, &atlas);
+        CHECK(declines.Take(atlasTag));
+        CHECK(!declines.Take(atlasTag));
+        CHECK(atlasTag == DeclineTag(Decline::MaskFormat, &atlas));
+        DrawFacts smaller = atlas;
+        smaller.maskHeight = 2048; // the near cascade's 2048x2048 atlas slice
+        CHECK(DeclineTag(Decline::MaskFormat, &smaller) != atlasTag);
+        DrawFacts otherFormat = atlas;
+        otherFormat.maskFormat = 87;
+        CHECK(DeclineTag(Decline::MaskFormat, &otherFormat) != atlasTag);
+        CHECK(DeclineTag(Decline::MaskSize, &atlas) != atlasTag);
+        CHECK(DeclineTag(Decline::StrengthZero, nullptr) != DeclineTag(Decline::MaskSize, nullptr));
+        CHECK(declines.Take(DeclineTag(Decline::MaskFormat, &smaller)));
+        for (uint32_t i = 0; i < 100; ++i)
+            declines.Take(0x1000u + i);
+        CHECK_EQ(declines.count, kMaxDeclineLines); // the budget, counted
+        // 16 atlas inspections interleaved with 16 runs: the run line is written once (the old shared gate wrote 16 + 16 and ran dry at 32)
+        LogGate gate;
+        DeclineLog interleaved;
+        unsigned runLines = 0, declineLines = 0;
+        for (unsigned i = 0; i < 16; ++i)
+        {
+            if (interleaved.Take(DeclineTag(Decline::MaskFormat, &atlas)))
+                ++declineLines;
+            if (gate.Take(0x80000000u | (3840u << 11) | 2160u))
+                ++runLines;
+        }
+        CHECK_EQ(runLines, 1u);
+        CHECK_EQ(declineLines, 1u);
     }
 
     // ---- the log budget: one line per change of state, 32 a session at most
@@ -217,35 +311,96 @@ int main()
         CHECK(!IsShapeDecline(Decline::NoDepth));
     }
 
-    // ---- the half-resolution target of the march: half in each axis, never zero
+    // ---- the march's extent in the term target: the window's whole texels, never zero
     {
-        CHECK_EQ(HalfExtent(2560.0f), 1280u);
-        CHECK_EQ(HalfExtent(1440.0f), 720u);
-        CHECK_EQ(HalfExtent(1.0f), 1u);
-        CHECK_EQ(HalfExtent(3.0f), 1u);
-        CHECK_EQ(HalfExtent(4.0f), 2u);
-        CHECK_EQ(HalfExtent(1505.0f), 752u);
+        CHECK_EQ(TermExtent(1920.0f), 1920u);
+        CHECK_EQ(TermExtent(1080.0f), 1080u);
+        CHECK_EQ(TermExtent(0.5f), 1u);
+        CHECK_EQ(TermExtent(1505.5f), 1505u);
     }
 
-    // ---- the five reflected names are the ones the capture recorded
+    // ---- the reflected names are the ones the captures recorded, and the mask answers to both names the two measured builds use
     {
-        CHECK_EQ(std::string(kMaskSampler), std::string("g_SamplerShadow"));   // there is no g_SamplerShadowMask in this build
+        CHECK_EQ(std::string(kMaskSampler), std::string("g_SamplerShadow")); // the benchmark build's name for the mask
+        CHECK_EQ(std::string(kMaskSamplerAlternate), std::string("g_SamplerShadowMask")); // this game build's
         CHECK_EQ(std::string(kDepthSampler), std::string("g_SamplerDepth"));
         CHECK_EQ(std::string(kViewPositionSampler), std::string("g_SamplerViewPosition"));
         CHECK_EQ(std::string(kLightParamBuffer), std::string("g_LightParam"));
         CHECK_EQ(std::string(kCameraParamBuffer), std::string("g_CameraParameter"));
-        CHECK(IsMaskFormat(87));
+        CHECK(IsMaskName(kMaskSampler) && IsMaskName(kMaskSamplerAlternate));
+        CHECK(!IsMaskName("g_SamplerShadowMaskExtra")); // a name that merely starts with the mask's letters is another resource
+        CHECK(!IsMaskName("g_CloudShadowSampler"));
+        // The formats: BGRA measured on the benchmark build, R8 on this game build, whose texture is the typeless member of the same family.
+        CHECK(IsMaskFormat(87));  // B8G8R8A8_UNORM: the benchmark build's mask as its light draw sampled it
+        CHECK(IsMaskFormat(90));  // B8G8R8A8_TYPELESS: the texture that view belongs to
+        CHECK(IsMaskFormat(61));  // R8_UNORM: this build's mask as the light draw samples it
+        CHECK(IsMaskFormat(60));  // R8_TYPELESS: this build's mask as the engine creates it
+        CHECK(!IsMaskFormat(56)); // R16_UNORM: the cascade atlas' view
+        CHECK(!IsMaskFormat(53)); // R16_TYPELESS: the atlas' texture
         CHECK(!IsMaskFormat(28)); // R8G8B8A8_UNORM is the colour, not the mask
-        CHECK(!IsMaskFormat(61)); // R8_UNORM is the cascade atlas
+        CHECK(!IsMaskFormat(64)); // A8_UNORM is a single channel, but not a mask anyone measured
+        // A typeless texture is viewed through the typed member of its family, and only that view is the mask the pass multiplies.
+        CHECK(IsTypedMaskFormat(61) && IsTypedMaskFormat(87));
+        CHECK(!IsTypedMaskFormat(60) && !IsTypedMaskFormat(90));
+        CHECK(IsMaskR8(60) && IsMaskR8(61) && !IsMaskR8(87) && !IsMaskR8(90));
+        CHECK_EQ(TypedMaskFormat(60), 61u);
+        CHECK_EQ(TypedMaskFormat(90), 87u);
+        CHECK_EQ(TypedMaskFormat(61), 61u);
+        CHECK_EQ(TypedMaskFormat(87), 87u);
+        CHECK(IsMaskFormatPair(60, 61)); // this build: an R8_TYPELESS texture sampled through an R8_UNORM view
+        CHECK(IsMaskFormatPair(90, 87));
+        CHECK(IsMaskFormatPair(61, 61));
+        CHECK(!IsMaskFormatPair(60, 63)); // R8_SNORM of the same texture reads different numbers, so it is not the mask
+        CHECK(!IsMaskFormatPair(60, 62)); // nor is R8_UINT
+        CHECK(!IsMaskFormatPair(90, 91)); // nor the sRGB view of the BGRA texture
+        CHECK(!IsMaskFormatPair(53, 56)); // the atlas' own pair is not the screen mask's
+        CHECK(!IsMaskFormatPair(61, 87)); // nor is a texture of another family
+    }
+
+    // ---- the light draw this game build makes: an R8_UNORM mask at the draw's own size, the depth under it, both buffers beside it
+    {
+        DrawFacts facts;
+        facts.hasMask = facts.hasDepth = facts.hasLightParam = facts.hasCameraParam = true;
+        facts.maskFormat = 61;
+        facts.maskWidth = facts.maskHeight = 3840;
+        facts.maskWidth = 3840;
+        facts.maskHeight = 2160;
+        facts.depthWidth = 3840;
+        facts.depthHeight = 2160;
+        facts.displayWidth = 3840;
+        facts.displayHeight = 2160;
+        facts.window = { 0.5f, 0.5f, 1920.0f, 1080.0f }; // the 1920x1080 picture inside the 3840x2160 allocation
+        CHECK(Classify(facts) == Decline::None);
+        // The cascade atlas the same name belongs to, bound by the mask writer: its size and its format both refuse it.
+        DrawFacts atlas = facts;
+        atlas.maskFormat = 56;
+        atlas.maskWidth = 2048;
+        atlas.maskHeight = 8192;
+        CHECK(Classify(atlas) == Decline::MaskFormat);
+        atlas.maskFormat = 61; // even an R8_UNORM binding of the atlas' size is another draw than the screen mask
+        CHECK(Classify(atlas) == Decline::MaskSize);
     }
     // ---- the name scan that keeps the index filled while the key is off: only a shader that names the mask is parsed
     {
         const char* withMask = "...g_SamplerShadow.T...g_SamplerDepth.T...";
+        const char* withThisBuildsMask = "...g_SamplerShadowMask.T...g_SamplerDepth.T...";
         const char* without = "...g_Texture.T...g_MaterialParameter...";
         CHECK(MentionsMaskName(withMask, std::strlen(withMask)));
+        CHECK(MentionsMaskName(withThisBuildsMask, std::strlen(withThisBuildsMask))); // the shorter name is a prefix of this one
         CHECK(!MentionsMaskName(without, std::strlen(without)));
         CHECK(!MentionsMaskName(nullptr, 100));
         CHECK(!MentionsMaskName("g_SamplerShadow", 5)); // shorter than the name
+        // The exact-name scan the dump uses to tell this build's light draw from the atlas' writers.
+        CHECK(MentionsName(withThisBuildsMask, std::strlen(withThisBuildsMask), kMaskSamplerAlternate));
+        CHECK(!MentionsName(withMask, std::strlen(withMask), kMaskSamplerAlternate));
+        CHECK(!MentionsName(nullptr, 10, kMaskSampler));
+    }
+    // ---- the dump's mask files say which format their texels are, so an R8 dump's one byte per texel cannot be read as a colour word
+    {
+        CHECK(std::string(MaskDumpFile(/*r8*/ true, /*before*/ true)) == "mask-before.r8");
+        CHECK(std::string(MaskDumpFile(true, false)) == "mask-after.r8");
+        CHECK(std::string(MaskDumpFile(false, true)) == "mask-before.bgra8");
+        CHECK(std::string(MaskDumpFile(false, false)) == "mask-after.bgra8");
     }
 
     // ---- the camera layout: the products the reflected layout promises, and the refusal of anything else

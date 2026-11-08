@@ -2,10 +2,23 @@
 // Contact shadows before the sun light pass: the pure rules. No pch, no Windows, D3D or shader call, so every decision here is covered
 // by tests/ext/ffxiv/relight on the host.
 //
-// What the feature does, in one line: the engine builds a screen-space sun visibility mask (a B8G8R8A8_UNORM texture the size of the
-// display allocation, 0..1, accumulated with MIN) and the sun light draw samples it as `g_SamplerShadow`. A short march along the sun
-// direction over the view-position buffer finds the contact occlusion the cascade map cannot resolve (a character's shadow at its
-// feet, a prop on the ground), and the mask is multiplied by it in a private copy that is bound for that one draw.
+// What the feature does, in one line: the engine builds a screen-space sun visibility mask (the size of the display allocation, 0..1, one
+// visibility factor per texel, accumulated with MIN) and the sun light draw samples it, as `g_SamplerShadowMask` in this game build and as
+// `g_SamplerShadow` in the benchmark build the feature was designed on. The two builds also bind it in different formats: B8G8R8A8_UNORM in
+// the benchmark build, R8_UNORM in this one (the visibility in red, the only channel). A short march along the sun direction over the view
+// position, reconstructed from the depth, finds the contact occlusion the cascade map cannot resolve (a character's shadow at its feet, a prop
+// on the ground), and the mask is multiplied by it in a private copy that is bound for that one draw.
+//
+// The engine creates the mask's texture as the typeless member of its format's family and the light draw samples a typed view of it: this build's
+// mask is R8, the view the capture records is R8_UNORM (DXGI format 61) and the texture behind it is R8_TYPELESS (60). Both halves of that pair
+// are what the rules below accept, and the pass builds its own copy and views from the typed one.
+//
+// The mask's meaning is the benchmark build's convention (`1 = sunlit`, 0 = fully shadowed) and it is *assumed* for this build's R8 mask: the
+// captures hold the binding's name, format and size but not its texels, and the light shader's bytecode was not captured, so which value is
+// sunlit and which channel the shader reads are not measured. If this build's mask encodes the opposite (0 = lit), the term multiplies the
+// shadowed texels instead: the artefact would land on the sun's own shadows, which is plausible enough to survive a casual A/B, and nothing
+// fails open there because nothing is missing. `ContactShadowsDump` writes the mask's own texels and the mask-declaring shaders' bytecode,
+// kept from creation, so one session can settle both (docs/notes/contact-shadows.md says how).
 //
 // Everything that can be decided without a device lives here: which draw is a sun light draw, which of its texture bindings is the mask
 // (the cascade atlas shares the same reflected name, so only size and format tell them apart), whether the render window is usable, and
@@ -34,8 +47,8 @@ inline constexpr float kDefaultStrength = 0.5f;
 // Step budget, clamped: fewer than four cannot see a contact, more than 24 is no longer a "short" march and the per-pixel cost of the
 // half-resolution pass grows with it.
 inline constexpr int32_t kMinSteps = 4;
-inline constexpr int32_t kMaxSteps = 24;
-inline constexpr int32_t kDefaultSteps = 12;
+inline constexpr int32_t kMaxSteps = 64;
+inline constexpr int32_t kDefaultSteps = 32;
 
 // The sun vector's space: whether the game reports it in world space (then the view matrix turns it into view space) or already in view
 // space. The measurement this feature was built on found VIEW space: the direction the game reports changed with the camera while
@@ -103,7 +116,7 @@ enum class Decline : uint8_t
     None = 0,
     FeatureOff,          // the key is off, or the module switched itself off for the session
     StrengthZero,        // ContactShadowsStrength = 0: no term to apply
-    NoMask,              // the draw declares no g_SamplerShadow
+    NoMask,              // the draw declares neither name of the screen-space mask
     NoDepth,             // no g_SamplerDepth
     NoViewPosition,      // no g_SamplerViewPosition (no longer a refusal: the position comes from the depth)
     NoLightParam,        // no g_LightParam constant buffer
@@ -111,7 +124,7 @@ enum class Decline : uint8_t
     MaskNotA2D,          // the binding is not a single-sample 2D texture
     MaskMsaa,            // multisampled
     MaskArrayOr3D,       // a texture array or a volume view
-    MaskFormat,          // not an 8-bit colour format: the cascade atlas (R8_UNORM) or anything else
+    MaskFormat,          // not the screen mask's 8-bit format, or a view of its texture in another typed format: the cascade atlas or anything else
     MaskSize,            // not the display allocation's size
     DepthSize,           // the depth binding is not the mask's size
     ViewPositionSize,    // the view-position binding is not the mask's size
@@ -134,7 +147,7 @@ constexpr const char* DeclineName(Decline reason) noexcept
     case Decline::None: return "run";
     case Decline::FeatureOff: return "the key is off";
     case Decline::StrengthZero: return "ContactShadowsStrength is 0";
-    case Decline::NoMask: return "the draw declares no g_SamplerShadow";
+    case Decline::NoMask: return "the draw declares no g_SamplerShadow or g_SamplerShadowMask";
     case Decline::NoDepth: return "the draw declares no g_SamplerDepth";
     case Decline::NoLightParam: return "the draw declares no g_LightParam";
     case Decline::NoCameraParam: return "the draw declares no g_CameraParameter";
@@ -159,40 +172,99 @@ constexpr const char* DeclineName(Decline reason) noexcept
 
 // ---- the draw --------------------------------------------------------------------------------------------------------
 
-// The format a mask must have. B8G8R8A8_UNORM is what the capture measured for the screen-space mask and for the engine's own AO
-// buffer; an R8_UNORM binding of the same name is the cascade atlas and is rejected by format *and* by size.
-inline constexpr bool IsMaskFormat(uint32_t format) noexcept { return format == 87u; } // DXGI_FORMAT_B8G8R8A8_UNORM
+// The formats a mask may have: this game build's screen-space sun mask is R8_UNORM (one visibility factor per texel, the light draw samples it
+// as g_SamplerShadowMask) and the benchmark build this feature was designed on had it as B8G8R8A8_UNORM (the same factor in red, sampled as
+// g_SamplerShadow). The engine creates the mask's texture as the typeless member of that family and binds a typed view of it, so the texture's
+// format and the view's are both needed: R8_TYPELESS (60) with an R8_UNORM (61) view, or B8G8R8A8_TYPELESS (90) with a B8G8R8A8_UNORM (87) view.
+// The numbers are the DXGI_FORMAT values of dxgiformat.h, spelled out because this header is built on the host, without D3D.
+// The cascade atlas the same reflected name belongs to is R16_TYPELESS (53) sampled as R16_UNORM (56): refused by format *and* by size, so
+// accepting the screen mask's family here does not accept the atlas.
+inline constexpr uint32_t kMaskFormatR8Typeless = 60;   // DXGI_FORMAT_R8_TYPELESS: the texture of an R8_UNORM mask
+inline constexpr uint32_t kMaskFormatR8 = 61;           // DXGI_FORMAT_R8_UNORM: this build's mask as the light draw samples it
+inline constexpr uint32_t kMaskFormatBgra = 87;         // DXGI_FORMAT_B8G8R8A8_UNORM: the benchmark build's mask
+inline constexpr uint32_t kMaskFormatBgraTypeless = 90; // DXGI_FORMAT_B8G8R8A8_TYPELESS: the texture of that mask
+
+// Any format a mask's texture or the view of it may carry.
+constexpr bool IsMaskFormat(uint32_t format) noexcept
+{
+    return format == kMaskFormatR8 || format == kMaskFormatR8Typeless || format == kMaskFormatBgra ||
+           format == kMaskFormatBgraTypeless;
+}
+
+// The typed member of the family: the only format an SRV, an RTV or a copy of the mask may be built with, because D3D11 refuses to create a view
+// with a typeless format. One visibility factor per texel for the R8 family, which is what the pass's copy and the dump's one byte per texel mean.
+constexpr bool IsTypedMaskFormat(uint32_t format) noexcept { return format == kMaskFormatR8 || format == kMaskFormatBgra; }
+constexpr bool IsMaskR8(uint32_t format) noexcept { return format == kMaskFormatR8 || format == kMaskFormatR8Typeless; }
+constexpr uint32_t TypedMaskFormat(uint32_t format) noexcept
+{
+    return IsMaskR8(format) ? kMaskFormatR8 : (format == kMaskFormatBgraTypeless ? kMaskFormatBgra : format);
+}
+
+// The mask's texture format and the format of the view the draw binds, together. A typeless texture can be viewed in any format of its family,
+// and only the typed member is the sun visibility the pass multiplies: an R8_TYPELESS texture sampled as R8_SNORM or R8_UINT reads other numbers,
+// so the pair is a mask only when the view is the family's typed member and the texture belongs to that same family.
+constexpr bool IsMaskFormatPair(uint32_t textureFormat, uint32_t viewFormat) noexcept
+{
+    return IsMaskFormat(textureFormat) && IsTypedMaskFormat(viewFormat) && TypedMaskFormat(textureFormat) == viewFormat;
+}
 
 // The reflected names this feature depends on. A draw is a sun light draw when its pixel shader declares the mask, the depth and the two
-// constant buffers. A view-position binding is NOT required: the sun light draw of the shipped build does not bind one (the capture shows
-// g_SamplerDepth and g_SamplerShadow but no g_SamplerViewPosition), so the pass reconstructs the position from the depth and the camera's
-// inverse projection instead.
-inline constexpr const char* kMaskSampler = "g_SamplerShadow";inline constexpr const char* kDepthSampler = "g_SamplerDepth";
+// constant buffers. The mask's name is the one this game build's own light pass uses, `g_SamplerShadowMask`; the benchmark build the feature
+// was designed on named the same binding `g_SamplerShadow`, and that name is kept because it is what the cascade atlas reader also declares
+// and a name is the only handle the reflection gives: the shape rules above tell the screen-space mask from the atlas. A view-position binding
+// is NOT required: neither light draw binds one (the capture shows the mask and g_SamplerDepth), so the pass reconstructs the position from
+// the depth and the camera's inverse projection instead.
+inline constexpr const char* kMaskSampler = "g_SamplerShadow";
+inline constexpr const char* kMaskSamplerAlternate = "g_SamplerShadowMask";
+inline constexpr const char* kDepthSampler = "g_SamplerDepth";
 inline constexpr const char* kViewPositionSampler = "g_SamplerViewPosition"; // not required; kept named because a patch could add one
 inline constexpr const char* kLightParamBuffer = "g_LightParam";
 inline constexpr const char* kCameraParamBuffer = "g_CameraParameter";
 
-// Whether a pixel shader's bytecode can be a sun light draw at all: it must name the mask. This byte scan is what lets the index be filled
-// whatever the key says - the shaders of a session are created long before the menu can be reached - while the reflection parse itself
-// runs only for the few shaders whose bytes contain the mask's name. The names arrive as the effect compiler writes them
-// (`g_SamplerShadow.T`), so the plain name is a prefix of what the blob holds.
-inline bool MentionsMaskName(const void* code, size_t size) noexcept
+// Which of the light draws that carry the four names is the sun (2026-11-07, the rc6 captures' draws.csv): the four names alone also match
+// the shadowed point and spot lights (they sample a shadow texture of their own beside the depth, g_LightParam and the camera), and their
+// light colours then fed shadow mapping's night curve, which flickered in daylight. Only a directional light draw - the sun, or the moon at
+// night - declares the cascade parameters g_DirectionalShadowParameter; of those, the main view's also declares g_FakeSpecularParam on this
+// game build (the character view's light does not, and the 2024 benchmark build declares it nowhere).
+inline constexpr const char* kDirectionalShadowBuffer = "g_DirectionalShadowParameter";
+inline constexpr const char* kFakeSpecularBuffer = "g_FakeSpecularParam";
+
+// Whether a served sun light draw's g_LightParam feeds the night curve's colour: the main view's draw (fake specular) when the session has
+// indexed such a shader, every directional draw when it has not (a build that declares the buffer nowhere keeps the earlier behaviour).
+constexpr bool FeedsNightColour(bool fakeSpecular, bool anyFakeSpecularIndexed) noexcept
 {
-    constexpr char needle[] = "g_SamplerShadow";
-    constexpr size_t length = sizeof needle - 1;
-    if (code == nullptr || size < length)
+    return fakeSpecular || !anyFakeSpecularIndexed;
+}
+
+// Whether a reflected variable is the screen-space mask under either of the names the two measured builds use. The comparison is exact: a
+// name that merely starts with the mask's letters (a variant this pass does not know, such as a cloud shadow mask) is another resource.
+// A shader that declared both names is read at the first one its reflection lists (ReflectionIndex.cpp); no shader of this build declares both
+// - the 16 that declare `g_SamplerShadow` are the cascade atlas' readers, and the light draw's binding is named `g_SamplerShadowMask` in the
+// view names (`draws.csv`), its own reflection not captured - so where that shader would sit is unmeasured.
+inline constexpr bool IsMaskName(std::string_view name) noexcept
+{
+    return name == kMaskSampler || name == kMaskSamplerAlternate;
+}
+
+// Whether a pixel shader's bytecode contains `name` as a byte string. The names arrive as the effect compiler writes them (`g_SamplerShadow.T`,
+// `g_SamplerShadowMask.T`), so a scan for the plain name finds a declaration of it and the texel-dump's scan for the longer name tells the
+// light draw's shader from the atlas' writers.
+inline bool MentionsName(const void* code, size_t size, std::string_view name) noexcept
+{
+    if (code == nullptr || name.empty() || size < name.size())
         return false;
     const auto* bytes = static_cast<const unsigned char*>(code);
-    for (size_t i = 0; i + length <= size; ++i)
-    {
-        size_t j = 0;
-        while (j < length && bytes[i + j] == static_cast<unsigned char>(needle[j]))
-            ++j;
-        if (j == length)
+    for (size_t i = 0; i + name.size() <= size; ++i)
+        if (bytes[i] == static_cast<unsigned char>(name[0]) && std::string_view(reinterpret_cast<const char*>(bytes) + i, name.size()) == name)
             return true;
-    }
     return false;
 }
+
+// Whether a pixel shader's bytecode can be a sun light draw at all: it must name the mask. This byte scan is what lets the index be filled
+// whatever the key says - the shaders of a session are created long before the menu can be reached - while the reflection parse itself
+// runs only for the few shaders whose bytes contain the mask's name. The shorter name's scan finds both of them, because the longer one starts
+// with it.
+inline bool MentionsMaskName(const void* code, size_t size) noexcept { return MentionsName(code, size, kMaskSampler); }
 
 // The render window of the draw, in the mask's pixels.
 struct Window
@@ -203,7 +275,8 @@ struct Window
 struct DrawFacts
 {
     bool hasMask = false, hasDepth = false, hasViewPosition = false, hasLightParam = false, hasCameraParam = false;
-    uint32_t maskFormat = 0;
+    uint32_t maskFormat = 0;        // the format the draw's view samples the mask in
+    uint32_t maskTextureFormat = 0; // the format the mask's texture was created with (the engine's is typeless); the pair check is the device side's
     uint32_t maskWidth = 0, maskHeight = 0;
     uint32_t depthWidth = 0, depthHeight = 0;
     uint32_t viewPositionWidth = 0, viewPositionHeight = 0;
@@ -235,7 +308,7 @@ constexpr Decline Classify(const DrawFacts& facts) noexcept
     if (facts.maskWidth == 0 || facts.maskHeight == 0)
         return Decline::MaskNotA2D;
     // The screen-space mask is the size of the display allocation, so it is the size of the draw's full-resolution depth binding.
-    // The cascade atlas (2048x10240) fails this and the format test; nothing in this list ever binds the atlas by accident.
+    // The cascade atlas (2048x8192 in this build) fails this and the format test; nothing in this list ever binds the atlas by accident.
     if (!SameSize(facts.maskWidth, facts.maskHeight, facts.displayWidth, facts.displayHeight) || !facts.depthWidth || !facts.depthHeight)
         return Decline::MaskSize;
     if (facts.window.width < 1.0f || facts.window.height < 1.0f)
@@ -247,11 +320,10 @@ constexpr Decline Classify(const DrawFacts& facts) noexcept
     return Decline::None;
 }
 
-// The half-resolution target of the march from the window: half in each axis, at least one pixel.
-constexpr uint32_t HalfExtent(float pixels) noexcept
+// The march's extent in the term target, from the window's: its whole texels, at least one.
+constexpr uint32_t TermExtent(float pixels) noexcept
 {
-    const float half = pixels * 0.5f;
-    const uint32_t rounded = uint32_t(half);
+    const uint32_t rounded = uint32_t(pixels);
     return rounded < 1 ? 1 : rounded;
 }
 
@@ -329,11 +401,11 @@ constexpr bool CameraLayoutOk(const float* rows, size_t count) noexcept
 }
 
 // A refusal about the draw's *shape*: the indexed shader binds something other than the screen-space mask. The cascade atlas writer declares
-// the same four names as the sun light draw and binds the 2048x10240 atlas instead, so its draws reach the classification on every shadow
-// pass and are refused there. Those refusals say "this is a different draw", not "this build lost a binding": they are logged once, the
-// draw is skipped from then on (Inject.cpp remembers it for a few seconds, because a resolution change re-creates the mask and the new one
-// must be looked at again), and they do not count towards the switch-off below. A camera buffer that is not the layout the shaders read is
-// the same kind of answer: it is judged again after a few seconds rather than switching the feature off for the session.
+// the same names as the light draw and binds the 2048x8192 atlas instead, so its draws reach the classification on every shadow pass and are
+// refused there. Those refusals say "this is a different draw", not "this build lost a binding": they are logged once, the draw is skipped
+// from then on (Inject.cpp remembers it for a few seconds, because a resolution change re-creates the mask and the new one must be looked at
+// again), and they do not count towards the switch-off below. A camera buffer that is not the layout the shaders read is the same kind of
+// answer: it is judged again after a few seconds rather than switching the feature off for the session.
 inline constexpr bool IsShapeDecline(Decline reason) noexcept
 {
     switch (reason)
@@ -351,14 +423,14 @@ inline constexpr bool IsShapeDecline(Decline reason) noexcept
 }
 
 // How long a remembered shape refusal keeps a shader's draws out of the classification. A resolution change re-creates the mask within a
-// frame or two; the atlas writer, whose draws are refused for their size, is looking at a 2048x10240 binding that no resolution change
+// frame or two; the atlas writer, whose draws are refused for their size, is looking at a 2048x8192 binding that no resolution change
 // touches. Three seconds is long enough that the atlas writer's weightless refusals cost one inspection every few seconds and short enough
 // that a re-created mask is picked up while a cutscene is still loading.
 inline constexpr double kShapeRefusalSeconds = 3.0;
 
 // Whether a remembered shape refusal still keeps this shader's draws out of the classification. A refusal is looked at again once it is
 // older than kShapeRefusalSeconds, so a re-created mask (a resolution change) is picked up within a few frames while the atlas writer, whose
-// 2048x10240 binding no resolution change touches, still costs one inspection every few seconds instead of one per shadow pass.
+// 2048x8192 binding no resolution change touches, still costs one inspection every few seconds instead of one per shadow pass.
 constexpr bool ShapeRefusalActive(int64_t refusedQpc, int64_t nowQpc, int64_t frequency) noexcept
 {
     if (refusedQpc <= 0 || frequency <= 0 || nowQpc < refusedQpc)
@@ -474,15 +546,35 @@ inline std::string FormatCost(const CostMeter& draws, uint64_t drawsSeen, const 
 // [FFXIV] ContactShadowsDump is an integer, ini only, off by default: the seconds after the game starts at which the first sun light draw
 // that runs is written out, with its mask before and after the pass, the term, the depth and the camera and sun bytes. One frame, once per
 // session. The files land in OptiScaler\contact-dump\<date-time>\ beside the DLL.
+//
+// The mask's files carry the mask's own format, one byte per texel for R8_UNORM and four for B8G8R8A8_UNORM (`PixelBytes` in
+// ContactShadowsDump.cpp), and the file's name says which: the mask's meaning (which level is sunlit) is the one thing this dump exists to
+// settle for a build whose convention is only assumed.
+//
+// The same delay also keeps the bytecode of the shaders that declare a mask name from the moment the game creates them: the game's light shader
+// is created while it loads, long before the dump's draw, so a capture of that draw alone never holds it, and the channel it reads is the other
+// half of the mask's meaning. Bounded so a build whose mask name many shaders declare cannot grow this without limit.
 inline constexpr int32_t kMaxDumpDelaySeconds = 3600;
 inline constexpr const char* kDumpFolder = "contact-dump";
-inline constexpr const char* kDumpMaskBeforeFile = "mask-before.bgra8";
+inline constexpr const char* kDumpMaskBeforeFile = "mask-before.bgra8";   // the B8G8R8A8 name; the R8 dump is mask-before.r8
+inline constexpr const char* kDumpMaskBeforeFileR8 = "mask-before.r8";
 inline constexpr const char* kDumpTermFile = "term.r8";
 inline constexpr const char* kDumpMaskAfterFile = "mask-after.bgra8";
+inline constexpr const char* kDumpMaskAfterFileR8 = "mask-after.r8";
 inline constexpr const char* kDumpDepthFile = "depth.r32";
 inline constexpr const char* kDumpCameraFile = "camera.bin";
 inline constexpr const char* kDumpSunFile = "sun.bin";
 inline constexpr const char* kDumpFactsFile = "facts.txt";
+inline constexpr uint32_t kMaxKeptShaders = 32;            // how many shaders the dump keeps from creation
+inline constexpr size_t kMaxKeptShaderBytes = 128 * 1024;  // one shader's bytecode
+inline constexpr size_t kMaxKeptBytes = 512 * 1024;        // and all of them together
+
+// The dump's mask file name: what the texels are, said by the file's own suffix, so a reader cannot mistake an R8 dump's one byte per texel for a
+// B8G8R8A8 word.
+constexpr const char* MaskDumpFile(bool r8, bool before) noexcept
+{
+    return before ? (r8 ? kDumpMaskBeforeFileR8 : kDumpMaskBeforeFile) : (r8 ? kDumpMaskAfterFileR8 : kDumpMaskAfterFile);
+}
 
 // The dump is due once: the key holds a delay of at least one second (0 = off), the session has not written a dump yet, and the delay has
 // passed since the config load. A delay of zero is "off" and never writes, which keeps the key's default free of any work.
@@ -550,6 +642,66 @@ inline std::string FormatDecline(Decline reason)
 {
     return std::format("Contact shadows: the draw was left alone ({})", DeclineName(reason));
 }
+
+// The DXGI names of the formats a mask-sampler binding can show in this module's logs; any other number prints as "another format" next to the number.
+constexpr const char* MaskFormatName(uint32_t format) noexcept
+{
+    switch (format)
+    {
+    case 0: return "unknown";
+    case 56: return "R16_UNORM";
+    case kMaskFormatR8Typeless: return "R8_TYPELESS";
+    case kMaskFormatR8: return "R8_UNORM";
+    case kMaskFormatBgra: return "B8G8R8A8_UNORM";
+    case kMaskFormatBgraTypeless: return "B8G8R8A8_TYPELESS";
+    default: break;
+    }
+    return "another format";
+}
+
+// The decline line with what the draw bound, for the reasons that are about the mask's shape. LIVE1 (2026-11-07): the first rc7c session's 16 lines
+// read "the mask binding has an unexpected format" and nothing else. The draws behind them were the shadow-mask builder's, which declares
+// g_SamplerShadow (a prefix of this build's mask name `g_SamplerShadowMask`) and samples the cascade atlas through an R16_UNORM (56) view.
+inline std::string FormatDeclineWithFacts(Decline reason, const DrawFacts& facts)
+{
+    if (reason != Decline::MaskFormat)
+        return FormatDecline(reason);
+    return std::format("Contact shadows: the draw was left alone ({}: the draw's view is {} ({}) on a texture of {} ({}), {}x{}; the sun mask is an R8_UNORM (61) view "
+                       "of an R8_TYPELESS (60) texture in this build, a B8G8R8A8_UNORM (87) view of a B8G8R8A8_TYPELESS (90) one in the benchmark build; an R16_UNORM (56) "
+                       "view is the cascade shadow atlas, which the shadow-mask builder declares under the same sampler name and which is skipped on purpose)",
+                       DeclineName(reason), MaskFormatName(facts.maskFormat), facts.maskFormat, MaskFormatName(facts.maskTextureFormat),
+                       facts.maskTextureFormat, facts.maskWidth, facts.maskHeight);
+}
+
+// The decline lines' own budget: one line per distinct refusal (the reason plus, for a mask-shape refusal, the formats and the size it saw), a handful a
+// session. The shared LogGate above writes a line per CHANGE of state, so a shape refusal that comes back every kShapeRefusalSeconds (the cascade
+// atlas reader) and the run line between them spent the 32 lines on flips (16 + 16 in the first rc7c session).
+inline constexpr unsigned kMaxDeclineLines = 8;
+
+constexpr uint32_t DeclineTag(Decline reason, const DrawFacts* facts) noexcept
+{
+    uint32_t tag = 0x20000000u ^ (uint32_t(reason) * 0x9E3779B1u);
+    if (facts != nullptr)
+        tag ^= facts->maskFormat * 0x85EBCA6Bu ^ facts->maskTextureFormat * 0xC2B2AE35u ^ facts->maskWidth * 0x27D4EB2Fu ^ facts->maskHeight * 0x165667B1u;
+    return tag;
+}
+
+struct DeclineLog
+{
+    uint32_t seen[kMaxDeclineLines] {};
+    unsigned count = 0;
+
+    bool Take(uint32_t tag) noexcept
+    {
+        for (unsigned i = 0; i < count; ++i)
+            if (seen[i] == tag)
+                return false;
+        if (count >= kMaxDeclineLines)
+            return false;
+        seen[count++] = tag;
+        return true;
+    }
+};
 
 inline std::string FormatRun(const Params& params, uint32_t maskWidth, uint32_t maskHeight, float windowWidth, float windowHeight,
                              bool haveGpuMilliseconds, double gpuMilliseconds)

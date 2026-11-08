@@ -148,13 +148,19 @@ int Run()
     ext::SetActive(ext::F::Plate, true);
     NewFrame(1, FrameMode::Declined);
     ResetCounts();
+    const auto beforeDeclined = ext::ffxiv::plates::Snapshot();
     CHECK(!GameDraw());
     CHECK(g_nativeDraws == 1 && g_slotDraws == 0);
     CHECK(ext::hudless::plates::AskCount() == 1);
     CHECK(!GameDraw());
     CHECK(g_nativeDraws == 2);
     CHECK(ext::hudless::plates::AskCount() == 1); // latched: no second ask in the same frame
-    // ... and the later draw of a declined frame costs no state read and no redirect attempt.
+    // ... and the later draw of a declined frame costs no state read and no redirect attempt: the frame's answer is a
+    // declined reservation, so every draw after the first is a native draw without a Get* pass. Two draws are seen, one
+    // reads the state.
+    const auto afterDeclined = ext::ffxiv::plates::Snapshot();
+    CHECK(afterDeclined.drawsSeen - beforeDeclined.drawsSeen == 2);
+    CHECK(afterDeclined.drawsMatched - beforeDeclined.drawsMatched == 1);
     CHECK(ext::ffxiv::plates::Snapshot().drawsFallback == 0);
     // The reservation carried the game's own target size and format.
     CHECK(ext::hudless::plates::LastWidth() == rig.Width() && ext::hudless::plates::LastHeight() == rig.Height());

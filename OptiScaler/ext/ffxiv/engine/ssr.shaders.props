@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Screen-space reflection shaders (ext\ffxiv\engine\shaders\Ssr.hlsl). One source, three entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by SsrPass.cpp and by
+  SsrRules.h; change them together. The camera registers are the contact shadow pass's own header (ext\ffxiv\relight\shaders\CameraRegisters.h),
+  found through the -I below, so the two passes cannot state different layouts.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ssr.hlsl">
+      <Variable>Ssr_Vs_cso</Variable>
+      <Header>Ssr_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ssr.hlsl">
+      <Variable>Ssr_Ssr_cso</Variable>
+      <Header>Ssr_Ssr.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Ssr</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ssr.hlsl">
+      <Variable>Ssr_Final_cso</Variable>
+      <Header>Ssr_Final.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_SsrFinal</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+  </ItemGroup>
+</Project>

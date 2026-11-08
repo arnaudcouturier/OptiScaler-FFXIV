@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Engine light controls: the exposure hold's shaders (ext\ffxiv\enginelight\shaders\ExposureHold.hlsl). One source, two entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layouts in the .hlsl are mirrored by EngineLightPass.cpp; change them together.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ExposureHold.hlsl">
+      <Variable>ExposureHold_Vs_cso</Variable>
+      <Header>ExposureHold_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ExposureHold.hlsl">
+      <Variable>ExposureHold_Hold_cso</Variable>
+      <Header>ExposureHold_Hold.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Hold</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Effect meter shaders (ext\ffxiv\meter\shaders\Meter.hlsl). One source, two entry points, each compiled by fxc -O3 into a header in $(IntDir)ext_gen\ (never
+  committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by MeterPass.cpp; change them together. This file is the meter's own: it
+  shares no shader source with the stages.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Meter.hlsl">
+      <Variable>Meter_Vs_cso</Variable>
+      <Header>Meter_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Meter.hlsl">
+      <Variable>Meter_Ps_cso</Variable>
+      <Header>Meter_Ps.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS</Entry>
+      <Args>/Gis</Args>
+    </ExtShader>
+  </ItemGroup>
+</Project>

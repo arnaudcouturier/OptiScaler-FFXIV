@@ -1,0 +1,47 @@
+#pragma once
+// Stand-in for the product config in the screen-space reflections tests: the five reflection keys, the engine pass overrides' master and the
+// character-preview keys the draw seam's own inline gate reads, all at the shipped defaults, so the module's publish path and its draw path can be
+// driven without the ini reader.
+#include <cstdint>
+
+namespace ext
+{
+template <class T> struct OptionalValue
+{
+    T value {};
+    T value_or_default() const { return value; }
+};
+
+// The character preview's keys: only the ones its inline gate reads, at the defaults a session with the preview off has.
+struct CharaFfxivConfig
+{
+    OptionalValue<bool> previewAA { false };
+    OptionalValue<bool> previewDlss { false };
+    OptionalValue<bool> previewNr { false };
+    OptionalValue<bool> previewProbe { false };
+    OptionalValue<bool> previewDebugFlood { false };
+};
+
+struct FfxivConfig
+{
+    OptionalValue<bool> screenSpaceReflections { false }; // the card's master switch
+    OptionalValue<int32_t> screenSpaceReflectionsSteps { 48 };
+    OptionalValue<float> screenSpaceReflectionsThickness { 0.3f };
+    OptionalValue<float> screenSpaceReflectionsBlend { 1.0f };
+    OptionalValue<float> screenSpaceReflectionsFade { 0.1f };
+    OptionalValue<bool> enginePassOverrides { false }; // the master switch of the module next door, which this card publishes through
+    CharaFfxivConfig chara;
+    static inline void (*screenSpaceReflectionsOnLoaded)(bool) = nullptr; // end of every config load (the card's Publish)
+};
+
+struct ExtConfig
+{
+    FfxivConfig ffxiv;
+};
+
+inline ExtConfig& Cfg()
+{
+    static ExtConfig config;
+    return config;
+}
+} // namespace ext

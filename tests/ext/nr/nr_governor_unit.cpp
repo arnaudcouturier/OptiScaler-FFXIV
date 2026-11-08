@@ -1372,6 +1372,64 @@ void ZeroBasedClockGap()
     CHECK(w.StepTimes().empty()); // and nothing stepped on it
 }
 
+// The count coming back after the bound is a transition like an applied size: the samples taken while it was assumed
+// belong to the old convention and are dropped, so the tier is never stepped on the rate the freeze read (the
+// multiplier read as 1, while the live rate is twice that).
+void CountReturnIsATransition()
+{
+    // A feature that reports itself active without a count: the governor waits kWaitingCountMs, then regulates on the
+    // present rate with the multiplier read as 1. That switch of convention is a transition like an applied size, so the
+    // samples the freeze read are dropped and the tier is not stepped on them. The step below has to come a full window
+    // later; starting to regulate with the old samples would step about a second early.
+    {
+        World bounded;
+        bounded.fgFeature = true;
+        bounded.rate = 51.0; // below the target at 1x
+        bounded.Run(7000);   // one step down to 90 on the real count, and past that step's own transition
+        CHECK(bounded.log.back().tierPct == 90);
+        const std::vector<uint64_t> before = bounded.StepTimes();
+        CHECK(before.size() == 1);
+        bounded.fgActive = true;
+        bounded.multiplier = 0.0; // the count never arrives
+        const uint64_t missing = bounded.t;
+        bounded.Run(kWaitingCountMs + kDiscardMs + kSeedMs + kStepDownDwellMs + 2000);
+        const uint64_t assumed = missing + kWaitingCountMs; // the bound: regulating from here
+        const std::vector<uint64_t> steps = bounded.StepTimes();
+        CHECK(steps.size() == before.size() + 1); // the assumed regulation does step, once
+        if (steps.size() == before.size() + 1)
+            CHECK(steps.back() >= assumed + kDiscardMs + kSeedMs + kStepDownDwellMs); // after a full window and dwell
+    }
+
+    // The count coming back after the bound is the same kind of transition: the samples taken while it was assumed
+    // belong to the old convention, so the tier is not stepped on the rate the freeze read (the multiplier read as 1,
+    // while the live rate is twice that).
+    {
+        World w;
+        w.fgFeature = true;
+        w.rate = 51.0; // below the target at 1x: the real count steps the tier down
+        w.Run(5000);
+        CHECK(w.log.back().tierPct == 90); // one step down on the real count
+        w.fgActive = true;
+        w.multiplier = 0.0;
+        w.Run(kWaitingCountMs + kDiscardMs + kSeedMs + kStepDownDwellMs - 100);
+        CHECK(w.log.back().tierPct == 90); // the assumed path has not stepped yet
+        const std::vector<uint64_t> before = w.StepTimes();
+        // The count comes back: the rate doubles, which is above the target. A step inside the window would judge the
+        // samples the freeze read, not the live rate.
+        w.multiplier = 2.0;
+        const uint64_t resumed = w.t;
+        w.Run(kDiscardMs + kSeedMs); // exactly the window the count's return opens
+        CHECK(w.StepTimes() == before); // nothing stepped inside it
+        CHECK(w.log.back().tierPct == 90); // the tier held through the transition
+        w.Run(12000);
+        CHECK(w.log.back().tierPct == 100); // and the live rate (above the target) probes the tier back up
+        const std::vector<uint64_t> steps = w.StepTimes();
+        CHECK(steps.size() == before.size() + 1);
+        if (steps.size() == before.size() + 1)
+            CHECK(steps.back() - resumed >= kDiscardMs + kSeedMs + kUpDwellBaseMs); // a full window, then the up dwell
+    }
+}
+
 // A pause whose first tick also takes a transient exit shifts the timers once, not twice: the gap block pins the
 // clock before the exit runs. A second shift would move the whole transition two pauses into the future.
 void GapThenTransientShiftsOnce()
@@ -1429,6 +1487,7 @@ int main()
     NoiseAroundLines();
     SpikeClipBothWays();
     ZeroBasedClockGap();
+    CountReturnIsATransition();
     GapThenTransientShiftsOnce();
     ConstantsAndStatus();
     if (failures != 0)

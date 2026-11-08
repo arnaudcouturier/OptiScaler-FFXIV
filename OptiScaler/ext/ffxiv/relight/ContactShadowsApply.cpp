@@ -3,7 +3,10 @@
 #include "ext/ffxiv/relight/Inject.h"
 
 #include "ext/ffxiv/diag/ShaderBindings.h" // the DXBC RDEF reader the developer draw diagnostic already uses
+#include "ext/ffxiv/diag/StageDump.h" // the per-stage image dump: this stage reports its run and its pictures on the capture frame
+#include "ext/ffxiv/enginelight/ActiveSwap.h" // the engine light controls' swapped light buffer: this pass reads the engine's (header only)
 #include "ext/ffxiv/relight/shaders/CameraRegisters.h"
+#include "ext/ffxiv/shadows/ShadowsHooks.h" // ext: shadow mapping rides this pass's combine (one copy per light draw) and feeds on this draw
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -39,11 +42,12 @@ int64_t QpcFrequency()
 
 double SecondsBetween(int64_t from, int64_t to) { return from <= 0 ? 0.0 : double(to - from) / double(QpcFrequency()); }
 
-// One bound texture of the draw, as the classification needs it.
+// One bound texture of the draw, as the classification needs it: the format the view samples it in and the format its texture was created with
+// (the engine creates the sun mask as a typeless texture and binds a typed view of it, so the two need not agree).
 struct BoundTexture
 {
     ComPtr<ID3D11ShaderResourceView> view;
-    uint32_t format = 0, width = 0, height = 0, samples = 0;
+    uint32_t format = 0, textureFormat = 0, width = 0, height = 0, samples = 0;
     bool twoD = false;
 };
 
@@ -71,6 +75,7 @@ BoundTexture TextureAt(ID3D11ShaderResourceView* view)
     }
     D3D11_TEXTURE2D_DESC texture {};
     static_cast<ID3D11Texture2D*>(resource.Get())->GetDesc(&texture);
+    out.textureFormat = uint32_t(texture.Format);
     out.width = texture.Width;
     out.height = texture.Height;
     out.samples = texture.SampleDesc.Count;
@@ -158,6 +163,10 @@ void Inspect(ID3D11DeviceContext* context, const Layout& layout, Inputs& inputs,
 
     ID3D11Buffer* buffers[kCbSlots] {};
     context->PSGetConstantBuffers(0, kCbSlots, buffers);
+    // The engine light controls may have swapped this draw's g_LightParam for a patched copy (the moon at x0.1): the pass and the night curve's
+    // colour capture read the ENGINE's buffer, or the darkened moon would feed back into the night weight.
+    if (layout.lightParamSlot < kCbSlots)
+        buffers[layout.lightParamSlot] = ext::ffxiv::enginelight::OwnedGameBuffer(buffers[layout.lightParamSlot]);
     ComPtr<ID3D11Buffer> light, camera;
     if (layout.lightParamSlot < kCbSlots && buffers[layout.lightParamSlot] != nullptr)
         light.Attach(buffers[layout.lightParamSlot]);
@@ -172,6 +181,7 @@ void Inspect(ID3D11DeviceContext* context, const Layout& layout, Inputs& inputs,
     facts.hasLightParam = light != nullptr;
     facts.hasCameraParam = camera != nullptr;
     facts.maskFormat = mask.format;
+    facts.maskTextureFormat = mask.textureFormat;
     facts.maskWidth = mask.width;
     facts.maskHeight = mask.height;
     facts.maskSamples = mask.samples;
@@ -213,10 +223,13 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
     // it is logged, and the draw path skips that shader from then on. The game's draw runs exactly once per call: after it threw, it is
     // not called a second time here (that would run it twice and let the second throw escape).
     bool drew = false;
-    const auto decline = [&](Decline reason) {
+    const auto decline = [&](Decline reason, const DrawFacts* declineFacts = nullptr) {
+        ext::ffxiv::diag::StageReport(ext::ffxiv::diag::StageId::ContactShadows, ext::ffxiv::diag::StageOutcome::Declined, DeclineName(reason));
         state.declined++;
-        if (state.log.Take(uint32_t(reason)))
-            LOG_INFO("{}", FormatDecline(reason));
+        if (IsShapeDecline(reason))
+            state.shapes++; // a draw of another shape (the cascade atlas): first the shape, then this build's mask
+        if (state.declineLog.Take(DeclineTag(reason, declineFacts)))
+            LOG_INFO("{}", declineFacts != nullptr ? FormatDeclineWithFacts(reason, *declineFacts) : FormatDecline(reason));
         if (!IsShapeDecline(reason) && state.session.NoteDecline() && !state.loggedOff)
         {
             state.loggedOff = true;
@@ -235,9 +248,23 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
         Inputs inputs;
         DrawFacts facts;
         Inspect(context, *layout, inputs, facts);
+        // What the card says the rule looked at: the mask's format and size, the slot the indexed shader declares it at, and the verdict. A
+        // session reads this before it reads the picture - a mask of another format, or a size that is not the draw's own, is the whole answer.
+        state.haveInspection = true;
+        state.lastMaskSlot = layout->maskSlot;
+        state.lastMaskFormat = facts.maskFormat;
+        state.lastMaskWidth = facts.maskWidth;
+        state.lastMaskHeight = facts.maskHeight;
         const Decline reason = Classify(facts);
+        state.lastDecline = reason;
         if (reason != Decline::None)
-            return decline(reason);
+            return decline(reason, &facts);
+        // The mask's texture is the typeless member of its format's family in this build (R8_TYPELESS, DXGI 60) and the draw samples it through
+        // the typed view the rules accept (R8_UNORM, 61). The pair is checked here because only the device side holds the texture's own
+        // description: a view of that texture in another typed format of the family (R8_SNORM, R8_UINT) is a different resource that reads
+        // different numbers, so it is a format refusal like any other.
+        if (!IsMaskFormatPair(facts.maskTextureFormat, facts.maskFormat))
+            return decline(Decline::MaskFormat, &facts);
 
         // The sun vector and the camera layout, once per session (and again after a few seconds if the first light draw still had a loading
         // camera): the unit-length guard, the layout check and the classification line. The GPU normalises every frame anyway, so a later
@@ -272,8 +299,30 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
         }
 
         inputs.params = state.params;
-        // The pass runs in its own device-context state and sets its own shaders there; the game's binding comes back with the state swap,
-        // not with another PSSetShader, so the pixel-shader tracker must not overwrite what it learned from the game while this runs.
+        // Shadow mapping (ext/ffxiv/shadows), ext-internal via hooks: the mask lift rides this pass's combine (the
+        // values travel with the run; zeros are the engine's own mask bytes), and the composite's curve reads this
+        // very draw's g_LightParam through the same once-per-served-draw capture the own route uses. Nothing here
+        // blocks: the hooks' cheap answers are two state reads while the module is not armed.
+        if (ext::ffxiv::shadows::Hooks::combineLift != nullptr)
+        {
+            float combineLift = 0.0f, combineSoftness = 0.0f;
+            if (ext::ffxiv::shadows::Hooks::combineLift(context, &combineLift, &combineSoftness))
+            {
+                inputs.maskLift = combineLift;
+                inputs.maskSoftness = combineSoftness;
+                // The shadow-mapping lift has no pass of its own on this draw: it rides this pass's combine, so its stage line says so.
+                ext::ffxiv::diag::StageReport(ext::ffxiv::diag::StageId::ShadowLift, ext::ffxiv::diag::StageOutcome::Combined,
+                                              "the lift and its softness are ridden on the contact-shadow mask copy");
+            }
+        }
+        // Only the main view's sun feeds the night curve's colour (2026-11-07): the character view's directional light carries its own
+        // light rig, and its colour made the curve flip within seconds (ContactShadowsRules.h FeedsNightColour).
+        if (ext::ffxiv::shadows::Hooks::captureLightColour != nullptr && inputs.lightParam != nullptr && layout != nullptr &&
+            FeedsNightColour(layout->fakeSpecular, AnyIndexedFakeSpecular()))
+            ext::ffxiv::shadows::Hooks::captureLightColour(context, inputs.lightParam);
+        // The pass sets its own shaders between an explicit save and restore of the game's state; its PSSetShader calls and the guard's restore of
+        // the game's shader reach the pixel-shader hook like any other bind, so the tracker must not overwrite what it learned from the game while
+        // this runs.
         struct TrackGuard
         {
             State& state;
@@ -307,6 +356,11 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
 
         state.runs++;
         state.session.NoteRun();
+        // The capture frame's pictures of this stage: the engine's mask the draw would have sampled and the copy it sampled instead, copied after
+        // the pass returned (the pass's own explicit-state guard is gone; the tracker flag above only keeps the shader tracker out of the way, and
+        // the copy sets no shader and draws nothing).
+        ext::ffxiv::diag::StageRan(ext::ffxiv::diag::StageId::ContactShadows, context, inputs.mask, copy,
+                                   ext::ffxiv::diag::StageWindow { inputs.window.x, inputs.window.y, inputs.window.width, inputs.window.height });
         // The developer check's one-frame dump: the key holds a delay, and the first light draw that runs after it is written out whole.
         if (DumpDue(state.dumpDelaySeconds, state.dumpWritten, state.dumpStartQpc, Qpc(), QpcFrequency()))
             DumpFrame(context, state, inputs, state.pass);

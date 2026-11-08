@@ -1,0 +1,9 @@
+@{
+    Class       = 'cpu'
+    Note        = 'God rays volumetric march wiring pins: the march is the chain''s last member through hook pointers the earlier stages call (the puddle''s chained entry and its answer tail, the shafts'' fallback owner branch) with no link dependency the existing tests would need, the march''s seam entry called from exactly one place after the shafts'' and the puddle''s, the stamping contract (the march''s sources never reference the shared usedCapture stamp or the capture id, and its own answered-tracking is its own rendered-frame counter, so a decline cannot unstamps the composite), the decline paths bind nothing and draw nothing (the chain hook returns a texture or null only), the hold-semantics wordings exist in the rules (the chain''s hold stands vs the frame is the engine''s own), the march is its own shader file that includes no SceneMarch and carries the copied Hash01 with its origin named, every staging Map carries D3D11_MAP_FLAG_DO_NOT_WAIT and every GetData carries D3D11_ASYNC_GETDATA_DONOTFLUSH in the flags argument, the fog post''s bit is 63 with its cFogParam slot in the light shafts'' field under the cannot-coexist guard and the atlas readers riding the light bit with no new bit, the feature bit is 18 (17 is the shadows slice''s claim), the ten keys off or at the engine''s own value by default in the config, the binder, the ini, the schema and the settings page with the card''s state line, the scene-HDR decline and the chara replay refusal and the 64-refusal stand-down on the march''s own knob, the pass running inside a private device-context state with a scope-guard restore and the game''s scene only ever copied, and the march''s capture never waiting on the GPU'
+    Sources     = @('godrays_pins.cpp')
+    IncludeDirs = @('{repo}/OptiScaler')
+    Args        = @('{repo}')
+    Defines     = @('NOMINMAX')
+    Std         = 'c++20'
+}

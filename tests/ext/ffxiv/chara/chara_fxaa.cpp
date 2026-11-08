@@ -500,6 +500,80 @@ void TestStateRestored(Env& e)
 
 }
 
+// The picture does not depend on what the game had bound. The pass used to run in a private context state; on the game's own it sets the rasterizer, blend
+// and depth-stencil state itself. A hostile game state (a scissor of one pixel, front faces reversed with back-face culling, a blend state and a sample
+// mask that write nothing, a failing depth test with a depth view bound) gives the picture a cleared context gives.
+void TestHostileGameState(Env& e)
+{
+    const UINT n = 32;
+    auto stairs = Staircase(n);
+    auto tex = MakeTexture(e, n, n, stairs);
+    auto srv = MakeSrv(e, tex.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    FxaaPass pass;
+    ID3D11ShaderResourceView* filtered = nullptr;
+
+    e.context->ClearState();
+    CHECK(pass.Process(e.context.Get(), srv.Get(), n, n, false, 1, &filtered));
+    const std::vector<Rgba> clean = Read(e, filtered, n, n);
+    bool anyEdge = false; // the staircase has to leave a mark, or the comparison compares nothing with nothing
+    for (const Rgba& p : clean)
+        anyEdge = anyEdge || (p.r != 0 && p.r != 255);
+    CHECK(anyEdge);
+
+    GameState g = SetUpGameState(e, 64, 64, srv.Get());
+    ID3D11DeviceContext* c = e.context.Get();
+    D3D11_RASTERIZER_DESC rd {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_BACK;
+    rd.FrontCounterClockwise = TRUE;
+    rd.ScissorEnable = TRUE;
+    rd.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> raster;
+    CHECK(SUCCEEDED(e.device->CreateRasterizerState(&rd, &raster)));
+    D3D11_BLEND_DESC bd {};
+    bd.RenderTarget[0].RenderTargetWriteMask = 0;
+    bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    ComPtr<ID3D11BlendState> blend;
+    CHECK(SUCCEEDED(e.device->CreateBlendState(&bd, &blend)));
+    D3D11_DEPTH_STENCIL_DESC dsd {};
+    dsd.DepthEnable = TRUE;
+    dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D11_COMPARISON_NEVER;
+    ComPtr<ID3D11DepthStencilState> depth;
+    CHECK(SUCCEEDED(e.device->CreateDepthStencilState(&dsd, &depth)));
+    D3D11_TEXTURE2D_DESC dd {};
+    dd.Width = dd.Height = 64;
+    dd.MipLevels = dd.ArraySize = dd.SampleDesc.Count = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> depthTexture;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    CHECK(SUCCEEDED(e.device->CreateTexture2D(&dd, nullptr, &depthTexture)) && SUCCEEDED(e.device->CreateDepthStencilView(depthTexture.Get(), nullptr, &dsv)));
+    ID3D11RenderTargetView* rtv = g.rtv.Get();
+    c->OMSetRenderTargets(1, &rtv, dsv.Get());
+    c->RSSetState(raster.Get());
+    const D3D11_RECT scissor { 0, 0, 1, 1 };
+    c->RSSetScissorRects(1, &scissor);
+    const FLOAT factor[4] { 0.5f, 0.5f, 0.5f, 0.5f };
+    c->OMSetBlendState(blend.Get(), factor, 0x0u);
+    c->OMSetDepthStencilState(depth.Get(), 3);
+
+    CHECK(pass.Process(c, srv.Get(), n, n, false, 1, &filtered));
+    const std::vector<Rgba> hostile = Read(e, filtered, n, n);
+    CHECK(hostile == clean);
+    // the game's hostile state is still what the game bound
+    ComPtr<ID3D11RasterizerState> rsAfter;
+    c->RSGetState(&rsAfter);
+    ComPtr<ID3D11BlendState> blendAfter;
+    FLOAT factorAfter[4] {};
+    UINT maskAfter = 1;
+    c->OMGetBlendState(&blendAfter, factorAfter, &maskAfter);
+    CHECK(rsAfter.Get() == raster.Get() && blendAfter.Get() == blend.Get() && maskAfter == 0 && factorAfter[0] == 0.5f);
+    c->ClearState();
+}
+
 void TestSwappedSourceDraw(Env& e)
 {
     // The equipment draw: the filtered image is t0 for the draw, then the game's own t0 is bound again.
@@ -584,6 +658,7 @@ int main()
     TestSrgb(e);
     TestRejectedRequests(e);
     TestStateRestored(e);
+    TestHostileGameState(e);
     TestSwappedSourceDraw(e);
     return TEST_RESULT("chara_fxaa");
 }

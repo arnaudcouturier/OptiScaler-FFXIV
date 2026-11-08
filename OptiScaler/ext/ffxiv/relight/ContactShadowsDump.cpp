@@ -12,6 +12,7 @@
 #include <format>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -210,6 +211,73 @@ bool ReadBuffer(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Buffer
 }
 } // namespace
 
+namespace
+{
+// The bytecode of the mask-declaring shaders, kept from creation while the one-frame dump is armed (ContactShadowsRules.h's kMaxKeptShaders): one
+// copy per CRC, bounded in count and in bytes. Shader creation runs on any thread and the dump reads on the render thread, so both take this
+// mutex; the storage lives here, with the only reader, so Inject.h - which the draw hook includes - carries no lock.
+struct KeptShader
+{
+    uint32_t crc = 0;
+    bool alternateName = false; // the shader declares `g_SamplerShadowMask`, this build's light draw, not `g_SamplerShadow`
+    Layout layout;
+    std::vector<uint8_t> code;
+};
+
+struct Kept
+{
+    std::mutex mutex;
+    std::vector<KeptShader> shaders;
+    size_t bytes = 0;
+};
+
+Kept& K()
+{
+    static Kept* kept = new Kept; // never destroyed: no destructor may run under the loader lock
+    return *kept;
+}
+} // namespace
+
+void KeepShaderBytecode(uint32_t crc, const void* code, size_t size, const Layout& layout)
+{
+    if (code == nullptr || size == 0 || size > kMaxKeptShaderBytes || crc == 0)
+        return;
+    Kept& kept = K();
+    std::lock_guard lock(kept.mutex);
+    if (kept.shaders.size() >= kMaxKeptShaders || kept.bytes + size > kMaxKeptBytes)
+        return;
+    for (const KeptShader& shader : kept.shaders)
+        if (shader.crc == crc)
+            return;
+    KeptShader shader;
+    shader.crc = crc;
+    shader.layout = layout;
+    shader.alternateName = MentionsName(code, size, kMaskSamplerAlternate);
+    const auto* bytes = static_cast<const uint8_t*>(code);
+    shader.code.assign(bytes, bytes + size);
+    kept.bytes += size;
+    kept.shaders.push_back(std::move(shader));
+}
+
+void ForgetKeptShaders()
+{
+    Kept& kept = K();
+    std::lock_guard lock(kept.mutex);
+    kept.shaders.clear();
+    kept.bytes = 0;
+}
+
+namespace
+{
+// The copy the dump writes: the list under the same lock, so a shader creation on another thread cannot grow the vector under the loop.
+std::vector<KeptShader> KeptShaderCode()
+{
+    Kept& kept = K();
+    std::lock_guard lock(kept.mutex);
+    return kept.shaders;
+}
+} // namespace
+
 void DumpFrame(ID3D11DeviceContext* context, State& state, const Inputs& inputs, const Pass& pass)
 {
     if (context == nullptr || pass.CopyView() == nullptr || pass.TermView() == nullptr)
@@ -226,13 +294,34 @@ void DumpFrame(ID3D11DeviceContext* context, State& state, const Inputs& inputs,
     }
 
     std::string maskBefore, term, maskAfter, depth, camera, sun;
-    const bool okMaskBefore = ReadTexture(device.Get(), context, inputs.mask, dir / kDumpMaskBeforeFile, maskBefore);
+    // The mask's files carry its own format, and their names say which one: an R8_UNORM mask is one byte per texel, a B8G8R8A8_UNORM mask four,
+    // and the mask's meaning (which level is sunlit) is what this dump exists to settle (ContactShadowsRules.h).
+    const bool maskR8 = IsMaskR8(inputs.maskFormat);
+    const bool okMaskBefore = ReadTexture(device.Get(), context, inputs.mask, dir / MaskDumpFile(maskR8, /*before*/ true), maskBefore);
     const bool okTerm = ReadTexture(device.Get(), context, pass.TermView(), dir / kDumpTermFile, term);
-    const bool okMaskAfter = ReadTexture(device.Get(), context, pass.CopyView(), dir / kDumpMaskAfterFile, maskAfter);
+    const bool okMaskAfter = ReadTexture(device.Get(), context, pass.CopyView(), dir / MaskDumpFile(maskR8, /*before*/ false), maskAfter);
     const bool okDepth = ReadTexture(device.Get(), context, inputs.depth, dir / kDumpDepthFile, depth);
     const bool okCamera = ReadBuffer(device.Get(), context, inputs.cameraParam, 0, CS_CAMERA_CHECK_BYTES, dir / kDumpCameraFile, camera);
     const bool okSun = ReadBuffer(device.Get(), context, inputs.lightParam, 0x10, 16, dir / kDumpSunFile, sun);
     (void)okSun;
+
+    // The mask-declaring shaders' bytecode, kept from creation (KeptShaderCode): the light shader is created while the game loads, so this is
+    // the only place its bytecode can come from, and which channel of the mask it reads is the other half of the mask's meaning.
+    std::string shaders;
+    for (const KeptShader& kept : KeptShaderCode())
+    {
+        const std::string name = std::format("shader-{:08X}.dxbc", kept.crc);
+        const bool written = WriteBytes(dir / name, kept.code.data(), kept.code.size());
+        shaders += std::format("\n  {} ({} bytes{}) declaration {}, mask slot {}, depth slot {}, g_LightParam slot {}, g_CameraParameter "
+                               "slot {}, {} of its four names",
+                               name, kept.code.size(), written ? "" : ", the write failed",
+                               kept.alternateName ? "g_SamplerShadowMask" : "g_SamplerShadow", kept.layout.maskSlot,
+                               kept.layout.depthSlot, kept.layout.lightParamSlot, kept.layout.cameraParamSlot,
+                               uint32_t((kept.layout.found & 1u) != 0) + uint32_t((kept.layout.found & 2u) != 0) +
+                                   uint32_t((kept.layout.found & 4u) != 0) + uint32_t((kept.layout.found & 8u) != 0));
+    }
+    if (shaders.empty())
+        shaders = " none: no shader declared a mask name while the dump was armed";
 
     std::string facts = std::format(
         "contact shadows: one frame, at the sun light draw that ran after {} s\n"
@@ -244,16 +333,20 @@ void DumpFrame(ID3D11DeviceContext* context, State& state, const Inputs& inputs,
         "sun (g_LightParam +0x10):{}\n"
         "window: origin ({:.2f}, {:.2f}) extent ({:.2f}, {:.2f}), mask {}x{} format {}\n"
         "parameters: length {:.2f} m, strength {:.2f}, {} step(s), sun in {} space, sign {}\n"
-        "sun vector at the first light draw: ({:.4f}, {:.4f}, {:.4f})\n",
+        "sun vector at the first light draw: ({:.4f}, {:.4f}, {:.4f})\n"
+        "the mask's meaning is not measured for this build: which level is sunlit is the benchmark build's convention (1 = sunlit, 0 = fully\n"
+        "shadowed), and mask-before above carries the engine's own texels, {} byte(s) per texel, so the convention and the channel the light draw\n"
+        "reads can be read from this folder - the shaders below are the ones that declare a mask name, kept from creation\n"
+        "shaders kept from creation:{}\n",
         state.dumpDelaySeconds, maskBefore, term, maskAfter, depth, CS_CAMERA_CHECK_BYTES, camera, sun, double(inputs.window.x),
         double(inputs.window.y), double(inputs.window.width), double(inputs.window.height), inputs.maskWidth, inputs.maskHeight,
         inputs.maskFormat, double(inputs.params.length), double(inputs.params.strength), inputs.params.steps,
         inputs.params.space == SunSpace::View ? "view" : "world", inputs.params.sign == SunSign::Toward ? "toward the sun" : "the way the light travels",
-        double(state.lastSun[0]), double(state.lastSun[1]), double(state.lastSun[2]));
+        double(state.lastSun[0]), double(state.lastSun[1]), double(state.lastSun[2]), PixelBytes(DXGI_FORMAT(inputs.maskFormat)), shaders);
     if (!okMaskBefore || !okTerm || !okMaskAfter || !okDepth || !okCamera)
         facts += "one or more files above carry a note in brackets: they were not written\n";
     if (WriteText(dir / kDumpFactsFile, facts))
-        LOG_INFO("Contact shadows: dump written to {} (mask before, term, mask copy, depth, camera, sun, facts.txt)",
+        LOG_INFO("Contact shadows: dump written to {} (mask before, term, mask copy, depth, camera, sun, the mask shaders' bytecode, facts.txt)",
                  dir.string());
     else
         LOG_WARN("Contact shadows: the dump's facts.txt could not be written");
