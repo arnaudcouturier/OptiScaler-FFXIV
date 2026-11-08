@@ -3,6 +3,8 @@
 #include "ext/ffxiv/relight/Inject.h"
 
 #include "ext/core/ExtConfig.h"
+#include "ext/ffxiv/chara/CharaDispatch.h"
+#include "ext/ffxiv/engine/EnginePass.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -147,6 +149,11 @@ void OnGameDraw(ID3D11DeviceContext* context, DrawFn draw, void* user)
         draw(user); // this module's own pass drawing its two full-screen triangles: never classified, never a decline
         return;
     }
+    if (ext::ffxiv::chara::t_replay)
+    {
+        draw(user);
+        return;
+    }
     ++state.drawsSeen;
     try
     {
@@ -193,6 +200,7 @@ void OnGameDraw(ID3D11DeviceContext* context, DrawFn draw, void* user)
             draw(user); // not a sun light draw, or one of another shape: passed through untouched
             return;
         }
+        ext::ffxiv::engine::OwnWork ownWork;
         const Decline outcome = ApplyDraw(context, state, &layout, draw, user);
         if (outcome == Decline::None)
             state.refusedShapes.erase(id); // a shader that has run is never remembered as refused
@@ -214,6 +222,8 @@ void OnPixelShaderSet(ID3D11PixelShader* shader, uint32_t instances)
     State& state = S();
     if (state.inPass.load(std::memory_order_relaxed))
         return; // this module's own pass: the game's binding is put back by the context-state swap, not by another PSSetShader
+    if (ext::ffxiv::chara::t_replay)
+        return;
     ++state.bindsSeen;
     const int64_t bindStart = state.bindCost.Sampling() ? Qpc() : 0;
     const uint32_t id = instances == 0 ? TrackedIdOf(shader) : 0; // a class-instance override is never a sun light draw
@@ -236,6 +246,10 @@ void OnShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, u
         // nothing is logged while the key is off: a default-off install writes no line about a feature the player never enabled.
         const bool logging = ext::Active(ext::F::ContactShadows);
         const Layout layout = LayoutOfShader(code, size);
+        // The dump's other half, kept whatever the key says but only while a dump is armed: the light shader is created while the game loads,
+        // so the draw's bytecode cannot be captured later (see ContactShadowsRules.h's kMaxKeptShaders).
+        if (S().dumpDelaySeconds > 0)
+            KeepShaderBytecode(crc, code, size, layout);
         if (!layout.ok)
         {
             // Not a sun light draw: no stamp at all, so the draw path never looks it up. A shader that declares the mask but not all four
@@ -244,7 +258,7 @@ void OnShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, u
             if (logging && (layout.found & 1u) != 0 && !S().partialLogged)
             {
                 S().partialLogged = true;
-                LOG_WARN("Contact shadows: a shader declares g_SamplerShadow but not all of g_SamplerDepth, g_LightParam and g_CameraParameter "
+                LOG_WARN("Contact shadows: a shader declares the sun mask but not all of g_SamplerDepth, g_LightParam and g_CameraParameter "
                          "(found mask {}, depth {}, light {}, camera {}); the pass was not indexed",
                          (layout.found & 1u) != 0, (layout.found & 2u) != 0, (layout.found & 4u) != 0, (layout.found & 8u) != 0);
             }
@@ -289,6 +303,28 @@ bool Armed()
 
 Params CurrentParams() { return S().params; }
 
+Status CurrentStatus()
+{
+    State& state = S();
+    Status status;
+    status.key = ext::Active(ext::F::ContactShadows);
+    status.armed = state.session.Armed();
+    status.runs = state.runs;
+    status.declined = state.declined;
+    status.shapes = state.shapes;
+    status.haveInspection = state.haveInspection;
+    status.maskFormat = state.lastMaskFormat;
+    status.maskWidth = state.lastMaskWidth;
+    status.maskHeight = state.lastMaskHeight;
+    status.maskSlot = state.lastMaskSlot;
+    status.lastDecline = state.lastDecline;
+    {
+        std::lock_guard lock(I().mutex);
+        status.indexed = uint32_t(I().layouts.size());
+    }
+    return status;
+}
+
 void Publish(bool on)
 {
     State& state = S();
@@ -327,6 +363,10 @@ void Reset()
     state.lastCameraCheckQpc = 0;
     state.runs = 0;
     state.declined = 0;
+    state.shapes = 0;
+    state.haveInspection = false;
+    state.lastMaskFormat = state.lastMaskWidth = state.lastMaskHeight = state.lastMaskSlot = 0;
+    state.lastDecline = Decline::None;
     state.refusedShapes.clear();
     state.loggedOff = false;
     state.indexedLogged = false;
@@ -340,6 +380,7 @@ void Reset()
     state.boundLayoutId.store(0, std::memory_order_relaxed);
     state.dumpStartQpc = 0;
     state.dumpWritten = false;
+    ForgetKeptShaders();
     {
         std::lock_guard lock(I().mutex);
         I().layouts.clear();

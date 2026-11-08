@@ -76,6 +76,41 @@ int main()
     CHECK(ReleasePlan {}.quietTimeout <= 250ms);
     CHECK(ReleasePlan {}.quietTimeout >= 100ms);
 
+    // ---- the gate's own wait is MEASURED: an evaluate in flight on another thread holds the gate for its timeout ----
+    {
+        EvalRegistry reg;
+        FakeOps ops;
+        ops.reg = &reg;
+        ops.id = 7;
+        // An evaluate in flight on a WORKER thread (the gate's own WaitIdle answers SelfInside for the caller's thread).
+        // The worker enters after 30 ms, holds the evaluate 150 ms, leaves: the gate's 60 ms timeout sits inside that
+        // window, so the wait runs to its timeout and the pair reads it.
+        std::thread worker([&reg] {
+            std::this_thread::sleep_for(30ms);
+            if (reg.TryEnter(7))
+            {
+                std::this_thread::sleep_for(150ms);
+                reg.Leave(7);
+            }
+        });
+        for (int i = 0; i < 1000 && reg.InFlight(7) == 0; ++i) // the evaluate is IN FLIGHT before the release starts:
+            std::this_thread::sleep_for(1ms);                  // an absent entry reads idle, which is the race the pair must not measure through
+        CHECK(reg.InFlight(7) == 1);
+        ReleasePlan plan;
+        plan.handleId = 7;
+        plan.fgRequired = true;
+        plan.gate = true;
+        plan.quietTimeout = 60ms;
+        const auto out = PrepareRelease(reg, plan, ops);
+        worker.join();
+        CHECK(out.quiet == Quiescence::EvaluateInFlight); // the evaluate outlasted the gate's timeout
+        CHECK(out.quietMs >= 40.0);  // the measured wait is the gate's own timeout, not a vacuous zero: a wrong
+        CHECK(out.quietMs < 500.0);  // placement of the measuring pair (before the close, after the drains) fails here
+        CHECK(out.result == ReleaseDrain::NotApplicable); // a not-proven release is the old flow's answer, never a claimed Drained
+        CHECK(!reg.IsClosed(7)); // the gate reopened the handle for the evaluates still running
+        reg.Forget(7);
+    }
+
     // ---- all good: drained, handle left closed for the caller's destroy --------------------------------------------------
     {
         EvalRegistry reg;
@@ -85,6 +120,7 @@ int main()
         const auto out = PrepareRelease(reg, Plan(true, true), ops);
         CHECK(out.result == ReleaseDrain::Drained);
         CHECK(out.quiet == Quiescence::Idle);
+        CHECK(out.quietMs >= 0.0); // the gate ran: its own wait is on the record, whatever its duration
         CHECK(ops.calls == (std::vector<std::string> { "fg", "upscale" })); // FG first, then upscale
         CHECK(!ops.lockHeld);
         CHECK(ops.closedAtDrain); // evaluates were already refused while draining
@@ -215,6 +251,7 @@ int main()
         CHECK(std::chrono::steady_clock::now() - t0 < 150ms); // did not wait for the evaluator (timeout is 200 ms)
         CHECK(!reg.IsClosed(42));
         CHECK(out.quiet == Quiescence::NotChecked);
+        CHECK(out.quietMs == 0.0); // the gate did not run: nothing was waited for and said so
         CHECK(out.result == ReleaseDrain::NotApplicable); // never Drained with the key off
         CHECK(!ops.closedAtDrain);
         ops.upscale = QueueDrain::Failed;

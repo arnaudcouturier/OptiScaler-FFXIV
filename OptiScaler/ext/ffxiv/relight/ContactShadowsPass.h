@@ -23,11 +23,11 @@ namespace ext::ffxiv::relight
 // What one run needs: the draw's own resources, its measured sizes, the render window and the tuning keys.
 struct Inputs
 {
-    ID3D11ShaderResourceView* mask = nullptr;  // the draw's g_SamplerShadow (the screen-space mask)
+    ID3D11ShaderResourceView* mask = nullptr;  // the draw's screen-space mask (g_SamplerShadowMask or g_SamplerShadow)
     ID3D11ShaderResourceView* depth = nullptr; // the draw's g_SamplerDepth (the view position is reconstructed from it)
     ID3D11Buffer* lightParam = nullptr;        // the draw's g_LightParam
     ID3D11Buffer* cameraParam = nullptr;       // the draw's g_CameraParameter
-    uint32_t maskFormat = 0;
+    uint32_t maskFormat = 0; // the format the draw samples the mask in: a typeless texture's view is its family's typed member
     uint32_t maskWidth = 0, maskHeight = 0;
     Window window;
     Params params;

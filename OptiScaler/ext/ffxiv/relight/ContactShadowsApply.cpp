@@ -39,11 +39,12 @@ int64_t QpcFrequency()
 
 double SecondsBetween(int64_t from, int64_t to) { return from <= 0 ? 0.0 : double(to - from) / double(QpcFrequency()); }
 
-// One bound texture of the draw, as the classification needs it.
+// One bound texture of the draw, as the classification needs it: the format the view samples it in and the format its texture was created with
+// (the engine creates the sun mask as a typeless texture and binds a typed view of it, so the two need not agree).
 struct BoundTexture
 {
     ComPtr<ID3D11ShaderResourceView> view;
-    uint32_t format = 0, width = 0, height = 0, samples = 0;
+    uint32_t format = 0, textureFormat = 0, width = 0, height = 0, samples = 0;
     bool twoD = false;
 };
 
@@ -71,6 +72,7 @@ BoundTexture TextureAt(ID3D11ShaderResourceView* view)
     }
     D3D11_TEXTURE2D_DESC texture {};
     static_cast<ID3D11Texture2D*>(resource.Get())->GetDesc(&texture);
+    out.textureFormat = uint32_t(texture.Format);
     out.width = texture.Width;
     out.height = texture.Height;
     out.samples = texture.SampleDesc.Count;
@@ -172,6 +174,7 @@ void Inspect(ID3D11DeviceContext* context, const Layout& layout, Inputs& inputs,
     facts.hasLightParam = light != nullptr;
     facts.hasCameraParam = camera != nullptr;
     facts.maskFormat = mask.format;
+    facts.maskTextureFormat = mask.textureFormat;
     facts.maskWidth = mask.width;
     facts.maskHeight = mask.height;
     facts.maskSamples = mask.samples;
@@ -215,6 +218,8 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
     bool drew = false;
     const auto decline = [&](Decline reason) {
         state.declined++;
+        if (IsShapeDecline(reason))
+            state.shapes++; // a draw of another shape (the cascade atlas): first the shape, then this build's mask
         if (state.log.Take(uint32_t(reason)))
             LOG_INFO("{}", FormatDecline(reason));
         if (!IsShapeDecline(reason) && state.session.NoteDecline() && !state.loggedOff)
@@ -235,9 +240,23 @@ Decline ApplyDraw(ID3D11DeviceContext* context, State& state, const Layout* layo
         Inputs inputs;
         DrawFacts facts;
         Inspect(context, *layout, inputs, facts);
+        // What the card says the rule looked at: the mask's format and size, the slot the indexed shader declares it at, and the verdict. A
+        // session reads this before it reads the picture - a mask of another format, or a size that is not the draw's own, is the whole answer.
+        state.haveInspection = true;
+        state.lastMaskSlot = layout->maskSlot;
+        state.lastMaskFormat = facts.maskFormat;
+        state.lastMaskWidth = facts.maskWidth;
+        state.lastMaskHeight = facts.maskHeight;
         const Decline reason = Classify(facts);
+        state.lastDecline = reason;
         if (reason != Decline::None)
             return decline(reason);
+        // The mask's texture is the typeless member of its format's family in this build (R8_TYPELESS, DXGI 60) and the draw samples it through
+        // the typed view the rules accept (R8_UNORM, 61). The pair is checked here because only the device side holds the texture's own
+        // description: a view of that texture in another typed format of the family (R8_SNORM, R8_UINT) is a different resource that reads
+        // different numbers, so it is a format refusal like any other.
+        if (!IsMaskFormatPair(facts.maskTextureFormat, facts.maskFormat))
+            return decline(Decline::MaskFormat);
 
         // The sun vector and the camera layout, once per session (and again after a few seconds if the first light draw still had a loading
         // camera): the unit-length guard, the layout check and the classification line. The GPU normalises every frame anyway, so a later

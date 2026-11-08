@@ -30,16 +30,67 @@ struct FfxivConfig
     // default to today's behaviour, the capture collecting from the first draw.
     CustomOptional<int32_t> drawDiagnosticsDelaySeconds { 0 }; // [FFXIV] DrawDiagnosticsDelaySeconds: 0..3600, 0 = at the first draw
     CustomOptional<std::string> drawDiagnosticsKey { "off" };  // [FFXIV] DrawDiagnosticsKey: a letter, a digit or F1..F24; off = no key
+    // One captured frame's targets as raw bytes next to the capture, for the developer check: off (today's behaviour) | frame.
+    CustomOptional<std::string> drawDiagnosticsDump { "off" }; // [FFXIV] DrawDiagnosticsDump: off, frame, or ssr-pair
+    // The one-frame dump's byte budget in MiB, 64 to 4096: 256 is today's bound, and a 4K frame's full set needs about 500.
+    CustomOptional<int32_t> drawDiagnosticsDumpBudgetMiB { 256 }; // [FFXIV] DrawDiagnosticsDumpBudgetMiB
     // Contact shadows before the sun light pass (ext/ffxiv/relight): the switch and its tuning, off by default, and the two keys that
     // settle what the measurement of the sun vector could not (ext/ffxiv/relight/ContactShadowsRules.h has the ranges).
     CustomOptional<bool> contactShadows { false };            // [FFXIV] ContactShadows
     CustomOptional<float> contactShadowsLength { 0.5f };      // [FFXIV] ContactShadowsLength: metres of march, 0.05..2.0
     CustomOptional<float> contactShadowsStrength { 0.5f };    // [FFXIV] ContactShadowsStrength: 0..1 of the sun's visibility
-    CustomOptional<int32_t> contactShadowsSteps { 12 };       // [FFXIV] ContactShadowsSteps: 4..24
+    CustomOptional<int32_t> contactShadowsSteps { 32 };       // [FFXIV] ContactShadowsSteps: 4..24
     CustomOptional<std::string> contactShadowsSunSpace { "auto" }; // [FFXIV] ContactShadowsSunSpace: auto | world | view
     CustomOptional<std::string> contactShadowsSunSign { "auto" };  // [FFXIV] ContactShadowsSunSign: auto | toward | from
     // [FFXIV] ContactShadowsDump: seconds after the game start at which one frame is written out, 0 = never (the developer check)
     CustomOptional<int32_t> contactShadowsDump { 0 };
+    // Engine pass overrides (ext/ffxiv/engine): the master switch of the module that patches one of the engine's own passes for one draw, and
+    // the first knob it carries. Off and at the vanilla value by default, so a fresh ini is today's picture.
+    CustomOptional<bool> enginePassOverrides { false };       // [FFXIV] EnginePassOverrides
+    CustomOptional<float> ambientSkyVisibilityScale { 1.0f }; // [FFXIV] AmbientSkyVisibilityScale: 0..2, 1.0 = the engine's own value
+    // [FFXIV] WetnessOverride: the wetness the engine applies to the ground. -1 = the engine's own value (off); 0..1 = the amount to
+    // force, with the engine's own dryness blend following it.
+    CustomOptional<float> wetnessOverride { -1.0f };
+    // Ambient occlusion (ext/ffxiv/engine/AoRules.h has the ranges): this fork's own occlusion in place of the engine's screen-space
+    // occlusion texture, computed from the game's depth and G-buffer normal. Off, at the engine's picture, by default.
+    CustomOptional<bool> ambientOcclusion { false };         // [FFXIV] AmbientOcclusion
+    CustomOptional<float> ambientOcclusionRadius { 1.0f };   // [FFXIV] AmbientOcclusionRadius: metres of world searched, 0.1..4
+    CustomOptional<float> ambientOcclusionStrength { 1.0f }; // [FFXIV] AmbientOcclusionStrength: how much of it is applied, 0..2
+    CustomOptional<float> ambientOcclusionBlend { 0.5f };    // [FFXIV] AmbientOcclusionBlend: ours against the engine's own, 0..1
+    CustomOptional<std::string> ambientOcclusionQuality { "medium" }; // [FFXIV] AmbientOcclusionQuality: low | medium | high
+    // Puddles (ext/ffxiv/engine/GlossPuddlesRules.h has the ranges): the engine's own G-buffer target, copied and shaped into puddles on the
+    // up-facing ground, bound at every reader of that target; and, at the tone-map draw, the pool's colour darkened and a marched reflection of
+    // the scene added to it. Off by default, and a switch left on with the coverage at zero is today's picture.
+    CustomOptional<bool> puddles { false };                    // [FFXIV] Puddles
+    CustomOptional<float> puddlesCoverage { 0.42f };           // [FFXIV] PuddlesCoverage: 0..1, the share of the up-facing ground that becomes puddle at full rain
+    CustomOptional<float> puddlesScale { 6.0f };               // [FFXIV] PuddlesScale: 0.05..16, metres one noise cell spans
+    CustomOptional<float> puddlesSoftness { 0.03f };           // [FFXIV] PuddlesSoftness: 0..0.5, the half-width of a puddle's edge
+    CustomOptional<int32_t> puddlesGlossTarget { 1 };          // [FFXIV] PuddlesGlossTarget: 1..2, which G-buffer target carries the gloss channel
+    CustomOptional<std::string> puddlesGlossChannel { "a" };    // [FFXIV] PuddlesGlossChannel: r | g | b | a, the channel this pass replaces (a: the gloss; r on target 1 is a selector and is refused)
+    CustomOptional<float> puddlesGlossWet { 1.0f };            // [FFXIV] PuddlesGlossWet: 0..1, the channel value of a mirror-wet surface
+    CustomOptional<bool> puddlesReflection { true };           // [FFXIV] PuddlesReflection: the marched mirror at the tone map (off: the darkening alone)
+    CustomOptional<float> puddlesReflectionStrength { 0.6f };  // [FFXIV] PuddlesReflectionStrength: 0..1 of the Fresnel reflection the hit is added with
+    CustomOptional<float> puddlesDarkening { 0.45f };          // [FFXIV] PuddlesDarkening: 0..1 of the lit colour a full puddle takes away
+    CustomOptional<float> puddlesRipple { 0.35f };             // [FFXIV] PuddlesRipple: 0..1, how much the static ripple tilts the mirror
+    CustomOptional<int32_t> puddlesReflectionSteps { 24 };     // [FFXIV] PuddlesReflectionSteps: 8..48, the march's taps
+    CustomOptional<float> puddlesReach { 24.0f };              // [FFXIV] PuddlesReach: metres a pool may sit at (0 = no limit); beyond it open water keeps the engine's texel
+    // Light shafts before the tone map (ext/ffxiv/engine/ShaftsDraw.cpp): the master switch and the four tuning keys, off by default so a fresh
+    // ini is today's picture (ShaftsRules.h has the ranges and what each key does to the picture).
+    CustomOptional<bool> lightShafts { false };          // [FFXIV] LightShafts
+    CustomOptional<float> lightShaftsIntensity { 1.0f }; // [FFXIV] LightShaftsIntensity: 0..2, 0 = off
+    CustomOptional<float> lightShaftsDecay { 0.96f };    // [FFXIV] LightShaftsDecay: 0.80..1.0
+    CustomOptional<int32_t> lightShaftsSamples { 48 };   // [FFXIV] LightShaftsSamples: 16..96
+    CustomOptional<float> lightShaftsDensity { 0.9f };   // [FFXIV] LightShaftsDensity: 0.1..1.5
+    CustomOptional<std::string> lightShaftsColor { "auto" }; // [FFXIV] LightShaftsColor: auto | white
+    // Screen-space reflections (ext/ffxiv/engine/SsrRules.h has the ranges): this fork's own reflection for the water surfaces, computed from
+    // the engine's view-position buffer and the scene the frame has already rendered, in place of the engine's planar reflection map. Off, at
+    // the engine's picture, by default.
+    CustomOptional<bool> screenSpaceReflections { false };            // [FFXIV] ScreenSpaceReflections
+    CustomOptional<bool> screenSpaceReflectionsDiagnostic { false };  // [FFXIV] ScreenSpaceReflectionsDiagnostic: F7 cycles engine-SSR-private-copy map sources
+    CustomOptional<int32_t> screenSpaceReflectionsSteps { 48 };        // [FFXIV] ScreenSpaceReflectionsSteps: ray march taps, 16..128
+    CustomOptional<float> screenSpaceReflectionsThickness { 0.3f };    // [FFXIV] ScreenSpaceReflectionsThickness: metres, 0.05..2
+    CustomOptional<float> screenSpaceReflectionsBlend { 0.5f };       // [FFXIV] ScreenSpaceReflectionsBlend: ours against the engine's, 0..1
+    CustomOptional<float> screenSpaceReflectionsFade { 0.15f };         // [FFXIV] ScreenSpaceReflectionsFade: the picture's edge, 0..0.5
     // Developer probe, ini only: a constant half-screen mask handed to the upscaler's mask input, to see whether the backend reads
     // one at all. off | left | right, anything else reads as off (ext/ffxiv/vfxmask).
     CustomOptional<std::string> vfxMaskProbe { "off" }; // [FFXIV] VfxMaskProbe
@@ -60,6 +111,20 @@ struct FfxivConfig
     static inline TextHook vfxMaskProbeOnLoaded = nullptr;
     // And for the contact shadow switch (ext/ffxiv/relight/Inject.cpp): the key arms the seam's feature bit.
     static inline BoolHook contactShadowsOnLoaded = nullptr;
+    // And for the engine pass overrides (ext/ffxiv/engine/EnginePass.cpp): the key arms the seam's feature bit.
+    static inline BoolHook enginePassOverridesOnLoaded = nullptr;
+    // And for the ambient occlusion pass (ext/ffxiv/engine/AoApply.cpp): the keys and the seam's feature bit. It publishes before the module's
+    // own hook, because that hook's arming asks this pass whether it wants a draw.
+    static inline BoolHook ambientOcclusionOnLoaded = nullptr;
+    // And for the puddles pass (ext/ffxiv/engine/GlossPuddlesApply.cpp): the keys and the seam's feature bit, published for the same reason.
+    static inline BoolHook puddlesOnLoaded = nullptr;
+    // And for the light shafts (ext/ffxiv/engine/ShaftsDraw.cpp): its own key, tuning keys and feature bit. It publishes before the module's own
+    // hook for the same reason: that hook's arming asks this module whether it wants a draw too.
+    static inline BoolHook lightShaftsOnLoaded = nullptr;
+    // And for the screen-space reflections pass (ext/ffxiv/engine/SsrApply.cpp): the keys and the seam's feature bit. It publishes before the
+    // module's own hook for the same reason.
+    static inline BoolHook screenSpaceReflectionsOnLoaded = nullptr;
+    static inline BoolHook screenSpaceReflectionsDiagnosticOnLoaded = nullptr;
 
     void PostLoad()
     {
@@ -71,6 +136,18 @@ struct FfxivConfig
             vfxMaskProbeOnLoaded(vfxMaskProbe.value_or_default().c_str());
         if (contactShadowsOnLoaded != nullptr)
             contactShadowsOnLoaded(contactShadows.value_or_default());
+        if (ambientOcclusionOnLoaded != nullptr)
+            ambientOcclusionOnLoaded(ambientOcclusion.value_or_default());
+        if (lightShaftsOnLoaded != nullptr)
+            lightShaftsOnLoaded(lightShafts.value_or_default());
+        if (puddlesOnLoaded != nullptr)
+            puddlesOnLoaded(puddles.value_or_default());
+        if (screenSpaceReflectionsOnLoaded != nullptr)
+            screenSpaceReflectionsOnLoaded(screenSpaceReflections.value_or_default());
+        if (screenSpaceReflectionsDiagnosticOnLoaded != nullptr)
+            screenSpaceReflectionsDiagnosticOnLoaded(screenSpaceReflectionsDiagnostic.value_or_default());
+        if (enginePassOverridesOnLoaded != nullptr)
+            enginePassOverridesOnLoaded(enginePassOverrides.value_or_default());
     }
 };
 } // namespace ext

@@ -227,20 +227,24 @@ bool Pass::EnsureCopy(ID3D11Device* device, uint32_t format, uint32_t width, uin
     _copy.Reset();
     _copyFormat = _copyWidth = _copyHeight = 0;
 
+    // The copy is built with the typed member of the mask's format family: the engine creates the mask's texture as R8_TYPELESS and the draw
+    // samples an R8_UNORM view of it, and D3D11 refuses to create a render target (or any view) with a typeless format, while the combine's own
+    // write to this copy has to be one. The combine reads the game's mask itself, so the copy shares no format with it.
+    const uint32_t typedFormat = TypedMaskFormat(format);
     D3D11_TEXTURE2D_DESC desc {};
     desc.Width = width;
     desc.Height = height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = static_cast<DXGI_FORMAT>(format);
+    desc.Format = static_cast<DXGI_FORMAT>(typedFormat);
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     D3D11_RENDER_TARGET_VIEW_DESC rtv {};
-    rtv.Format = static_cast<DXGI_FORMAT>(format);
+    rtv.Format = static_cast<DXGI_FORMAT>(typedFormat);
     rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     D3D11_SHADER_RESOURCE_VIEW_DESC srv {};
-    srv.Format = static_cast<DXGI_FORMAT>(format);
+    srv.Format = static_cast<DXGI_FORMAT>(typedFormat);
     srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = 1;
     if (FAILED(device->CreateTexture2D(&desc, nullptr, &_copy)) || FAILED(device->CreateRenderTargetView(_copy.Get(), &rtv, &_copyRtv)) ||
@@ -330,10 +334,10 @@ ID3D11ShaderResourceView* Pass::Run(ID3D11DeviceContext* context, const Inputs& 
     if (cameraDesc.ByteWidth < kCameraBytes || lightDesc.ByteWidth < kSunOffset + kSunBytes)
         return nullptr;
 
-    // The term is the size of half the mask's allocation, which a dynamic-resolution change does not touch: the render window inside the
+    // The term is the size of the mask's allocation, which a dynamic-resolution change does not touch: the render window inside the
     // allocation is what moves, and it is a viewport on that texture. Only a real allocation change (a window resize) re-creates it.
     if (!EnsureCopy(device.Get(), inputs.maskFormat, inputs.maskWidth, inputs.maskHeight) ||
-        !EnsureTerm(device.Get(), HalfExtent(float(inputs.maskWidth)), HalfExtent(float(inputs.maskHeight))))
+        !EnsureTerm(device.Get(), inputs.maskWidth, inputs.maskHeight))
     {
         _failure = "the mask copy or the term target could not be created";
         return nullptr;
@@ -407,16 +411,16 @@ ID3D11ShaderResourceView* Pass::Run(ID3D11DeviceContext* context, const Inputs& 
     context->OMSetBlendState(nullptr, blendFactor, 0xffffffff);
     context->OMSetDepthStencilState(nullptr, 0);
 
-    // The march: the window's half, at the window's own origin in the term texture. The term texture is the render target here, so it is
+    // The march: the window, at its own whole-texel origin in the term texture. The term texture is the render target here, so it is
     // not also bound as a shader resource: D3D11 would drop that binding and the combine below would then read nothing at all.
     ID3D11ShaderResourceView* marchViews[6] {};
     marchViews[kSlotDepth] = inputs.depth;
     marchViews[kSlotCamera] = _cameraView.Get();
     marchViews[kSlotSun] = _sunView.Get();
     ID3D11RenderTargetView* termRtv = _termRtv.Get();
-    const uint32_t termWidth = HalfExtent(inputs.window.width);
-    const uint32_t termHeight = HalfExtent(inputs.window.height);
-    const D3D11_VIEWPORT termViewport { float(uint32_t(inputs.window.x * 0.5f)), float(uint32_t(inputs.window.y * 0.5f)),
+    const uint32_t termWidth = TermExtent(inputs.window.width);
+    const uint32_t termHeight = TermExtent(inputs.window.height);
+    const D3D11_VIEWPORT termViewport { float(uint32_t(inputs.window.x)), float(uint32_t(inputs.window.y)),
                                         float(termWidth), float(termHeight), 0.0f, 1.0f };
     // The pair covers both draws: the march and the combine are one pass. Only the run that began the pair ends it (a run that found the
     // previous pair still in the queue is not timed at all), so no End is ever issued without its Begin.

@@ -26,6 +26,8 @@ enum class F : uint64_t
     DrawDiag = 1ull << 12,  // developer draw diagnostic ([FFXIV] DrawDiagnostics, log only)
     Plate = 1ull << 13,      // native nameplate interpolation (ffxiv/plates + hudless/UiPlates.cpp)
     ContactShadows = 1ull << 14, // contact shadows before the sun light pass ([FFXIV] ContactShadows)
+    EnginePassOverrides = 1ull << 15, // engine pass overrides: a constant-buffer patch for one draw ([FFXIV] EnginePassOverrides)
+    LightShafts = 1ull << 16, // light shafts before the tone map ([FFXIV] LightShafts)
 };
 
 namespace detail

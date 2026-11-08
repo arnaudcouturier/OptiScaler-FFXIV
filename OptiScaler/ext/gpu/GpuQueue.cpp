@@ -2,6 +2,8 @@
 
 #include "ext/gpu/Gpu.h"
 
+#include <chrono>
+
 #include <wrl/client.h>
 
 // Queue helpers of the C6 base that log (kept out of Gpu.cpp, which the standalone tests link).
@@ -33,13 +35,18 @@ QueueDrain DrainQueueEx(ID3D12CommandQueue* queue)
     if (SUCCEEDED(result))
         result = fence->SetEventOnCompletion(1, event);
     outcome.signalOk = SUCCEEDED(result);
+    // How long the GPU actually took to get past its backlog: the release summary line reads the shares from here (the
+    // fence wait, not the setup), so a next session can split a "waited X ms" release without correlating timestamps.
+    const auto fenceStart = std::chrono::steady_clock::now();
     waited = outcome.signalOk ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
+    const auto fenceMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fenceStart).count();
     CloseHandle(event);
     outcome.waitSignaled = waited == WAIT_OBJECT_0;
     outcome.removedAfter = FAILED(device->GetDeviceRemovedReason());
     const auto drain = ClassifyFence(outcome);
-    LOG_INFO("FFXIV upscaler release: queue {:X} drained={}, wait={:X}, result={:X}", (size_t) queue,
-             drain == QueueDrain::Drained, waited, (UINT) result);
+    LOG_INFO("FFXIV upscaler release: queue {:X} drained={}, wait={:X}, result={:X}, fence {:.2f} ms", (size_t) queue,
+             drain == QueueDrain::Drained, waited, (UINT) result, fenceMs);
     return drain;
 }
 

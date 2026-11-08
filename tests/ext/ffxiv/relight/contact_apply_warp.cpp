@@ -63,6 +63,8 @@ struct Scene
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11ShaderResourceView> maskView, depthView, atlasView;
+    // The mask as this game build binds it, and the same texture through a view of another typed format of its family.
+    ComPtr<ID3D11ShaderResourceView> r8MaskView, r8SnormView;
     ComPtr<ID3D11Buffer> light, camera;
 
     bool Create()
@@ -90,8 +92,8 @@ struct Scene
 
         maskView = MakeView(kWidth, kHeight, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, maskPixels.data(), kWidth * 4);
         depthView = MakeView(kWidth, kHeight, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, depths.data(), kWidth * 4);
-        // The screen-space mask's format at the cascade atlas' size (2048x10240 in the game, 2048x1024 here): the size test is what
-        // refuses it, and the real atlas would also fail the format test (it is R8_UNORM).
+        // The screen-space mask's format at the cascade atlas' size (2048x8192 in the game, 2048x1024 here): the size test is what
+        // refuses it, and the real atlas would also fail the format test (it is R8_TYPELESS, not R8_UNORM).
         std::vector<uint32_t> atlasPixels(size_t(2048) * 1024, 0xFFFFFFFFu);
         atlasView = MakeView(2048, 1024, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, atlasPixels.data(), 2048 * 4);
 
@@ -100,7 +102,12 @@ struct Scene
         const contact_test::CameraRows rows = contact_test::MakeCamera(contact_test::Identity(), projection);
         light = MakeBuffer(lightBytes, sizeof lightBytes);
         camera = MakeBuffer(rows.v, sizeof rows.v);
-        return maskView && depthView && atlasView && light && camera;
+        // The engine's own mask pair: the texture is R8_TYPELESS, the view the light draw samples is R8_UNORM. One visibility factor per texel
+        // at full sun, and the same texture through an R8_SNORM view, which is a different resource reading other numbers.
+        std::vector<unsigned char> maskLevels(size_t(kWidth) * kHeight, 0xFFu);
+        r8MaskView = MakeView(kWidth, kHeight, DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_UNORM, maskLevels.data(), kWidth);
+        r8SnormView = MakeView(kWidth, kHeight, DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_SNORM, maskLevels.data(), kWidth);
+        return maskView && depthView && atlasView && light && camera && r8MaskView && r8SnormView;
     }
 
     ComPtr<ID3D11ShaderResourceView> MakeView(uint32_t width, uint32_t height, DXGI_FORMAT format, DXGI_FORMAT viewFormat,
@@ -213,6 +220,43 @@ int main()
         CHECK(scene.BoundMask(layout.maskSlot) == scene.maskView.Get()); // and the game's own is back
         CHECK_EQ(state.runs, 1u);
         CHECK(g_testLogLines > linesBefore); // the classification line and the run line
+        scene.Clear();
+    }
+
+    // ---- the mask as this game build binds it: the engine creates the screen-space sun mask as an R8_TYPELESS texture and the light draw samples
+    // an R8_UNORM view of it. The pair is the mask the pass multiplies, so the draw sees the pass's copy and its own binding comes back - and the
+    // card's last-mask line reports the format the draw samples (R8_UNORM, 61), not the typeless format of the texture behind it.
+    {
+        State state;
+        state.params = GoodParams();
+        scene.Bind(layout, scene.r8MaskView.Get());
+        Payload payload { scene.context.Get(), layout.maskSlot, false };
+        const Decline reason = ApplyDraw(scene.context.Get(), state, &layout, &Draw, &payload);
+        std::printf("    an R8_TYPELESS mask sampled through an R8_UNORM view: %s%c", DeclineName(reason), 10);
+        CHECK(reason == Decline::None);
+        CHECK(payload.ran);
+        CHECK(payload.mask != nullptr && payload.mask != scene.r8MaskView.Get()); // the draw ran on the pass's copy
+        CHECK(scene.BoundMask(layout.maskSlot) == scene.r8MaskView.Get());        // and the game's own is back
+        CHECK_EQ(state.runs, 1u);
+        CHECK_EQ(state.lastMaskFormat, uint32_t(DXGI_FORMAT_R8_UNORM)); // what the light draw samples, not the texture's 60
+        scene.Clear();
+    }
+
+    // ---- the same texture through another typed format of its family (R8_SNORM reads other numbers): a format refusal, the game's own binding
+    // never moves, and the draw runs exactly once
+    {
+        State state;
+        state.params = GoodParams();
+        scene.Bind(layout, scene.r8SnormView.Get());
+        Payload payload { scene.context.Get(), layout.maskSlot, false };
+        const Decline reason = ApplyDraw(scene.context.Get(), state, &layout, &Draw, &payload);
+        std::printf("    an R8_TYPELESS mask sampled through an R8_SNORM view: %s%c", DeclineName(reason), 10);
+        CHECK(reason == Decline::MaskFormat);
+        CHECK(payload.ran);
+        CHECK(payload.mask == scene.r8SnormView.Get());
+        CHECK(scene.BoundMask(layout.maskSlot) == scene.r8SnormView.Get());
+        CHECK_EQ(state.runs, 0u);
+        CHECK_EQ(state.declined, 1u);
         scene.Clear();
     }
 

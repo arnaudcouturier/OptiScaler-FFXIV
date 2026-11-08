@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Light shaft shaders (ext\ffxiv\engine\shaders\LightShafts.hlsl). One source, five entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by ShaftsPass.cpp;
+  change them together.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\LightShafts.hlsl">
+      <Variable>LightShafts_Vs_cso</Variable>
+      <Header>LightShafts_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\LightShafts.hlsl">
+      <Variable>LightShafts_Mask_cso</Variable>
+      <Header>LightShafts_Mask.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Mask</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\LightShafts.hlsl">
+      <Variable>LightShafts_Blur_cso</Variable>
+      <Header>LightShafts_Blur.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Blur</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\LightShafts.hlsl">
+      <Variable>LightShafts_SunColour_cso</Variable>
+      <Header>LightShafts_SunColour.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_SunColour</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\LightShafts.hlsl">
+      <Variable>LightShafts_Composite_cso</Variable>
+      <Header>LightShafts_Composite.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Composite</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

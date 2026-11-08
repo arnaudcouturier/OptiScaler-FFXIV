@@ -70,10 +70,14 @@ int main(int, char** argv)
     {
         const std::string hooks = Code(repo, "ffxiv/lighting/FfxivLightingCapture.h");
         EXPECT(Count(hooks, "ext::Active(ext::F::ContactShadows)") == 1, "the draw hook asks the key exactly once");
-        EXPECT(Has(hooks, R"x(if(!inside&&c==context&&ext::Active(ext::F::ContactShadows)))x"),
-               "the key test is the first thing the seam does, and only the game's own context is touched (the classification reads that "
-               "context's tracked shader and the pass enters its private state on it)");
-        EXPECT(Has(hooks, R"x(ext::ffxiv::relight::BoundDraw(c,original))x"), "the seam wraps the game's own draw");
+        EXPECT(Has(hooks, R"x(if(!inside&&c==context&&ext::ActiveAny(ext::F::ContactShadows,ext::F::EnginePassOverrides,ext::F::LightShafts)))x"),
+               "the key test is the first thing the seam does (together with the engine pass override bit: one relaxed load while both are "
+               "off), and only the game's own context is touched (the classification reads that context's tracked shader and the pass enters "
+               "its private state on it)");
+        EXPECT(Has(hooks, R"x(if(!ext::Active(ext::F::ContactShadows)){original();return;})x"),
+               "the pass is skipped, and the game's draw still runs, when only the other feature asked for the draw");
+        EXPECT(Has(hooks, R"x(ext::ffxiv::relight::BoundDraw(c,original);)x"),
+               "the seam wraps the game's own draw, inside the engine pass override's patch");
         EXPECT(Has(hooks, R"x(AroundBody(c,kind,wrapped);)x") && Has(hooks, R"x(AroundBody(c,kind,original);)x"),
                "the rest of the hook runs either way: the pass only replaces the draw call");
         EXPECT(Count(hooks, "ext::ffxiv::relight::") == 4,
@@ -92,9 +96,9 @@ int main(int, char** argv)
         // The wrapper hands the hook body's draw to the draw-once rule with both paths: the pass with the draw, and the draw alone for a
         // replay. Dropping the second argument (or running both) would double the frame's draws or drop the replayed one; the rule itself is
         // tested in contact_rules.
-        EXPECT(Has(hooks, R"x(autowrapped=[&]{ext::ffxiv::relight::RunDrawOnce(first,ext::hdr::FfxivSceneHdr::Requested(),[&]{ext::ffxiv::relight::BoundDraw(c,original);},original);};)x"),
-               "the seam hands the hook body's draw to the draw-once rule once, with both paths (running both, or neither, would double "
-               "the frame's draws or drop the replayed one)");
+        EXPECT(Has(hooks, R"x(ext::ffxiv::relight::RunDrawOnce(first,ext::hdr::FfxivSceneHdr::Requested(),[&]{if(!ext::ActiveAny(ext::F::EnginePassOverrides,ext::F::LightShafts)){shadows();return;}ext::ffxiv::engine::BoundDraw(c,shadows);},original);};)x"),
+               "the seam hands the hook body's draw to the draw-once rule once, with both paths: the wrapped draw, and the game's own draw as "
+               "the plain path (running both, or neither, would double the frame's draws or drop the replayed one)");
     }
 
     // ---- the feature bit is its own, and the inline test is the relaxed load of ExtFeatures.h
@@ -133,6 +137,18 @@ int main(int, char** argv)
                "a recycled address is not trusted: the stamp is the shader object's own answer");
         EXPECT(Has(cpp, R"x(if(state.inPass.load(std::memory_order_relaxed))return;)x"),
                "the pass's own shaders do not overwrite what the game bound (the state swap puts the game's back)");
+        // The dump's second half: the mask's own texels, and the bytecode of the shaders that declare a mask name kept from creation, which is
+        // what settles the mask's meaning (which level is sunlit) and the channel the light draw reads.
+        EXPECT(Has(cpp, R"x(KeepShaderBytecode(crc,code,size,layout);)x"),
+               "shader creation hands a mask-declaring shader's bytecode to the dump's keep while a dump is armed");
+        const std::string dump = Code(repo, "ffxiv/relight/ContactShadowsDump.cpp");
+        EXPECT(Has(dump, R"x(std::lock_guardlock(kept.mutex);)x") && Has(dump, R"x(kept.shaders.push_back(std::move(shader));)x"),
+               "the dump owns the copies and their lock, so the header the draw hook includes carries no lock and nothing is copied while the "
+               "dump's key is off");
+        EXPECT(Has(dump, R"x(for(constKeptShader&kept:KeptShaderCode()))x") && Has(dump, R"x(MaskDumpFile(maskR8,/*before*/true))x") &&
+                   Has(dump, R"x(themask'smeaningisnotmeasuredforthisbuild)x"),
+               "the dump writes the mask's texels under a name that says their format, the kept shader bytecode beside them, and says that "
+               "the mask's meaning is an assumption for this build");
         const std::string apply = Code(repo, "ffxiv/relight/ContactShadowsApply.cpp");
         EXPECT(Has(apply, R"x(structRestore{)x"), "the game's binding is put back by a scope guard");
         EXPECT(Has(apply, R"x(context->PSSetShaderResources(slot,1,&view);)x"), "the binding that was there is what comes back");
@@ -164,6 +180,22 @@ int main(int, char** argv)
                "the camera buffer is checked against the matrix products before the pass may run");
         EXPECT(Has(apply, R"x(state.pass.HasGpuMilliseconds(),state.pass.GpuMilliseconds())x"),
                "the run line reports the pass's own GPU cost, separate from the hook's CPU cost");
+        // The counters the card reads: the draws of another shape are counted apart from the rest, and the last classified light draw's mask
+        // and verdict are kept so a session can tell "the rule did not find this build's mask" from "the effect is subtle".
+        EXPECT(Has(apply, R"x(if(IsShapeDecline(reason))state.shapes++;)x"), "a shape refusal is counted apart from the other reasons");
+        EXPECT(Has(apply, R"x(state.haveInspection=true;)x") && Has(apply, R"x(state.lastMaskFormat=facts.maskFormat;)x") &&
+                   Has(apply, R"x(state.lastMaskHeight=facts.maskHeight;)x") && Has(apply, R"x(state.lastMaskSlot=layout->maskSlot;)x"),
+               "the last classified light draw's mask and slot are recorded for the card");
+        EXPECT(Has(apply, R"x(state.lastDecline=reason;)x"), "and its verdict");
+        const std::string inject = Code(repo, "ffxiv/relight/Inject.cpp");
+        EXPECT(Has(inject, R"x(status.shapes=state.shapes;)x") && Has(inject, R"x(status.haveInspection=state.haveInspection;)x") &&
+                   Has(inject, R"x(status.maskFormat=state.lastMaskFormat;)x") && Has(inject, R"x(status.lastDecline=state.lastDecline;)x"),
+               "the card's status reads those counters and the last mask, never the log");
+        const std::string menu = Code(repo, "ffxiv/relight/RelightMenu.cpp");
+        EXPECT(Has(menu, R"x(constStatusstatus=CurrentStatus();)x") &&
+                   Has(menu, R"x(status.runs,status.declined,status.shapes,status.maskWidth)x") && !Has(menu, "status.runs,status.runs"),
+               "the card shows the counters - the passes (one per light draw served), the refusals, the shape refusals and the last mask - "
+               "not only the tuning, and no counter is printed twice as if it were two");
     }
 
     // ---- the pass: two draws in a private device-context state, and the mask copy is the pass's own texture
@@ -179,10 +211,10 @@ int main(int, char** argv)
                "a second entry into the pass while a run holds it is refused");
         EXPECT(Has(pass, R"x(constbooltimed=BeginGpuTiming(context);)x") && Has(pass, R"x(if(timed&&_end&&_disjoint))x"),
                "a run ends the timestamp pair only when it began it (no End without Begin)");
-        EXPECT(Has(pass, R"x(constD3D11_VIEWPORTtermViewport{float(uint32_t(inputs.window.x*0.5f)),float(uint32_t(inputs.window.y*0.5f)),)x"),
+        EXPECT(Has(pass, R"x(constD3D11_VIEWPORTtermViewport{float(uint32_t(inputs.window.x)),float(uint32_t(inputs.window.y)),)x"),
                "the march is a viewport at the render window's own origin in the term target");
-        EXPECT(Has(pass, R"x(!EnsureTerm(device.Get(),HalfExtent(float(inputs.maskWidth)),HalfExtent(float(inputs.maskHeight))))x"),
-               "the term is the allocation's half, so a dynamic-resolution change creates no D3D object");
+        EXPECT(Has(pass, R"x(!EnsureTerm(device.Get(),inputs.maskWidth,inputs.maskHeight))x"),
+               "the term is the allocation's size, so a dynamic-resolution change creates no D3D object");
         EXPECT(Has(pass, R"x(context->Draw(3,0);)x"), "two full-screen triangles");
         EXPECT(Count(pass, "context->Draw(3,0);") == 2, "the march and the combine");
         EXPECT(Has(pass, "DXGI_FORMAT_R8_UNORM"), "the term is the 8-bit format the mask's precision allows");
@@ -209,7 +241,7 @@ int main(int, char** argv)
         EXPECT(Has(config, R"x(CustomOptional<bool>contactShadows{false};)x"), "off by default: today's behaviour");
         EXPECT(Has(config, R"x(CustomOptional<float>contactShadowsLength{0.5f};)x"), "the length default");
         EXPECT(Has(config, R"x(CustomOptional<float>contactShadowsStrength{0.5f};)x"), "the strength default");
-        EXPECT(Has(config, R"x(CustomOptional<int32_t>contactShadowsSteps{12};)x"), "the step default");
+        EXPECT(Has(config, R"x(CustomOptional<int32_t>contactShadowsSteps{32};)x"), "the step default");
         EXPECT(Has(config, R"x(CustomOptional<std::string>contactShadowsSunSpace{"auto"};)x"), "the space default reads as the measurement");
         EXPECT(Has(config, R"x(CustomOptional<std::string>contactShadowsSunSign{"auto"};)x"), "the sign default reads as the measurement");
         EXPECT(Has(config, R"x(CustomOptional<int32_t>contactShadowsDump{0};)x"), "the dump is off by default: 0 writes nothing");

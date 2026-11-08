@@ -186,6 +186,8 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "DrawDiagnosticsFrames", drawDiagnosticsFrames);
     b.Add("FFXIV", "DrawDiagnosticsDelaySeconds", drawDiagnosticsDelaySeconds);
     b.Add("FFXIV", "DrawDiagnosticsKey", drawDiagnosticsKey);
+    b.Add("FFXIV", "DrawDiagnosticsDump", drawDiagnosticsDump);
+    b.Add("FFXIV", "DrawDiagnosticsDumpBudgetMiB", drawDiagnosticsDumpBudgetMiB);
     b.Add("FFXIV", "VfxMaskProbe", vfxMaskProbe);
     b.Add("FFXIV", "ContactShadows", contactShadows);
     b.Add("FFXIV", "ContactShadowsLength", contactShadowsLength);
@@ -194,6 +196,39 @@ void FfxivConfig::Bind(config::Binder& b)
     b.Add("FFXIV", "ContactShadowsSunSpace", contactShadowsSunSpace);
     b.Add("FFXIV", "ContactShadowsSunSign", contactShadowsSunSign);
     b.Add("FFXIV", "ContactShadowsDump", contactShadowsDump);
+    b.Add("FFXIV", "EnginePassOverrides", enginePassOverrides);
+    b.Add("FFXIV", "AmbientSkyVisibilityScale", ambientSkyVisibilityScale);
+    b.Add("FFXIV", "WetnessOverride", wetnessOverride);
+    b.Add("FFXIV", "AmbientOcclusion", ambientOcclusion);
+    b.Add("FFXIV", "AmbientOcclusionRadius", ambientOcclusionRadius);
+    b.Add("FFXIV", "AmbientOcclusionStrength", ambientOcclusionStrength);
+    b.Add("FFXIV", "AmbientOcclusionBlend", ambientOcclusionBlend);
+    b.Add("FFXIV", "AmbientOcclusionQuality", ambientOcclusionQuality);
+    b.Add("FFXIV", "Puddles", puddles);
+    b.Add("FFXIV", "PuddlesCoverage", puddlesCoverage);
+    b.Add("FFXIV", "PuddlesScale", puddlesScale);
+    b.Add("FFXIV", "PuddlesSoftness", puddlesSoftness);
+    b.Add("FFXIV", "PuddlesGlossTarget", puddlesGlossTarget);
+    b.Add("FFXIV", "PuddlesGlossChannel", puddlesGlossChannel);
+    b.Add("FFXIV", "PuddlesGlossWet", puddlesGlossWet);
+    b.Add("FFXIV", "PuddlesReflection", puddlesReflection);
+    b.Add("FFXIV", "PuddlesReflectionStrength", puddlesReflectionStrength);
+    b.Add("FFXIV", "PuddlesDarkening", puddlesDarkening);
+    b.Add("FFXIV", "PuddlesRipple", puddlesRipple);
+    b.Add("FFXIV", "PuddlesReflectionSteps", puddlesReflectionSteps);
+    b.Add("FFXIV", "PuddlesReach", puddlesReach);
+    b.Add("FFXIV", "LightShafts", lightShafts);
+    b.Add("FFXIV", "LightShaftsIntensity", lightShaftsIntensity);
+    b.Add("FFXIV", "LightShaftsDecay", lightShaftsDecay);
+    b.Add("FFXIV", "LightShaftsSamples", lightShaftsSamples);
+    b.Add("FFXIV", "LightShaftsDensity", lightShaftsDensity);
+    b.Add("FFXIV", "LightShaftsColor", lightShaftsColor);
+    b.Add("FFXIV", "ScreenSpaceReflections", screenSpaceReflections);
+    b.Add("FFXIV", "ScreenSpaceReflectionsDiagnostic", screenSpaceReflectionsDiagnostic);
+    b.Add("FFXIV", "ScreenSpaceReflectionsSteps", screenSpaceReflectionsSteps);
+    b.Add("FFXIV", "ScreenSpaceReflectionsThickness", screenSpaceReflectionsThickness);
+    b.Add("FFXIV", "ScreenSpaceReflectionsBlend", screenSpaceReflectionsBlend);
+    b.Add("FFXIV", "ScreenSpaceReflectionsFade", screenSpaceReflectionsFade);
     chara.Bind(b);
 }
 

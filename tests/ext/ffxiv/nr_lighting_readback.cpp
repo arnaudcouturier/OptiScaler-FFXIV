@@ -5,6 +5,7 @@
 #define LOG_WARN(...) ((void)0)
 #define LOG_ERROR(...) ((void)0)
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
+#include "ext/ffxiv/engine/SsrNativeContext.h"
 #pragma comment(lib, "d3d11.lib")
 namespace FfxivLightingScan = ext::ffxiv::lighting::FfxivLightingScan;
 namespace LightingHistory = ext::ffxiv::lighting::LightingHistory;
@@ -45,6 +46,12 @@ int main()
     assert(proxy.refs==1 && nested.refs==1 && foreign.refs==1);
     IdentityProxy cycleA(nullptr), cycleB(&cycleA); cycleA.original=&cycleB;
     assert(!NativeIdentity(&cycleA));
+    using ext::ffxiv::engine::ssr::native_context::Identity;
+    assert(Identity(device.Get()) == NativeIdentity(device.Get()));
+    assert(Identity(&proxy) == NativeIdentity(device.Get()));
+    assert(Identity(&nested) == NativeIdentity(device.Get()));
+    assert(!Identity(&cycleA));
+    assert(!Identity(&foreign) || Identity(&foreign) != Identity(device.Get()));
     assert(cycleA.refs==1 && cycleB.refs==1);
     auto& s = State(); s.active = true; s.context = context.Get();
     // Different contexts on one device are allowed only with the exact captured
@@ -94,6 +101,25 @@ int main()
     assert(!KnownColor(s.slots[0].lut.Get()));
     prepare(); ForgetColor(s.slots[0].lut.Get());
     assert(!KnownColor(s.slots[0].lut.Get()));
+    // SSR's first-water-draw scene snapshot is a same-shape FP16 texture but
+    // CopySubresourceRegion supplies a non-null window box. The hook therefore
+    // passes fullCopy=false: it must not promote the private image to the HDR
+    // color lineage, and it must leave the engine source's lineage intact.
+    D3D11_TEXTURE2D_DESC sceneDesc{};
+    sceneDesc.Width=3840; sceneDesc.Height=2160; sceneDesc.MipLevels=sceneDesc.ArraySize=1;
+    sceneDesc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT; sceneDesc.SampleDesc.Count=1;
+    sceneDesc.Usage=D3D11_USAGE_DEFAULT; sceneDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> engineScene, ssrPrivateScene;
+    assert(SUCCEEDED(device->CreateTexture2D(&sceneDesc,nullptr,&engineScene)));
+    assert(SUCCEEDED(device->CreateTexture2D(&sceneDesc,nullptr,&ssrPrivateScene)));
+    prepare(); s.colorAliases[0]=engineScene;
+    ColorCopy(ssrPrivateScene.Get(),engineScene.Get(),false);
+    assert(KnownColor(engineScene.Get()));
+    assert(!KnownColor(ssrPrivateScene.Get()));
+    // A whole-resource copy with identical shape is the positive control.
+    ColorCopy(ssrPrivateScene.Get(),engineScene.Get(),true);
+    assert(KnownColor(ssrPrivateScene.Get()));
+    prepare();
     // Later draws can composite onto the tone-mapped scene. They do not undo
     // the measured tone-mapping stage, and the draw hook cannot infer that a
     // bound target was fully overwritten (a draw may even write no pixels).

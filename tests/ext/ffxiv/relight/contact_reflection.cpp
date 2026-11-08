@@ -3,9 +3,11 @@
 //
 // The classifier must find the four names a sun light draw declares, at the slots the bytecode really uses, and must refuse every shader
 // that does not carry all four - otherwise the pass would read a cascade atlas where the screen-space mask is expected, or bind a copy into
-// a draw that never samples it. The D3DCompile blobs here are compiled by the test, so their RDEF chunk has the shape this compiler writes;
-// the effect-style blob is built by hand from the name table an in-game capture of the sun light draw recorded, and the two files under
-// tests/ext/ffxiv/relight/fixtures are the real blobs that capture kept (see the block that reads them).
+// a draw that never samples it. The names are matched exactly, after the effect compiler's `.T`/`.S` pair is stripped and only that pair; a
+// name that merely starts with the mask's letters, or ends in another dot pair, is another resource and does not match. The D3DCompile blobs
+// here are compiled by the test, so their RDEF chunk has the shape this compiler writes; the effect-style blob is built by hand from the name
+// table an in-game capture of the sun light draw recorded, and the two files under tests/ext/ffxiv/relight/fixtures are the real blobs that
+// capture kept (see the block that reads them).
 #include "check.h"
 
 #include "ext/ffxiv/diag/ShaderBindings.h"
@@ -54,6 +56,20 @@ float4 PS() : SV_Target
 {
     return g_SamplerGBuffer.Load(int3(0, 0, 0)) + g_SamplerShadow.Load(int3(0, 0, 0)) +
            g_SamplerDepth.Load(int3(0, 0, 0)) + lightA + lightB + cameraA;
+}
+)";
+
+// This game build's own light draw, as its capture reflects it: the screen-space mask is `g_SamplerShadowMask` at t8, the depth is at t0,
+// and the two constant buffers are g_CameraParameter at cb1 and g_LightParam at cb2. The name the benchmark build used for the same
+// binding (g_SamplerShadow) belongs to the cascade-atlas reader here, so a rule that knows only that name never recognises this draw.
+constexpr const char* kThisBuildsSunLight = R"(
+Texture2D<float4> g_SamplerShadowMask : register(t8);
+Texture2D<float> g_SamplerDepth : register(t0);
+cbuffer g_CameraParameter : register(b1) { float4 cameraA; };
+cbuffer g_LightParam : register(b2) { float4 lightA; float4 lightB; };
+float4 PS() : SV_Target
+{
+    return g_SamplerShadowMask.Load(int3(0, 0, 0)) + g_SamplerDepth.Load(int3(0, 0, 0)) + cameraA + lightA + lightB;
 }
 )";
 
@@ -172,6 +188,48 @@ int main(int argc, char** argv)
         CHECK_EQ(layout.cameraParamSlot, 3u);
     }
 
+    // ---- this game build's own name for the mask, at the slots its capture recorded
+    {
+        using ext::ffxiv::diag::kBindConstantBuffer;
+        using ext::ffxiv::diag::kBindSampler;
+        using ext::ffxiv::diag::kBindTexture;
+        const std::string code = Compile(kThisBuildsSunLight);
+        CHECK(!code.empty());
+        const Layout layout = LayoutOfShader(code.data(), code.size());
+        CHECK(layout.ok);
+        CHECK_EQ(layout.maskSlot, 8u);
+        CHECK_EQ(layout.depthSlot, 0u);
+        CHECK_EQ(layout.lightParamSlot, 2u);
+        CHECK_EQ(layout.cameraParamSlot, 1u);
+
+        // The same table as the effect compiler writes it: the samplers first, then the textures, both under the mask's plain name. The mask
+        // answers to either name the two measured builds use, and a shader that declares both is read at the first one its reflection lists.
+        const std::vector<Bound> buildShape {
+            { "g_SamplerShadowMask.S", kBindSampler, 7 },
+            { "g_SamplerShadowMask.T", kBindTexture, 8 },
+            { "g_SamplerDepth.S", kBindSampler, 0 },
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 2 },
+        };
+        const std::vector<unsigned char> buildBlob = EffectStyleBlob(buildShape);
+        const Layout buildLayout = LayoutOfShader(buildBlob.data(), buildBlob.size());
+        CHECK(buildLayout.ok);
+        CHECK_EQ(buildLayout.maskSlot, 8u);
+
+        const std::vector<Bound> bothNames {
+            { "g_SamplerShadow.T", kBindTexture, 6 },
+            { "g_SamplerShadowMask.T", kBindTexture, 8 },
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 2 },
+        };
+        const std::vector<unsigned char> bothNamesBlob = EffectStyleBlob(bothNames);
+        const Layout bothLayout = LayoutOfShader(bothNamesBlob.data(), bothNamesBlob.size());
+        CHECK(bothLayout.ok);
+        CHECK_EQ(bothLayout.maskSlot, 6u); // the first texture of either name wins, as the rule says
+    }
+
     // ---- the same four names at other slots: the layout follows the shader, not a number in this fork
     {
         const std::string code = Compile(kOtherSlots);
@@ -281,6 +339,85 @@ int main(int argc, char** argv)
         const Layout refused = LayoutOfShader(writer.data(), writer.size());
         CHECK(!refused.ok);
         CHECK_EQ(refused.found, 1u | 2u | 8u); // the mask, the depth and the camera buffer, no g_LightParam
+    }
+
+    // ---- the mask answers to exactly two names, never by prefix: a texture that merely starts with either one is another
+    // resource (the variant a patch adds, a second mask), not the screen-space mask, so a shader whose only mask-like texture is
+    // one of those is refused
+    {
+        using ext::ffxiv::diag::kBindConstantBuffer;
+        using ext::ffxiv::diag::kBindTexture;
+        // (a) the near misses alone: nothing here is the mask. g_SamplerShadowMask is this game build's own name and is accepted
+        // elsewhere (the block above); a longer name that starts with it is not.
+        const std::vector<Bound> nearMiss {
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_SamplerShadowX.T", kBindTexture, 6 },
+            { "g_SamplerShadowMaskX.T", kBindTexture, 7 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 3 },
+        };
+        const std::vector<unsigned char> nearBlob = EffectStyleBlob(nearMiss);
+        const Layout refused = LayoutOfShader(nearBlob.data(), nearBlob.size());
+        std::printf("    a name that starts with the mask's letters: found 0x%X%c", refused.found, 10);
+        CHECK(!refused.ok);
+        CHECK_EQ(refused.found, 2u | 4u | 8u); // the depth and both buffers, no mask // the depth and both buffers, no mask
+        // (b) and beside the exact name the near miss neither becomes nor overwrites the mask: the near miss is declared
+        // first, so a rule that takes the first name it sees puts the mask at slot 7
+        const std::vector<Bound> both {
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_SamplerShadowX.T", kBindTexture, 7 },
+            { "g_SamplerShadow.T", kBindTexture, 6 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 3 },
+        };
+        const std::vector<unsigned char> bothBlob = EffectStyleBlob(both);
+        const Layout found = LayoutOfShader(bothBlob.data(), bothBlob.size());
+        CHECK(found.ok);
+        CHECK_EQ(found.maskSlot, 6u);
+    }
+
+    // ---- the name rule strips the effect compiler's `.T`/`.S` pair and nothing else: any other pair of characters after
+    // a dot belongs to the name, so a texture that merely ends in a letter keeps it and is not renamed into the mask
+    {
+        using ext::ffxiv::diag::ResourceBaseName;
+        const auto base = [](const char* name) { return std::string(ResourceBaseName(name)); };
+        CHECK(base("g_SamplerShadow.T") == "g_SamplerShadow");
+        CHECK(base("g_SamplerShadow.S") == "g_SamplerShadow");
+        CHECK(base("g_SamplerDepth.T") == "g_SamplerDepth");
+        CHECK(base("g_LightParam") == "g_LightParam"); // a constant buffer keeps its plain name
+        // Near misses: another character before the dot is part of the name, upper case or not.
+        CHECK(base("g_SamplerShadow.X") == "g_SamplerShadow.X");
+        CHECK(base("g_SamplerShadow.Q") == "g_SamplerShadow.Q");
+        CHECK(base("g_SamplerShadow.t") == "g_SamplerShadow.t");
+        CHECK(base("g_SamplerShadow.s") == "g_SamplerShadow.s");
+        // A name too short to carry a suffix, and one whose dot is not at the suffix position, are left alone.
+        CHECK(base(".T") == ".T");   // too short to carry a suffix
+        CHECK(base("a.T") == "a");   // and a one-letter name keeps its letter only
+        CHECK(base("g.SamplerShadow") == "g.SamplerShadow");
+        // Through the classifier: a mask-cased name with another suffix is not the mask, the `.T` one is.
+        using ext::ffxiv::diag::kBindConstantBuffer;
+        using ext::ffxiv::diag::kBindTexture;
+        const std::vector<Bound> suffixes {
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_SamplerShadow.Y", kBindTexture, 6 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 3 },
+        };
+        const std::vector<unsigned char> suffixBlob = EffectStyleBlob(suffixes);
+        const Layout suffixRefused = LayoutOfShader(suffixBlob.data(), suffixBlob.size());
+        std::printf("    another dot pair on the mask's letters: found 0x%X%c", suffixRefused.found, 10);
+        CHECK(!suffixRefused.ok);
+        CHECK_EQ(suffixRefused.found, 2u | 4u | 8u); // the depth and both buffers, no mask // the depth and both buffers, no mask
+        const std::vector<Bound> suffixesOk {
+            { "g_SamplerDepth.T", kBindTexture, 0 },
+            { "g_SamplerShadow.T", kBindTexture, 6 },
+            { "g_CameraParameter", kBindConstantBuffer, 1 },
+            { "g_LightParam", kBindConstantBuffer, 3 },
+        };
+        const std::vector<unsigned char> suffixOkBlob = EffectStyleBlob(suffixesOk);
+        const Layout suffixFound = LayoutOfShader(suffixOkBlob.data(), suffixOkBlob.size());
+        CHECK(suffixFound.ok);
+        CHECK_EQ(suffixFound.maskSlot, 6u);
     }
 
     return Finish("contact_shadows_reflection");

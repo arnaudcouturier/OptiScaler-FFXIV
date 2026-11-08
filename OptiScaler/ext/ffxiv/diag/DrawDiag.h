@@ -34,6 +34,7 @@ void OnUpscaleBoundary();
 // Present entry (ext::ffxiv::ui::OnPresentBegin): closes the frame the draw hooks collected and writes the files at the end.
 void OnPresent();
 
-// End of config::Load (ext::FfxivConfig::PostLoad): arms a capture, or disarms it. A capture happens once per session.
+// End of config::Load (ext::FfxivConfig::PostLoad): arms a capture, or disarms it. A capture happens once per session; a key-started one
+// re-arms after it is written, up to kMaxCapturesPerSession captures.
 void OnConfigLoaded(bool capture);
 } // namespace ext::ffxiv::diag

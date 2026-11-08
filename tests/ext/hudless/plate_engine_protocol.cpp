@@ -579,6 +579,41 @@ void PresetPause()
     std::puts("    S11 pause: the hidden frame is drawn unshifted, then the gate closes and the plates stay native");
 }
 
+// S40: a static condition that changes between two presents takes the arming away at the present it changes on. The
+// preset pause is such a flip: the record that present publishes is not armed, so no frame can hide on it, and the gate
+// is already closed when the next frame is reserved.
+void StaticFlipClosesTheGate()
+{
+    Scenario s(3);
+    ext::hudless::TestMode() = ext::hudless::Mode::Recomposition;
+    unsigned n = 1;
+    WarmUp(s, n);
+    Frame(s, n); // hidden, and the warm-up armed the gate
+    const unsigned hiddenFrame = n - 1;
+    EXPECT(s.driver.Mode(hiddenFrame) == FrameMode::Hidden, "hidden before the flip: %s",
+           ModeName(s.driver.Mode(hiddenFrame)));
+    EXPECT(ext::hudless::plates::HideAllowed(), "the warm-up armed the gate");
+    // The frame reserves its slot while the pause is still off; the preset drops the recomposition before its present.
+    s.driver.Frame(n);
+    EXPECT(s.driver.Mode(n) == FrameMode::Hidden, "the frame reserved a hidden slot: %s", ModeName(s.driver.Mode(n)));
+    ext::fg::preset::TestDecision().droppedByPreset = true;
+    const Counters beforeFlip = s.Now();
+    s.driver.Post();
+    EXPECT(s.Now().promoted - beforeFlip.promoted == 1, "the frame was still promoted");
+    // The record this present publishes carries the condition: not armed, so the gate closes here and not one present late.
+    EXPECT(!ext::hudless::plates::HideAllowed(), "the static flip closed the hide gate at its own present");
+    s.driver.Output(n);
+    ++n;
+    // And the next frame cannot hide at all: its ask is refused while the condition is off.
+    s.driver.Frame(n);
+    EXPECT(s.driver.Mode(n) == FrameMode::Declined, "the next frame is declined: %s", ModeName(s.driver.Mode(n)));
+    s.driver.Post();
+    ++n;
+    Common(s, "S40");
+    std::puts("    S40 static flip: the present that sees the pause publishes an unarmed record, so the gate is closed "
+              "before any frame can hide on it");
+}
+
 // S12: the output size changes. One slot is remade per present, so the first frame is declined and the following ones
 // use the slot that is already the new size.
 void Resize()
@@ -1779,6 +1814,7 @@ int main()
     MultiplierOne();
     MultiplierTwo();
     PresetPause();
+    StaticFlipClosesTheGate();
     Resize();
     RefusedReservation();
     ProduceFailure();

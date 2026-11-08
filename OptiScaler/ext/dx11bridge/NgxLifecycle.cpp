@@ -171,9 +171,13 @@ ReleaseDrain BeforeReleaseFeature(IFeature_Dx11& feature, unsigned handleId, boo
         fg->DestroyFGContext();
     }
 
-    LOG_INFO("FFXIV upscaler release: handle {} result={} (fg queue required={}, fg={}, upscale={}, handle {}), waited {:.2f} ms, sleep {}",
+    // The two shares of waitedMs: the gate's own wait for evaluates in flight, and the queue fences it measures inside
+    // ext::gpu (each drain line carries its own fence ms). A release is called on the game's own release thread, so what
+    // it waits for is felt; the split says at once whether the cost was an evaluate or the GPU's backlog.
+    LOG_INFO("FFXIV upscaler release: handle {} result={} (fg queue required={}, fg={}, upscale={}, handle {}), waited {:.2f} ms, sleep {}, quiet {:.2f} ms",
              handleId, Name(result), plan.fgRequired, (int) outcome.fg, (int) outcome.upscale, Name(outcome.quiet), waitedMs,
-             shuttingDown ? "n/a (shutdown)" : (ShouldSkipReleaseSleep(result) ? "skipped" : "kept (500 ms)"));
+             shuttingDown ? "n/a (shutdown)" : (ShouldSkipReleaseSleep(result) ? "skipped" : "kept (500 ms)"),
+             outcome.quietMs);
     return result;
 }
 } // namespace ext::dx11bridge

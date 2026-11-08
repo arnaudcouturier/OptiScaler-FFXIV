@@ -20,8 +20,9 @@ inline constexpr const char* kFfxivTab = "FFXIV";
 // Fork cards that need the FFXIV build match: they live in the FFXIV tab, and only they do. Their visible predicates are
 // the build match (`ext::game::Current()`), so the card hides itself even when it is pinned to the Custom Tab.
 inline constexpr const char* kFfxivOnlyIds[] = {
-    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_contact_shadows", "ffxiv_jitter", "ffxiv_character_preview",
-    "fg_hudless", "hudless_diag", "ffxiv_advanced",
+    "window_mode", "reshade_depth", "ffxiv_hdr", "ffxiv_contact_shadows", "ffxiv_engine_passes", "ffxiv_ambient_occlusion",
+    "ffxiv_light_shafts", "ffxiv_puddles", "ffxiv_screen_space_reflections", "ffxiv_jitter", "ffxiv_character_preview", "fg_hudless",
+    "hudless_diag", "ffxiv_advanced",
 };
 
 // Every fork card id that has been in a released menu. The Custom Tab saves pins by id (`[Menu] CustomTabCards`), so each
@@ -33,6 +34,7 @@ inline constexpr const char* kPersistedForkIds[] = {
     "ffxiv_advanced", // new in the menu cleanup (not in session-final)
     "reshade_depth",  // new with the automatic ReShade scene depth
     "fg_output_switch", // new with the live frame-generation output switch
+    "ffxiv_light_shafts", // new with the light shafts before the tone map
 };
 
 // A retired card id and the card that took its place (a merged or removed card keeps its id here)
@@ -84,6 +86,8 @@ inline constexpr const char* kIniOnlyKeys[] = {
     "[FFXIV] DrawDiagnosticsFrames", // developer draw diagnostic: how many frames one capture writes
     "[FFXIV] DrawDiagnosticsDelaySeconds", // developer draw diagnostic: how long after the game starts the capture begins
     "[FFXIV] DrawDiagnosticsKey", // developer draw diagnostic: the key that starts the capture in place of the delay
+    "[FFXIV] DrawDiagnosticsDump", // developer draw diagnostic: one captured frame's targets as raw bytes for the developer check
+    "[FFXIV] DrawDiagnosticsDumpBudgetMiB", // developer draw diagnostic: the one-frame dump's byte budget, a disk and memory bound no player setting changes
     "[FFXIV] VfxMaskProbe", // developer probe: a constant half-screen mask in the upscaler's mask input, to see whether a backend reads it at all
     "[FFXIV] ContactShadowsSunSpace", // contact shadows: which space the game reports its sun direction in, redone after a patch (not a player setting)
     "[FFXIV] ContactShadowsSunSign", // contact shadows: which way the game's sun direction points, redone after a patch (not a player setting)

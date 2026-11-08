@@ -89,6 +89,7 @@ constexpr const char* kShippedForkIds[] = {
     "dlss_nr",     "ffxiv_character_preview", "forced_quality", "ffxiv_jitter", "fg_unlocks",
     "ffxiv_hdr",   "fg_hudless",              "fg_auto_mfg",    "window_mode",  "hudless_diag",
     "mipmap_auto", "ffxiv_companion",         "reshade_addon_probe",
+    "ffxiv_light_shafts", // appended with the light shafts card
 };
 
 // Cards that do not have their SectionTitle yet. Empty when the titles are done: an entry is an error as soon as its card
@@ -443,8 +444,9 @@ void StalePinsIgnored(const std::string& cppRaw)
 void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw)
 {
     CHECK(m.upstream.size() >= 40);
-    CHECK(m.slots.size() == 17); // live output switch, contact shadows and frame pacing joined; the companion card is retired
-    CHECK(m.regs.size() == 17);  // the same three registrations
+    CHECK(m.slots.size() == 22); // live output switch, contact shadows, engine pass overrides, ambient occlusion, light shafts, puddles,
+                                 // screen-space reflections and frame pacing joined; the companion card is retired
+    CHECK(m.regs.size() == 22);  // the same registrations
 
     const Violations v = Check(m);
     Report("manifest", v);
@@ -456,8 +458,9 @@ void RealMenu(const Model& m, const std::string& cppRaw, const std::string& hRaw
 
     // facts the manifest test relies on, so a broken scanner cannot make the rules vacuous
     CHECK(Contains<std::string>(m.tabLabels, "FFXIV") && Contains<std::string>(m.tabLabels, "Frame Gen"));
-    CHECK(m.ffxivOnly.size() == 9); // the contact shadow card is FFXIV-only as well
-    CHECK(m.persisted.size() == 16); // the live output switch card added one; the contact shadow card is not persisted
+    CHECK(m.ffxivOnly.size() == 14); // the contact shadow, the engine pass override, the ambient occlusion, the light shaft, the puddles and
+                                     // the screen-space reflection cards are FFXIV-only too
+    CHECK(m.persisted.size() == 17); // the live output switch and the light shaft cards added one each; the contact shadow card is not persisted
     bool anyShared = false;
     for (const auto& b2 : m.upstream)
         anyShared = anyShared || b2.source == "RenderFrameGenerationRuntimeSettings";
