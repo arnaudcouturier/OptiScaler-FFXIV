@@ -25,6 +25,7 @@ OptiScaler-FFXIV is a fork of [OptiScaler](https://github.com/optiscaler/OptiSca
 | ReShade depth alignment | Keeps ReShade's depth lined up with the picture when the game renders below the output size, so ambient occlusion such as MXAO sits on the geometry | optional, tested with one preset |
 | HUD-less frame generation | Handles the interface separately from the game picture during frame generation | optional, tested in SDR; one of its two modes is experimental |
 | Character preview | DLSS, spatial anti-aliasing and Neural Rendering in the character preview | optional, tested on earlier builds with one preview window |
+| FFXIV scene graphics suite | Screen-space contact shadows (`ContactShadows`), world-space ambient occlusion (`AmbientOcclusion`), weather-reactive puddles with raindrop ripples and marched reflections (`Puddles`), pre-tonemap sun light shafts (`LightShafts`), and screen-space water reflections (`ScreenSpaceReflections`), all running before DLSS, tone mapping and the UI | optional, tested in game (RTX 4090) |
 
 Tested means played in game by the author on an RTX 4090. Neural Rendering, frame generation, HDR10 output and the optional features are off until you switch them on in the menu or in `OptiScaler.ini`; upscaling follows the quality set in the game.
 
@@ -43,6 +44,42 @@ Tested means played in game by the author on an RTX 4090. Neural Rendering, fram
 4. Start the game, press Insert and switch on the features you want.
 
 The [install guide](../docs/INSTALL.md) has the details, the settings of the tested setup and the uninstall steps.
+
+### Recommended full-fledged configuration (`OptiScaler.ini`)
+
+Every feature ships with calibrated `auto` sub-parameters, so enabling the full visual and frame-generation suite only requires setting the master switches in `OptiScaler.ini` (or toggling them in the **FFXIV** tab and clicking **Save INI**):
+
+```ini
+[Upscalers]
+Dx11Upscaler = dlss_12
+
+[DlssNr]
+Enabled = true
+
+[FrameGen]
+Enabled = true
+FGInput = upscaler
+FGOutput = dlssg
+
+[HudLess]
+Mode = recomposition
+PlateInterp = endpoint
+
+[FFXIV]
+; Scene graphics suite (all sub-sliders use calibrated auto defaults)
+ContactShadows = true
+AmbientOcclusion = true
+Puddles = true
+LightShafts = true
+ScreenSpaceReflections = true
+
+; Upscaling, ReShade depth alignment & character preview
+JitterCorrection = true
+AutomaticReShadeDepth = true
+PreviewAA = true
+PreviewUpscale = true
+```
+*(Keep `EnginePassOverrides = false` and `WetnessOverride = auto` so puddles and raindrop ripples follow the game's live weather and drying cycle automatically.)*
 
 **Or let Lucent install it.** [Lucent](https://github.com/arnaudcouturier/lucent) is a separate Windows app, by the same author, that installs this fork for you, with ReShade and presets if you want them. It backs up every file it replaces, can repair its files if a game update replaces them (after a game patch the FFXIV features that hook the game's code still wait for a fork update) and uninstalls cleanly. It deploys its own tested setups, which can lag behind the newest release here. The download and the list of files it installs are on its [website](https://arnaudcouturier.github.io/lucent/); questions about Lucent go to its own [issues](https://github.com/arnaudcouturier/lucent/issues).
 

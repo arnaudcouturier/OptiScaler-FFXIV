@@ -61,6 +61,14 @@ class PacingScope
 // An externally measured duration (microseconds) for `phase`, into the same windows. CharaNr.cpp feeds the preview NR recording time.
 void RecordSample(Phase phase, uint64_t durationUs);
 
+// The output-frame counter: FrameTick() runs once per output present of either present path - the bridge's Present (inside NativeBegin,
+// ext/hdr/BridgeHdr.cpp) and the plain wrapped swapchain's present (PacingScope with Phase::OutputPresent) - so a module that needs a frame
+// boundary has one whether the session runs through the D3D11-to-D3D12 bridge or the plain D3D11 swapchain. FrameCount() is one relaxed load.
+// A module that copies the frame's own bytes must see the new token before its first draw of a frame: an extra advance (both paths present
+// once in some sessions) only costs it one more copy and is always safe, a missed one is not.
+void FrameTick() noexcept;
+uint64_t FrameCount() noexcept;
+
 // ext::dx11bridge::PresentScope constructor / destructor: the whole DX11 bridge Present as one "native present" call.
 void NativeBegin();
 void NativeEnd();

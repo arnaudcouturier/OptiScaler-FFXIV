@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ambient occlusion shaders (ext\ffxiv\engine\shaders\Ao.hlsl). One source, three entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by AoPass.cpp and by
+  AoRules.h; change them together. The camera registers are the contact shadow pass's own header (ext\ffxiv\relight\shaders\CameraRegisters.h),
+  found through the -I below, so the two passes cannot state different layouts.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ao.hlsl">
+      <Variable>Ao_Vs_cso</Variable>
+      <Header>Ao_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ao.hlsl">
+      <Variable>Ao_Ao_cso</Variable>
+      <Header>Ao_Ao.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Ao</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Ao.hlsl">
+      <Variable>Ao_Final_cso</Variable>
+      <Header>Ao_Final.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Final</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot;</Args>
+    </ExtShader>
+  </ItemGroup>
+</Project>

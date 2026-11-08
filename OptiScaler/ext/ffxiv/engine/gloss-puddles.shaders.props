@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Puddles shaders (ext\ffxiv\engine\shaders\GlossPuddles.hlsl; the exposure gate both stages share is shaders\PuddleGate.hlsli). One source, two entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by GlossPuddlesPass.cpp and by
+  GlossPuddlesRules.h; change them together. The camera registers are the contact shadow pass's own header
+  (ext\ffxiv\relight\shaders\CameraRegisters.h), found through the -I below, so the two passes cannot state different layouts.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\PuddleReflection.hlsl">
+      <Variable>PuddleReflection_Vs_cso</Variable>
+      <Header>PuddleReflection_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot; -I &quot;$(MSBuildThisFileDirectory)shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\PuddleReflection.hlsl">
+      <Variable>PuddleReflection_Ps_cso</Variable>
+      <Header>PuddleReflection_Ps.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Puddle</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot; -I &quot;$(MSBuildThisFileDirectory)shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\GlossPuddles.hlsl">
+      <Variable>GlossPuddles_Vs_cso</Variable>
+      <Header>GlossPuddles_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot; -I &quot;$(MSBuildThisFileDirectory)shaders&quot;</Args>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\GlossPuddles.hlsl">
+      <Variable>GlossPuddles_Ps_cso</Variable>
+      <Header>GlossPuddles_Ps.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS</Entry>
+      <Args>-I &quot;$(MSBuildThisFileDirectory)..\relight\shaders&quot; -I &quot;$(MSBuildThisFileDirectory)shaders&quot;</Args>
+    </ExtShader>
+  </ItemGroup>
+</Project>

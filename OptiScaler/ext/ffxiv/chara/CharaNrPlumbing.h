@@ -63,7 +63,7 @@ constexpr bool DispatcherWanted(bool aaWanted, bool srWanted, bool nrWanted, boo
 }
 
 // Whether the SR plumbing still holds GPU objects whatever the config says now: preview slots (images and NGX features), the cyan tint
-// targets of the debug tint, or the helper passes (shaders and private state of the copy, guides, alpha and tint passes). The dispatcher's gate
+// targets of the debug tint, or the helper passes (shaders and constants of the copy, guides, alpha and tint passes). The dispatcher's gate
 // and its maintenance stay on while it does, so they are released after PreviewDLSS / PreviewNR / PreviewDebugTint are switched off.
 constexpr bool PlumbingHoldsObjects(uint32_t slotsHeld, uint32_t tintTargets, bool passesReady)
 {

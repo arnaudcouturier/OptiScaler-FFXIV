@@ -55,6 +55,11 @@ int ExeState()
 // Checked with a plain load at every scope; only a changed key reaches the locked exchange (AnnounceChanged).
 std::atomic<int> g_announced { -1 };
 
+// The output-frame counter behind FrameCount(): one atomic, ticked at the present entry of both present paths (the bridge's PresentScope
+// through NativeBegin, the plain swapchain through PacingScope with Phase::OutputPresent). Nothing reads it unless a module asked for a frame
+// boundary, and then it is one relaxed load.
+std::atomic<uint64_t> g_frameTicks { 0 };
+
 void Announce(const Decision& d, bool logToFile, int level)
 {
     if (!AnnounceChanged(g_announced, AnnounceKey(d.reason, logToFile, level)))
@@ -129,6 +134,10 @@ bool TraceIsOn()
 
 PacingScope::PacingScope(Phase phase) noexcept : _phase(phase), _startUs(0), _active(false)
 {
+    // The output-frame counter: the plain wrapped swapchain's present is the only per-frame signal such a session has (no bridge means no
+    // PresentScope), so the frame boundary is taken here, at the present entry, before anything of the next frame draws.
+    if (phase == Phase::OutputPresent)
+        FrameTick();
     // The status file output-cadence tick (only the output phase is recorded, and only while [Status] Enabled is
     // true; otherwise this is one cheap key read). The base cadence ticks at the bridge PresentScope
     // (ext/hdr/BridgeHdr.cpp), timed by NativeBegin/End rather than a scope.
@@ -174,8 +183,22 @@ void RecordSample(Phase phase, uint64_t durationUs)
         PacingReport(phase, durationUs, NowUs());
 }
 
+void FrameTick() noexcept
+{
+    if (State::Instance().swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
+        g_frameTicks.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t FrameCount() noexcept
+{
+    return g_frameTicks.load(std::memory_order_relaxed);
+}
+
 void NativeBegin()
 {
+    // The bridge's Present is that path's output present, so it is the frame boundary a module sees when the game runs through the bridge.
+    // A session that uses the plain swapchain instead ticks in PacingScope (Phase::OutputPresent).
+    g_frameTicks.fetch_add(1, std::memory_order_relaxed);
     // The simulation-tick lease's retry plan (one attempt every 120 presents until it is installed, refused for good or out of time) and the
     // probe's "bridge present began" event. Both return at once with the tick feature off.
     ext::latency::OnBridgePresent();

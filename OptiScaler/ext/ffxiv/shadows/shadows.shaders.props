@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shadow mapping shaders (ext\ffxiv\shadows\shaders\ShadowLift.hlsl): one source, two entry points, each compiled by
+  fxc -O3 into a header in $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in
+  the .hlsl are mirrored by ShadowsPass.cpp; change them together.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ShadowLift.hlsl">
+      <Variable>ShadowLift_Vs_cso</Variable>
+      <Header>ShadowLift_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\ShadowLift.hlsl">
+      <Variable>ShadowLift_Ps_cso</Variable>
+      <Header>ShadowLift_Ps.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Lift</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

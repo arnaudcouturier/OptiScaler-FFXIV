@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Depth of field shaders (ext\ffxiv\engine\shaders\Dof.hlsl). One source, six entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by DofPass.cpp;
+  change them together. This file is the DOF stage's own: it shares no shader source with SceneMarch.hlsl or Godrays.hlsl and edits
+  nothing of the engine's own family.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_Vs_cso</Variable>
+      <Header>Dof_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_Pack_cso</Variable>
+      <Header>Dof_Pack.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Pack</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_Blur_cso</Variable>
+      <Header>Dof_Blur.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Blur</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_Merge_cso</Variable>
+      <Header>Dof_Merge.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Merge</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_PackDistance_cso</Variable>
+      <Header>Dof_PackDistance.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_PackDistance</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Dof.hlsl">
+      <Variable>Dof_Focus_cso</Variable>
+      <Header>Dof_Focus.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Focus</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

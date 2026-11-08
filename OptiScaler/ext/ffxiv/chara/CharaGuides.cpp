@@ -1,37 +1,21 @@
 #include "pch.h"
 
-#include "ext/ffxiv/chara/CharaContextState.h"
+#include "ext/core/D3D11ExplicitState.h"
 #include "ext/ffxiv/chara/CharaGuides.h"
 
 namespace ext::ffxiv::chara::guides
 {
 using Microsoft::WRL::ComPtr;
 
+// What the passes touch, and so what the guard saves and puts back: pixel-shader resource slots 0-3 (t0 source, t1 motion, t2 depth, t3 original),
+// sampler slot 0, constant-buffer slots 0 (settings) and 1 (the game's camera block, bound with its exact range).
+constexpr ext::core::explicit_state::Spec kSpec { /*psSrvCount*/ 4, /*psSamplerCount*/ 1, /*psConstantBuffers*/ 2 };
+
 bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn drawTriangle)
 {
     Release();
     if (device == nullptr || drawTriangle == nullptr)
         return false;
-
-    ComPtr<ID3D11Device1> device1;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))))
-    {
-        LOG_ERROR("CharaView DLSS: the device has no ID3D11Device1 (private context state unavailable)");
-        return false;
-    }
-
-    const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL chosen = D3D_FEATURE_LEVEL_11_0;
-    ComPtr<ID3DDeviceContextState> state;
-    // The state agrees with the device's threading mode (the spatial AA does the same).
-    static_assert(kDeviceCreateSingleThreaded == D3D11_CREATE_DEVICE_SINGLETHREADED);
-    static_assert(kContextStateSingleThreaded == D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED);
-    if (FAILED(device1->CreateDeviceContextState(ContextStateFlags(device->GetCreationFlags()), levels, 1, D3D11_SDK_VERSION,
-                                                 __uuidof(ID3D11Device1), &chosen, &state)))
-    {
-        LOG_ERROR("CharaView DLSS: private context state could not be created");
-        return false;
-    }
 
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> copy, guides, alpha, alphaTint, alphaTintNr;
@@ -67,7 +51,6 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     if (FAILED(device->CreateBuffer(&bd, nullptr, &settings)))
         return false;
 
-    _state = state;
     _vs = vs;
     _copy = copy;
     _guides = guides;
@@ -77,12 +60,14 @@ bool Passes::Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn d
     _sampler = sampler;
     _settings = settings;
     _drawTriangle = drawTriangle;
+    _fl111 = device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1;
+    _ready = true;
     return true;
 }
 
 void Passes::Release()
 {
-    _state.Reset();
+    _ready = false;
     _vs.Reset();
     _copy.Reset();
     _guides.Reset();
@@ -101,16 +86,13 @@ Passes::Scope::Scope(Passes& passes, ID3D11DeviceContext* context, const Setting
     if (!passes.Ready() || context == nullptr || FAILED(context->QueryInterface(IID_PPV_ARGS(&_context1))))
         return;
 
-    // The settings buffer is not part of the pipeline state: write it before the swap.
+    // The settings buffer is not part of the pipeline state: write it before the guard (the order the swap into a private state had).
     context->UpdateSubresource(passes._settings.Get(), 0, nullptr, &settings, 0, 0);
 
-    _context1->SwapDeviceContextState(passes._state.Get(), &_previous);
-    if (_previous == nullptr)
-    {
-        // The game's state could not be captured: swap back at once, nothing ran.
-        _context1->SwapDeviceContextState(passes._state.Get(), nullptr);
-        return;
-    }
+    // No private pipeline state: the game's own is captured here and put back explicitly when the scope ends (ext/core/D3D11ExplicitState.h), on every
+    // exit of the caller. The swap into a private state it replaces does nothing when the draw hook is nested.
+    _guard.emplace(context, _context1.Get(), passes._fl111, kSpec);
+    _guard->Neutralise(); // what the private state's defaults provided: no HS, DS, GS, stream-out target or predicate
 
     ID3D11Buffer* settingsBuffer = passes._settings.Get();
     _context->PSSetConstantBuffers(0, 1, &settingsBuffer);
@@ -129,22 +111,23 @@ Passes::Scope::Scope(Passes& passes, ID3D11DeviceContext* context, const Setting
     _context->IASetInputLayout(nullptr);
     _context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     _context->VSSetShader(passes._vs.Get(), nullptr, 0);
-    _context->GSSetShader(nullptr, nullptr, 0);
-    _context->HSSetShader(nullptr, nullptr, 0);
-    _context->DSSetShader(nullptr, nullptr, 0);
+    // The rest of what the private state's defaults provided and this scope relied on without setting it: the default rasterizer state (solid,
+    // back-face culling, scissor off), no blending (all channels, sample mask all ones) and no depth-stencil test.
+    _context->RSSetState(nullptr);
+    _context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    _context->OMSetDepthStencilState(nullptr, 0);
     _ok = true;
 }
 
 Passes::Scope::~Scope()
 {
-    if (_previous != nullptr && _context1 != nullptr)
-    {
-        // Leave nothing bound in the private state: it keeps no reference to the slot textures.
-        _context->OMSetRenderTargets(0, nullptr, nullptr);
-        ID3D11ShaderResourceView* none[4] {};
-        _context->PSSetShaderResources(0, 4, none);
-        _context1->SwapDeviceContextState(_previous.Get(), nullptr);
-    }
+    _guard.reset(); // puts the game's state back
+}
+
+ext::core::explicit_state::FullStateSnapshot Passes::Scope::KeepState()
+{
+    // Built in place for the caller (guaranteed copy elision); inert when the scope never got going and has no context interface.
+    return ext::core::explicit_state::FullStateSnapshot(_context, _context1.Get(), _passes._fl111, _ok);
 }
 
 bool Passes::Scope::Draw(ID3D11PixelShader* ps, ID3D11ShaderResourceView* const (&srvs)[4], ID3D11RenderTargetView* const* targets,

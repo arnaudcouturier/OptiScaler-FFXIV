@@ -5,8 +5,8 @@
 //
 // Threading: Init, Capture, Withdraw and Release run on the thread that owns the immediate context (the NGX evaluate thread). The
 // swap-in .. draw .. swap-back sequence (and the recovery of a swap back) holds d3d11::ContextStateMutex(), which serializes only OUR
-// depth and G-buffer passes (ReShadeGBufferCopy.h, on the thread that runs begin_effects); CharaEnhancePass.cpp and CharaGuides.cpp also
-// swap private context states without it. The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the
+// depth and G-buffer passes (ReShadeGBufferCopy.h, on the thread that runs begin_effects); the chara passes (CharaEnhancePass.cpp,
+// CharaGuides.cpp) do not swap any more: they save and restore the game's state explicitly. The lock is TIMED (kContextStateLockTimeoutMs): a holder that does not come back costs the
 // capture 30 ms, not a freeze. On a timeout, before any state swap, the capture returns Result::Fault (nothing is published; the capture
 // that is published ages out), a pending recovery of a swap back returns false without counting an attempt, LockTimeouts() counts it
 // and one line per minute is logged.

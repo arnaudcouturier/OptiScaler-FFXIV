@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <format>
 
 #include "ext/core/ExtConfig.h"
 #include "ext/core/ProcessMemory.h"
@@ -186,6 +187,13 @@ inline void ProcessPendingRequest(uintptr_t renderer)
         callbacks == 0)
         return;
 
+    // The scene size before the invalidate, for the line below: a size that changed means the native update resized the
+    // scene, which runs the whole NGX lifecycle on this thread (the upscaler is released and re-created, frame
+    // generation restarts, the queues are drained) - the fingerprint of the "big skip" the session log is asked about.
+    // Read only, never gated: when the read fails the line just says nothing about the before size.
+    unsigned int before[2] {};
+    ReadMemory(reinterpret_cast<void*>(renderer + build->rendererSceneSizeOffset), before, sizeof(before));
+
     // Invalidate only the quality table's display-size cache. The native callback then queries NGX again and
     // propagates the result to rendering textures on the game's update thread.
     const unsigned long long invalidDisplay = 0;
@@ -199,8 +207,14 @@ inline void ProcessPendingRequest(uintptr_t renderer)
     handled = sequence;
     unsigned int size[2] {};
     ReadMemory(reinterpret_cast<void*>(renderer + build->rendererSceneSizeOffset), size, sizeof(size));
-    LOG_INFO("FFXIV native quality: request={} preset={} callbacks={} scene={}x{} thread={}", sequence,
-             requestedQuality.load(), result, size[0], size[1], GetCurrentThreadId());
+    const auto resized = (before[0] != 0 && before[0] != size[0]) || (before[1] != 0 && before[1] != size[1]);
+    LOG_INFO("FFXIV native quality: request={} preset={} callbacks={} scene={}x{}{} thread={}", sequence,
+             requestedQuality.load(), result, size[0], size[1],
+             resized ? std::format(" (scene was {}x{} before the update: the NGX feature is released and re-created, "
+                                   "frame generation restarts)",
+                                   before[0], before[1])
+                     : "",
+             GetCurrentThreadId());
 }
 
 inline void ObserveRendererUpdate(uintptr_t renderer, float elapsed)

@@ -2,8 +2,8 @@
 // Contact shadows before the sun light pass: the reflection index and the injection.
 //
 // The reflection index: the pixel shaders the game creates are parsed into the slots of the four names this feature binds by
-// (g_SamplerShadow, g_SamplerDepth, g_LightParam, g_CameraParameter; the light draw binds no view-position buffer, so the
-// position is reconstructed from the depth). The index is filled whatever the key says, so a switch turned on in a running session finds
+// (the screen-space mask under either of the two names the measured builds use, g_SamplerDepth, g_LightParam and g_CameraParameter; the
+// light draw binds no view-position buffer, so the position is reconstructed from the depth). The index is filled whatever the key says, so a switch turned on in a running session finds
 // the game's light shader; nothing is logged while the key is off. A draw is a sun light draw when its shader is in the index and the
 // runtime checks of ContactShadowsRules.h pass, so no shader CRC is compared and a recompile of the game's shaders does not break the
 // feature.
@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
@@ -36,11 +37,28 @@ struct Layout
     uint32_t depthSlot = 0;
     uint32_t lightParamSlot = 0;
     uint32_t cameraParamSlot = 0;
+    bool directional = false;  // the shader declares g_DirectionalShadowParameter: a directional light (the sun, or the moon at night)
+    bool fakeSpecular = false; // ... and g_FakeSpecularParam: the main view's directional light on this game build
 };
 
 // The slots of a shader's bytecode. Pure (no device): it reads the RDEF chunk, so a test can call it on a shader compiled in the test.
-// `ok` is false when any of the five names is missing, which is the "not a sun light draw" answer.
+// `ok` is false when any of the four names is missing; `directional` and `fakeSpecular` say which light the draw is (ContactShadowsRules.h).
 Layout LayoutOfShader(const void* code, size_t size);
+
+// A sun light draw: the four names AND the directional light's own cascade parameters. The shadowed point and spot lights carry the four
+// names too (2026-11-07), so `ok` alone is not the sun.
+inline bool IsSunLightLayout(const Layout& layout) noexcept
+{
+    return layout.ok && layout.directional;
+}
+
+// Whether the session has indexed a main-view (fake-specular) sun light shader: set by the index at shader creation, read by both colour
+// feeds through FeedsNightColour. An inline variable, so a test that compiles the apply path without the index links without it.
+inline std::atomic<bool> g_anyFakeSpecularIndexed { false };
+inline bool AnyIndexedFakeSpecular() noexcept
+{
+    return g_anyFakeSpecularIndexed.load(std::memory_order_relaxed);
+}
 
 // One shader whose draws were refused for their shape (it binds something other than the screen-space mask), with the time of that
 // refusal: the memory is what keeps the cascade atlas writer's draws from paying the state queries on every shadow pass, and its age is
@@ -66,6 +84,12 @@ struct State
     int64_t lastCameraCheckQpc = 0;
     uint32_t runs = 0;
     uint32_t declined = 0;
+    uint32_t shapes = 0; // of those refusals, the ones about the draw's shape (the cascade atlas, a mask of another format)
+    // The mask of the last indexed light draw the classification looked at, and its verdict: the card shows these, so a session can tell a
+    // build whose mask this rule found from one whose binding it refused, without reading the log.
+    bool haveInspection = false;
+    uint32_t lastMaskFormat = 0, lastMaskWidth = 0, lastMaskHeight = 0, lastMaskSlot = 0;
+    Decline lastDecline = Decline::None;
     CostMeter cost;        // the on-cost sample of the draw hook
     BindCostMeter bindCost; // and of the pixel-shader seam that feeds it
     uint64_t drawsSeen = 0;
@@ -83,6 +107,7 @@ struct State
     bool loggedOff = false; // the one line that says the module switched itself off for the session
     bool indexedLogged = false; // the one line that says the first sun light draw shader was indexed
     bool partialLogged = false; // the one line that reports a mask shader missing one of the other names
+    bool pointLightLogged = false; // the one line that reports a point/spot light shader carrying the four names (not indexed)
     Microsoft::WRL::ComPtr<ID3D11Buffer> readback; // the staging copy of the sun vector, read once per session
     Microsoft::WRL::ComPtr<ID3D11Buffer> cameraReadback; // the staging copy of the camera matrices, read once per session
 };
@@ -115,11 +140,35 @@ void DumpFrame(ID3D11DeviceContext* context, State& state, const Inputs& inputs,
 // reach the card. No log line while the key is off.
 void OnShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, uint32_t crc);
 
+// The bytecode of the mask-declaring shaders, kept from creation while a dump is armed (ContactShadowsDump.cpp owns the copies and their lock,
+// so this header - which the draw hook includes - carries neither). One copy per CRC, bounded by ContactShadowsRules.h's kMaxKeptShaders; the
+// caller keeps it off while the dump's key is off. The game's light shader is created while the game loads, so this is the only place its
+// bytecode can come from, and which channel of the mask it reads is half of what the mask's convention rests on.
+void KeepShaderBytecode(uint32_t crc, const void* code, size_t size, const Layout& layout);
+void ForgetKeptShaders();
+
 // Whether the module wants to see this draw at all: the key is on and the module has not switched itself off for the session.
 bool Armed();
 
 // The tuning parameters this session runs with (the keys, clamped).
 Params CurrentParams();
+
+// What the card says about the session: whether the module is armed, how many passes ran, how many light draws were served and refused,
+// and the mask of the last light draw the classification saw with its verdict. `indexed` is how many shaders the reflection index holds,
+// which is what decides whether a light draw can be recognised at all; `haveInspection` is false until an indexed draw reached the rules.
+struct Status
+{
+    bool key = false;
+    bool armed = false;
+    uint32_t runs = 0;
+    uint32_t declined = 0;
+    uint32_t shapes = 0;
+    uint32_t indexed = 0;
+    bool haveInspection = false;
+    uint32_t maskFormat = 0, maskWidth = 0, maskHeight = 0, maskSlot = 0;
+    Decline lastDecline = Decline::None;
+};
+Status CurrentStatus();
 
 // Publishes the card's values to the render thread: the tuning parameters and the feature bit, plus a re-arm when the switch is turned back
 // on after the module switched itself off. The menu card calls this after every change, so a switch turned on in a running session arms the

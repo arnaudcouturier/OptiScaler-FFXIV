@@ -107,7 +107,7 @@ int main(int, char** argv)
              { "#include\"ext/ffxiv/plates/PlateShaderKind.h\"", "the shader stamp header is included" },
              // the intercept is the last test before the game's own draw path, only for the game's own context and only
              // outside our own hooks; a true answer means the plate engine drew the draw.
-             { "if(c==context&&!inside&&ext::ffxiv::plates::InterceptIndexed(c,n,start,b,reinterpret_cast<void*>(indexed)))return;",
+             { "if(c==context&&!inside&&ext::ffxiv::plates::InterceptIndexed(c,n,start,b,reinterpret_cast<void*>(&IndexedDispatchAdapter)))return;",
                "the DrawIndexed intercept" },
              { "ext::ffxiv::plates::OnPixelShaderCreated(*out,crc);", "the nameplate pixel-shader stamp (one line, the CRC already computed)" },
          });

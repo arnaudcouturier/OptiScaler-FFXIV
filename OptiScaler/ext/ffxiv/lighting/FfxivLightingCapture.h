@@ -9,11 +9,16 @@
 #include "../../core/Crc32.h"
 #include "ext/core/DetourThreads.h"
 #include "ext/core/ExtConfig.h"
+#include "ext/core/InjectedWorkDiagnostic.h"
+#include "ext/core/InjectedStateWindowDiagnostic.h"
+#include "ext/core/D3D11DrawDispatch.h"
 #include "ext/ffxiv/chara/CharaDispatch.h" // ext: S11 character preview (CharaView)
 #include "ext/ffxiv/lighting/FfxivLightingScan.h"
 #include "ext/ffxiv/lighting/FfxivResolveGate.h"
 #include "ext/ffxiv/catalog/FfxivCatalog.h" // ext: catalog health accounting
 #include "ext/ffxiv/diag/DrawDiag.h" // ext: developer draw diagnostic (log only, one atomic load per draw)
+#include "ext/ffxiv/engine/EnginePass.h" // ext: engine pass overrides, a constant-buffer patch for one draw (one atomic load per draw while off)
+#include "ext/ffxiv/lighting/CharaAmbientApply.h" // ext: the lighting tab's chara ambient, a constant-buffer patch on the chara draws (one atomic load per draw while off)
 #include "ext/ffxiv/relight/Inject.h" // ext: contact shadows before the sun light pass (one atomic load per draw while off)
 #include "ext/ffxiv/ui/FfxivUiBoundary.h" // ext: S10 A hook consumer
 #include "ext/ffxiv/ui/PlateDraws.h" // ext: developer probe of the UI draws (log only)
@@ -78,6 +83,13 @@ using Indirect = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Buffer*,UIN
 inline Create create=nullptr; inline Draw draw=nullptr; inline Indexed indexed=nullptr;
 inline Instanced instanced=nullptr; inline IndexedInstanced indexedInstanced=nullptr;
 inline Indirect indirect=nullptr,indexedIndirect=nullptr;
+inline void* literalDraw=nullptr; inline void* literalIndexed=nullptr;
+inline void* literalInstanced=nullptr; inline void* literalIndexedInstanced=nullptr;
+inline void* literalIndirect=nullptr; inline void* literalIndexedIndirect=nullptr;
+inline void STDMETHODCALLTYPE DrawDispatchAdapter(ID3D11DeviceContext* c,UINT n,UINT start)
+{ ext::core::draw_dispatch::Forward(c,13,literalDraw,draw,ext::core::draw_dispatch::Api::Draw,n,start); }
+inline void STDMETHODCALLTYPE IndexedDispatchAdapter(ID3D11DeviceContext* c,UINT n,UINT start,INT base)
+{ ext::core::draw_dispatch::Forward(c,12,literalIndexed,indexed,ext::core::draw_dispatch::Api::Indexed,n,start,base); }
 // ext: contact shadows tracks the bound pixel shader here, so the draw hook never asks the context for it (a PSGetShader per draw was
 // 0.65 ms a frame at the game's ~9,250 draws, 32x the design's 0.02 ms budget). The seam sits behind the game's own PSSetShader call, which
 // it makes about 0.7 times per draw: with the key off the seam adds one out-of-line call and one relaxed load per bind, measured at 1.0 ns
@@ -88,20 +100,28 @@ inline SetPs setPs=nullptr;
 inline void STDMETHODCALLTYPE OnSetPs(ID3D11DeviceContext* c,ID3D11PixelShader* ps,ID3D11ClassInstance* const* instances,UINT count)
 {
     setPs(c,ps,instances,count);
+    if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;}
     if(c==context) ext::ffxiv::relight::OnPixelShaderSet(ps,count); // ext: contact shadows (one atomic load inside while the key is off)
+    if(c==context) ext::ffxiv::engine::OnPixelShaderSet(ps,count); // ext: engine pass overrides (one atomic load inside while the key is off)
+    if(c==context) ext::ffxiv::lighting::chara::OnPixelShaderSet(ps,count); // ext: the chara ambient's bind tracker (one atomic load inside while the key is off)
 }
+// ext: LENS-1: the draw seam's ActiveAny tests gain F::LensFlare in both places they name the seam's features, so the flare card's draws
+// enter the engine pass override seam when its own key is on. No new hook of its own: the card rides the engine module's OnPixelShaderSet
+// and OnShaderCreated (EnginePass.cpp), and the draw hook's feature tests are one relaxed load each.
 using Copy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
 using CopyRegion=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
 inline Copy copy=nullptr;inline CopyRegion copyRegion=nullptr;
 inline void STDMETHODCALLTYPE OnCopy(ID3D11DeviceContext* c,ID3D11Resource* dest,ID3D11Resource* source)
 {
     copy(c,dest,source);
+    if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;}
     if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,true);ext::hdr::FfxivSceneHdr::Copy(dest,source,true);}
     ext::ffxiv::chara::OnCopy(c,dest,source,true); // ext: S11 (after the native copy; not under `inside`, the feature has its own flags)
 }
 inline void STDMETHODCALLTYPE OnCopyRegion(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT sub,UINT x,UINT y,UINT z,ID3D11Resource* source,UINT from,const D3D11_BOX* box)
 {
     copyRegion(c,dest,sub,x,y,z,source,from,box);
+    if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;}
     const bool full=!sub && !from && !x && !y && !z && !box;
     if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,full);ext::hdr::FfxivSceneHdr::Copy(dest,source,full);}
     ext::ffxiv::chara::OnCopyRegion(c,dest,sub,x,y,z,source,from,box); // ext: S11 (the preview layer works out `full` itself)
@@ -112,6 +132,7 @@ inline ResolveCall resolve=nullptr;
 inline void STDMETHODCALLTYPE OnResolve(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT destSub,ID3D11Resource* source,UINT sourceSub,DXGI_FORMAT format)
 {
     resolve(c,dest,destSub,source,sourceSub,format);
+    if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;}
     ext::ffxiv::chara::OnResolve(c,dest,destSub,source,sourceSub,format);
 }
 // The detour is NOT part of the main hook transaction (Install): a debug aid must not be able to take the shipped features down. The preview
@@ -174,8 +195,10 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         ext::ffxiv::chara::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S11 character preview roles (after SceneHdr::Tag wrote the UI tag)
         ext::ffxiv::ui::OnShaderCreated(*out,crc,static_cast<uint32_t>(size)); // ext: S10 A/E3 (stamps the boundary stages ALWAYS: a Mode switched on later needs them; D1 registry only while armed)
         ext::ffxiv::plates::OnPixelShaderCreated(*out,crc); // ext: native nameplates (stamps the four nameplate variants ALWAYS: a key switched on later needs them)
-        ext::ffxiv::diag::OnPixelShaderCreated(*out,code,size,crc); // ext: developer draw diagnostic (one atomic test; reflects the bytecode once per shader)
+        ext::ffxiv::diag::OnPixelShaderCreated(*out,code,size,crc); // ext: developer draw diagnostic (two atomic tests while the key is off; reflects the bytecode once per shader)
         ext::ffxiv::relight::OnShaderCreated(*out,code,size,crc); // ext: contact shadows (one atomic test; the reflection of a sun light draw is parsed once)
+        ext::ffxiv::engine::OnShaderCreated(*out,code,size,crc); // ext: engine pass overrides (one byte scan; the reflection of a patchable draw is parsed once)
+        ext::ffxiv::lighting::chara::OnShaderCreated(*out,code,size,crc); // ext: the chara ambient's stamp (one byte scan; the reflection of a chara draw is parsed once)
     }
     return hr;
 }
@@ -210,58 +233,80 @@ template<class F> inline void AroundBody(ID3D11DeviceContext* c,const char* kind
     original();
     FfxivLightingScan::After(c, id);
 }
-// The seam of the contact shadow pass: it wraps only the game's draw (it hands the hook body a draw call that runs the pass first), and
-// only on the game's own immediate context - a draw on any other context is passed through, since the classification reads the immediate
-// context's tracked shader and the pass enters its private state on that context. The feature bit is tested first: one relaxed load while
-// the key is off, and nothing else.
+template<class F> inline void NativeCall(ID3D11DeviceContext* c,const char* kind,F&& call)
+{
+    ext::core::state_window::NativeDrawScope probe(c, kind);
+    call();
+}
+// The seam of the contact shadow pass and of the engine pass overrides: each wraps only the game's draw (it hands the hook body a draw call
+// that runs the patch first), and only on the game's own immediate context - a draw on any other context is passed through, since the
+// classification reads the immediate context's tracked shader and the patches work on that context. Both feature bits are tested together:
+// one relaxed load while both keys are off, and nothing else.
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
-    if(!inside && c==context && ext::Active(ext::F::ContactShadows)) // ext: contact shadows (ONE relaxed load while off)
+    if(!inside && c==context && ext::ActiveAny(ext::F::ContactShadows,ext::F::EnginePassOverrides,ext::F::LightShafts,ext::F::GodraysVolumetric,ext::F::CharaAmbient,ext::F::Gi,ext::F::DepthOfField,ext::F::LensFlare,ext::F::ShadowMapping)) // ext: contact shadows, engine pass overrides, light shafts, the volumetric march, the chara ambient, the light bounce and the depth-of-field stage's own captures at the same draws, the lens flare and shadow mapping's own light-draw route when contact shadows is off (ONE relaxed load while all nine are off)
     {
         bool first=true;
+        // The engine patch is applied outside the shadow's mask swap, so one draw can carry both: each puts back what it changed before the
+        // next one runs, and each draws the game's call exactly once.
+        auto shadows=[&]{
+            if(!ext::ActiveAny(ext::F::ContactShadows,ext::F::ShadowMapping)){original();return;} // either key: the relight seam answers the draw itself (shadow mapping runs its own route there when contact shadows is not serving)
+            ext::ffxiv::relight::BoundDraw(c,original);
+        };
+        auto charaLight=[&]{
+            if(!ext::Active(ext::F::CharaAmbient)){shadows();return;}
+            ext::ffxiv::lighting::chara::BoundDraw(c,shadows); // ext: the chara ambient's own draw path (one relaxed load when off)
+        };
         auto wrapped=[&]{
-            // The first call of the hook body runs the pass with the game's draw; every later call is a replay of the same draw (the scene
-            // HDR path repeats it to re-run the tone chain, the lighting scan runs it twice) and runs the draw alone: the pass belongs to the
-            // draw the frame makes, and running it again would double its cost and write the mask copy a second time.
-            ext::ffxiv::relight::RunDrawOnce(first,ext::hdr::FfxivSceneHdr::Requested(),[&]{ext::ffxiv::relight::BoundDraw(c,original);},original);
+            // The first call of the hook body runs the patches with the game's draw; every later call is a replay of the same draw (the scene
+            // HDR path repeats it to re-run the tone chain, the lighting scan runs it twice) and runs the draw alone: the patches belong to the
+            // draw the frame makes, and running them again would double their cost and write the mask copy a second time.
+            ext::ffxiv::relight::RunDrawOnce(first,ext::hdr::FfxivSceneHdr::Requested(),[&]{
+                if(!ext::ActiveAny(ext::F::EnginePassOverrides,ext::F::LightShafts,ext::F::GodraysVolumetric,ext::F::Gi,ext::F::DepthOfField,ext::F::LensFlare)){charaLight();return;} // ext: the engine's patch, the light shafts, the march, the light bounce and the depth-of-field stage's camera copy and the lens flare share this draw path (the chara ambient runs its own below)
+                ext::ffxiv::engine::BoundDraw(c,charaLight); // ext: one constant-buffer patch for this draw (one relaxed load when off)
+            },original);
         };
         AroundBody(c,kind,wrapped);
         return;
     }
     AroundBody(c,kind,original);
 }
-inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { ext::ffxiv::ui::plate::NoteDraw('D',n,1,start,0); Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{draw(c,n,start);});}); }
+inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::Draw)){draw(c,n,start);return;} if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"Draw",[&]{ext::core::draw_dispatch::Forward(c,13,literalDraw,draw,ext::core::draw_dispatch::Api::Draw,n,start);});ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::ui::plate::NoteDraw('D',n,1,start,0); Around(c,"Draw",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::Draw,[&]{NativeCall(c,"Draw",[&]{ext::core::draw_dispatch::Forward(c,13,literalDraw,draw,ext::core::draw_dispatch::Api::Draw,n,start);});});}); }
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
+    if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::Indexed)){indexed(c,n,start,b);return;}
+    if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"DrawIndexed",[&]{ext::core::draw_dispatch::Forward(c,12,literalIndexed,indexed,ext::core::draw_dispatch::Api::Indexed,n,start,b);});ext::core::diagnostic::NoteSuppressedCallback();return;}
     ext::ffxiv::ui::plate::NoteDraw('I',n,1,start,b); // ext: developer probe (one atomic test while PlateDiagnostics is off)
     // ext: native nameplates. A plate draw of a frame the plate engine hides is drawn into the plate image and not drawn
     // here; every other draw, and every draw while the key is off, is untouched (one atomic load, then 0). `original` is
     // the real DrawIndexed, so the redirected draw never re-enters these hooks.
-    if (c == context && !inside && ext::ffxiv::plates::InterceptIndexed(c, n, start, b, reinterpret_cast<void*>(indexed)))
+    if (c == context && !inside && ext::ffxiv::plates::InterceptIndexed(c, n, start, b, reinterpret_cast<void*>(&IndexedDispatchAdapter)))
         return;
-    auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{indexed(c,n,start,b);});}); };
+    auto normal = [&]{ Around(c,"DrawIndexed",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexed,[&]{NativeCall(c,"DrawIndexed",[&]{ext::core::draw_dispatch::Forward(c,12,literalIndexed,indexed,ext::core::draw_dispatch::Api::Indexed,n,start,b);});});}); };
     normal();
 }
-inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { ext::ffxiv::ui::plate::NoteDraw('N',n,i,start,0); Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{instanced(c,n,i,start,f);});}); }
+inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::Instanced)){instanced(c,n,i,start,f);return;} if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"DrawInstanced",[&]{ext::core::draw_dispatch::Forward(c,21,literalInstanced,instanced,ext::core::draw_dispatch::Api::Instanced,n,i,start,f);});ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::ui::plate::NoteDraw('N',n,i,start,0); Around(c,"DrawInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstanced,[&]{NativeCall(c,"DrawInstanced",[&]{ext::core::draw_dispatch::Forward(c,21,literalInstanced,instanced,ext::core::draw_dispatch::Api::Instanced,n,i,start,f);});});}); }
 inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
 {
+    if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::IndexedInstanced)){indexedInstanced(c,n,i,start,b,f);return;}
+    if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"DrawIndexedInstanced",[&]{ext::core::draw_dispatch::Forward(c,20,literalIndexedInstanced,indexedInstanced,ext::core::draw_dispatch::Api::IndexedInstanced,n,i,start,b,f);});ext::core::diagnostic::NoteSuppressedCallback();return;}
     ext::ffxiv::ui::plate::NoteDraw('X',n,i,start,b);
-    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstanced,[&]{indexedInstanced(c,n,i,start,b,f);});}); };
+    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstanced,[&]{NativeCall(c,"DrawIndexedInstanced",[&]{ext::core::draw_dispatch::Forward(c,20,literalIndexedInstanced,indexedInstanced,ext::core::draw_dispatch::Api::IndexedInstanced,n,i,start,b,f);});});}); };
     normal();
 }
-inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{indirect(c,b,o);});}); }
-inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{indexedIndirect(c,b,o);});}); }
+inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::Indirect)){indirect(c,b,o);return;} if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"DrawInstancedIndirect",[&]{ext::core::draw_dispatch::Forward(c,40,literalIndirect,indirect,ext::core::draw_dispatch::Api::Indirect,b,o);});ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawInstancedIndirect,[&]{NativeCall(c,"DrawInstancedIndirect",[&]{ext::core::draw_dispatch::Forward(c,40,literalIndirect,indirect,ext::core::draw_dispatch::Api::Indirect,b,o);});});}); }
+inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { if(ext::core::draw_dispatch::IsFreshReentry(c,ext::core::draw_dispatch::Api::IndexedIndirect)){indexedIndirect(c,b,o);return;} if(ext::core::diagnostic::ObserversSuppressed()){NativeCall(c,"DrawIndexedInstancedIndirect",[&]{ext::core::draw_dispatch::Forward(c,39,literalIndexedIndirect,indexedIndirect,ext::core::draw_dispatch::Api::IndexedIndirect,b,o);});ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::ui::plate::NoteDraw('Y',0,0,0,0); Around(c,"DrawIndexedInstancedIndirect",[&]{ext::ffxiv::chara::Around(c,ext::ffxiv::chara::DrawApi::DrawIndexedInstancedIndirect,[&]{NativeCall(c,"DrawIndexedInstancedIndirect",[&]{ext::core::draw_dispatch::Forward(c,39,literalIndexedIndirect,indexedIndirect,ext::core::draw_dispatch::Api::IndexedIndirect,b,o);});});}); }
 // ext: S11 hooks the character preview layer needs besides the draws: ClearRenderTargetView, Begin, End, CreateVertexShader.
 using ClearRtv=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,const FLOAT[4]);
 using QueryCall=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
 using CreateVs=HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11VertexShader**);
 inline ClearRtv clearRtv=nullptr; inline QueryCall beginQuery=nullptr,endQuery=nullptr; inline CreateVs createVs=nullptr;
 inline void STDMETHODCALLTYPE OnClearRtv(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const FLOAT color[4])
-{ clearRtv(c,v,color); ext::ffxiv::chara::OnClearRenderTargetView(c,v,color); }
+{ clearRtv(c,v,color); if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::chara::OnClearRenderTargetView(c,v,color); }
 inline void STDMETHODCALLTYPE OnBegin(ID3D11DeviceContext* c,ID3D11Asynchronous* q)
-{ ext::ffxiv::chara::OnQueryBegin(c,q); beginQuery(c,q); }
+{ if(ext::core::diagnostic::ObserversSuppressed()){beginQuery(c,q);ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::chara::OnQueryBegin(c,q); beginQuery(c,q); }
 inline void STDMETHODCALLTYPE OnEnd(ID3D11DeviceContext* c,ID3D11Asynchronous* q)
-{ endQuery(c,q); ext::ffxiv::chara::OnQueryEnd(c,q); }
+{ endQuery(c,q); if(ext::core::diagnostic::ObserversSuppressed()){ext::core::diagnostic::NoteSuppressedCallback();return;} ext::ffxiv::chara::OnQueryEnd(c,q); }
 inline HRESULT STDMETHODCALLTYPE OnCreateVertexShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11VertexShader** out)
 {
     auto hr=createVs(d,code,size,link,out);
@@ -274,6 +319,8 @@ inline void Install(ID3D11Device* d)
     if (create || !d) return;
     ComPtr<ID3D11DeviceContext> c; d->GetImmediateContext(&c); if (!c) return;
     auto dv=*reinterpret_cast<void***>(d), cv=*reinterpret_cast<void***>(c.Get());
+    literalDraw=cv[13]; literalIndexed=cv[12]; literalIndexedInstanced=cv[20];
+    literalInstanced=cv[21]; literalIndexedIndirect=cv[39]; literalIndirect=cv[40];
     create=reinterpret_cast<Create>(dv[15]); draw=reinterpret_cast<Draw>(cv[13]); indexed=reinterpret_cast<Indexed>(cv[12]);
     createLayout=reinterpret_cast<CreateLayout>(dv[11]);
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
@@ -313,7 +360,7 @@ inline void Install(ID3D11Device* d)
         return 0;
     });
     if (!began) { create=nullptr; return; }
-    if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::probe::SetResolveHookControl(&resolveControl); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(draw)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
+    if (result==NO_ERROR) { context=c.Get(); installed.store(true); ext::ffxiv::chara::probe::SetResolveHookControl(&resolveControl); ext::ffxiv::chara::OnInstalled(c.Get(),reinterpret_cast<void*>(&DrawDispatchAdapter)); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
     else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
 // The main detach transaction; runs under the layer's gate.
@@ -352,6 +399,8 @@ inline void Detach()
 {
     ext::hdr::FfxivSceneHdr::EndFrame();
     ext::ffxiv::chara::Detach(); // ext: S11 releases the preview layer's GPU objects while the device is still valid
+    ext::ffxiv::engine::Release(); // ext: engine pass overrides release their buffers while the device is still valid
+    ext::ffxiv::lighting::chara::Release(); // ext: the chara ambient releases its patch buffers and its staging ring while the device is still valid
     FfxivLightingScan::Stop();
     // The gate is taken only now: on the draw thread chara::Detach() above reaches the probe's run-time removal of the resolve detour,
     // which takes the same gate.

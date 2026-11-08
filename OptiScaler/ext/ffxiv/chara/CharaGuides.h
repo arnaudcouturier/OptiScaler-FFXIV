@@ -2,15 +2,20 @@
 // The helper passes of the isolated DLSS path (shader: shaders/chara_guides.hlsl): Copy (native image -> colour input),
 // Guides (depth + signed motion with the engine's camera offset removed) and Alpha (upscaled colour + native alpha).
 //
-// Every pass runs inside a private ID3DDeviceContextState (feature level 11_0): while a Scope is alive the context shows
-// an empty pipeline, and leaving it swaps the game's state back untouched, whatever the passes bound. Nothing in this file
-// knows the game: the caller supplies the shader bytecode, the camera copy and the full-screen draw.
+// Every pass runs between an explicit save and restore of the state it touches (ext/core/D3D11ExplicitState.h): a Scope captures
+// the game's state in its constructor, sets what a private context state's defaults used to provide (no HS/DS/GS, the default
+// rasterizer, blend and depth-stencil state), and puts the game's state back when it ends, whatever the passes bound and whether or
+// not the draw hook it runs in is nested (a swap into a private state does nothing then). Nothing in this file knows the game:
+// the caller supplies the shader bytecode, the camera copy and the full-screen draw.
+
+#include "ext/core/D3D11ExplicitState.h"
 
 #include <d3d11_1.h>
 #include <wrl/client.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace ext::ffxiv::chara::guides
 {
@@ -54,9 +59,9 @@ class Passes
   public:
     bool Init(ID3D11Device* device, const Shaders& shaders, DrawTriangleFn drawTriangle);
     void Release();
-    bool Ready() const { return _state != nullptr; }
+    bool Ready() const { return _ready; }
 
-    // RAII: enters the private state, restores the game's state on destruction.
+    // RAII: captures the game's state and sets the passes' defaults, restores the game's state on destruction.
     class Scope
     {
       public:
@@ -66,6 +71,11 @@ class Passes
         Scope(const Scope&) = delete;
         Scope& operator=(const Scope&) = delete;
         bool Ok() const { return _ok; }
+
+        // A full snapshot of the context for one call whose use of the pipeline is not known (NVIDIA NGX CreateFeature / EvaluateFeature on the game's
+        // context): everything is put back when the returned object ends, outputs before inputs. Build it right before the call and let it end right
+        // after it. Inert when the scope is not Ok(). The Guard of the scope restores what the passes touch; this one catches the rest.
+        ext::core::explicit_state::FullStateSnapshot KeepState();
 
         // Each returns false when the pass could not run. `tint` (Alpha): the debug variant, falls back to the plain one when the
         // tinted shader was not supplied.
@@ -84,13 +94,14 @@ class Passes
 
         Passes& _passes;
         ID3D11DeviceContext* _context = nullptr;
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> _context1;
-        Microsoft::WRL::ComPtr<ID3DDeviceContextState> _previous;
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> _context1; // declared before the guard: the guard is destroyed (restores) first
+        std::optional<ext::core::explicit_state::Guard> _guard; // built in the constructor where the swap into a private state was, reset in the destructor
         bool _ok = false;
     };
 
   private:
-    Microsoft::WRL::ComPtr<ID3DDeviceContextState> _state;
+    bool _ready = false;
+    bool _fl111 = false; // the device is feature level 11_1 or better (64 UAV slots instead of 8)
     Microsoft::WRL::ComPtr<ID3D11VertexShader> _vs;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> _copy, _guides, _alpha, _alphaTint, _alphaTintNr;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> _sampler;

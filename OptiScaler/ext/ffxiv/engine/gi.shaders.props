@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Screen-space light bounce shaders (ext\ffxiv\engine\shaders\Gi.hlsl). One source, four entry points, each compiled by fxc -O3 into a header in
+  $(IntDir)ext_gen\ (never committed). The register slots and the constant-buffer layout in the .hlsl are mirrored by GiPass.cpp; change them
+  together. This file is the light bounce's own: it shares no shader source with SceneMarch.hlsl (the pass marches through its own GiMarch.hlsl,
+  included first thing in the source), and edits nothing of the march's Godrays.hlsl.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Gi.hlsl">
+      <Variable>Gi_Vs_cso</Variable>
+      <Header>Gi_Vs.h</Header>
+      <Profile>vs_5_0</Profile>
+      <Entry>VS</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Gi.hlsl">
+      <Variable>Gi_Gi_cso</Variable>
+      <Header>Gi_Gi.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Gi</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Gi.hlsl">
+      <Variable>Gi_Smooth_cso</Variable>
+      <Header>Gi_Smooth.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Smooth</Entry>
+    </ExtShader>
+    <ExtShader Include="$(MSBuildThisFileDirectory)shaders\Gi.hlsl">
+      <Variable>Gi_Apply_cso</Variable>
+      <Header>Gi_Apply.h</Header>
+      <Profile>ps_5_0</Profile>
+      <Entry>PS_Apply</Entry>
+    </ExtShader>
+  </ItemGroup>
+</Project>

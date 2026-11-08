@@ -4,16 +4,73 @@ Companion to the [contact shadows](../FEATURES.md#contact-shadows-ffxiv) entry. 
 benchmark with the fork's own draw diagnostic; the notes below say which, how to repeat the measurement after a game patch, and what the
 benchmark showed when the pass ran.
 
-**Status: experimental.** The key is off by default and the effect is not verified: it has not been tried in game, and on the one benchmark
-frame that was dumped the term mostly did not land on contact edges (3.0 % of its texels were on one). The synthetic proofs in the tests are
-synthetic; they say the march follows the geometry, not that the picture looks right. Read every number below with that in mind.
+**Status: experimental.** The key is off by default. It was turned on in one game session and never ran there: the rule looked for one name,
+found no shader of the light draw that declares it, and indexed instead the 16 shaders of that build that do declare `g_SamplerShadow` - every
+one of them the cascade-atlas readers - refused their binding on its format, and never recognised the light draw that samples the same
+screen-space mask under the name `g_SamplerShadowMask` in `R8_UNORM` (below). That is fixed here, and the effect itself is still not verified in
+game; on the one benchmark frame that was dumped the term mostly did not land on contact edges (3.0 % of its texels were on one). The synthetic
+proofs in the tests are synthetic; they say the march follows the geometry, not that the picture looks right. Read every number below with
+that in mind.
+
+**One thing is assumed and not measured.** The convention `1 = sunlit, 0 = fully shadowed` is the benchmark build's, and this build's mask is
+`R8_UNORM`, so the pass multiplies the mask's level by the term as if it were the same factor. Neither captured session holds the mask's texels,
+and the sun light shader's bytecode is not in either `shaders/` folder (97 DXBC files in each capture folder, and the light draw's blob is not
+one of them), so **which level is sunlit and
+which channel the shader reads are unmeasured for this build**. If this build instead encodes `0 = lit`, the term multiplies the *shadowed*
+texels: the artefact would sit on the sun's shadows (darkening where the sun does not reach, and leaving the lit contact edges alone), which is
+plausible enough to survive a casual A/B. `ContactShadowsDump` now settles both halves from one session: it writes the mask's own texels with a
+file name that says the format (`mask-before.r8`, one byte per texel, in this build), and it keeps the bytecode of every mask-declaring shader
+from the moment the game creates it (`shader-<crc>.dxbc` in the same folder, with each one's declared slots in `facts.txt`) - the light shader is
+created while the game loads, so no capture of its draw ever holds it. The next session's list is: read `mask-before.r8` against the frame's
+shadows, and disassemble the kept shader that declares `g_SamplerShadowMask`.
+
+## Why it never ran in the game, and what changed
+
+Two builds of the same engine bind this mask differently, and the shipped rule knew only the first one:
+
+| | benchmark build (2026-10-30) | the game (2026-11-01, session 3) |
+|---|---|---|
+| the light draw that samples the mask | `0x63035CD0`, name `g_SamplerShadow` | `0x9DC59665`, name `g_SamplerShadowMask` |
+| the mask's format and size | `B8G8R8A8_UNORM` 2560x1440 | `R8_UNORM` 3840x2160 |
+| the shader that also declares `g_SamplerShadow` | the mask's writer `0xD8CDA48A`, which samples the cascade atlas with it | the mask's writers: 16 shaders declare it in this build and all of them bind the cascade atlas (`shaders.txt`) |
+
+The benchmark's name was shared between the mask's writer and the light draw, so a name-only index found the light draw. In the game the two
+draws use different names: the light draw's binding is `g_SamplerShadowMask` at texture slot 8 (beside `g_SamplerDepth` at 0,
+`g_CameraParameter` at cb1 and `g_LightParam` at cb2), and the file's only contact-shadows line in that session is the writer's
+`the draw was left alone (the mask binding has an unexpected format)` - the cascade atlas, `fmt56` (`R8_TYPELESS`) 2048x8192. Nothing in the
+session was ever multiplied.
+
+The name evidence is the *view* names in `draws.csv` (`8:g_SamplerShadowMask.T:R8_UNORM:3840x2160`), while the index matches *reflected*
+names; the two agree wherever both are known (`0x1257B24B`'s reflection lists `g_SamplerShadow.T=2` and its draw binds the atlas at 2), so the
+inference is good, but the light draw's own reflection was never captured - that is one of the two things the dump now keeps (above). The other
+name rule: a shader that declared both names would be read at whichever its reflection lists first, which for the measured family is the atlas;
+no shader of this build declares both (the 16 declare `g_SamplerShadow` only), so that slot is unmeasured, and the failure it would cause is
+fail-open - the atlas' format and size refuse the draw, and the feature simply does not run for that shader.
+
+The rule now accepts both names, exactly (a name that merely starts with either is still another resource), and both formats. The cascade
+atlas stays out on two independent tests: its format (`R8_TYPELESS`, not `R8_UNORM`) and its size (2048x8192 is not the draw's own depth
+allocation). The pass itself is unchanged: its combine writes `mask.rgb * term`, and an `R8_UNORM` target keeps the red channel - but whether
+that channel holds the same `1 = sunlit` factor the benchmark build held is the assumption the section above states. The pass test now runs the
+same wall scene with an `R8_UNORM` mask at a white level and at 200 of 255, and at the game's own shape: a 3840x2160 mask with a 1920x1080
+render window inside it, copied into an `R8_UNORM` copy whose every window texel agrees with the CPU reference of both shaders and whose
+6,220,800 texels outside the window are the mask's own level.
+
+**What the card shows now, and what the next session reads first.** The card carries the counters a session needs before it looks at the
+picture: the passes (one per light draw served), how many draws were left alone and how many of those bound another shape, and the mask of the
+last classified light draw with its format, size and slot and the rule's verdict. `%u pass(es), one per light draw served, %u left alone
+(%u of them of another shape); the last classified light draw's mask is 3840x2160 in format 57 at slot 8 (run)` means the rule found this
+build's mask and the pass is applying the term; a mask of `2048x8192 in format 56` means it is still looking at the atlas writer, and a
+`0 pass(es)` with `N of them of another shape` where N does not grow means no light draw of the scene declares the mask at all. The log's
+classification line names the slot the indexed shader declares the mask at, and the run line names the mask's size, the window and the
+pass's GPU cost.
 
 ## The two facts the pass needs, and how they were read
 
 The sun light draw and its mask were measured on 2026-10-30 (`builds/bench-runs/20261030-cap-diag-*`): the engine draws a screen-space sun
 visibility mask (`0xD8CDA48A`, ten draws a frame, `B8G8R8A8_UNORM` at the display allocation's size, accumulated with `MIN`) and the sun
 light draw `0x63035CD0` samples it as `g_SamplerShadow` at slot 6, together with `g_SamplerDepth` (it binds no view-position buffer; the
-pass reconstructs the position from the depth). The mask is
+pass reconstructs the position from the depth). The game's own build names the same binding `g_SamplerShadowMask` and binds it as
+`R8_UNORM`, which is the section above. The mask is
 rebuilt inside the frame (writes at ordinals 10..20, light at 22, more writes at 33..41, light at 44), which is why the pass runs per light
 draw and not once per frame. The engine's own AO is a half-resolution `B8G8R8A8_UNORM` buffer, the precedent for a half-resolution term.
 
@@ -125,7 +182,7 @@ expected sizes and formats, and the pass runs for the session without switching 
 
 **What it does not show.** One scene, one camera path, one time of day: the benchmark's sun is bright and high, which is the case the pass is
 for, but night, interiors, rain and the second light draw of a scene whose two masks differ in size are not in it. The pass is also not
-measured for GPU cost in a real session; the estimate is about 0.04 ms per light draw at 1440p in half resolution (two draws: the march and
+measured for GPU cost in a real session; the first estimate was about 0.04 ms per light draw at 1440p in half resolution, before the march moved to the render window's own resolution with even steps of at most one texel (a half-resolution term with widening steps drew a twig's contact as a row of dots, seen in game on 2026-11-02) (two draws: the march and
 the combine), and the log's run line carries the real sizes.
 
 ## Limits this build has
@@ -207,3 +264,7 @@ costs 16.2 ns on the same machine, which is why the draw hook no longer reads it
 the timestamp-disjoint query of the previous run without a begin on every run after the first, so the pair never completed; the pairing is
 fixed (a run ends only the pair it began) and the software-adapter test now pins that a begin happens on run after run and that the number
 resolves there. A session measurement (a real GPU) is still missing.
+
+## One texel per step, one term texel per mask texel (2026-11-02)
+
+The march runs at the render window's own resolution, with even steps of at most one depth texel, and the reach is what the steps can cover at that spacing (`ContactShadowsSteps`, 32 by default, 4 to 64), never more than `ContactShadowsLength`. The combine reads the term texel for texel, so there is no upsample and nothing crosses a depth edge. The normal takes the closer neighbour per axis, so a pixel in a crease keeps its own surface's normal, and the thickness dropped from 12 to 4 texels because a ray stepping one texel at a time crosses what it enters. Measured on a software adapter only: a rail one texel thick now casts a band three times thinner. The cost in a real frame and the look on thin branches still need a session.

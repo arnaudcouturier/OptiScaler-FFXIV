@@ -283,8 +283,8 @@ void TestAlphaInputs(guides::Passes& passes)
 
 // ---- The game's context state around a tint ------------------------------------------------------------------------------------------
 // The tint runs inside the game's own UI draw: the game has bound its render target, its texture, its viewport, its shaders and its constant
-// buffers, and expects every one of them to be there after the call. The pass works in a private context state that is swapped in and out;
-// this checks the swap really gives the game's state back, after a drawn tint, a cached one, a new result, a resized one, the failure without
+// buffers, and expects every one of them to be there after the call. The pass saves the game's state in its scope and puts it back explicitly;
+// this checks the game's state really comes back, after a drawn tint, a cached one, a new result, a resized one, the failure without
 // the cyan shader and a refused call.
 struct BoundState
 {
@@ -526,6 +526,32 @@ void TestGameStateKept(guides::Passes& passes, guides::Passes& noCyan, const Com
     // refused before anything ran
     CHECK(targets.Tinted(passes, g_device.Get(), g_context.Get(), 0x1000, nullptr, 5, 160, &drawn) == nullptr && !drawn);
     CHECK(SameState(before, Capture()));
+
+    // The picture is the same under this hostile state (scissor on, CULL_BACK, alpha blend, a depth test with a depth view) as in a cleared context: the
+    // pass used to get its rasterizer, blend and depth-stencil state from the private context state, and has to set them itself on the game's own. A fresh
+    // key and serial in each run, because a cached result draws nothing.
+    {
+        auto bytesOf = [&](const ComPtr<ID3D11ShaderResourceView>& view) {
+            ComPtr<ID3D11Resource> res;
+            view->GetResource(&res);
+            ComPtr<ID3D11Texture2D> tex;
+            res.As(&tex);
+            return Read(tex.Get(), 8);
+        };
+        nr::TintTargets hostileTargets;
+        ComPtr<ID3D11ShaderResourceView> underHostile = hostileTargets.Tinted(passes, g_device.Get(), g_context.Get(), 0x3000, result.srv.Get(), 9, 300, &drawn);
+        CHECK(underHostile != nullptr && drawn);
+        const std::vector<uint8_t> hostileBytes = underHostile ? bytesOf(underHostile) : std::vector<uint8_t>();
+        CHECK(SameState(before, Capture()));
+        g_context->ClearState();
+        nr::TintTargets cleanTargets;
+        ComPtr<ID3D11ShaderResourceView> inClean = cleanTargets.Tinted(passes, g_device.Get(), g_context.Get(), 0x3000, result.srv.Get(), 9, 300, &drawn);
+        CHECK(inClean != nullptr && drawn);
+        const std::vector<uint8_t> cleanBytes = inClean ? bytesOf(inClean) : std::vector<uint8_t>();
+        CHECK(!cleanBytes.empty() && hostileBytes == cleanBytes);
+        // and it is the tint, not two empty images
+        CHECK(!cleanBytes.empty() && IsCyanMix(HalfAt(cleanBytes, kW, kW / 2, kH / 2), kR, kG, kB, kA));
+    }
 
     // nothing the game owns was written: its render target is still the clear colour, its constant buffers keep their data
     const auto pixels = Read(target.texture.Get(), 4);

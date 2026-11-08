@@ -5,9 +5,17 @@
 #include "ext/core/ExtConfig.h"
 #include "ext/ffxiv/diag/DrawDiagFormat.h"
 #include "ext/ffxiv/diag/ShaderBindings.h"
+#include "ext/ffxiv/diag/ShaderCrc.h" // the tag a draw's pixel shader is named by, shared with the modules that write a line about a draw
+#include "ext/ffxiv/diag/StageDump.h" // the per-stage image dump: what each stage of this fork received and produced on the capture frame
+#include "ext/ffxiv/engine/EnginePass.h" // the engine pass overrides' counters, written to engine.txt
+#include "ext/ffxiv/engine/GlossPuddlesApply.h" // the puddles' two stages, written to the same engine.txt
+#include "ext/ffxiv/engine/PuddleTone.h"        // ... and the tone-map stage's last measurement of the pool and the march
+#include "ext/ffxiv/engine/ShaftsRules.h"       // the pure sun projection engine.txt's sun line is computed with (it needs no card)
+#include "ext/ffxiv/engine/SsrApply.h"    // the screen-space reflections' counters, written to the same engine.txt
 #include "ext/ffxiv/lighting/FfxivLightingCapture.h" // the game's own context (the hooks' identity for "the game is drawing")
 #include "ext/ffxiv/ui/PlateDraws.h"                 // the draw arguments the draw hooks already noted
 #include "ext/ffxiv/ui/UiShaderCatalog.h"
+#include "ext/present/PresentSeams.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -42,8 +50,8 @@ namespace
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
 
-// The bytecode CRC the creation hook stamps on a shader object, so a draw can name its pixel shader without seeing its bytecode.
-constexpr GUID kCrcTag { 0x2d7b41c8, 0x9e04, 0x4a1d, { 0x8a, 0x3c, 0x1b, 0x6e, 0xd2, 0x57, 0x40, 0x91 } };
+// The bytecode CRC the creation hook stamps on a shader object, so a draw can name its pixel shader without seeing its bytecode (the tag
+// itself is diag::kShaderCrcTag: a module's own line names the same shader a capture would).
 
 // The constant buffer the lighting passes carry, read back by name (its layout is in DrawDiagFormat.h: kLightParam*).
 constexpr const char* kLightParamName = "g_LightParam";
@@ -61,7 +69,7 @@ enum Phase : uint8_t
 struct Bound
 {
     uint32_t name = 0; // index into State::names
-    uint32_t type = 0; // ext::ffxiv::diag::kBind*
+    BindKind kind = BindKind::Texture; // the kind the shader declares: what a slot is looked up by, and never compared by hand
     uint32_t bindPoint = 0;
     uint32_t bindCount = 1;
 };
@@ -166,19 +174,116 @@ struct State
     uint32_t wantedFrames = static_cast<uint32_t>(kDefaultFrames);
     uint64_t frames = 0; // frames closed since the capture started; the frame in progress is frames + 1
     uint32_t drawsInFrame = 0;
+    // The capture's own draw counter: it keeps counting across a frame close and across the partial-frame drop, so "a later draw" has one
+    // meaning within a capture (the row ordinal starts at 1 at every frame).
+    uint64_t drawSequence = 0;
     uint32_t omittedInFrame = 0;
     uint32_t framesCaptured = 0;
+    uint64_t framesWritten = 0; // frames whose text and frame line are in draws.csv (a frame the byte cap dropped is not counted)
     uint32_t waitTicks = 0; // draws since the last key poll while waiting for the capture to start
     FrameSplitter split;
     std::string frameRows;
     MarkerPlan markers;
     std::string rows; // draws.csv body
     std::string cbs;  // cb.csv body
-    bool truncated = false, truncatedCbs = false;
-    uint64_t rowsWritten = 0, cbRows = 0, shadersWithoutReflection = 0;
+    std::string cbdump; // cbdump.csv body: the named buffers' bytes, sampled at most once a second
+    std::string framesCsv; // bounded per-output-frame SSR/puddle telemetry
+    uint32_t frameTelemetryRows = 0;
+    bool frameTelemetryTruncated = false;
+    uint32_t previousSsrRuns = 0, previousSsrDeclines = 0;
+    uint32_t previousGlossRuns = 0, previousGlossDeclines = 0;
+    uint32_t previousToneRuns = 0, previousToneDeclines = 0;
+    std::string views; // views.txt body: one line per identifying texture, once per capture
+    bool viewSeen[kViewNameCount] {};
+    bool truncated = false, truncatedCbs = false, truncatedCbDump = false;
+    uint64_t rowsWritten = 0, cbRows = 0, cbDumpRows = 0, omittedTotal = 0, shadersWithoutReflection = 0;
     int64_t clockZero = 0;
     int64_t lastReadQpc = 0;
+    // The last light pass the diagnostic read, in the form engine.txt's sun line needs: the direction the light draw reported (view space), the
+    // projection the same draw's camera carried, and that draw's own window. It is filled whatever the light shafts card says, which is what the
+    // line needed: that module only projects a sun while its own card runs. Arming a capture clears the read clock (`StartCollecting`), so the
+    // capture's first light pass reads its own frame; a capture that holds no light pass keeps the waiting sample, and a sun a second old still
+    // answers whether the engine's flare could be in frame.
+    struct LightSample
+    {
+        bool have = false;
+        float direction[3] {};
+        float projection[16] {}; // m_ProjectionMatrix (+0x120): the light's direction is view space, so this alone places it
+        float window[4] {};      // x, y, width, height of the light draw's viewport
+    };
+    LightSample lastLight;
+    // The capture session's key: one press starts one capture, and a written capture needs a release before the next press counts.
+    CaptureArm captureArm;
+    fs::path runDir; // the run folder of the capture in progress, created on first use (the dump needs it at its frame's end)
+
+    // The one-frame texture dump ([FFXIV] DrawDiagnosticsDump = frame): the resources identified in the first captured frame, the readback
+    // copy of each, and what facts.txt says about them. `dumpWritten` is per capture: it stays set for the rest of the capture that wrote its
+    // dump (the dump is one frame of one capture), and the next capture of the session re-opens the dump while `dumpsWritten` (the session's
+    // count of written dumps) is under kMaxDumpsPerSession.
+    struct DumpItem
+    {
+        std::string name;                // "wetness", "gbuffer0", ... ; the file is <name>.bin
+        ComPtr<ID3D11Resource> resource; // identified at `sequence`; copied at a later draw, mapped at the dump's write
+        ComPtr<ID3D11Texture2D> staging;
+        ComPtr<ID3D11Buffer> bufferStaging; // the structured row dump's staging (one of the two stagings is set)
+        uint32_t srcByteOffset = 0;         // the structured dump's first byte in the game's buffer (the view's first row)
+        std::string format;
+        uint32_t width = 0, height = 0, bytesPerPixel = 0, rowPitch = 0;
+        uint64_t bytes = 0;
+        uint32_t ordinal = 0;  // the identifying draw's row ordinal, for facts.txt
+        uint64_t sequence = 0; // the identifying draw in the capture's own order (the copy waits for a later one)
+        uint8_t rank = 0;      // DumpRank
+        bool copied = false;
+        std::string note; // why the texture is not written (a skip decided while identifying, or a failed copy), for facts.txt
+        std::string factsExtra; // a stage image's comment line, written right after its facts line (StageImageNote)
+        bool stage = false;     // a per-stage image (it has places of its own beside the dump's twenty-four, and the same byte budget)
+        bool cropped = false;   // a depth item: the whole subresource is copied (a depth texture cannot be copied in part) and cropped at the write
+        float cropWindow[4] {}; // x, y, width, height of the draw that identified it (the crop's window)
+        std::string viewFormat; // the identifying view's format text, for the crop's comment line
+    };
+    std::vector<DumpItem> dumpItems;
+    uint64_t dumpHeldBytes = 0; // the bytes held for the staging copies, so identification stays under their bound
+    bool dumpActive = false;
+    bool dumpWritten = false;
+    uint32_t dumpsWritten = 0; // dumps this session wrote, whichever capture: the allowance DumpMayStart reads
+
+    // The per-stage image dump (StageDump.h): what each stage reported on the capture frame, the armed state and key values read where the
+    // frame's window opened, and the textures already copied this frame (a stage's input that is the stage before's output is a reference, not
+    // a second file). The images themselves are DumpItems of rank Stage, so the byte budget, the staging and the writer are the dump's own.
+    StageRecord stageRecords[kStageCount];
+    bool stageArmed[kStageCount] {};
+    std::string stageValues[kStageCount];
+    std::string stageLate[kStageCount]; // the numbers a stage measured at its run on the capture frame, appended to its values text at the write
+    struct StageProbeItem
+    {
+        StageId id = StageId::ContactShadows;
+        ComPtr<ID3D11Texture2D> staging; // one texel of a texture the stage keeps on the GPU, copied on the capture frame, mapped at the write
+        StageProbeFormatFn format = nullptr;
+        uint32_t floats = 0;
+    };
+    std::vector<StageProbeItem> stageProbes;
+    float dumpDrawWindow[4] {}; // the viewport of the draw being noted (x, y, width, height), for the depth item's crop
+    bool stageSnapshot = false;
+    struct StageSource
+    {
+        ComPtr<IUnknown> identity; // the texture's identity, so two views of one texture are one picture
+        std::string name;          // the file that holds it
+    };
+    std::vector<StageSource> stageSources;
+    std::string stageNotes;          // reference and skip comment lines, written with the stage lines
+    uint64_t stageWantedBytes = 0;   // what every stage image of the frame would take, the budget's answer to "how much would hold everything"
+    uint32_t dumpToneFrame = 0; // the frame whose tone map was identified (0 = not seen)
+    bool dumpToneAtPresent = false; // that frame was closed at a bridge Present, so it is whole without a later frame
+    uint64_t dumpToneSequence = 0;
+    uint32_t dumpSceneWidth = 0, dumpSceneHeight = 0;
+    int64_t cbDumpLast[kCbDumpNameCount] {}; // the last read of each named buffer, per name
+    int64_t pointerWindowTicks = 0;          // the pointer cadence's window, converted from kSampleSeconds once a draw
+    CbDumpPointerCadence cbDumpPointer[kCbDumpNameCount] {}; // the same cadence, per distinct pointer: the shadow parameter's
+                                                             // cascade instances (CbDumpPointersPerSecond), which one name's
+                                                             // row a second would fold into one
+    uint64_t dumpBudget = kMaxDumpBytes;     // the one-frame dump's byte budget, from [FFXIV] DrawDiagnosticsDumpBudgetMiB
     Staging lightStaging, cameraStaging;
+    std::vector<Staging> cbDumpStaging; // one staging buffer per distinct buffer size, reused for the session
 
     // The fixture dump: (crc, bytecode) of the pixel shaders whose reflection names one of the resources the fork identifies draws by
     // (DrawDiagFormat.h's FixtureBitsOf), kept for the run folder.
@@ -193,12 +298,66 @@ struct State
     size_t commonFixtures = 0; // the ones kept for a common name only, capped apart from the key shapes
     size_t lightFixtures = 0;  // the ones kept for the light draw's own shape, which keeps slots of its own
 
+    // The shaders kept from creation (DrawDiagFormat.h's creation rules): the composite, the wetness pass, the hierarchical-Z and the glare
+    // chain are created while the game loads, before any capture can be armed. Filled whatever the capture phase is, while the draw
+    // diagnostic key is on, and written into every capture's shaders\ folder with `creation` as its origin. Session-wide and bounded.
+    struct CreationFixture
+    {
+        uint32_t crc = 0;
+        std::string code;
+        std::vector<std::string> names;
+    };
+    std::mutex creationMutex;
+    std::vector<CreationFixture> creationFixtures;
+    uint64_t creationBytes = 0;
+    bool creationBoundLogged = false;
+    std::atomic<bool> creationOn { false }; // the draw diagnostic key is on: keep key shaders from creation, capture or not
+
+    // The engine pass overrides' counters as they stood when the capture in progress armed: engine.txt's window lines are the difference
+    // from this baseline, so a second capture of one session answers for its own window instead of the whole session. Taken where the phase
+    // becomes `kCapturing`, before the first draw the capture collects.
+    struct EngineBase
+    {
+        bool taken = false;
+        uint32_t runs = 0;
+        uint32_t declined = 0;
+        uint32_t declines[ext::ffxiv::engine::kDeclineReasonCount] {};
+    };
+    EngineBase engineBase;
+
+    // The screen-space reflections' counters at the same moment, for the second block of the same file: the module's own runs, readers,
+    // declines and passed-on reasons, so a capture answers which of its gates stopped the water draws without a log.
+    struct SsrBase
+    {
+        bool taken = false;
+        uint32_t runs = 0;
+        uint32_t readers = 0;
+        uint32_t declined = 0;
+        uint32_t declines[ext::ffxiv::engine::ssr::kDeclineReasonCount] {};
+        uint32_t passedOn[ext::ffxiv::engine::ssr::kPassedOnCount] {};
+    };
+    SsrBase ssrBase;
+
+    // The puddles' two stages at the same moment, for the last block of the same file: so a capture answers whether the mirror ran in its own
+    // frames, not just whether the module was ever on.
+    struct PuddleBase
+    {
+        bool taken = false;
+        uint32_t toneRuns = 0;
+    };
+    PuddleBase puddleBase;
+
     // Reflection table: appended to by shader creation on any thread, read by the draw path under the same mutex. Kept for the session
     // (freeing it would race a creation that outlives the capture); bounded by the two caps below.
     std::mutex mutex;
     std::vector<std::string> names;
     std::unordered_map<std::string, uint32_t> nameIds;
     std::unordered_map<uint32_t, Reflection> byCrc;
+    // The reflections of the shaders kept from creation, by CRC, under the same mutex and the same name pool. The table above is bounded and a
+    // long session fills it (the game creates tens of thousands of pixel shaders), and the key passes it misses are exactly the ones created while
+    // the game loads - the glare chain and the flare family among them. They are the shaders a capture has to name, so their reflections live in
+    // their own bounded table instead of competing for the session's.
+    std::unordered_map<uint32_t, Reflection> creationReflections;
     size_t bindings = 0;
 };
 
@@ -219,8 +378,9 @@ fs::path OptiScalerDir()
     return fs::path(path).parent_path() / "OptiScaler";
 }
 
-// Creates OptiScaler\draw-diag\<run>\ and keeps the newest runs, deleting only folders it named itself.
-fs::path MakeRunFolder()
+// Creates OptiScaler\draw-diag\<run>\ and keeps the newest runs, deleting only folders it named itself. `capture` is the session's capture
+// index: the first capture gets the plain run id, a later one of the same session the id with its index appended.
+fs::path MakeRunFolder(uint32_t capture)
 {
     const fs::path base = OptiScalerDir();
     if (base.empty())
@@ -236,7 +396,7 @@ fs::path MakeRunFolder()
         LOG_WARN("Draw diagnostics: the local time could not be read");
         return {};
     }
-    const std::string id = FormatRunId(local);
+    const std::string id = CaptureFolderName(local, capture);
     const fs::path dir = root / id;
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -274,6 +434,190 @@ bool WriteFile(const fs::path& path, const std::string& text)
     return file.good();
 }
 
+bool WriteBytes(const fs::path& path, const void* data, size_t bytes)
+{
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file)
+        return false;
+    file.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    file.flush();
+    return file.good();
+}
+
+// The run folder of the capture in progress, created on first use: the one-frame dump needs it at its frame's end, the files at the end of
+// the capture. The capture index names the folder of a re-armed capture.
+fs::path RunFolder()
+{
+    State& s = S();
+    if (s.runDir.empty())
+        s.runDir = MakeRunFolder(s.captureArm.captures);
+    return s.runDir;
+}
+
+// Takes the engine counters a capture's window is measured from: the counts as they stand the moment the capture arms, before it collects a
+// draw. Called from both arm sites (the immediate arm in the config load and the delayed or key arm at a draw), so every capture has a
+// baseline. It only reads the module's counters and atomics: no allocation, no D3D call and no log, so the config-load arm may run inside
+// DllMain.
+void TakeEngineBaseline(State& s)
+{
+    const ext::ffxiv::engine::Diagnostics diagnostics = ext::ffxiv::engine::CurrentDiagnostics();
+    s.engineBase.taken = true;
+    s.engineBase.runs = diagnostics.runs;
+    s.engineBase.declined = diagnostics.declined;
+    for (uint32_t reason = 0; reason < ext::ffxiv::engine::kDeclineReasonCount; ++reason)
+        s.engineBase.declines[reason] = diagnostics.declines[reason];
+}
+
+// The puddles' tone-map runs at the same moment, for the last block of engine.txt.
+void TakePuddleBaseline(State& s)
+{
+    s.puddleBase.taken = true;
+    s.puddleBase.toneRuns = ext::ffxiv::engine::gloss::CurrentToneDiagnostics().runs;
+}
+
+// The screen-space reflections' counters at the same moment, for the second block of engine.txt: taken wherever the engine's baseline is, so the
+// two windows of one file are the same draws.
+void TakeSsrBaseline(State& s)
+{
+    const ext::ffxiv::engine::ssr::Diagnostics diagnostics = ext::ffxiv::engine::ssr::CurrentDiagnostics();
+    s.ssrBase.taken = true;
+    s.ssrBase.runs = diagnostics.runs;
+    s.ssrBase.readers = diagnostics.readers;
+    s.ssrBase.declined = diagnostics.declined;
+    for (uint32_t reason = 0; reason < ext::ffxiv::engine::ssr::kDeclineReasonCount; ++reason)
+        s.ssrBase.declines[reason] = diagnostics.declines[reason];
+    for (uint32_t reason = 0; reason < ext::ffxiv::engine::ssr::kPassedOnCount; ++reason)
+        s.ssrBase.passedOn[reason] = diagnostics.passedOn[reason];
+}
+
+// The puddles' counters as the last block of engine.txt carries them: both stages, each refusal reason named by the module's own text, the tone
+// stage's last measurement of the pool and the march (only a capture takes one), and this capture's own share of the tone runs.
+ext::ffxiv::engine::gloss::PuddleStatus PuddleStatusNow()
+{
+    const ext::ffxiv::engine::gloss::Diagnostics gloss = ext::ffxiv::engine::gloss::CurrentDiagnostics();
+    const ext::ffxiv::engine::gloss::ToneDiagnostics tone = ext::ffxiv::engine::gloss::CurrentToneDiagnostics();
+    ext::ffxiv::engine::gloss::PuddleStatus status;
+    status.keyOn = gloss.key;
+    status.glossArmed = gloss.armed;
+    status.toneArmed = tone.armed;
+    status.glossRuns = gloss.runs;
+    status.glossReaders = gloss.readers;
+    status.toneRuns = tone.runs;
+    status.glossDeclined = gloss.declined;
+    status.toneDeclined = tone.declined;
+    for (uint32_t reason = 1; reason < ext::ffxiv::engine::gloss::kDeclineReasonCount; ++reason) // None is the run count, not a decline
+        if (gloss.declines[reason] != 0)
+            status.declines.emplace_back(std::string("gloss: ") + ext::ffxiv::engine::gloss::DeclineName(ext::ffxiv::engine::gloss::Decline(reason)),
+                                         gloss.declines[reason]);
+    for (uint32_t reason = 1; reason < ext::ffxiv::engine::gloss::kToneDeclineReasonCount; ++reason)
+        if (tone.declines[reason] != 0)
+            status.declines.emplace_back(std::string("tone: ") + ext::ffxiv::engine::gloss::ToneDeclineName(
+                                                                     ext::ffxiv::engine::gloss::ToneDecline(reason)),
+                                         tone.declines[reason]);
+    status.statsKnown = tone.statsKnown;
+    status.poolShare = tone.poolShare;
+    status.hitShare = tone.hitShare;
+    const State::PuddleBase& baseline = S().puddleBase;
+    if (baseline.taken)
+    {
+        status.haveWindow = true;
+        status.windowToneRuns = WindowCounter(tone.runs, baseline.toneRuns);
+    }
+    return status;
+}
+
+// The engine pass overrides' counters as engine.txt carries them: the module's own export, with each nonzero decline reason named by the
+// module's own text. The key is what decides whether the file says anything else. The window lines are this capture's share of the session
+// counters: the difference from the baseline `TakeEngineBaseline` took when it armed.
+EngineStatus EngineStatusNow()
+{
+    const ext::ffxiv::engine::Diagnostics diagnostics = ext::ffxiv::engine::CurrentDiagnostics();
+    EngineStatus status;
+    status.keyOn = diagnostics.key;
+    status.armed = diagnostics.armed;
+    status.identity = diagnostics.identity;
+    status.runs = diagnostics.runs;
+    status.declined = diagnostics.declined;
+    for (uint32_t reason = 1; reason < ext::ffxiv::engine::kDeclineReasonCount; ++reason) // None is the run count, not a decline
+        if (diagnostics.declines[reason] != 0)
+            status.declines.emplace_back(ext::ffxiv::engine::DeclineName(ext::ffxiv::engine::Decline(reason)), diagnostics.declines[reason]);
+    const State::EngineBase& base = S().engineBase;
+    if (base.taken)
+    {
+        status.haveWindow = true;
+        status.windowRuns = WindowCounter(diagnostics.runs, base.runs);
+        status.windowDeclined = WindowCounter(diagnostics.declined, base.declined);
+        for (uint32_t reason = 1; reason < ext::ffxiv::engine::kDeclineReasonCount; ++reason)
+            if (const uint32_t count = WindowCounter(diagnostics.declines[reason], base.declines[reason]); count != 0)
+                status.windowDeclines.emplace_back(ext::ffxiv::engine::DeclineName(ext::ffxiv::engine::Decline(reason)), count);
+    }
+    status.haveRun = diagnostics.haveRun;
+    status.boundBytes = diagnostics.boundBytes;
+    status.targetWidth = diagnostics.targetWidth;
+    status.targetHeight = diagnostics.targetHeight;
+    status.indexed = diagnostics.indexed;
+    status.indexRefused = diagnostics.indexRefused;
+    // The frame's sun, projected here from the diagnostic's own last light read: the direction the light draw reported (already in view space),
+    // through the projection the same draw's camera carried, into that draw's window. It does not depend on any other module's card being on (the
+    // light shafts module only projects a sun while its own card runs), so the line is there in the state the engine's flare is captured in.
+    const State::LightSample& light = S().lastLight;
+    if (light.have)
+    {
+        const ext::ffxiv::shafts::Window window { light.window[0], light.window[1], light.window[2], light.window[3] };
+        const ext::ffxiv::shafts::SunProjection sun = ext::ffxiv::shafts::ProjectSun(light.projection, light.direction, window);
+        status.haveSun = sun.unit;
+        status.sunBehind = sun.behind;
+        status.sunX = sun.screenX;
+        status.sunY = sun.screenY;
+        status.sunOutside = sun.offscreen;
+    }
+    for (size_t i = 0; i < 4; ++i)
+        status.window[i] = diagnostics.window[i];
+    return status;
+}
+
+// The screen-space reflections' counters as the second block of engine.txt carries them: the module's own export, each nonzero reason named by
+// the module's own text, and the same counts for this capture's window (the difference from the baseline taken when it armed).
+SsrStatus SsrStatusNow()
+{
+    const ext::ffxiv::engine::ssr::Diagnostics diagnostics = ext::ffxiv::engine::ssr::CurrentDiagnostics();
+    SsrStatus status;
+    status.keyOn = diagnostics.key;
+    status.armed = diagnostics.armed;
+    status.runs = diagnostics.runs;
+    status.readers = diagnostics.readers;
+    status.declined = diagnostics.declined;
+    for (uint32_t reason = 1; reason < ext::ffxiv::engine::ssr::kDeclineReasonCount; ++reason) // None is not a decline
+        if (diagnostics.declines[reason] != 0)
+            status.declines.emplace_back(ext::ffxiv::engine::ssr::DeclineName(ext::ffxiv::engine::ssr::Decline(reason)),
+                                         diagnostics.declines[reason]);
+    for (uint32_t reason = 0; reason < ext::ffxiv::engine::ssr::kPassedOnCount; ++reason)
+        if (diagnostics.passedOn[reason] != 0)
+            status.passedOn.emplace_back(ext::ffxiv::engine::ssr::PassedOnName(ext::ffxiv::engine::ssr::PassedOn(reason)),
+                                         diagnostics.passedOn[reason]);
+    const State::SsrBase& baseline = S().ssrBase;
+    if (baseline.taken)
+    {
+        status.haveWindow = true;
+        status.windowRuns = WindowCounter(diagnostics.runs, baseline.runs);
+        status.windowReaders = WindowCounter(diagnostics.readers, baseline.readers);
+        status.windowDeclined = WindowCounter(diagnostics.declined, baseline.declined);
+        // The slot and the view of the last water draw the gate passed on, this capture's only: the module keeps one read for the session, so
+        // the line answers for the capture's window when that window passed a water draw on (the count of the reason that stores the read, from
+        // the baseline taken when it armed) and reads `-` otherwise - a second capture of one session must not print the first one's slot.
+        constexpr uint32_t kReadPassedOn = uint32_t(ext::ffxiv::engine::ssr::PassedOn::OtherMap);
+        if (WindowCounter(diagnostics.passedOn[kReadPassedOn], baseline.passedOn[kReadPassedOn]) > 0)
+            status.lastWaterDraw = ext::ffxiv::engine::ssr::FormatReadBinding(diagnostics.read);
+        for (uint32_t reason = 1; reason < ext::ffxiv::engine::ssr::kDeclineReasonCount; ++reason)
+            if (const uint32_t count = WindowCounter(diagnostics.declines[reason], baseline.declines[reason]); count != 0)
+                status.windowDeclines.emplace_back(ext::ffxiv::engine::ssr::DeclineName(ext::ffxiv::engine::ssr::Decline(reason)), count);
+        for (uint32_t reason = 0; reason < ext::ffxiv::engine::ssr::kPassedOnCount; ++reason)
+            if (const uint32_t count = WindowCounter(diagnostics.passedOn[reason], baseline.passedOn[reason]); count != 0)
+                status.windowPassedOn.emplace_back(ext::ffxiv::engine::ssr::PassedOnName(ext::ffxiv::engine::ssr::PassedOn(reason)), count);
+    }
+    return status;
+}
+
 // ---- reflection table ------------------------------------------------------------------------------------------------
 
 // Interns a name. The pool is bounded and a full pool simply stops new names, so a binding is then nameless rather than wrong.
@@ -289,18 +633,32 @@ uint32_t Intern(State& s, const char* name, uint32_t length)
     return id;
 }
 
-// The binding a shader declares at `slot`, or null.
-const char* NameAt(const State& s, const Reflection* reflection, uint32_t type, uint32_t slot)
+// The binding a shader declares at `slot`, or null. The kind is part of the question: a texture and its sampler share one variable name in
+// the effect compiler's reflection, so a walk of the draw's slots that ignored the kind would name a texture after its sampler.
+const char* NameAt(const State& s, const Reflection* reflection, BindKind kind, uint32_t slot)
 {
     if (reflection == nullptr)
         return nullptr;
     for (const Bound& b : reflection->binds)
     {
-        const ShaderBinding probe { s.names[b.name].c_str(), static_cast<uint32_t>(s.names[b.name].size()), b.type, b.bindPoint, b.bindCount };
-        if (BindingCovers(probe, type, slot))
+        const ShaderBinding probe { s.names[b.name].c_str(), static_cast<uint32_t>(s.names[b.name].size()), uint32_t(b.kind), b.bindPoint,
+                                    b.bindCount };
+        if (BindingAnswers(probe, kind, slot))
             return probe.name;
     }
     return nullptr;
+}
+
+// The reflection a draw's pixel shader is described by, or null when the session never saw its bytecode. The session's table first (it is what a
+// capture collects), then the shaders kept from creation: a long session fills the first, and the passes created while the game loads are the
+// ones a capture needs to name. Called with the reflection mutex held.
+const Reflection* ReflectionFor(const State& s, uint32_t crc)
+{
+    const auto it = s.byCrc.find(crc);
+    if (it != s.byCrc.end())
+        return &it->second;
+    const auto creation = s.creationReflections.find(crc);
+    return creation != s.creationReflections.end() ? &creation->second : nullptr;
 }
 
 // ---- text of the D3D state -------------------------------------------------------------------------------------------
@@ -364,26 +722,41 @@ std::string FormatText(uint32_t format)
     return "fmt" + std::to_string(format);
 }
 
-bool TextureSize(ID3D11Resource* resource, uint32_t* width, uint32_t* height)
+// The description of the texture behind a view: the size column of a row and the views file both read it. A resource that is not a 2D
+// texture yields an invalid result rather than a guess, and the column then says "?".
+struct TextureInfo
 {
+    uint32_t width = 0, height = 0, arraySize = 0, mips = 0, format = 0, sampleCount = 1;
+    bool valid = false;
+};
+
+TextureInfo ReadTextureInfo(ID3D11Resource* resource)
+{
+    TextureInfo info;
     if (resource == nullptr)
-        return false;
+        return info;
     D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     resource->GetType(&dimension);
     if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
-        return false;
+        return info;
     D3D11_TEXTURE2D_DESC desc {};
     static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-    *width = desc.Width;
-    *height = desc.Height;
-    return true;
+    info.width = desc.Width;
+    info.height = desc.Height;
+    info.arraySize = desc.ArraySize;
+    info.mips = desc.MipLevels;
+    info.format = uint32_t(desc.Format);
+    info.sampleCount = desc.SampleDesc.Count;
+    info.valid = true;
+    return info;
 }
 
 std::string SizeText(uint32_t width, uint32_t height) { return std::to_string(width) + "x" + std::to_string(height); }
 
 // One number per field, in the D3D11 enum order: enable, src, dst, op, srcAlpha, dstAlpha, opAlpha, write mask. With no blend state
-// object bound D3D11 uses its default, which is blending off and every channel written.
-std::string BlendText(ID3D11DeviceContext* c)
+// object bound D3D11 uses its default, which is blending off and every channel written. `blends` answers the same question the first number
+// does, for the light-buffer shape rule: a draw that blends into its targets is one of the local lights, not the frame's light pass.
+std::string BlendText(ID3D11DeviceContext* c, bool& blends)
 {
     ComPtr<ID3D11BlendState> state;
     FLOAT factor[4] {};
@@ -404,6 +777,8 @@ std::string BlendText(ID3D11DeviceContext* c)
         desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     }
     const D3D11_RENDER_TARGET_BLEND_DESC& t = desc.RenderTarget[0];
+    blends = desc.IndependentBlendEnable ? (desc.RenderTarget[0].BlendEnable || desc.RenderTarget[1].BlendEnable) != FALSE
+                                         : desc.RenderTarget[0].BlendEnable != FALSE;
     char text[96];
     snprintf(text, sizeof text, "%u/%u/%u/%u/%u/%u/%u/%u", t.BlendEnable ? 1u : 0u, uint32_t(t.SrcBlend), uint32_t(t.DestBlend),
              uint32_t(t.BlendOp), uint32_t(t.SrcBlendAlpha), uint32_t(t.DestBlendAlpha), uint32_t(t.BlendOpAlpha),
@@ -458,47 +833,1216 @@ std::string ViewportText(ID3D11DeviceContext* c)
     return text;
 }
 
-// Every bound render target as "slot:format:size|..." in the render target column, and the depth view as "format:size" in `depth`.
-std::string RenderTargetText(ID3D11DeviceContext* c, std::string& depth)
+// Every bound render target as "slot:format:size:pointer|..." in the render target column, and the depth view as "format:size:pointer"
+// in `depth`. The view's resource is held so a caller can name it (the pointer column) and copy it later (the one-frame dump).
+struct TargetInfo
 {
+    ComPtr<ID3D11Resource> resource;
+    uint32_t format = 0;
+    TextureInfo texture;
+};
+
+struct DrawTargets
+{
+    TargetInfo rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    uint32_t bound = 0; // how many of the eight slots held a view
+    TargetInfo dsv;
+    bool hasDsv = false;
+};
+
+DrawTargets ReadTargets(ID3D11DeviceContext* c)
+{
+    DrawTargets targets;
     ID3D11RenderTargetView* views[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] {};
     ID3D11DepthStencilView* dsv = nullptr;
     c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, views, &dsv);
-    std::string text;
     for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
     {
         if (views[i] == nullptr)
             continue;
         D3D11_RENDER_TARGET_VIEW_DESC desc {};
         views[i]->GetDesc(&desc);
-        ComPtr<ID3D11Resource> resource;
-        views[i]->GetResource(&resource);
-        uint32_t width = 0, height = 0;
-        const bool sized = TextureSize(resource.Get(), &width, &height);
-        if (!text.empty())
-            text += '|';
-        text += std::to_string(i) + ":" + FormatText(uint32_t(desc.Format)) + ":" + (sized ? SizeText(width, height) : "?");
+        targets.rtv[i].format = uint32_t(desc.Format);
+        views[i]->GetResource(&targets.rtv[i].resource);
+        targets.rtv[i].texture = ReadTextureInfo(targets.rtv[i].resource.Get());
+        ++targets.bound;
         views[i]->Release();
     }
     if (dsv != nullptr)
     {
         D3D11_DEPTH_STENCIL_VIEW_DESC desc {};
         dsv->GetDesc(&desc);
-        ComPtr<ID3D11Resource> resource;
-        dsv->GetResource(&resource);
-        uint32_t width = 0, height = 0;
-        const bool sized = TextureSize(resource.Get(), &width, &height);
-        depth = FormatText(uint32_t(desc.Format)) + ":" + (sized ? SizeText(width, height) : "?");
+        targets.dsv.format = uint32_t(desc.Format);
+        dsv->GetResource(&targets.dsv.resource);
+        targets.dsv.texture = ReadTextureInfo(targets.dsv.resource.Get());
+        targets.hasDsv = true;
         dsv->Release();
+    }
+    return targets;
+}
+
+std::string RenderTargetText(const DrawTargets& targets, std::string& depth)
+{
+    std::string text;
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+    {
+        if (!targets.rtv[i].resource)
+            continue;
+        const TextureInfo& texture = targets.rtv[i].texture;
+        if (!text.empty())
+            text += '|';
+        text += TargetEntryText(i, FormatText(targets.rtv[i].format), texture.valid ? SizeText(texture.width, texture.height) : "?",
+                                targets.rtv[i].resource.Get());
+    }
+    if (targets.hasDsv)
+    {
+        const TextureInfo& texture = targets.dsv.texture;
+        depth = DepthEntryText(FormatText(targets.dsv.format), texture.valid ? SizeText(texture.width, texture.height) : "?",
+                               targets.dsv.resource.Get());
     }
     return text;
 }
 
+// ---- the one-frame texture dump --------------------------------------------------------------------------------------
+
+// The bytes per pixel of the formats a dump writes. A compressed or unfamiliar format gets 0 and is skipped with a line in facts.txt; a
+// typeless format is written as it is, because that is the format the engine's targets have.
+uint32_t DumpPixelBytes(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8_UNORM:
+    case DXGI_FORMAT_R8_TYPELESS:
+    case DXGI_FORMAT_R8_UINT:
+    case DXGI_FORMAT_A8_UNORM: return 1;
+    case DXGI_FORMAT_R8G8_UNORM:
+    case DXGI_FORMAT_R8G8_TYPELESS:
+    case DXGI_FORMAT_R8G8_UINT:
+    case DXGI_FORMAT_R16_FLOAT:
+    case DXGI_FORMAT_R16_UNORM:
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_R16_UINT:
+    case DXGI_FORMAT_B5G6R5_UNORM: return 2;
+    case DXGI_FORMAT_D16_UNORM: return 2; // a 16-bit depth target, not the 32-bit group below
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+    case DXGI_FORMAT_R16G16_FLOAT:
+    case DXGI_FORMAT_R16G16_UNORM:
+    case DXGI_FORMAT_R16G16_TYPELESS:
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_R32_UINT:
+    case DXGI_FORMAT_D32_FLOAT: return 4;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R32G32_FLOAT: return 8;
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS: return 16;
+    default: return 0;
+    }
+}
+
+// The bound texture slots of one draw, as the draw collected them.
+struct SrvSlot
+{
+    bool bound = false;
+    uint32_t format = 0, viewDimension = 0, viewMips = 0, arraySize = 0, cubes = 0;
+    std::string formatText;
+    TextureInfo texture;
+    ComPtr<ID3D11Resource> resource;
+    // A buffer view's rows: the view's first element and count, and the resource's own byte width and structure stride,
+    // all read here (a D3D call on the slot's own state) so the structured identification that runs under the reflection
+    // mutex makes no D3D call of it - the same rule DumpIdentify's texture description follows.
+    ComPtr<ID3D11Buffer> buffer;
+    uint32_t bufferBytes = 0, bufferStride = 0, bufFirstElement = 0, bufElements = 0;
+};
+
+// Whether a shader-resource view looks at a buffer (the plain description or the extended one a raw or flagged view uses).
+constexpr bool IsBufferView(uint32_t viewDimension) noexcept
+{
+    return viewDimension == D3D11_SRV_DIMENSION_BUFFER || viewDimension == D3D11_SRV_DIMENSION_BUFFEREX;
+}
+
+bool DumpHeld(const State& s, std::string_view name)
+{
+    for (const State::DumpItem& item : s.dumpItems)
+        if (item.name == name)
+            return true;
+    return false;
+}
+
+// Whether `name` is already held on `resource`: the water gate's light pair must not dump the texels the main light names already hold when a
+// water draw binds the main pair under the same reflected names.
+bool HoldsResource(const State& s, std::string_view name, ID3D11Resource* resource)
+{
+    if (resource == nullptr)
+        return false;
+    for (const State::DumpItem& item : s.dumpItems)
+        if (item.name == name && item.resource.Get() == resource)
+            return true;
+    return false;
+}
+
+// The engine places in use: the items that can still become a file, without the stage images (they have places of their own). A skipped texture is
+// held as an item too (with its reason), and it must not use up one of the twenty-four places the written files share.
+size_t DumpCount(const State& s)
+{
+    size_t count = 0;
+    for (const State::DumpItem& item : s.dumpItems)
+        count += (item.note.empty() && !item.stage) ? 1 : 0;
+    return count;
+}
+
+// Whether the shader declares `name`, compared by the variable's name (a texture arrives as `<name>.T`). The caller holds the mutex.
+bool ReflectionHas(const State& s, const Reflection* reflection, std::string_view name)
+{
+    if (reflection == nullptr)
+        return false;
+    const std::string_view wanted = ResourceBaseName(name);
+    for (const Bound& bound : reflection->binds)
+        if (ResourceBaseName(s.names[bound.name]) == wanted)
+            return true;
+    return false;
+}
+
+// The reflected name of a bound SRV without the compiler's suffix, or an empty name when the shader declares none.
+std::string_view SrvName(const State& s, const Reflection* reflection, size_t slot)
+{
+    const char* name = NameAt(s, reflection, BindKind::Texture, static_cast<uint32_t>(slot));
+    return name != nullptr ? ResourceBaseName(name) : std::string_view {};
+}
+
+// The reflected name of a bound structured-buffer SRV. The parsed table files a structured buffer under BindKind::Other (it is neither
+// a texture nor a constant buffer), so SrvName's Texture question never answers it: the same slot lookup, asked for that kind.
+std::string_view StructuredSrvName(const State& s, const Reflection* reflection, size_t slot)
+{
+    const char* name = NameAt(s, reflection, BindKind::Other, static_cast<uint32_t>(slot));
+    return name != nullptr ? ResourceBaseName(name) : std::string_view {};
+}
+
+// Identifies one resource for the dump, from the description the draw's own state reads already took (`info`), so no D3D call is made here:
+// the caller may hold the reflection mutex. Only the reference is kept; the copy happens at a later draw, because the hook runs before the
+// draw, so a target read at the draw that writes it would still hold what was there before.
+void DumpIdentify(State& s, std::string_view name, ID3D11Resource* resource, const TextureInfo& info, uint32_t ordinal, uint64_t sequence,
+                  DumpRank rank)
+{
+    const DumpAddVerdict verdict = DumpAddWhat(s.dumpActive, s.dumpWritten, resource, DumpHeld(s, name), DumpCount(s));
+    if (verdict == DumpAddVerdict::Ignore)
+        return;
+    // A texture the dump cannot take is held as an item too, carrying the reason and the rank of its kind (so facts.txt keeps the priority
+    // order between a written texture and a skip): its line is written once, and a later draw that identifies the same name does not add
+    // it again.
+    const auto skip = [&s, name, rank](std::string reason)
+    {
+        State::DumpItem item;
+        item.name = std::string(name);
+        item.note = std::move(reason);
+        item.rank = uint8_t(rank);
+        s.dumpItems.push_back(std::move(item));
+    };
+    if (verdict == DumpAddVerdict::NoPlace)
+    {
+        skip(kDumpNoPlaceReason); // the engine places are full: said once in facts.txt, never refused in silence
+        return;
+    }
+    if (!info.valid)
+    {
+        skip("not a 2D texture");
+        return;
+    }
+    if (info.sampleCount > 1)
+    {
+        skip("multisampled");
+        return;
+    }
+    const uint32_t bytesPerPixel = DumpPixelBytes(static_cast<DXGI_FORMAT>(info.format));
+    if (bytesPerPixel == 0)
+    {
+        skip("format " + std::to_string(info.format) + " not written");
+        return;
+    }
+    State::DumpItem item;
+    item.name = std::string(name);
+    item.resource = resource;
+    item.format = FormatText(info.format);
+    item.width = info.width;
+    item.height = info.height;
+    item.bytesPerPixel = bytesPerPixel;
+    item.bytes = uint64_t(info.width) * info.height * bytesPerPixel;
+    // The copies are bounded here, not only when the files are written: twenty-four staging textures of a 4K frame are about a gigabyte.
+    // A texture of a higher priority gives the holds of a lower priority their place back first (facts.txt names the newcomer that took
+    // it), so the wetness target is not displaced by the G-buffer and the light buffers merely because they came first.
+    if (!DumpIdentFits(s.dumpHeldBytes, item.bytes, s.dumpBudget))
+    {
+        DumpHold holds[kMaxDumpTextures + kMaxStageImages];
+        size_t count = 0;
+        for (const State::DumpItem& held : s.dumpItems)
+            if (held.note.empty() && held.bytes != 0 && count < kMaxDumpTextures + kMaxStageImages)
+                holds[count++] = DumpHold { DumpRank(held.rank), held.bytes, false };
+        const uint64_t freed = DumpMakeRoom(holds, count, rank, item.bytes, s.dumpHeldBytes, s.dumpBudget);
+        size_t index = 0;
+        for (State::DumpItem& held : s.dumpItems)
+        {
+            if (!held.note.empty() || held.bytes == 0)
+                continue;
+            if (index < count && holds[index].released)
+            {
+                held.note = "displaced by " + std::string(name);
+                held.staging.Reset();
+                held.bufferStaging.Reset();
+                held.resource.Reset();
+            }
+            ++index;
+        }
+        s.dumpHeldBytes -= freed;
+    }
+    if (!DumpIdentFits(s.dumpHeldBytes, item.bytes, s.dumpBudget))
+    {
+        skip("over the dump's bound");
+        return;
+    }
+    item.ordinal = ordinal;
+    item.sequence = sequence;
+    item.rank = uint8_t(rank);
+    s.dumpHeldBytes += item.bytes;
+    s.dumpItems.push_back(std::move(item));
+}
+
+// Identifies the structured buffer the dump's name list carries (IsStructuredDumpName's one name), from the description the draw's own
+// slot read took (the view's first element and count, the resource's byte width and the row stride), so no D3D call is made here: the caller
+// may hold the reflection mutex. The row bytes carry DumpItem's width-as-rows view (one row of the table is one texture row of one 128-B
+// pixel), so the bound, the rank order and facts.txt read like every texture's, and the copy waits for a later draw like every texture's.
+void DumpIdentifyStructured(State& s, ID3D11Buffer* buffer, uint32_t bufferBytes, uint32_t stride, uint32_t firstElement,
+                            uint32_t numElements, uint32_t ordinal, uint64_t sequence)
+{
+    if (!DumpAdds(s.dumpActive, s.dumpWritten, buffer, DumpHeld(s, kStructuredDumpFile), DumpCount(s)))
+        return;
+    const auto skip = [&s](std::string reason)
+    {
+        // A refused table is held as an item too, with the reason and the rank of its kind (the same rule the texture skips follow).
+        State::DumpItem item;
+        item.name = kStructuredDumpFile;
+        item.note = std::move(reason);
+        item.rank = uint8_t(DumpRank::ShaderTypes);
+        s.dumpItems.push_back(std::move(item));
+    };
+    const uint32_t elements = StructuredDumpElements(bufferBytes, stride, firstElement, numElements);
+    if (elements == 0)
+    {
+        skip("not the 128-B row table");
+        return;
+    }
+    State::DumpItem item;
+    item.name = kStructuredDumpFile;
+    item.resource = buffer;
+    item.format = StructuredDumpFormatText(stride);
+    item.width = elements;
+    item.height = 1;
+    item.bytesPerPixel = stride;
+    item.bytes = uint64_t(elements) * stride;
+    item.srcByteOffset = StructuredDumpByteOffset(firstElement, stride);
+    item.ordinal = ordinal;
+    item.sequence = sequence;
+    item.rank = uint8_t(DumpRank::ShaderTypes);
+    // The table is the lowest-priority item: a bound so small never displaces a texture of a higher rank, so the
+    // make-room path of the texture identification is not asked and a too-tight bound simply refuses the table.
+    if (!DumpIdentFits(s.dumpHeldBytes, item.bytes, s.dumpBudget))
+    {
+        skip("over the dump's bound");
+        return;
+    }
+    s.dumpHeldBytes += item.bytes;
+    s.dumpItems.push_back(std::move(item));
+}
+
+// Queues the staging copy of one identified resource: subresource 0 only, as the resource describes itself (a typeless format stays
+// typeless). A failure is recorded in the item's note for facts.txt and does not stop the others; the caller gives the bytes back to the
+// running total, because a texture without a copy can never become a file. The structured table is a buffer: a staging buffer of just
+// the rows the view covers (the texture cast below would refuse it), one CopySubresourceRegion from the view's first row, and the row
+// stride the identification carried.
+bool DumpCopyItem(ID3D11Device* device, ID3D11DeviceContext* c, State::DumpItem& item)
+{
+    ComPtr<ID3D11Buffer> buffer;
+    if (SUCCEEDED(item.resource.As(&buffer)) && buffer)
+    {
+        D3D11_BUFFER_DESC desc {};
+        buffer->GetDesc(&desc);
+        if (desc.StructureByteStride != item.bytesPerPixel || uint64_t(item.srcByteOffset) + item.bytes > desc.ByteWidth)
+        {
+            item.note = "not the structured row table it was identified as";
+            return false;
+        }
+        D3D11_BUFFER_DESC stagingDesc = desc;
+        stagingDesc.ByteWidth = static_cast<UINT>(item.bytes);
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
+        ComPtr<ID3D11Buffer> staging;
+        if (FAILED(device->CreateBuffer(&stagingDesc, nullptr, &staging)) || !staging)
+        {
+            item.note = "the staging copy could not be created";
+            return false;
+        }
+        const D3D11_BOX rows { item.srcByteOffset, 0, 0, static_cast<UINT>(item.srcByteOffset + item.bytes), 1, 1 };
+        c->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, buffer.Get(), 0, &rows);
+        item.bufferStaging = staging;
+        item.copied = true;
+        return true;
+    }
+    ComPtr<ID3D11Texture2D> texture;
+    item.resource.As(&texture);
+    if (!texture)
+    {
+        item.note = "not a 2D texture";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging)) || !staging)
+    {
+        item.note = "the staging copy could not be created";
+        return false;
+    }
+    c->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
+    item.staging = staging;
+    item.copied = true;
+    return true;
+}
+
+// A copy that did not happen frees the bytes it held: the running total is what the bound is enforced against, and the texture's place
+// must go to one that can still be read back.
+void DumpReleaseBytes(State& s, const State::DumpItem& item)
+{
+    s.dumpHeldBytes = s.dumpHeldBytes > item.bytes ? s.dumpHeldBytes - item.bytes : 0;
+}
+
+// ---- the per-stage image dump (StageDump.h, StageDumpFormat.h) ---------------------------------------------------------------------------
+// What every stage of this fork did to the capture frame: the picture it received, the picture it produced, and one status line. The stages
+// report here AFTER their own pass returned (and its explicit-state Guard is gone), so a copy is one CopySubresourceRegion on the context the
+// pass ran on - no pipeline state is set - queued behind the pass's own draws; it is mapped and written with the rest of the dump.
+
+// Publishes which draws belong to the capture frame (StageOpenMask) and, where the window first opens, reads every stage's armed state and key
+// values once. Called wherever the capture's frame state moves: the end of a draw, a Present, a finished or restarted capture.
+void RefreshStageOpen(State& s)
+{
+    StageOpenState open;
+    open.dumpActive = s.dumpActive;
+    open.dumpWritten = s.dumpWritten;
+    open.capturing = s.phase.load(std::memory_order_relaxed) == kCapturing;
+    open.splitFresh = s.split.fresh;
+    open.toneFrameSet = s.dumpToneFrame != 0;
+    open.toneFrameOver = open.toneFrameSet && DumpFrameOver(s.frames, s.dumpToneFrame, s.dumpToneAtPresent);
+    const uint32_t mask = StageOpenMask(open);
+    if (mask != 0 && !s.stageSnapshot)
+    {
+        s.stageSnapshot = true;
+        for (size_t i = 0; i < kStageCount; ++i)
+        {
+            s.stageArmed[i] = detail::g_stageArmed[i] != nullptr && detail::g_stageArmed[i]();
+            s.stageValues[i] = detail::g_stageValues[i] != nullptr ? detail::g_stageValues[i]() : std::string();
+        }
+    }
+    detail::g_stageOpen.store(mask, std::memory_order_relaxed);
+}
+
+// A capture starts its stage records over: nothing of the last capture's frame is carried into the next one.
+void ResetStageDump(State& s)
+{
+    for (StageRecord& record : s.stageRecords)
+        record = StageRecord {};
+    for (bool& armed : s.stageArmed)
+        armed = false;
+    for (std::string& values : s.stageValues)
+        values.clear();
+    for (std::string& late : s.stageLate) late.clear(); s.stageProbes.clear();
+    detail::g_frameWhite.store(0.0f, std::memory_order_relaxed);
+    s.stageSnapshot = false;
+    s.stageSources.clear();
+    s.stageNotes.clear();
+    s.stageWantedBytes = 0;
+    detail::g_stageOpen.store(0, std::memory_order_relaxed);
+}
+
+// The stage images the dump holds now (a displaced or skipped one has given its place back).
+size_t StageImagesHeld(const State& s)
+{
+    size_t count = 0;
+    for (const State::DumpItem& item : s.dumpItems)
+        count += (item.stage && item.note.empty()) ? 1 : 0;
+    return count;
+}
+
+// A stage image that does not fit beside what is held asks for the places of the holds of a lower priority (DumpRank::Stage sits above the atlas,
+// the sun mask, the water files, the material table and the fog post's two textures, and below the engine's own targets). True when it fits now.
+bool StageMakeRoom(State& s, uint64_t bytes, const std::string& name)
+{
+    constexpr size_t kMaxHolds = kMaxDumpTextures + kMaxStageImages;
+    DumpHold holds[kMaxHolds];
+    size_t count = 0;
+    for (const State::DumpItem& held : s.dumpItems)
+        if (held.note.empty() && held.bytes != 0 && count < kMaxHolds)
+            holds[count++] = DumpHold { DumpRank(held.rank), held.bytes, false };
+    const uint64_t freed = DumpMakeRoom(holds, count, DumpRank::Stage, bytes, s.dumpHeldBytes, s.dumpBudget);
+    size_t index = 0;
+    for (State::DumpItem& held : s.dumpItems)
+    {
+        if (!held.note.empty() || held.bytes == 0)
+            continue;
+        if (index < count && holds[index].released)
+        {
+            held.note = "displaced by " + name;
+            held.staging.Reset();
+            held.bufferStaging.Reset();
+            held.resource.Reset();
+        }
+        ++index;
+    }
+    s.dumpHeldBytes -= freed;
+    return DumpIdentFits(s.dumpHeldBytes, bytes, s.dumpBudget);
+}
+
+// One picture of a stage: copied now (the stage has returned, its output is complete), cropped to the render window, in the texture's own
+// format. The first run of the capture frame is the one that is shown; a later run adds nothing.
+void StageImageHook(StageId id, StagePort port, ID3D11DeviceContext* c, ID3D11ShaderResourceView* view, const StageWindow& window)
+{
+    State& s = S();
+    try
+    {
+        if (!s.dumpActive || s.dumpWritten || c == nullptr || view == nullptr || !StageInfoOf(id).images)
+            return;
+        StageRecord& record = s.stageRecords[size_t(id)];
+        const size_t portIndex = port == StagePort::Out ? 1 : 0;
+        if (record.attempted[portIndex])
+            return;
+        record.attempted[portIndex] = true;
+        const std::string name = StageImageName(id, port);
+        const auto skip = [&s, &name](const std::string& reason) { s.stageNotes += StageSkipNote(name, reason); };
+
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        if (!resource)
+        {
+            skip("the view has no resource");
+            return;
+        }
+        ComPtr<IUnknown> identity;
+        resource.As(&identity);
+        // A chain picture is a stage's own persistent output: it stays what it is until the next frame, so a stage's input that is the stage
+        // before's output (or the chain's first input again) is one file, named by a reference.
+        if (StageInfoOf(id).group == StageGroup::Chain && identity)
+            for (const State::StageSource& source : s.stageSources)
+                if (source.identity.Get() == identity.Get())
+                {
+                    s.stageNotes += StageReferenceNote(name, source.name);
+                    record.images[portIndex] = true;
+                    return;
+                }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc {};
+        view->GetDesc(&viewDesc);
+        UINT mip = 0, slice = 0;
+        if (viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D)
+            mip = viewDesc.Texture2D.MostDetailedMip;
+        else if (viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY)
+        {
+            mip = viewDesc.Texture2DArray.MostDetailedMip;
+            slice = viewDesc.Texture2DArray.FirstArraySlice;
+        }
+        else
+        {
+            skip("not a plain 2D view");
+            return;
+        }
+        ComPtr<ID3D11Texture2D> texture;
+        resource.As(&texture);
+        if (!texture)
+        {
+            skip("not a 2D texture");
+            return;
+        }
+        D3D11_TEXTURE2D_DESC desc {};
+        texture->GetDesc(&desc);
+        if (desc.SampleDesc.Count > 1)
+        {
+            skip("multisampled");
+            return;
+        }
+        if ((desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0)
+        {
+            skip("a depth texture cannot be copied in part");
+            return;
+        }
+        const uint32_t bytesPerPixel = DumpPixelBytes(desc.Format);
+        if (bytesPerPixel == 0)
+        {
+            skip("format " + std::to_string(uint32_t(desc.Format)) + " not written");
+            return;
+        }
+        const uint32_t levelWidth = (std::max)(1u, desc.Width >> mip), levelHeight = (std::max)(1u, desc.Height >> mip);
+        const StageBox box = mip == 0 ? StageCrop(window.x, window.y, window.width, window.height, levelWidth, levelHeight)
+                                      : StageCrop(0.0f, 0.0f, 0.0f, 0.0f, levelWidth, levelHeight);
+        if (!box.valid)
+        {
+            skip("the stage's window lies outside the texture");
+            return;
+        }
+        const uint64_t bytes = uint64_t(box.Width()) * box.Height() * bytesPerPixel;
+        s.stageWantedBytes += bytes;
+        if (!StageCountFits(StageImagesHeld(s)))
+        {
+            skip("over the stage images' places");
+            return;
+        }
+        if (!DumpIdentFits(s.dumpHeldBytes, bytes, s.dumpBudget) && !StageMakeRoom(s, bytes, name))
+        {
+            skip("over the dump's bound");
+            return;
+        }
+        ComPtr<ID3D11Device> device;
+        c->GetDevice(&device);
+        if (!device)
+        {
+            skip("no device");
+            return;
+        }
+        D3D11_TEXTURE2D_DESC stagingDesc {};
+        stagingDesc.Width = box.Width();
+        stagingDesc.Height = box.Height();
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+        stagingDesc.Format = desc.Format;
+        stagingDesc.SampleDesc.Count = 1;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
+        {
+            skip("the staging copy could not be created");
+            return;
+        }
+        const D3D11_BOX source { box.left, box.top, 0, box.right, box.bottom, 1 };
+        c->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), D3D11CalcSubresource(mip, slice, desc.MipLevels), &source);
+
+        State::DumpItem item;
+        item.name = name;
+        item.resource = resource;
+        item.staging = staging;
+        item.format = FormatText(uint32_t(desc.Format));
+        item.width = box.Width();
+        item.height = box.Height();
+        item.bytesPerPixel = bytesPerPixel;
+        item.bytes = bytes;
+        item.ordinal = s.drawsInFrame;
+        item.sequence = s.drawSequence;
+        item.rank = uint8_t(DumpRank::Stage);
+        item.stage = true;
+        item.copied = true;
+        item.factsExtra = StageImageNote(name, id, port,
+                                         viewDesc.Format != DXGI_FORMAT_UNKNOWN ? FormatText(uint32_t(viewDesc.Format)) : item.format, window.x,
+                                         window.y, window.width, window.height, box, levelWidth, levelHeight);
+        s.dumpHeldBytes += bytes;
+        s.dumpItems.push_back(std::move(item));
+        record.images[portIndex] = true;
+        if (identity)
+            s.stageSources.push_back(State::StageSource { identity, name });
+    }
+    catch (...)
+    {
+    }
+}
+
+// What happened to the capture frame at one stage.
+void StageStatusHook(StageId id, StageOutcome outcome, const char* reason)
+{
+    State& s = S();
+    try
+    {
+        if (!s.dumpActive || s.dumpWritten || size_t(id) >= kStageCount)
+            return;
+        StageNote(s.stageRecords[size_t(id)], outcome, reason != nullptr ? std::string_view(reason) : std::string_view(), s.drawsInFrame);
+    }
+    catch (...)
+    {
+    }
+}
+
+// Numbers a stage measured at its run on the capture frame: kept per stage and appended to its values text when facts.txt is written.
+void StageLateHook(StageId id, const char* text)
+{
+    State& s = S();
+    try
+    {
+        if (!s.dumpActive || s.dumpWritten || size_t(id) >= kStageCount || text == nullptr || text[0] == '\0')
+            return;
+        std::string& late = s.stageLate[size_t(id)];
+        if (!late.empty())
+            late += ' ';
+        late += text;
+    }
+    catch (...)
+    {
+    }
+}
+
+// One texel of a texture a stage keeps on the GPU, copied now (the stage has returned) into a staging texture of the dump's own and mapped at the write.
+void StageProbeHook(StageId id, ID3D11DeviceContext* c, ID3D11ShaderResourceView* view, StageProbeFormatFn format)
+{
+    State& s = S();
+    try
+    {
+        if (!s.dumpActive || s.dumpWritten || c == nullptr || view == nullptr || format == nullptr || size_t(id) >= kStageCount)
+            return;
+        for (const State::StageProbeItem& held : s.stageProbes)
+            if (held.id == id)
+                return; // the first run of the capture frame is the one that is shown
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        if (resource)
+            resource.As(&texture);
+        if (!texture)
+            return;
+        D3D11_TEXTURE2D_DESC desc {};
+        texture->GetDesc(&desc);
+        const uint32_t bytes = DumpPixelBytes(desc.Format);
+        if (desc.Width != 1 || desc.Height != 1 || desc.SampleDesc.Count > 1 || bytes == 0 || bytes > 16 || bytes % 4 != 0)
+            return;
+        ComPtr<ID3D11Device> device;
+        c->GetDevice(&device);
+        if (!device)
+            return;
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
+            return;
+        c->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
+        State::StageProbeItem item;
+        item.id = id;
+        item.staging = staging;
+        item.format = format;
+        item.floats = bytes / 4;
+        s.stageProbes.push_back(std::move(item));
+    }
+    catch (...)
+    {
+    }
+}
+
+// The facts.txt section of the stages: the legend, the reference and skip lines, then one line for every stage whether or not it ran.
+std::string StageFactsText(const State& s)
+{
+    std::string text = StageFactsLegend();
+    text += s.stageNotes;
+    for (size_t i = 0; i < kStageCount; ++i)
+        text += StageStatusLine(StageId(i), s.stageRecords[i], s.stageArmed[i], StageValuesWithLate(s.stageValues[i], s.stageLate[i]));
+    return text;
+}
+
+// Copies the resources the dump identified before this draw, at the draw itself: the hook runs before the game's draw, so the copy holds
+// what the previous draws wrote. The G-buffer targets are left to DumpCopySampled, because their pass is not over yet.
+void DumpCopyPending(ID3D11DeviceContext* c, State& s, uint64_t sequence)
+{
+    if (!s.dumpActive || s.dumpWritten || s.dumpItems.empty() || c == nullptr)
+        return;
+    ComPtr<ID3D11Device> device;
+    for (State::DumpItem& item : s.dumpItems)
+    {
+        if (!DumpCopyDue(item.copied, !item.note.empty(), item.sequence, sequence) || DumpWaitsForSampling(DumpRank(item.rank)))
+            continue;
+        if (!device)
+        {
+            c->GetDevice(&device);
+            if (!device)
+                return;
+        }
+        if (!DumpCopyItem(device.Get(), c, item))
+            DumpReleaseBytes(s, item);
+    }
+}
+
+// The G-buffer targets are copied at the first later draw that binds one of them as a sampled texture: that is the point the geometry pass
+// that writes them is over. Called after the draw's texture slots were read and before the reflection mutex is taken, so it makes no D3D
+// call under it.
+void DumpCopySampled(ID3D11DeviceContext* c, State& s, const SrvSlot* srv, uint64_t sequence)
+{
+    if (!s.dumpActive || s.dumpWritten || s.dumpItems.empty() || c == nullptr)
+        return;
+    // The resources this draw binds in its texture slots, so the match itself is the same rule the unit test walks.
+    const void* bound[kMaxSlots] {};
+    for (size_t i = 0; i < kMaxSlots; ++i)
+        bound[i] = srv[i].bound ? srv[i].resource.Get() : nullptr;
+    ComPtr<ID3D11Device> device;
+    for (State::DumpItem& item : s.dumpItems)
+    {
+        if (!DumpWaitsForSampling(DumpRank(item.rank)) || !DumpCopyDue(item.copied, !item.note.empty(), item.sequence, sequence))
+            continue;
+        if (DumpSampledSlot(bound, kMaxSlots, item.resource.Get()) < 0)
+            continue;
+        if (!device)
+        {
+            c->GetDevice(&device);
+            if (!device)
+                return;
+        }
+        if (!DumpCopyItem(device.Get(), c, item))
+            DumpReleaseBytes(s, item);
+    }
+}
+
+// The stages' probed texels (a focus state, say): mapped here, where the dump maps its other readbacks (the frame is over and the copies have
+// finished), and turned into words by the stage's own formatter; the words join the stage's late numbers.
+void ResolveStageProbes(ID3D11DeviceContext* c, State& s)
+{
+    for (State::StageProbeItem& probe : s.stageProbes)
+    {
+        try
+        {
+            D3D11_MAPPED_SUBRESOURCE map {};
+            if (!probe.staging || FAILED(c->Map(probe.staging.Get(), 0, D3D11_MAP_READ, 0, &map)) || map.pData == nullptr)
+                continue;
+            float values[4] {};
+            const uint32_t count = probe.floats < 4 ? probe.floats : 4;
+            std::memcpy(values, map.pData, size_t(count) * sizeof(float));
+            c->Unmap(probe.staging.Get(), 0);
+            const std::string text = probe.format != nullptr ? probe.format(values, count) : std::string();
+            if (!text.empty())
+            {
+                std::string& late = s.stageLate[size_t(probe.id)];
+                if (!late.empty())
+                    late += ' ';
+                late += text;
+            }
+        }
+        catch (...)
+        {
+        }
+        probe.staging.Reset();
+    }
+    s.stageProbes.clear();
+}
+
+// Writes the dump: each staging copy is mapped, packed row by row with the readback's real RowPitch, and its .bin gets a line in facts.txt.
+// The files are taken in DumpRank order, so the byte bound never gives the wetness target's place away to a later copy.
+void DumpWrite(ID3D11DeviceContext* c, State& s)
+{
+    if (!s.dumpActive || s.dumpWritten || c == nullptr)
+        return;
+    s.dumpWritten = true;
+    ++s.dumpsWritten;
+    RefreshStageOpen(s); // the capture frame is over: the stages stop reporting
+    s.stageSources.clear(); // the references that named the frame's textures (the game's own targets among them) go with the dump's other holds
+    // The items move out of the state: every hold on a game texture, and every staging copy, is released whichever way this returns.
+    std::vector<State::DumpItem> items = std::move(s.dumpItems);
+    s.dumpItems.clear();
+    s.dumpHeldBytes = 0;
+    const fs::path run = RunFolder();
+    if (run.empty())
+    {
+        LOG_WARN("Draw diagnostics: the one-frame dump was not written (the run folder)");
+        return;
+    }
+    const fs::path dir = run / kDumpFolder;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec)
+    {
+        LOG_WARN("Draw diagnostics: the dump folder could not be created: {}", ec.message());
+        return;
+    }
+    std::vector<State::DumpItem*> order;
+    order.reserve(items.size());
+    for (State::DumpItem& item : items)
+        order.push_back(&item);
+    std::stable_sort(order.begin(), order.end(), [](const State::DumpItem* a, const State::DumpItem* b) { return a->rank < b->rank; });
+    std::string facts = DumpFactsHeader();
+    uint32_t written = 0;
+    uint64_t bytes = 0;
+    uint32_t stageWritten = 0;
+    uint64_t stageBytes = 0;
+    for (State::DumpItem* item : order)
+    {
+        const bool stageImage = item->stage; // the stage images have places of their own, the bytes are the dump's
+        if (!item->copied || (!item->staging && !item->bufferStaging))
+        {
+            facts += DumpSkipText(item->name, item->note.empty() ? "not copied" : item->note);
+            continue;
+        }
+        if (!DumpFits(stageImage ? 0 : written, bytes, item->bytes, s.dumpBudget))
+        {
+            facts += DumpSkipText(item->name, "over the dump's bound");
+            item->staging.Reset();
+            item->bufferStaging.Reset();
+            item->resource.Reset();
+            continue;
+        }
+        const void* pointer = item->resource.Get();
+        // A depth item was copied whole; its file is the draw's window of it (the same crop rule the stage images use). A window the crop cannot place
+        // leaves the whole texture, said in the comment.
+        StageBox cropBox;
+        const uint32_t fullWidth = item->width, fullHeight = item->height;
+        if (item->cropped)
+        {
+            cropBox = StageCrop(item->cropWindow[0], item->cropWindow[1], item->cropWindow[2], item->cropWindow[3], fullWidth, fullHeight);
+            if (!cropBox.valid)
+                cropBox = StageCrop(0.0f, 0.0f, 0.0f, 0.0f, fullWidth, fullHeight);
+            item->width = cropBox.Width();
+            item->height = cropBox.Height();
+        }
+        // The packed image is allocated before the copy is mapped: an allocation failure must not leave the staging texture mapped.
+        std::vector<unsigned char> pixels(size_t(item->width) * item->height * item->bytesPerPixel);
+        D3D11_MAPPED_SUBRESOURCE map {};
+        bool mapped = false;
+        if (item->bufferStaging)
+            mapped = SUCCEEDED(c->Map(item->bufferStaging.Get(), 0, D3D11_MAP_READ, 0, &map)) && map.pData != nullptr;
+        else
+            mapped = SUCCEEDED(c->Map(item->staging.Get(), 0, D3D11_MAP_READ, 0, &map)) && map.pData != nullptr;
+        if (!mapped)
+        {
+            facts += DumpSkipText(item->name, "the staging copy could not be mapped");
+            item->staging.Reset();
+            item->bufferStaging.Reset();
+            item->resource.Reset();
+            continue;
+        }
+        // The texture's pitch is the readback's row pitch; the structured table's is the row width itself (a buffer map
+        // carries no pitch, and one row of rows x 1 needs none beyond the row width the facts line already shows).
+        item->rowPitch = item->bufferStaging ? item->bytesPerPixel : map.RowPitch;
+        const auto* rows = static_cast<const unsigned char*>(map.pData);
+        const size_t cropLeftBytes = item->cropped ? size_t(cropBox.left) * item->bytesPerPixel : 0;
+        for (uint32_t y = 0; y < item->height; ++y)
+            std::memcpy(pixels.data() + size_t(y) * item->width * item->bytesPerPixel,
+                        rows + size_t(item->cropped ? cropBox.top + y : y) * map.RowPitch + cropLeftBytes, size_t(item->width) * item->bytesPerPixel);
+        if (item->bufferStaging)
+            c->Unmap(item->bufferStaging.Get(), 0);
+        else
+            c->Unmap(item->staging.Get(), 0);
+        item->staging.Reset();
+        item->bufferStaging.Reset();
+        item->resource.Reset();
+        if (!WriteBytes(dir / (item->name + ".bin"), pixels.data(), pixels.size()))
+        {
+            facts += DumpSkipText(item->name, "the write failed");
+            continue;
+        }
+        DumpFact fact;
+        fact.name = item->name;
+        fact.format = item->format;
+        fact.width = item->width;
+        fact.height = item->height;
+        fact.bytes = pixels.size();
+        fact.rowPitch = item->rowPitch;
+        fact.ordinal = item->ordinal;
+        fact.pointer = pointer;
+        facts += DumpFactText(fact);
+        facts += item->factsExtra;
+        if (item->cropped)
+            facts += DepthImageNote(item->name, item->viewFormat, item->cropWindow[0], item->cropWindow[1], item->cropWindow[2], item->cropWindow[3], cropBox,
+                                    fullWidth, fullHeight);
+        if (stageImage)
+        {
+            ++stageWritten;
+            stageBytes += item->bytes;
+        }
+        else
+            ++written;
+        bytes += item->bytes;
+    }
+    ResolveStageProbes(c, s);
+    facts += StageFactsText(s);
+    if (!WriteFile(dir / kDumpFactsFile, facts))
+        LOG_WARN("Draw diagnostics: the dump's facts.txt could not be written");
+    else
+    {
+        LOG_INFO("Draw diagnostics: one-frame dump of {} texture(s) written to {}", written, dir.string());
+        if (stageWritten != 0 || s.stageWantedBytes != 0)
+            LOG_INFO("Draw diagnostics: {} stage image(s) written ({} KiB); the stages' pictures of this frame want {} KiB in all, of a {} KiB budget "
+                     "(DrawDiagnosticsDumpBudgetMiB)",
+                     stageWritten, stageBytes >> 10, s.stageWantedBytes >> 10, s.dumpBudget >> 10);
+    }
+}
+
+// Writes the dump once the frame that identified its tone map is over and its staging copies exist. A bridge Present has no context, so
+// the next draw writes it; a capture of a single frame ends before its copies can be mapped, and the end of the capture says so.
+void MaybeWriteDump(ID3D11DeviceContext* c, State& s)
+{
+    if (!s.dumpActive || s.dumpWritten || !DumpFrameOver(s.frames, s.dumpToneFrame, s.dumpToneAtPresent))
+        return;
+    DumpWrite(c, s);
+}
+
+// The one-frame dump at the end of a capture, with the game's own context: a bridge Present closes the frame with no context, so the draw
+// path could not map the readbacks there and a two-frame capture would otherwise lose the dump that was just collected.
+void FinishDump(State& s)
+{
+    if (!s.dumpActive || s.dumpWritten || !DumpFrameOver(s.frames, s.dumpToneFrame, s.dumpToneAtPresent))
+        return;
+    ID3D11DeviceContext* c = ext::ffxiv::lighting::FfxivLightingCapture::context;
+    if (c == nullptr)
+        return;
+    ComPtr<ID3D11Device> device;
+    // Every missing copy that may still be taken is queued now (what DumpAtEnd says: a bridge Present has already run the frame's last
+    // draw, the tone-map split has not, and a G-buffer target is skipped because its frame is over).
+    for (State::DumpItem& item : s.dumpItems)
+    {
+        if (item.copied || !item.note.empty())
+            continue;
+        switch (DumpAtEnd(DumpRank(item.rank), item.sequence, s.drawSequence, s.dumpToneAtPresent))
+        {
+        case DumpEnd::Skip:
+            // A copy now would hold a later frame's content under the identifying draw's name.
+            item.note = "not sampled";
+            continue;
+        case DumpEnd::Leave: continue;
+        case DumpEnd::Copy: break;
+        }
+        if (!device)
+        {
+            c->GetDevice(&device);
+            if (!device)
+                break;
+        }
+        if (!DumpCopyItem(device.Get(), c, item))
+            DumpReleaseBytes(s, item);
+    }
+    DumpWrite(c, s);
+}
+
+// The depth item is held whole (a depth texture cannot be copied in part) and cropped to the identifying draw's window at the write: the crop's window
+// and the view's format are kept on the item the draw just added (the one that holds this very resource, not yet marked).
+void DumpMarkDepth(State& s, std::string_view name, ID3D11Resource* resource, uint32_t viewFormat)
+{
+    for (State::DumpItem& item : s.dumpItems)
+        if (item.name == name && !item.cropped && item.resource.Get() == resource && item.note.empty())
+        {
+            item.cropped = true;
+            item.viewFormat = FormatText(viewFormat);
+            for (size_t k = 0; k < 4; ++k)
+                item.cropWindow[k] = s.dumpDrawWindow[k];
+            return;
+        }
+}
+
+// What one draw contributes to the dump. Called with the reflected binding table in hand, because the wetness pass and the light draws are
+// identified by the names their pixel shader declares and binds, not by a bytecode CRC. `sequence` is the draw in the capture's own order.
+void DumpNoteDraw(State& s, const DrawRow& row, const DrawTargets& targets, const SrvSlot* srv, const Reflection* reflection,
+                  uint64_t sequence)
+{
+    // Nothing is identified while the splitter still waits for the tone map that opens the first window: the draws before it are the
+    // partial frame the capture started in, and their targets are only half written.
+    if (!s.dumpActive || s.dumpWritten || !DumpIdentifies(s.split.fresh))
+        return;
+    // The G-buffer fill: the five targets of the frame's first five-target draw.
+    if (IsGbufferShape(targets.bound) && !DumpHeld(s, "gbuffer0"))
+    {
+        uint32_t index = 0;
+        for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT && index < 5; ++slot)
+        {
+            if (!targets.rtv[slot].resource)
+                continue;
+            DumpIdentify(s, "gbuffer" + std::to_string(index), targets.rtv[slot].resource.Get(), targets.rtv[slot].texture, row.ordinal,
+                         sequence, DumpRank::Gbuffer);
+            ++index;
+        }
+    }
+    // The light buffers as the first draws that sample them bind them, the view-position buffer the frame's water and composite draws sample (each
+    // names it its own way, DrawDiagFormat.h's kViewPositionNames), and the target of the first draw that reads the hierarchical-Z map.
+    for (size_t i = 0; i < kMaxSlots; ++i)
+    {
+        if (!srv[i].bound)
+            continue;
+        const std::string_view name = SrvName(s, reflection, i);
+        if (name == "g_SamplerLightDiffuse" || name == "g_SamplerLightSpecular")
+        {
+            // The transparency-light pair the water draws sample under the light names is a DIFFERENT resource pair than
+            // the composite's main pair (the water study found two resource pairs under these names): the puddles' definitive water gate's top candidate.
+            // The test sits ABOVE the plain light names - the same names, so a chain below them is unreachable - and it
+            // asks for the main pair to be held already, so a first binder that is the main pair itself still identifies
+            // the light files, whatever kind of draw bound it first.
+            const bool waterPair = DumpHeld(s, "light_diffuse") && ReflectionHas(s, reflection, "g_SamplerReflectionMap") &&
+                                   !HoldsResource(s, "light_diffuse", srv[i].resource.Get()) &&
+                                   !HoldsResource(s, "light_specular", srv[i].resource.Get());
+            if (waterPair)
+                DumpIdentify(s, name == "g_SamplerLightDiffuse" ? "waterlights-diffuse" : "waterlights-specular",
+                             srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::WaterLights);
+            else if (name == "g_SamplerLightDiffuse")
+                DumpIdentify(s, "light_diffuse", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::Light);
+            else
+                DumpIdentify(s, "light_specular", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::Light);
+        }
+        else if (name == "g_SamplerHierarchicalZ" && !DumpHeld(s, "ssr"))
+        {
+            // The braces matter: without them the view-position branch below would be this loop's `if`'s else, so the view-position buffer
+            // would only ever be identified by a hierarchical-Z draw that binds no target at all, and its file would never be written.
+            for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++slot)
+                if (targets.rtv[slot].resource)
+                {
+                    DumpIdentify(s, "ssr", targets.rtv[slot].resource.Get(), targets.rtv[slot].texture, row.ordinal, sequence,
+                                 DumpRank::Ssr);
+                    break;
+                }
+        }
+        else if (IsViewPositionName(name))
+            DumpIdentify(s, "vposition", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::ViewPosition);
+        else if (name == "g_SamplerShadowMask")
+            // The screen-space sun mask (the R8 texture the light draws square in the shader): the shadow-mapping module's
+            // lever, and the capture's U-a answer. The atlas above states at another name (see DrawDiagFormat.h's mask
+            // rules), separated by that one name alone in the identifies (their shapes agree, so one binding is the mask).
+            DumpIdentify(s, "sunmask", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::SunMask);
+        else if (name == "g_SamplerShadow")
+            DumpIdentify(s, "atlas", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::Atlas);
+        else if (name == "g_SamplerReflectionMap")
+            // The water draws' own planar map: the puddles' definitive water gate reads its alpha traffic (the water study's third
+            // candidate). The water readers are the draws whose shader declares this name, which is also the gate the light-pair branch above
+            // asks for before it names the transparency pair.
+            DumpIdentify(s, "planar", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::WaterGate);
+        else if (FogDumpTargetOf(name, true) != nullptr && ReflectionHas(s, reflection, "cFogParam"))
+            // The fog post's own two textures, the shared weight LUT and the sky colour: only at a draw whose shader also declares the post's
+            // parameter buffer (the sun sprite names the sky texture too and declares the halo buffer instead, so it is never a target).
+        {
+            DumpIdentify(s, FogDumpTargetOf(name, true), srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, FogDumpRankOf(FogDumpTargetOf(name, true)));
+            if (std::string_view(FogDumpTargetOf(name, true)) == kDepthDumpFile)
+                DumpMarkDepth(s, kDepthDumpFile, srv[i].resource.Get(), srv[i].format);
+        }
+        else if (IsAoDepthReader(ReflectionHas(s, reflection, "g_SamplerOcclusion"), name))
+        {
+            DumpIdentify(s, kAoDepthDumpFile, srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, FogDumpRankOf(kAoDepthDumpFile));
+            DumpMarkDepth(s, kAoDepthDumpFile, srv[i].resource.Get(), srv[i].format);
+        }
+        else if (IsBufferView(srv[i].viewDimension) && IsStructuredDumpName(StructuredSrvName(s, reflection, i)))
+            // The composite's per-material shading table (the skin/hair/fur rows), one 128-B row per material, its index
+            // gbuffer0.a names: the one SRV a buffer view reaches here, DumpIdentifyStructured's whole shape.
+            DumpIdentifyStructured(s, srv[i].buffer.Get(), srv[i].bufferBytes, srv[i].bufferStride, srv[i].bufFirstElement,
+                                   srv[i].bufElements, row.ordinal, sequence);
+    }
+    // The composite's own occlusion: the puddles' water gate's second candidate (the occlusion's channels may carry the engine's own surface
+    // class). Every light draw and every forward draw binds the same name, so the identification is scoped to the composite's own shape - the
+    // ambient probe table beside the light buffers is what names the composite and nothing else.
+    if (!DumpHeld(s, "occlusion") && ReflectionHas(s, reflection, "g_AmbientParamArray") &&
+        ReflectionHas(s, reflection, "g_SamplerLightDiffuse"))
+        for (size_t i = 0; i < kMaxSlots; ++i)
+            if (srv[i].bound && SrvName(s, reflection, i) == "g_SamplerOcclusion")
+            {
+                DumpIdentify(s, "occlusion", srv[i].resource.Get(), srv[i].texture, row.ordinal, sequence, DumpRank::WaterGate);
+                break;
+            }
+    // The wetness pass: it declares the wetness buffer and the two textures the ground pass reads, and it writes one target.
+    if (!DumpHeld(s, "wetness") && IsWetnessPassShape(ReflectionHas(s, reflection, "g_WetnessParameter"),
+                                                      ReflectionHas(s, reflection, "g_SamplerGBuffer3"),
+                                                      ReflectionHas(s, reflection, "g_SamplerViewPosition"), targets.bound))
+        for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++slot)
+            if (targets.rtv[slot].resource)
+            {
+                DumpIdentify(s, "wetness", targets.rtv[slot].resource.Get(), targets.rtv[slot].texture, row.ordinal, sequence,
+                             DumpRank::Wetness);
+                break;
+            }
+    // The tone map: t0 is the scene it reads and its first target is what it writes. The copy of the scene that follows it is identified
+    // by the draws after this one.
+    if (row.stage == kStageToneMap && s.dumpToneFrame == 0)
+    {
+        s.dumpToneFrame = static_cast<uint32_t>(row.frame);
+        s.dumpToneSequence = sequence;
+        if (srv[0].bound)
+        {
+            DumpIdentify(s, "scene", srv[0].resource.Get(), srv[0].texture, row.ordinal, sequence, DumpRank::Scene);
+            s.dumpSceneWidth = srv[0].texture.width;
+            s.dumpSceneHeight = srv[0].texture.height;
+        }
+        for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++slot)
+            if (targets.rtv[slot].resource)
+            {
+                DumpIdentify(s, "tonemap", targets.rtv[slot].resource.Get(), targets.rtv[slot].texture, row.ordinal, sequence,
+                             DumpRank::Rest);
+                if (s.dumpSceneWidth == 0)
+                {
+                    s.dumpSceneWidth = targets.rtv[slot].texture.width;
+                    s.dumpSceneHeight = targets.rtv[slot].texture.height;
+                }
+                break;
+            }
+    }
+    // The unidentified FP16 copy: the first draw after the tone map that reads one FP16 texture and writes a different FP16 target of the
+    // same size as the scene the tone map read.
+    if (s.dumpToneFrame != 0 && DumpAfterTone(s.dumpToneSequence, sequence) && !DumpHeld(s, "copyps") && s.dumpSceneWidth != 0)
+    {
+        bool reads = false;
+        for (size_t i = 0; i < kMaxSlots && !reads; ++i)
+            reads = srv[i].bound && IsFp16Format(srv[i].format) &&
+                    SameTextureSize(srv[i].texture.width, srv[i].texture.height, s.dumpSceneWidth, s.dumpSceneHeight);
+        if (!reads)
+            return;
+        for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++slot)
+        {
+            const TargetInfo& target = targets.rtv[slot];
+            if (!target.resource || !IsFp16Format(target.format) ||
+                !SameTextureSize(target.texture.width, target.texture.height, s.dumpSceneWidth, s.dumpSceneHeight))
+                continue;
+            bool same = false;
+            for (size_t i = 0; i < kMaxSlots && !same; ++i)
+                same = srv[i].bound && srv[i].resource.Get() == target.resource.Get();
+            if (same)
+                continue;
+            DumpIdentify(s, "copyps", target.resource.Get(), target.texture, row.ordinal, sequence, DumpRank::Rest);
+            break;
+        }
+    }
+}
+
+// Whether the draw is the light pass that writes the frame's light buffers (DrawDiagFormat.h's IsLightPassShape), from the targets the diagnostic
+// has already read and the blend state it has already queried: the draw the light shafts module copies g_LightParam from.
+bool IsLightPass(const DrawTargets& targets, bool blends)
+{
+    uint32_t format = 0;
+    uint32_t width = 0, height = 0;
+    bool same = true;
+    for (uint32_t slot = 0; slot < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++slot)
+    {
+        const TargetInfo& target = targets.rtv[slot];
+        if (!target.resource)
+            continue;
+        if (format == 0)
+        {
+            format = target.format;
+            width = target.texture.width;
+            height = target.texture.height;
+        }
+        else if (target.format != format || target.texture.width != width || target.texture.height != height)
+        {
+            same = false;
+        }
+    }
+    return IsLightPassShape(targets.bound, format, targets.bound != 0 && same, blends);
+}
+
 // ---- the named constant buffers of the lighting passes ----------------------------------------------------------------
 
-// Reads the light parameters and the camera view matrix of one draw: position, direction and diffuse colour at the offsets
-// DrawDiagFormat.h documents, and the view matrix rows the space of the direction is read against. One staging copy and one map per
-// buffer, at most once a second, on the render thread. `frame` = the frame the read belongs to (0 while the diagnostic waits).
+// Reads the light parameters and the camera's two matrices of one draw: position, direction and diffuse colour at the offsets
+// DrawDiagFormat.h documents, the view matrix rows the space of the direction is read against, and the view-projection that direction is
+// projected through. One staging copy and one map per buffer, at most once a second, on the render thread. `frame` = the frame the read
+// belongs to (0 while the diagnostic waits).
 void ReadConstants(ID3D11DeviceContext* c, uint64_t frame, ID3D11Buffer* light, uint32_t lightSlot, ID3D11Buffer* camera, uint32_t crc,
                    bool hasCrc)
 {
@@ -523,15 +2067,40 @@ void ReadConstants(ID3D11DeviceContext* c, uint64_t frame, ID3D11Buffer* light, 
     std::memcpy(read.diffuse, bytes + kLightParamDiffuseAt, sizeof read.diffuse);
     UnmapConstant(c, s.lightStaging);
 
-    // The camera buffer is read from the same draw, so the direction and the matrix always belong to one frame's state.
+    // The camera buffer is read from the same draw, so the direction and the matrices always belong to one frame's state. The view is the
+    // buffer's first matrix, the view-projection its second and the projection its fourth at +0x120 (DrawDiagFormat.h), so one map of 0x160 bytes
+    // covers them and a row's direction, view, view-projection and projection are always the same light pass's.
     if (camera != nullptr)
-        if (const unsigned char* view = MapConstant(c, s.cameraStaging, camera, kCameraParamViewAt + kCameraParamMatrixBytes);
-            view != nullptr)
+        if (const unsigned char* cameraBytes = MapConstant(c, s.cameraStaging, camera, kCameraParamProjectionAt + kCameraParamMatrixBytes);
+            cameraBytes != nullptr)
         {
-            std::memcpy(read.view, view + kCameraParamViewAt, sizeof read.view);
+            std::memcpy(read.view, cameraBytes + kCameraParamViewAt, sizeof read.view);
             read.hasView = true;
+            std::memcpy(read.viewProjection, cameraBytes + kCameraParamViewProjectionAt, sizeof read.viewProjection);
+            read.hasViewProjection = true;
+            std::memcpy(read.projection, cameraBytes + kCameraParamProjectionAt, sizeof read.projection);
+            read.hasProjection = true;
             UnmapConstant(c, s.cameraStaging);
         }
+
+    // The frame's sun for engine.txt, from this read: the direction the light draw reports (view space), through the projection the same draw's
+    // camera carries, into the window this draw renders. Kept whether or not the light shafts card is on (that module only projects a sun while its
+    // own card runs, which is the state the engine's flare is captured in) and whichever phase took the read - the sample belongs to the frame that
+    // was drawn, not to a capture's window.
+    if (read.hasProjection)
+    {
+        D3D11_VIEWPORT viewport {};
+        UINT count = 1;
+        c->RSGetViewports(&count, &viewport);
+        State::LightSample& sample = s.lastLight;
+        sample.have = true;
+        std::memcpy(sample.direction, read.direction, sizeof sample.direction);
+        std::memcpy(sample.projection, read.projection, sizeof sample.projection);
+        sample.window[0] = viewport.TopLeftX;
+        sample.window[1] = viewport.TopLeftY;
+        sample.window[2] = viewport.Width;
+        sample.window[3] = viewport.Height;
+    }
 
     if (s.truncatedCbs)
         return;
@@ -546,71 +2115,250 @@ void ReadConstants(ID3D11DeviceContext* c, uint64_t frame, ID3D11Buffer* light, 
     ++s.cbRows;
 }
 
+// One staging buffer per distinct constant-buffer size: the dump reads a dozen names a second, and allocating a copy for each would be the
+// expensive part of it.
+Staging& CbDumpStaging(State& s, UINT bytes)
+{
+    for (Staging& staging : s.cbDumpStaging)
+        if (staging.bytes == bytes)
+            return staging;
+    s.cbDumpStaging.emplace_back();
+    s.cbDumpStaging.back().bytes = bytes;
+    return s.cbDumpStaging.back();
+}
+
+// Whether one named buffer of the dump list is due (at most once a second per name).
+bool CbDumpDue(State& s, size_t index)
+{
+    const int64_t now = Qpc();
+    if (s.cbDumpLast[index] != 0 && SecondsBetween(s.cbDumpLast[index], now) < kSampleSeconds)
+        return false;
+    s.cbDumpLast[index] = now;
+    return true;
+}
+
+// One row of cbdump.csv: a staging copy of the buffer, its first min(bytes, kCbDumpHexMax) bytes in hex, and its pointer. Only while the
+// capture collects; a buffer that cannot be copied or mapped skips its row and nothing else happens.
+void ReadCbDump(ID3D11DeviceContext* c, State& s, uint64_t frame, ID3D11Buffer* buffer, uint32_t slot, const char* name, uint32_t crc,
+                bool hasCrc)
+{
+    if (s.truncatedCbDump || buffer == nullptr)
+        return;
+    D3D11_BUFFER_DESC desc {};
+    buffer->GetDesc(&desc);
+    Staging& staging = CbDumpStaging(s, desc.ByteWidth);
+    const unsigned char* bytes = MapConstant(c, staging, buffer, desc.ByteWidth);
+    if (bytes == nullptr)
+        return;
+    CbDumpRow row;
+    row.frame = frame;
+    row.seconds = SecondsBetween(s.clockZero, Qpc());
+    row.psCrc = crc;
+    row.hasCrc = hasCrc;
+    row.name = name;
+    row.slot = slot;
+    row.bytes = desc.ByteWidth;
+    row.pointer = buffer;
+    const size_t count = desc.ByteWidth < kCbDumpHexMax ? desc.ByteWidth : kCbDumpHexMax;
+    row.data.assign(bytes, bytes + count);
+    UnmapConstant(c, staging);
+    const std::string text = CbDumpRowText(row);
+    if (!CbDumpFits(s.cbdump.size(), text.size()))
+    {
+        s.cbdump += kTruncatedLine;
+        s.truncatedCbDump = true;
+        return;
+    }
+    s.cbdump += text;
+    ++s.cbDumpRows;
+}
+
 // ---- files -----------------------------------------------------------------------------------------------------------
 
-void AppendDraws(State& s, const std::string& text)
+// Appends one frame's text to draws.csv, or refuses it at the byte cap. The return value is what the trailer counts: a frame that was not
+// appended contributes nothing, and the TRUNCATED line says why.
+bool AppendDraws(State& s, const std::string& text)
 {
     if (s.truncated)
-        return;
+        return false;
     if (s.rows.size() + text.size() > kDrawsBytes)
     {
         s.rows += kTruncatedLine;
         s.truncated = true;
-        return;
+        return false;
     }
     s.rows += text;
+    return true;
 }
 
-void Finish()
+// The creation fixtures, copied under their mutex: shader creation can run while a capture is being written, and the files are written from
+// the copy so no file of it is written while the mutex is held.
+std::vector<State::CreationFixture> CreationFixtures()
+{
+    std::lock_guard lock(S().creationMutex);
+    return S().creationFixtures;
+}
+
+// Writes the capture in progress: the run folder, the files and the fixtures.
+void WriteRun()
 {
     State& s = S();
-    s.phase.store(kDone, std::memory_order_relaxed);
-    ext::SetActive(ext::F::DrawDiag, false); // the draw path is back to one relaxed load
-    const fs::path dir = MakeRunFolder();
+    const fs::path dir = RunFolder();
     if (dir.empty())
     {
         LOG_WARN("Draw diagnostics: the capture could not be written");
         return;
     }
-    const std::string draws = "# FFXIV draw diagnostics, format " + std::to_string(kFormatVersion) + "\n" + DrawsHeaderText() + s.rows;
-    const std::string cbs = "# FFXIV draw diagnostics, format " + std::to_string(kFormatVersion) + "\n" + CbHeaderText() + s.cbs;
-    if (!WriteFile(dir / kDrawsFile, draws) || !WriteFile(dir / kCbFile, cbs))
+    const std::string draws = "# FFXIV draw diagnostics, format " + std::to_string(kFormatVersion) + "\n" + DrawsHeaderText() + s.rows +
+                              DrawsTrailerText(s.rowsWritten, s.framesWritten, s.omittedTotal);
+    const std::string cbs = "# FFXIV draw diagnostics, format " + std::to_string(kFormatVersion) + "\n" + CbHeaderText() + s.cbs +
+                            RowsTrailerText(s.cbRows);
+    const std::string cbdump = "# FFXIV draw diagnostics, format " + std::to_string(kFormatVersion) + "\n" + CbDumpHeaderText() + s.cbdump +
+                               RowsTrailerText(s.cbDumpRows);
+    const std::string frames = "# bounded feature telemetry; counts are deltas since the previous row; sample_time_token is FrameCount at this callback\n"
+                               "sample_time_token,ssr_token,ssr_tried,ssr_valid,ssr_served,ssr_runs,ssr_declines,"
+                               "puddle_gloss_token,puddle_gloss_tried,puddle_gloss_valid,puddle_gloss_served,puddle_gloss_runs,puddle_gloss_declines,"
+                               "wetness_token,wetness_known,wetness,wet_latched,shape_token,shape_present,"
+                               "tone_capture_token,tone_capture_taken,tone_shape_wet,tone_runs,tone_declines\n" + s.framesCsv +
+                               (s.frameTelemetryTruncated ? "# telemetry truncated at the 16-sample cap\n" : std::string());
+    const std::string views = ViewsFileHeader() + ViewsHeaderText() + s.views;
+    if (!WriteFile(dir / kDrawsFile, draws) || !WriteFile(dir / kCbFile, cbs) || !WriteFile(dir / kCbDumpFile, cbdump) ||
+        !WriteFile(dir / kViewsFile, views) || !WriteFile(dir / kFramesFile, frames))
     {
         LOG_WARN("Draw diagnostics: a write to the run folder failed");
         return;
     }
-    LOG_INFO("Draw diagnostics: {} frame(s), {} draw row(s), {} constant-buffer read(s) written to {}", s.framesCaptured, s.rowsWritten,
-             s.cbRows, dir.string());
-    if (s.truncated || s.truncatedCbs)
+    // The engine pass overrides' counters: the same session facts the module's card shows, so a session is read from the capture instead of
+    // from a log. `module: off` is the whole file when the key is off.
+    if (!WriteFile(dir / kEngineFile, EngineStatusText(EngineStatusNow()) + SsrStatusText(SsrStatusNow()) + PuddleStatusText(PuddleStatusNow())))
+        LOG_WARN("Draw diagnostics: engine.txt could not be written");
+    LOG_INFO("Draw diagnostics: {} frame(s), {} draw row(s) ({} omitted), {} cb.csv read(s), {} cbdump.csv sample(s) written to {}",
+             s.framesWritten, s.rowsWritten, s.omittedTotal, s.cbRows, s.cbDumpRows, dir.string());
+    if (s.truncated || s.truncatedCbs || s.truncatedCbDump)
         LOG_WARN("Draw diagnostics: the byte cap of a file was reached, later rows were dropped");
-    if (!s.fixtures.empty())
+    const std::vector<State::CreationFixture> creation = CreationFixtures();
+    if (!s.fixtures.empty() || !creation.empty())
     {
         // The fixture shaders: one file per shader plus a list of what each one declares, so a reflection rule can be replayed offline on
-        // the blob the game really handed to CreatePixelShader.
+        // the blob the game really handed to CreatePixelShader. The shaders kept from creation come first and are marked `creation`: they
+        // were created while the game loaded, before this capture was armed. A blob kept in both lists is written once.
         const fs::path folder = dir / kShaderFolder;
         std::error_code ec;
         fs::create_directories(folder, ec);
-        std::string list = "# FFXIV draw diagnostics, shader fixtures, format " + std::to_string(kFormatVersion) +
-                           "\n# crc,size,name=bindPoint,...\n";
-        for (const State::Fixture& fixture : s.fixtures)
+        std::string list = FixtureListHeader();
+        size_t listed = 0;
+        for (const State::CreationFixture& fixture : creation)
         {
-            char head[64];
-            snprintf(head, sizeof head, "%08X,%zu", fixture.crc, fixture.code.size());
-            std::string line = head;
-            for (const std::string& name : fixture.names)
-                line += "," + name;
-            list += line + "\n";
+            list += FixtureListLine(fixture.crc, fixture.code.size(), true, fixture.names);
             if (!ec)
                 WriteFile(folder / (detail::Hex32(fixture.crc) + ".dxbc"), fixture.code);
+            ++listed;
+        }
+        for (const State::Fixture& fixture : s.fixtures)
+        {
+            bool alreadyKept = false;
+            for (const State::CreationFixture& kept : creation)
+                if (kept.crc == fixture.crc)
+                    alreadyKept = true;
+            if (alreadyKept)
+                continue;
+            list += FixtureListLine(fixture.crc, fixture.code.size(), false, fixture.names);
+            if (!ec)
+                WriteFile(folder / (detail::Hex32(fixture.crc) + ".dxbc"), fixture.code);
+            ++listed;
         }
         if (!ec && !WriteFile(dir / kShadersFile, list))
             LOG_WARN("Draw diagnostics: the shader fixtures could not be listed");
         else
-            LOG_INFO("Draw diagnostics: {} shader fixture(s) written", s.fixtures.size());
+            LOG_INFO("Draw diagnostics: {} shader fixture(s) written ({} kept from creation)", listed, creation.size());
     }
     if (s.shadersWithoutReflection != 0)
-        LOG_INFO("Draw diagnostics: {} draw(s) named a pixel shader whose reflection was not recorded (created before the key was on)",
+        LOG_INFO("Draw diagnostics: {} draw(s) named a pixel shader whose reflection was not recorded (the session's table was full, or the shader "
+                 "was created while the key was off)",
                  s.shadersWithoutReflection);
+}
+
+// The state one capture owns, back to its starting values for the next capture of the same session. The fixture list, the reflection table
+// and the count of dumps written (the session's allowance) are session-wide, so none of them is reset here; the dump itself is per capture.
+void ResetForNextCapture(State& s)
+{
+    s.frameRows.clear();
+    s.rows.clear();
+    s.cbs.clear();
+    s.cbdump.clear();
+    s.framesCsv.clear();
+    s.frameTelemetryRows = 0;
+    s.frameTelemetryTruncated = false;
+    s.previousSsrRuns = s.previousSsrDeclines = 0;
+    s.previousGlossRuns = s.previousGlossDeclines = 0;
+    s.previousToneRuns = s.previousToneDeclines = 0;
+    s.views.clear();
+    for (bool& seen : s.viewSeen)
+        seen = false;
+    for (int64_t& last : s.cbDumpLast)
+        last = 0;
+    for (CbDumpPointerCadence& cadence : s.cbDumpPointer)
+        cadence = CbDumpPointerCadence {};
+    s.pointerWindowTicks = 0;
+    s.truncated = false;
+    s.truncatedCbs = false;
+    s.truncatedCbDump = false;
+    s.frames = 0;
+    s.framesCaptured = 0;
+    s.framesWritten = 0;
+    s.drawSequence = 0;
+    s.drawsInFrame = 0;
+    s.omittedInFrame = 0;
+    s.rowsWritten = 0;
+    s.cbRows = 0;
+    s.cbDumpRows = 0;
+    s.omittedTotal = 0;
+    s.shadersWithoutReflection = 0;
+    s.announced = false;
+    s.waitTicks = 0;
+    s.lastReadQpc = 0;
+    s.split = FrameSplitter {};
+    s.markers.Reset();
+    // The run folder and the dump belong to the capture that ended: the next capture makes its own folder and, while the session's allowance
+    // holds and the key asks for it, takes its own dump (an unwritten one is not carried over, and spends nothing).
+    s.runDir.clear();
+    s.dumpItems.clear();
+    s.dumpHeldBytes = 0;
+    s.dumpWritten = false;
+    s.dumpActive = DumpEnabled(ext::Cfg().ffxiv.drawDiagnosticsDump.value_or_default()) && DumpMayStart(s.dumpsWritten);
+    s.dumpToneFrame = 0;
+    s.dumpToneAtPresent = false;
+    s.dumpToneSequence = 0;
+    s.dumpSceneWidth = 0;
+    s.dumpSceneHeight = 0;
+    ResetStageDump(s);
+}
+
+// Ends a capture. The files are written either way; a key-started capture then waits for its next press - the press that started the last
+// one has to be released first, so one press never starts two captures - up to kMaxCapturesPerSession captures per session.
+void Finish()
+{
+    State& s = S();
+    s.phase.store(kDone, std::memory_order_relaxed);
+    ext::SetActive(ext::F::DrawDiag, false); // the draw path is back to one relaxed load
+    FinishDump(s);
+    WriteRun();
+    if (s.dumpActive && !s.dumpWritten)
+        LOG_WARN("Draw diagnostics: the one-frame dump was not written (the frame that identified its tone map never ended, or there was "
+                 "no context to read the copies back on)");
+    // The dump holds references to game textures: they are released here whichever path ended the capture, before the session moves on.
+    // A swapchain buffer held like this makes the next ResizeBuffers fail.
+    s.dumpItems.clear();
+    s.dumpHeldBytes = 0;
+    s.stageSources.clear();
+    RefreshStageOpen(s);
+    if (s.arm.trigger != Trigger::Key || s.captureArm.Exhausted())
+        return;
+    ResetForNextCapture(s);
+    s.phase.store(kWaiting, std::memory_order_relaxed);
+    ext::SetActive(ext::F::DrawDiag, true); // set last: a draw never sees the bit without a capture behind it
+    LOG_INFO("Draw diagnostics: capture {} of at most {} written; release the capture key and press it again for the next one",
+             s.captureArm.captures, kMaxCapturesPerSession);
 }
 
 // ---- one draw --------------------------------------------------------------------------------------------------------
@@ -621,9 +2369,33 @@ struct CbSlot
     uint32_t bytes = 0;
 };
 
-// Closes the frame in progress: its rows, its marker line, the counters and the splitter. Called from the tone map draw (the frame
-// split, which needs no Present) and from the bridge Present entry when a session has one.
-void CloseFrame()
+// The light draw's own 128-byte pixel-shader constant buffers, each with the name its reflection gives it. The shafts identity reads the row at
+// +0x20 of the frame's `g_DirectionalShadowParameter`, and the sun draw binds a same-sized neighbour beside it (a captured sun draw puts one at
+// slot 6), so the bytes of that draw itself are what says which slot holds the shadow and what the neighbour's numbers are. The fixed dump list's
+// names land first at the rain volumes' earlier light draw of the frame, which is what a capture of the list alone shows; this dumps the draw that
+// writes the frame's light buffers, once a second beside the light's own sample. A buffer that cannot be copied skips its row.
+void DumpSunDrawConstants(ID3D11DeviceContext* c, State& s, const CbSlot (&cb)[8], const std::string (&names)[8], uint32_t crc, bool hasCrc)
+{
+    for (size_t i = 0; i < 8; ++i)
+    {
+        if (!cb[i].buffer || cb[i].bytes != 0x80)
+            continue;
+        try
+        {
+            ReadCbDump(c, s, s.frames + 1, cb[i].buffer.Get(), static_cast<uint32_t>(i),
+                       names[i].empty() ? "128-byte constant buffer" : names[i].c_str(), crc, hasCrc);
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
+// Closes the frame in progress: its rows, its marker line and the counters. `keepTone` is set by the tone-map split: the tone map
+// that closes a window also opens the next one, so the splitter keeps its armed state and only the bridge Present starts it over.
+// Called from the tone map draw (the frame split, which needs no Present) and from the bridge Present entry when a session has one.
+// `c` is the context the close was seen on; a Present has none, so a dump that is due is written by the next draw instead.
+void CloseFrame(ID3D11DeviceContext* c, bool keepTone)
 {
     State& s = S();
     const uint64_t frame = s.frames + 1;
@@ -631,15 +2403,36 @@ void CloseFrame()
     {
         std::string text = std::move(s.frameRows);
         text += s.markers.Line(frame, s.drawsInFrame, s.omittedInFrame);
-        AppendDraws(s, text);
+        const FrameTally tally = TallyFrame(s.drawsInFrame, s.omittedInFrame, AppendDraws(s, text));
+        s.rowsWritten += tally.rows;
+        s.omittedTotal += tally.omitted;
+        if (tally.frame)
+            ++s.framesWritten;
         ++s.framesCaptured;
     }
     s.frameRows.clear();
     s.frames = frame;
+    // The frame that identified the dump's tone map is whole once a Present closed it: the dump can be written from here on, even when the
+    // capture ends at that same Present (two frames, a session with a bridge).
+    if (!keepTone && s.dumpToneFrame != 0 && frame == s.dumpToneFrame)
+        s.dumpToneAtPresent = true;
     s.drawsInFrame = 0;
     s.omittedInFrame = 0;
     s.markers.Reset();
-    s.split.Reset();
+    if (!keepTone)
+        s.split.Reset();
+    MaybeWriteDump(c, s);
+}
+
+// The tone map that opens the first window also ends the partial frame the capture started in (the draws before it belong to a frame
+// whose beginning was never seen). Its rows and markers are dropped so the first window is one whole frame, which is also what the
+// one-frame texture dump reads.
+void DropPartialFrame(State& s)
+{
+    s.frameRows.clear();
+    s.drawsInFrame = 0;
+    s.omittedInFrame = 0;
+    s.markers.Reset();
 }
 
 // The pixel shader's bytecode CRC, as the creation hook stamped it on the object (0 when it has none).
@@ -647,14 +2440,7 @@ uint32_t ShaderCrc(ID3D11DeviceContext* c)
 {
     ComPtr<ID3D11PixelShader> shader;
     c->PSGetShader(&shader, nullptr, nullptr);
-    uint32_t crc = 0;
-    if (shader)
-    {
-        UINT bytes = sizeof crc;
-        if (FAILED(shader->GetPrivateData(kCrcTag, &bytes, &crc)) || bytes != sizeof crc)
-            crc = 0;
-    }
-    return crc;
+    return ReadShaderCrc(shader.Get());
 }
 
 // Whether the constant-buffer read of this draw is due (at most once a second).
@@ -667,17 +2453,74 @@ bool SampleDue(State& s)
     return true;
 }
 
+// Whether the second has passed, without spending it: a draw that is not the light pass leaves the slot open for the one that is.
+bool SampleWanted(State& s)
+{
+    const int64_t now = Qpc();
+    return s.lastReadQpc == 0 || SecondsBetween(s.lastReadQpc, now) >= kSampleSeconds;
+}
+
+void NoteSampled(State& s) { s.lastReadQpc = Qpc(); }
+
 // While the diagnostic waits for its capture (a delay or a key), it still samples the light and camera constants once a second - the
 // measurement of the sun direction's space needs a series over a moving camera - and checks every kWaitDrawsPerPoll draws whether it
-// is time to start. Nothing else happens per draw on this path: no render target, viewport, blend or depth query.
+// is time to start. Once a second, and only then, it also reads the draw's targets and blend state to tell the light pass that carries the
+// light's own parameters from the passes that bind the same name; nothing else happens per draw on this path.
 void WaitTick(ID3D11DeviceContext* c);
 
 // Starts the collection, once, from the render thread (the config load may run inside DllMain, where nothing may log). `clockZero`
-// stays at the config load even for a delayed capture, so a cb.csv row says when in the session it was read.
+// stays at the config load even for a delayed capture, so a cb.csv row says when in the session it was read. The engine counters' baseline is
+// taken here, after the phase's `kWaiting` draws and before this one's own patch, so the window holds exactly the draws the capture collects.
+// The constant-buffer sample's clock is cleared here as well: a waiting diagnostic reads the light pass once a second, and a key capture can arm
+// inside the second that read spent - without the reset the capture's first light pass is skipped and engine.txt's sun line carries the waiting
+// frame's camera pose, which is a screen position this capture's frame does not have.
 void StartCollecting()
 {
     State& s = S();
+    TakeEngineBaseline(s);
+    TakeSsrBaseline(s);
+    TakePuddleBaseline(s);
+    s.lastReadQpc = 0;
     s.phase.store(kCapturing, std::memory_order_relaxed);
+    ext::ffxiv::engine::ssr::OnDiagnosticCaptureStart();
+    const auto ssr = ext::ffxiv::engine::ssr::CurrentFrameObservation();
+    const auto gloss = ext::ffxiv::engine::gloss::CurrentFrameObservation();
+    const auto tone = ext::ffxiv::engine::gloss::CurrentToneFrameObservation();
+    s.previousSsrRuns = ssr.runs;
+    s.previousSsrDeclines = ssr.declined;
+    s.previousGlossRuns = gloss.runs;
+    s.previousGlossDeclines = gloss.declined;
+    s.previousToneRuns = tone.runs;
+    s.previousToneDeclines = tone.declined;
+}
+
+void AppendFrameTelemetry(State& s)
+{
+    if (s.frameTelemetryRows >= static_cast<uint32_t>(kMaxFrames))
+    {
+        s.frameTelemetryTruncated = true;
+        return;
+    }
+    const auto ssr = ext::ffxiv::engine::ssr::CurrentFrameObservation();
+    const auto gloss = ext::ffxiv::engine::gloss::CurrentFrameObservation();
+    const auto tone = ext::ffxiv::engine::gloss::CurrentToneFrameObservation();
+    const uint64_t presentToken = ext::present::FrameCount();
+    const auto delta = [](uint32_t value, uint32_t previous) { return value >= previous ? value - previous : value; };
+    s.framesCsv += std::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{},{},{},{},{},{},{},{}\n", presentToken,
+                               ssr.hasToken ? ssr.token : 0, ssr.tried ? 1 : 0, ssr.valid ? 1 : 0, ssr.served,
+                               delta(ssr.runs, s.previousSsrRuns), delta(ssr.declined, s.previousSsrDeclines),
+                               gloss.hasToken ? gloss.token : 0, gloss.tried ? 1 : 0, gloss.valid ? 1 : 0, gloss.served,
+                               delta(gloss.runs, s.previousGlossRuns), delta(gloss.declined, s.previousGlossDeclines),
+                               gloss.wetnessToken, gloss.wetnessKnown ? 1 : 0, double(gloss.wetness), gloss.wetLatched ? 1 : 0,
+                               gloss.shapeToken, gloss.shapePresent ? 1 : 0, tone.captureToken, tone.captureTaken ? 1 : 0,
+                               tone.shapeWet ? 1 : 0, delta(tone.runs, s.previousToneRuns), delta(tone.declined, s.previousToneDeclines));
+    s.previousSsrRuns = ssr.runs;
+    s.previousSsrDeclines = ssr.declined;
+    s.previousGlossRuns = gloss.runs;
+    s.previousGlossDeclines = gloss.declined;
+    s.previousToneRuns = tone.runs;
+    s.previousToneDeclines = tone.declined;
+    ++s.frameTelemetryRows;
 }
 
 // The log line of the first collected draw: when the capture started and how many frames it writes.
@@ -693,12 +2536,20 @@ void Announce(State& s)
 void Draw(ID3D11DeviceContext* c, const char* api)
 {
     State& s = S();
+    ext::ffxiv::engine::ssr::OnRenderCallback(c);
     if (!s.announced)
         Announce(s);
 
     DrawRow row;
     row.frame = s.frames + 1;
     row.ordinal = ++s.drawsInFrame;
+    // The capture's own draw counter, which a frame close does not restart: the dump's "a later draw" rule is written on it, so a target
+    // identified at a window's last draw is still copied in the next window.
+    const uint64_t sequence = ++s.drawSequence;
+    // The one-frame dump acts before the draw: the readback copies of what an earlier draw identified are queued here, so they hold that
+    // draw's output, and the dump is written once its frame is over.
+    DumpCopyPending(c, s, sequence);
+    MaybeWriteDump(c, s);
     row.api = api != nullptr ? api : "";
     row.gameContext = c == ext::ffxiv::lighting::FfxivLightingCapture::context;
     const ext::ffxiv::ui::plate::DrawArgs args = ext::ffxiv::ui::plate::g_args;
@@ -715,23 +2566,69 @@ void Draw(ID3D11DeviceContext* c, const char* api)
 
     // The bound resources, by slot; the names are added below, from the reflection table.
     ID3D11ShaderResourceView* views[kMaxSlots] {};
-    struct SrvSlot
-    {
-        bool bound = false;
-        uint32_t format = 0, width = 0, height = 0;
-    } srv[kMaxSlots] {};
+    SrvSlot srv[kMaxSlots] {};
     c->PSGetShaderResources(0, kMaxSlots, views);
     for (size_t i = 0; i < kMaxSlots; ++i)
     {
         if (views[i] == nullptr)
             continue;
-        ComPtr<ID3D11Resource> resource;
-        views[i]->GetResource(&resource);
         D3D11_SHADER_RESOURCE_VIEW_DESC desc {};
         views[i]->GetDesc(&desc);
         srv[i].bound = true;
         srv[i].format = uint32_t(desc.Format);
-        TextureSize(resource.Get(), &srv[i].width, &srv[i].height);
+        srv[i].formatText = FormatText(srv[i].format);
+        srv[i].viewDimension = uint32_t(desc.ViewDimension);
+        srv[i].arraySize = 1;
+        switch (desc.ViewDimension)
+        {
+        case D3D11_SRV_DIMENSION_TEXTURE1D: srv[i].viewMips = desc.Texture1D.MipLevels; break;
+        case D3D11_SRV_DIMENSION_TEXTURE1DARRAY:
+            srv[i].viewMips = desc.Texture1DArray.MipLevels;
+            srv[i].arraySize = desc.Texture1DArray.ArraySize;
+            break;
+        case D3D11_SRV_DIMENSION_TEXTURE2D: srv[i].viewMips = desc.Texture2D.MipLevels; break;
+        case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+            srv[i].viewMips = desc.Texture2DArray.MipLevels;
+            srv[i].arraySize = desc.Texture2DArray.ArraySize;
+            break;
+        case D3D11_SRV_DIMENSION_TEXTURE2DMS: break;
+        case D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY: srv[i].arraySize = desc.Texture2DMSArray.ArraySize; break;
+        case D3D11_SRV_DIMENSION_TEXTURE3D: srv[i].viewMips = desc.Texture3D.MipLevels; break;
+        case D3D11_SRV_DIMENSION_BUFFER:
+            srv[i].bufFirstElement = desc.Buffer.FirstElement;
+            srv[i].bufElements = desc.Buffer.NumElements;
+            break;
+        case D3D11_SRV_DIMENSION_BUFFEREX: // a structured buffer may also be viewed through the extended description (a raw view has no row stride and is refused)
+            srv[i].bufFirstElement = desc.BufferEx.FirstElement;
+            srv[i].bufElements = desc.BufferEx.NumElements;
+            break;
+        case D3D11_SRV_DIMENSION_TEXTURECUBE:
+            srv[i].viewMips = desc.TextureCube.MipLevels;
+            srv[i].arraySize = 6;
+            break;
+        case D3D11_SRV_DIMENSION_TEXTURECUBEARRAY:
+            srv[i].viewMips = desc.TextureCubeArray.MipLevels;
+            srv[i].cubes = desc.TextureCubeArray.NumCubes;
+            srv[i].arraySize = desc.TextureCubeArray.NumCubes * 6;
+            break;
+        default: break;
+        }
+        views[i]->GetResource(&srv[i].resource);
+        srv[i].texture = ReadTextureInfo(srv[i].resource.Get());
+        // A buffer view's rows are read now, so the identification that runs under the reflection mutex makes no D3D
+        // call: the buffer's own byte width and row stride stand beside the view's first element and count. Every other
+        // bind is a texture and walks none of it (the buffer view is the one bind the structured dump takes).
+        if (IsBufferView(srv[i].viewDimension))
+        {
+            srv[i].resource.As(&srv[i].buffer); // a no-op cast when the resource is not a buffer, which no texture bind pays
+            if (srv[i].buffer)
+            {
+                D3D11_BUFFER_DESC bufDesc {};
+                srv[i].buffer->GetDesc(&bufDesc);
+                srv[i].bufferBytes = bufDesc.ByteWidth;
+                srv[i].bufferStride = bufDesc.StructureByteStride;
+            }
+        }
         views[i]->Release();
         views[i] = nullptr;
     }
@@ -749,10 +2646,36 @@ void Draw(ID3D11DeviceContext* c, const char* api)
         cb[i].bytes = desc.ByteWidth;
     }
 
-    row.rtv = RenderTargetText(c, row.dsv);
+    // The chara shaders bind their ambient block at b8 or b9, past the eight slots above. The slots up to the API's last constant buffer slot
+    // are fetched for the byte dump's names alone: the draw row and the sun-draw dump keep reading the first eight, so draws.csv is unchanged.
+    constexpr size_t kHighCbFirst = 8;
+    constexpr size_t kDumpCbSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
+    ID3D11Buffer* highBuffers[kDumpCbSlots - kHighCbFirst] {};
+    CbSlot high[kDumpCbSlots - kHighCbFirst] {};
+    c->PSGetConstantBuffers(static_cast<UINT>(kHighCbFirst), static_cast<UINT>(kDumpCbSlots - kHighCbFirst), highBuffers);
+    for (size_t i = 0; i < kDumpCbSlots - kHighCbFirst; ++i)
+        high[i].buffer.Attach(highBuffers[i]); // takes the reference the Get* call handed out (null stays null)
+
+    const DrawTargets targets = ReadTargets(c);
+    row.rtv = RenderTargetText(targets, row.dsv);
     row.viewport = ViewportText(c);
-    row.blend = BlendText(c);
+    if (s.dumpActive && !s.dumpWritten)
+    {
+        D3D11_VIEWPORT first {};
+        UINT firstCount = 1;
+        c->RSGetViewports(&firstCount, &first);
+        s.dumpDrawWindow[0] = first.TopLeftX;
+        s.dumpDrawWindow[1] = first.TopLeftY;
+        s.dumpDrawWindow[2] = first.Width;
+        s.dumpDrawWindow[3] = first.Height;
+    }
+    bool blends = false;
+    row.blend = BlendText(c, blends);
     row.depth = DepthText(c);
+
+    // The G-buffer targets are copied at the first later draw that binds one of them as a sampled texture, which is the point the geometry
+    // pass that writes them is over. The slots were read above; no D3D call is made under the reflection mutex below.
+    DumpCopySampled(c, s, srv, sequence);
 
     // The names, from the reflection table. Every D3D query above is already done, so the mutex is never held across a D3D call.
     // The names of the two constant buffers are copied out here: the interned names live in a vector that shader creation still grows on
@@ -761,37 +2684,72 @@ void Draw(ID3D11DeviceContext* c, const char* api)
     uint32_t lightSlot = 0;
     uint32_t cameraSlot = 0;
     bool hasCamera = false;
+    int32_t dumpName[kDumpCbSlots] {}; // the cbdump.csv list index of each bound slot, -1 for a name not in it
+    std::string cbName[8];  // the reflected name of each bound slot, for the sun draw's 128-byte dump below
+    for (int32_t& index : dumpName)
+        index = -1;
     {
         std::lock_guard lock(s.mutex);
         const Reflection* reflection = nullptr;
         if (row.hasCrc)
         {
-            const auto it = s.byCrc.find(crc);
-            if (it != s.byCrc.end())
-                reflection = &it->second;
-            else
+            reflection = ReflectionFor(s, crc);
+            if (reflection == nullptr)
                 ++s.shadersWithoutReflection;
         }
         for (size_t i = 0; i < kMaxSlots; ++i)
         {
             if (!srv[i].bound)
                 continue;
-            const char* name = NameAt(s, reflection, kBindTexture, static_cast<uint32_t>(i));
+            const char* name = NameAt(s, reflection, BindKind::Texture, static_cast<uint32_t>(i));
             if (!row.srvs.empty())
                 row.srvs += '|';
-            row.srvs += std::to_string(i) + ":" + (name != nullptr ? name : "-") + ":" + FormatText(srv[i].format) + ":" +
-                        (srv[i].width != 0 || srv[i].height != 0 ? SizeText(srv[i].width, srv[i].height) : "?");
+            row.srvs += SrvEntryText(static_cast<uint32_t>(i), name != nullptr ? name : "-", srv[i].formatText,
+                                     srv[i].texture.valid ? SizeText(srv[i].texture.width, srv[i].texture.height) : "?",
+                                     srv[i].resource.Get());
+            if (name == nullptr)
+                continue;
+            const int32_t view = ViewNameIndex(name);
+            if (view < 0 || s.viewSeen[view])
+                continue;
+            s.viewSeen[view] = true;
+            ViewSample sample;
+            sample.ordinal = row.ordinal;
+            sample.name = std::string(ResourceBaseName(name));
+            sample.viewDimension = srv[i].viewDimension;
+            sample.viewMips = srv[i].viewMips;
+            sample.arraySize = srv[i].arraySize;
+            sample.cubes = srv[i].cubes;
+            sample.viewFormat = srv[i].formatText;
+            sample.width = srv[i].texture.width;
+            sample.height = srv[i].texture.height;
+            sample.textureArray = srv[i].texture.arraySize;
+            sample.textureMips = srv[i].texture.mips;
+            sample.textureFormat = FormatText(srv[i].texture.format);
+            sample.pointer = srv[i].resource.Get();
+            s.views += ViewSampleText(sample);
+        }
+        // The slots past the first eight are named for the byte dump only (no draw-row entry, no light or camera slot).
+        for (size_t i = 0; i < kDumpCbSlots - kHighCbFirst; ++i)
+        {
+            if (!high[i].buffer)
+                continue;
+            const char* name = NameAt(s, reflection, BindKind::ConstantBuffer, static_cast<uint32_t>(kHighCbFirst + i));
+            if (name != nullptr)
+                dumpName[kHighCbFirst + i] = CbDumpNameIndex(name);
         }
         for (size_t i = 0; i < 8; ++i)
         {
             if (!cb[i].buffer)
                 continue;
-            const char* name = NameAt(s, reflection, kBindConstantBuffer, static_cast<uint32_t>(i));
+            const char* name = NameAt(s, reflection, BindKind::ConstantBuffer, static_cast<uint32_t>(i));
             if (!row.cbs.empty())
                 row.cbs += '|';
-            row.cbs += std::to_string(i) + ":" + (name != nullptr ? name : "-") + ":" + std::to_string(cb[i].bytes);
+            row.cbs += CbEntryText(static_cast<uint32_t>(i), name != nullptr ? name : "-", cb[i].bytes, cb[i].buffer.Get());
             if (name == nullptr)
                 continue;
+            dumpName[i] = CbDumpNameIndex(name);
+            cbName[i] = name;
             if (std::strcmp(name, kLightParamName) == 0)
             {
                 lightName = name;
@@ -803,30 +2761,86 @@ void Draw(ID3D11DeviceContext* c, const char* api)
                 hasCamera = true;
             }
         }
+        // The one-frame dump's identification, from the same reflection table (the wetness pass is a shape of declared names, the light
+        // buffers and the SSR target are bound names, and the G-buffer and tone map are shapes of the draw's own targets).
+        DumpNoteDraw(s, row, targets, srv, reflection, sequence);
     }
 
-    // The named constant buffers of the lighting and camera passes: at most once a second, one staging copy and one map each.
-    if (!lightName.empty() && SampleDue(s))
+    // The named constant buffers of the lighting and camera passes: at most once a second, one staging copy and one map each, and only at the
+    // light pass that writes the frame's light buffers. Every other draw of the frame that declares g_LightParam is another pass (the wetness
+    // volumes, a local light), and its buffer is another light's: a sample taken there answered a different direction and a different colour.
+    if (!lightName.empty() && IsLightPass(targets, blends) && SampleDue(s))
+    {
         ReadConstants(c, s.frames + 1, cb[lightSlot].buffer.Get(), lightSlot, hasCamera ? cb[cameraSlot].buffer.Get() : nullptr, crc,
                       row.hasCrc);
+        // The draw's own 128-byte parameter buffers: the frame's `g_DirectionalShadowParameter` among them, so a capture of the sun draw itself
+        // carries the row the identity reads and the bytes of the neighbour beside it.
+        DumpSunDrawConstants(c, s, cb, cbName, crc, row.hasCrc);
+    }
+
+    // The named buffers of the byte dump, each at most once a second. Only the collecting path reads them: the waiting path never pays
+    // for a copy and a map of a dozen buffers. The shadow parameter is the one name whose instances the window must not fold into
+    // one row: its assembly draws bind one per cascade, so each pointer the shader read this window answers its own row
+    // (CbDumpPointersPerSecond), by its ring slot and not by the name.
+    for (size_t i = 0; i < kDumpCbSlots; ++i)
+    {
+        if (dumpName[i] < 0)
+            continue;
+        ID3D11Buffer* const source = i < kHighCbFirst ? cb[i].buffer.Get() : high[i - kHighCbFirst].buffer.Get();
+        const std::string_view name = kCbDumpNames[dumpName[i]];
+        if (CbDumpPointersPerSecond(ResourceBaseName(name)) > 1)
+        {
+            if (s.pointerWindowTicks == 0)
+                s.pointerWindowTicks = int64_t(double(QpcFrequency()) * kSampleSeconds);
+            const int64_t now = Qpc();
+            const void* pointer = source;
+            const int32_t index = CbDumpPointerIndex(s.cbDumpPointer[dumpName[i]], pointer);
+            if (index >= 0 && !CbDumpPointerDue(s.cbDumpPointer[dumpName[i]], pointer, now, s.pointerWindowTicks))
+                continue;
+            CbDumpPointerRecord(s.cbDumpPointer[dumpName[i]], pointer, now);
+            try
+            {
+                ReadCbDump(c, s, s.frames + 1, source, static_cast<uint32_t>(i), kCbDumpNames[dumpName[i]], crc, row.hasCrc);
+            }
+            catch (...)
+            {
+            }
+        }
+        else if (!CbDumpDue(s, size_t(dumpName[i])))
+            continue;
+        else
+        {
+            try
+            {
+                ReadCbDump(c, s, s.frames + 1, source, static_cast<uint32_t>(i), kCbDumpNames[dumpName[i]], crc, row.hasCrc);
+            }
+            catch (...)
+            {
+            }
+        }
+    }
 
     // Markers are noted for every draw, whether or not the row below is kept, so a capped frame still reports its ordinals.
     row.markers = s.markers.NoteDraw(row.stage, row.ordinal);
     if (s.drawsInFrame > kMaxRowsPerFrame)
         ++s.omittedInFrame;
     else
-    {
         s.frameRows += DrawsRowText(row);
-        ++s.rowsWritten;
-    }
-    // The frame end, in the draw stream: the tone map draw closes the frame in progress, so a capture completes in a session that
-    // has no bridge Present at all (the reason a benchmark run with both keys set once wrote nothing).
-    if (s.split.NoteDraw(row.stage, s.drawsInFrame))
+    // The frame end, in the draw stream: the tone map draw closes the window in progress, so a capture completes in a session that
+    // has no bridge Present at all (the reason a benchmark run with both keys set once wrote nothing). The first tone map drops the
+    // partial frame the capture started in; every later one closes a whole frame and arms the next.
+    const uint8_t split = s.split.NoteDraw(row.stage, s.drawsInFrame);
+    if ((split & kSplitArm) != 0)
+        DropPartialFrame(s);
+    if ((split & kSplitClose) != 0)
     {
-        CloseFrame();
+        CloseFrame(c, true);
         if (s.framesCaptured >= s.wantedFrames)
             Finish();
     }
+    // The stages that report after this draw (the tone-map chain runs right behind the tone map's own hook) see the capture frame's state as
+    // this draw left it.
+    RefreshStageOpen(s);
 }
 
 // ---- the frame -------------------------------------------------------------------------------------------------------
@@ -839,15 +2853,24 @@ void WaitTick(ID3D11DeviceContext* c)
     if (++s.waitTicks < kWaitDrawsPerPoll)
         return;
     s.waitTicks = 0;
-    const bool start = s.arm.trigger == Trigger::Key ? KeyDown(s.arm.key)
+    const bool start = s.arm.trigger == Trigger::Key ? s.captureArm.Poll(KeyDown(s.arm.key))
                                                       : SecondsBetween(s.clockZero, Qpc()) >= s.arm.delaySeconds;
     if (start)
     {
         StartCollecting();
         return;
     }
-    if (!SampleDue(s))
+    // The same rule the collecting path uses, and for the same reason: only the light pass that writes the frame's light buffers is read. The
+    // shape is checked before the second's sample is spent, so a frame's worth of the wetness volumes and local lights costs one target read.
+    if (!SampleWanted(s))
         return;
+    {
+        bool blends = false;
+        BlendText(c, blends);
+        if (!IsLightPass(ReadTargets(c), blends))
+            return;
+    }
+    NoteSampled(s);
     try
     {
         const uint32_t crc = ShaderCrc(c);
@@ -868,13 +2891,12 @@ void WaitTick(ID3D11DeviceContext* c)
         bool hasLight = false, hasCamera = false;
         {
             std::lock_guard lock(s.mutex);
-            const auto it = s.byCrc.find(crc);
-            const Reflection* reflection = crc != 0 && it != s.byCrc.end() ? &it->second : nullptr;
+            const Reflection* reflection = crc != 0 ? ReflectionFor(s, crc) : nullptr;
             for (size_t i = 0; i < 8; ++i)
             {
                 if (!cb[i].buffer)
                     continue;
-                const char* name = NameAt(s, reflection, kBindConstantBuffer, static_cast<uint32_t>(i));
+                const char* name = NameAt(s, reflection, BindKind::ConstantBuffer, static_cast<uint32_t>(i));
                 if (name == nullptr)
                     continue;
                 if (std::strcmp(name, kLightParamName) == 0)
@@ -907,12 +2929,79 @@ void Present()
         return;
     try
     {
-        CloseFrame();
+        CloseFrame(nullptr, false);
+        AppendFrameTelemetry(s);
         if (s.framesCaptured >= s.wantedFrames)
             Finish();
+        RefreshStageOpen(s);
     }
     catch (...)
     {
+    }
+}
+// Keeps the bytecode of a shader whose reflection declares one of the creation-fixture shapes (DrawDiagFormat.h's IsCreationFixture), and its
+// reflected names and slots, bounded and first come. Runs at shader creation on whatever thread creates shaders, so it takes the creation mutex
+// for the list and the reflection mutex for the interned names - never both at once, and no D3D call under either. The CRC is stamped on the
+// object here too: a shader kept from creation can be created while no capture is collecting (the key is on, the capture is not yet armed, or one
+// was already written), and a draw row can only name it through the stamp. One session line says when the bound was reached, because a shape the
+// list did not expect must not fill it silently.
+void KeepCreationFixture(ID3D11PixelShader* shader, const void* code, size_t size, uint32_t crc)
+{
+    State& s = S();
+    ShaderBinding parsed[kMaxBindings];
+    const size_t count = ParseBindings(code, size, parsed, kMaxBindings);
+    if (count == 0)
+        return;
+    uint32_t names = 0;
+    for (size_t i = 0; i < count; ++i)
+        names |= CreationNameBitsOf(std::string_view(parsed[i].name, parsed[i].nameLength));
+    if (!IsCreationFixture(names))
+        return;
+    State::CreationFixture fixture;
+    fixture.crc = crc;
+    for (size_t i = 0; i < count; ++i)
+        fixture.names.push_back(std::string(parsed[i].name, parsed[i].nameLength) + "=" + std::to_string(parsed[i].bindPoint));
+    bool loggedBound = false;
+    bool kept = false;
+    {
+        std::lock_guard lock(s.creationMutex);
+        for (const State::CreationFixture& keptFixture : s.creationFixtures)
+            if (keptFixture.crc == crc)
+                return; // one copy per bytecode, however often the game creates a shader object from it
+        if (!AdmitCreationFixture(names, s.creationFixtures.size(), s.creationBytes, size))
+        {
+            loggedBound = !s.creationBoundLogged;
+            s.creationBoundLogged = true;
+        }
+        else
+        {
+            fixture.code.assign(static_cast<const char*>(code), size);
+            s.creationBytes += size;
+            s.creationFixtures.push_back(std::move(fixture));
+            kept = true;
+        }
+    }
+    if (loggedBound)
+        LOG_INFO("Draw diagnostics: the shaders kept from creation are at their bound ({} shader(s) or {} MiB); a later key shader is not "
+                 "kept",
+                 kMaxCreationFixtures, kMaxCreationFixtureBytes >> 20);
+    if (!kept)
+        return;
+    // A draw names the shader by this stamp and its slots by the reflection below: both are kept for a shader created while no capture could
+    // collect it, so a capture armed later still prints its names and samples its buffers.
+    if (shader != nullptr)
+        shader->SetPrivateData(kShaderCrcTag, sizeof crc, &crc);
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.creationReflections.find(crc) == s.creationReflections.end() && s.creationReflections.size() < kMaxCreationFixtures)
+        {
+            Reflection reflection;
+            reflection.binds.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+                reflection.binds.push_back({ Intern(s, parsed[i].name, parsed[i].nameLength), BindingKindOf(parsed[i]), parsed[i].bindPoint,
+                                             parsed[i].bindCount });
+            s.creationReflections.emplace(crc, std::move(reflection));
+        }
     }
 }
 } // namespace
@@ -938,12 +3027,19 @@ void OnDraw(ID3D11DeviceContext* context, const char* api)
 
 void OnPixelShaderCreated(ID3D11PixelShader* shader, const void* code, size_t size, uint32_t crc)
 {
-    if (!Capturing() || shader == nullptr || crc == 0) // one relaxed load per created shader
-        return;
+    const bool capturing = Capturing(); // one relaxed load per created shader, plus one while no capture is armed
+    if (shader == nullptr || crc == 0 || (!capturing && !S().creationOn.load(std::memory_order_relaxed)))
+        return; // the draw diagnostic is off: no scan, no parse, nothing kept
     try
     {
-        // The stamp goes on the object first: a shader whose reflection is skipped (the caps below) still names its CRC in a row.
-        shader->SetPrivateData(kCrcTag, sizeof crc, &crc);
+        if (capturing)
+            shader->SetPrivateData(kShaderCrcTag, sizeof crc, &crc); // the stamp a draw row names its CRC by
+        // The creation fixtures are kept whatever the capture phase is (the byte scan first, so the reflection parse runs only for the few
+        // shaders that can be one of the shapes); the reflection table below is filled only while a capture runs, as before.
+        if (code != nullptr && size >= 32 && MentionsCreationFixtureName(code, size))
+            KeepCreationFixture(shader, code, size, crc);
+        if (!capturing)
+            return;
         State& s = S();
         std::lock_guard lock(s.mutex);
         if (s.byCrc.size() >= kMaxReflectedShaders || s.bindings >= kMaxBindingsTotal || s.byCrc.find(crc) != s.byCrc.end())
@@ -980,7 +3076,7 @@ void OnPixelShaderCreated(ID3D11PixelShader* shader, const void* code, size_t si
         reflection.binds.reserve(count);
         for (size_t i = 0; i < count; ++i)
         {
-            reflection.binds.push_back({ Intern(s, parsed[i].name, parsed[i].nameLength), parsed[i].type, parsed[i].bindPoint,
+            reflection.binds.push_back({ Intern(s, parsed[i].name, parsed[i].nameLength), BindingKindOf(parsed[i]), parsed[i].bindPoint,
                                          parsed[i].bindCount });
             ++s.bindings;
         }
@@ -999,6 +3095,14 @@ void OnUpscaleBoundary()
     s.markers.NoteUpscale(s.drawsInFrame);
 }
 
+void InstallStageHooks()
+{
+    detail::g_stageImage = &StageImageHook;
+    detail::g_stageStatus = &StageStatusHook;
+    detail::g_stageLate = &StageLateHook;
+    detail::g_stageProbe = &StageProbeHook;
+}
+
 void OnPresent()
 {
     if (S().phase.load(std::memory_order_relaxed) != kCapturing) // the present path pays one relaxed load while the key is off
@@ -1009,6 +3113,9 @@ void OnPresent()
 void OnConfigLoaded(bool capture)
 {
     State& s = S();
+    // The creation fixtures follow the key, not the capture: the shaders a diagnostic needs are created while the game loads, and a capture
+    // armed later can only have them if they were kept then.
+    s.creationOn.store(capture, std::memory_order_relaxed);
     if (!capture)
     {
         const uint8_t phase = s.phase.load(std::memory_order_relaxed);
@@ -1016,6 +3123,8 @@ void OnConfigLoaded(bool capture)
         {
             s.phase.store(kIdle, std::memory_order_relaxed);
             ext::SetActive(ext::F::DrawDiag, false);
+            s.stageSources.clear();
+            RefreshStageOpen(s);
         }
         return;
     }
@@ -1023,10 +3132,18 @@ void OnConfigLoaded(bool capture)
         return; // a capture is running, or this session already wrote its one capture
     s.wantedFrames = WantedFrames();
     s.arm = PlannedArm();
+    s.dumpActive = DumpEnabled(ext::Cfg().ffxiv.drawDiagnosticsDump.value_or_default());
+    s.dumpBudget = DumpBudgetBytes(ext::Cfg().ffxiv.drawDiagnosticsDumpBudgetMiB.value_or_default());
     // The clock of cb.csv starts here, so the first captured frame already has a sane "seconds into the capture" (its draws run before the
     // first Present). A delayed capture keeps this zero: its rows then say how long after the config load they were read. Reading the
     // performance counter is safe from the config load.
     s.clockZero = Qpc();
+    if (s.arm.trigger == Trigger::Immediate)
+    {
+        TakeEngineBaseline(s); // the window starts with the first draw, so its baseline is the counters as they stand now
+        TakeSsrBaseline(s);
+        TakePuddleBaseline(s);
+    }
     s.phase.store(s.arm.trigger == Trigger::Immediate ? kCapturing : kWaiting, std::memory_order_relaxed);
     ext::SetActive(ext::F::DrawDiag, true); // set last: a draw never sees the bit without a capture behind it
 }
@@ -1038,6 +3155,10 @@ namespace
 // static initialisers run, so ext/core/ExtConfig.cpp keeps no link dependency on this file.
 struct RegisterDrawDiagnostics
 {
-    RegisterDrawDiagnostics() { ext::FfxivConfig::drawDiagnosticsOnLoaded = &ext::ffxiv::diag::OnConfigLoaded; }
+    RegisterDrawDiagnostics()
+    {
+        ext::FfxivConfig::drawDiagnosticsOnLoaded = &ext::ffxiv::diag::OnConfigLoaded;
+        ext::ffxiv::diag::InstallStageHooks(); // the stages' report calls reach this runtime only in a build that links it
+    }
 } g_registerDrawDiagnostics;
 } // namespace

@@ -1,6 +1,6 @@
 #include "pch.h"
 
-#include "ext/ffxiv/chara/CharaContextState.h"
+#include "ext/core/D3D11ExplicitState.h"
 #include "ext/ffxiv/chara/CharaEnhancePass.h"
 
 #include <Chara_Fxaa_PS.h>
@@ -11,12 +11,14 @@ namespace ext::ffxiv::chara
 {
 using Microsoft::WRL::ComPtr;
 
+// What the pass touches, and so what the guard saves and puts back: pixel-shader resource slot 0 (the image), sampler slot 0, no constant buffer.
+constexpr ext::core::explicit_state::Spec kSpec { /*psSrvCount*/ 1, /*psSamplerCount*/ 1, /*psConstantBuffers*/ 0 };
+
 void FxaaPass::Reset()
 {
     _outputSrv.Reset();
     _outputRtv.Reset();
     _output.Reset();
-    _state.Reset();
     _rasterizer.Reset();
     _sampler.Reset();
     _ps.Reset();
@@ -30,13 +32,6 @@ void FxaaPass::Reset()
 
 bool FxaaPass::Init(ID3D11Device* device)
 {
-    ComPtr<ID3D11Device1> device1;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))))
-    {
-        _failure = "ID3D11Device1 is not available";
-        return false;
-    }
-
     if (FAILED(device->CreateVertexShader(Chara_Fxaa_VS_cso, sizeof(Chara_Fxaa_VS_cso), nullptr, &_vs)) ||
         FAILED(device->CreatePixelShader(Chara_Fxaa_PS_cso, sizeof(Chara_Fxaa_PS_cso), nullptr, &_ps)) ||
         FAILED(device->CreatePixelShader(Chara_Fxaa_PSTint_cso, sizeof(Chara_Fxaa_PSTint_cso), nullptr, &_psTint)))
@@ -64,19 +59,6 @@ bool FxaaPass::Init(ID3D11Device* device)
     if (FAILED(device->CreateRasterizerState(&raster, &_rasterizer)))
     {
         _failure = "the rasterizer state could not be created";
-        return false;
-    }
-
-    // The private state the pass runs in: the game's own pipeline state is not touched.
-    const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL chosen {};
-    static_assert(kDeviceCreateSingleThreaded == D3D11_CREATE_DEVICE_SINGLETHREADED);
-    static_assert(kContextStateSingleThreaded == D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED);
-    const UINT flags = ContextStateFlags(device->GetCreationFlags());
-    if (FAILED(device1->CreateDeviceContextState(flags, levels, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), &chosen, &_state)) ||
-        _state == nullptr)
-    {
-        _failure = "the private device-context state could not be created";
         return false;
     }
 
@@ -161,16 +143,10 @@ bool FxaaPass::Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* s
     if (!EnsureOutput(device.Get(), width, height, srgb))
         return false;
 
-    ComPtr<ID3DDeviceContextState> previous;
-    context1->SwapDeviceContextState(_state.Get(), &previous);
-    if (previous == nullptr)
-    {
-        // The game's state could not be captured. Do what the DLSS guides do in the same case: swap again at once, so the private state
-        // is not left active over the game's pipeline (best effort; the runtime always hands back a state, so this should not happen).
-        context1->SwapDeviceContextState(_state.Get(), nullptr);
-        _failure = "the previous device-context state was not returned";
-        return false;
-    }
+    // No private pipeline state: the game's own is captured here and put back explicitly when the function ends (ext/core/D3D11ExplicitState.h), also
+    // when the draw callback throws through this fork's hooks. The swap into a private state it replaces does nothing when the draw hook is nested.
+    ext::core::explicit_state::Guard stateGuard(context, context1.Get(), device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1, kSpec);
+    stateGuard.Neutralise(); // what the private state's defaults provided: no HS, DS, GS, stream-out target or predicate
 
     const D3D11_VIEWPORT viewport { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
     const float blendFactor[4] {};
@@ -197,8 +173,6 @@ bool FxaaPass::Process(ID3D11DeviceContext* context, ID3D11ShaderResourceView* s
     ID3D11ShaderResourceView* none = nullptr;
     context->PSSetShaderResources(0, 1, &none);
     context->OMSetRenderTargets(0, nullptr, nullptr);
-
-    context1->SwapDeviceContextState(previous.Get(), nullptr);
 
     *out = _outputSrv.Get();
     return true;

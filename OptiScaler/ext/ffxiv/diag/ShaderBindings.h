@@ -38,13 +38,6 @@ struct ShaderBinding
     uint32_t bindCount = 0;
 };
 
-// True when a binding serves the slot a draw has bound: a binding covers bindPoint .. bindPoint + bindCount - 1 (a texture array
-// declares one entry for its whole range).
-inline bool BindingCovers(const ShaderBinding& binding, uint32_t type, uint32_t slot)
-{
-    return binding.type == type && slot >= binding.bindPoint && slot < binding.bindPoint + binding.bindCount;
-}
-
 // The name a binding is compared by. The effect compiler this game's shaders go through declares a texture and its sampler under ONE
 // variable name and writes the pair into the reflection as "<name>.T" (the texture) and "<name>.S" (the sampler state); a constant
 // buffer keeps its plain name. So the reflected name of the sun mask is `g_SamplerShadow.T`, not `g_SamplerShadow`. The binding's own
@@ -54,6 +47,78 @@ inline constexpr std::string_view ResourceBaseName(std::string_view name)
     if (name.size() > 2 && name[name.size() - 2] == '.' && (name.back() == 'T' || name.back() == 'S'))
         return name.substr(0, name.size() - 2);
     return name;
+}
+
+// The kind of resource a slot is looked up for. The effect compiler this game's shaders go through writes a texture and its sampler under one
+// variable name, as "<name>.T" (the texture) and "<name>.S" (the sampler state), and the two are bound at registers that need not agree (the
+// ambient occlusion shader declares g_SamplerDepth.S at s0 and .T at t1). A lookup that compared names alone would therefore answer the
+// sampler's slot for a texture - the bug that cost two sessions - so every slot decision asks for the kind it binds and this is the one place
+// the type is compared, for a lookup by name and for a lookup by slot.
+enum class BindKind : uint32_t
+{
+    ConstantBuffer = kBindConstantBuffer,
+    Texture = kBindTexture,
+    Sampler = kBindSampler,
+    Other = 0xFFFFFFFFu, // a kind no slot decision here asks for (a UAV, a structured buffer): kept, and never an answer
+};
+
+// The kind a parsed binding declares, for a reader that keeps the parsed table in a shape of its own. A binding of a type no slot decision here
+// asks about answers `Other`, so it can neither be looked up nor answer a lookup by accident.
+constexpr BindKind BindingKindOf(const ShaderBinding& binding)
+{
+    switch (binding.type)
+    {
+    case kBindConstantBuffer: return BindKind::ConstantBuffer;
+    case kBindTexture: return BindKind::Texture;
+    case kBindSampler: return BindKind::Sampler;
+    default: return BindKind::Other;
+    }
+}
+
+// The answer of a lookup for a name and kind the shader does not declare, in eight bits apart from every slot D3D11 can bind.
+inline constexpr uint32_t kNoBindPoint = 0xFFFFFFFFu;
+
+// True when a binding answers the slot a draw has bound: it is of the kind asked for and covers bindPoint .. bindPoint + bindCount - 1 (a
+// texture array declares one entry for its whole range). This is BindPointOf read the other way, for a reader that walks a draw's slots and asks
+// which name it carries (a capture names the buffer it samples), and it is the second and last place a binding's type is compared: a reader that
+// compared the type itself could answer a name for the wrong kind of resource, which is the same defect the slot lookup exists for.
+constexpr bool BindingAnswers(const ShaderBinding& binding, BindKind kind, uint32_t slot)
+{
+    return binding.type == uint32_t(kind) && binding.bindCount != 0 && slot >= binding.bindPoint &&
+           slot < binding.bindPoint + binding.bindCount;
+}
+
+// The slot `name` is bound at as `kind`, or kNoBindPoint. The name is compared by the variable's name (ResourceBaseName) and the binding has to
+// be of the kind asked for - a binding of another kind is never a candidate, whatever its name - and the first binding that carries both wins,
+// so a shader that declares one name twice is read at the slot its reflection lists first.
+constexpr uint32_t BindPointOf(const ShaderBinding* bindings, size_t count, BindKind kind, std::string_view name)
+{
+    if (bindings == nullptr)
+        return kNoBindPoint;
+    const std::string_view wanted = ResourceBaseName(name);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const ShaderBinding& bind = bindings[i];
+        if (bind.name == nullptr || !BindingAnswers(bind, kind, bind.bindPoint))
+            continue;
+        if (ResourceBaseName(std::string_view(bind.name, bind.nameLength)) == wanted)
+            return bind.bindPoint;
+    }
+    return kNoBindPoint;
+}
+
+// True when a parsed table declares `name`, which is what a draw's shape is identified by (the wetness pass declares its own constant
+// buffer and two named textures, for example). Compared by the variable's name for the same reason as ResourceBaseName: a raw comparison
+// finds nothing for a texture, because the reflection calls it `g_SamplerGBuffer3.T`. Either form may be passed in.
+inline bool ReflectionDeclares(const ShaderBinding* bindings, size_t count, std::string_view name)
+{
+    const std::string_view wanted = ResourceBaseName(name);
+    if (bindings == nullptr)
+        return false;
+    for (size_t i = 0; i < count; ++i)
+        if (ResourceBaseName(std::string_view(bindings[i].name, bindings[i].nameLength)) == wanted)
+            return true;
+    return false;
 }
 
 inline constexpr size_t kMaxBindings = 48; // the table of a real shader is a dozen to three dozen entries
